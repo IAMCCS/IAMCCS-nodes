@@ -38,7 +38,7 @@ It produces a stacked LoRA bundle that merges all the active LoRAs and prepares 
 
 This node applies the generated LoRA stack directly to a loaded diffusion model at the Torch level, without relying on older ComfyUI Apply LoRA wrappers.
 
-https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/lora%20to%20model.png
+![Node piece no_2](assets/lora%20to%20model.png)
 
 Works natively with FP16 accumulation (recommended when paired with Model Patch Torch Settings)
 
@@ -51,7 +51,7 @@ Output: a ready-to-run patched model for image or video generation.
 This structure replaces multiple chained LoRA nodes with a single modular system, improving both stability and performance.
 Ideal for WANAnimate, WANVideo, or any Flow-based cinematic model.
 
-https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/ensemble.png
+![Node piece no_3](assets/ensemble.png)
 
 # Installation
 
