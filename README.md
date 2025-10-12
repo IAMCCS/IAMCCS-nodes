@@ -1,60 +1,57 @@
 # 🌀 IAMCCS-nodes
 
+<img src="icon.png" width="150" height="150">
+
 ## Author: IAMCCS (Carmine Cristallo Scalzi)
 
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows
 Version: 1.0.0
 
-# 💡 Overview
+# Overview
 
 The IAMCCS-nodes package introduces a fix for a key limitation in native WANAnimate workflows:
 when users run animation pipelines without the WanVideoWrapper, LoRA models fail to load correctly — most weights are ignored, and the visual consistency breaks.
 
 This package contains two complementary nodes that work together to fix this problem and restore full LoRA functionality while keeping the workflow lightweight and modular.
 
-## Node Structure
+The IAMCCS Native LoRA System introduces an optimized way to handle multiple LoRAs inside native ComfyUI workflows.
+It is composed of two interconnected nodes designed to work seamlessly together.
 
-### 1. IAMCCS_WanModelWithLora
+## 1. LoRA Stack (WAN-style remap)
 
-This node replaces the standard model loader for WANAnimate.
+This node lets you combine several LoRA models—especially those made for WAN2.x / Animate / Flow architectures—into one unified output.
 
-Function:
+![[Node piece](assets/lora stack.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/lora%20stack.png)
 
-Loads the selected WAN model (e.g. WAN2.1, WAN2.2, WANAnimate_relight).
+Each LoRA slot includes:
 
-Checks if one or more LoRA files are attached.
+an independent strength control,
 
-Merges LoRA weights directly into the model layers before the animation process starts.
-It explicitly maps keys like blocks.*.lora_A.weight and blocks.*.lora_B.weight, which are normally ignored in the native WAN loader.
+automatic WAN-style key remapping for full compatibility,
 
-Result:
-The base WAN model becomes LoRA-aware even when used in pure animation workflows, without any wrapper.
+and support for .safetensors files across any model type (flow, wan, sdxl, etc).
 
-### 2. IAMCCS_WanApplyLora
+It produces a stacked LoRA bundle that merges all the active LoRAs and prepares them for efficient native injection.
 
-This secondary node provides manual control over LoRA injection.
+## 2. Apply LoRA to MODEL (Native)
 
-Function:
+This node applies the generated LoRA stack directly to a loaded diffusion model at the Torch level, without relying on older ComfyUI Apply LoRA wrappers.
 
-Reads the WAN model from the first node and applies additional LoRA weights or strength adjustments at runtime.
+https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/lora%20to%20model.png
 
-Supports stacking multiple LoRA models with custom strength and priority.
+Works natively with FP16 accumulation (recommended when paired with Model Patch Torch Settings)
 
-Can be chained between different WANAnimate processing stages, enabling fine-tuned control.
+Maintains precision and speed
 
-Result:
-The user can dynamically mix and reapply LoRA sets, allowing for artistic control over motion, lighting, or realism during animation generation.
+Fully compatible with WAN2.x and other Flow-type diffusion models
 
-# How It Works (Internally)
+Output: a ready-to-run patched model for image or video generation.
 
-Both nodes share a modified implementation of the load_lora_weights() and merge_lora_keys() logic used inside WanVideoWrapper.
+This structure replaces multiple chained LoRA nodes with a single modular system, improving both stability and performance.
+Ideal for WANAnimate, WANVideo, or any Flow-based cinematic model.
 
-Instead of requiring the wrapper’s internal bridge class, these nodes operate directly on the base model’s state dict.
-
-Missing keys or mismatched LoRA layers are gracefully skipped, ensuring full compatibility and stability.
-
-The resulting model can run natively in WANAnimate pipelines, with all LoRAs correctly injected and active.
+https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/ensemble.png
 
 # Installation
 
@@ -62,13 +59,12 @@ The resulting model can run natively in WANAnimate pipelines, with all LoRAs cor
 
 IAMCCS-nodes
 
-
 or manually:
 
 cd ComfyUI/custom_nodes
 git clone https://github.com/IAMCCS/IAMCCS-nodes.git
 
-🧪 Compatibility
+Compatibility
 
 ComfyUI ≥ 0.3.0
 
