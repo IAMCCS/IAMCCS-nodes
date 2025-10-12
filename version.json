@@ -1,0 +1,6 @@
+{
+  "name": "iamccs-wan-lora-fixer-stack",
+  "version": "1.1.0",
+  "author": "Carmine Cristallo Scalzi (IAMCCS)",
+  "description": "Nodo IAMCCS per ComfyUI che applica fino a 5 LoRA in stack, compatibile con WAN 2.1 e 2.2 (Flow)."
+}
