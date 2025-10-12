@@ -55,11 +55,7 @@ Ideal for WANAnimate, WANVideo, or any Flow-based cinematic model.
 
 # Installation
 
-### Install from ComfyUI Manager:
-
-IAMCCS-nodes
-
-or manually:
+manually:
 
 cd ComfyUI/custom_nodes
 git clone https://github.com/IAMCCS/IAMCCS-nodes.git
