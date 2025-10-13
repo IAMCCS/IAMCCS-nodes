@@ -61,6 +61,8 @@ or
 
 You can grab it manually:
 
+digit in your terminal:
+
  cd ComfyUI/custom_nodes
  git clone https://github.com/IAMCCS/IAMCCS-nodes.git
 
