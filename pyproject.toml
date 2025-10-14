@@ -1,7 +1,7 @@
 [project]
 name = "iamccs-wan-lora-fixer-stack"
-version = "1.1.0"
-description = "Nodo IAMCCS per ComfyUI che applica fino a 5 LoRA (WAN 2.1 / 2.2 compatibili) con fix automatico e input/output MODEL."
+version = "1.2.0"
+description = "Nodo IAMCCS per ComfyUI che applica fino a 5 LoRA (WAN 2.1 / 2.2 compatibili) con fix automatico e input/output MODEL. Aggiornamento v1.2.0: aggiunto nodo LightX2V con supporto per una LoRA aggiuntiva e compatibilità estesa WAN 2.2."
 license = { text = "MIT" }
 authors = [
   { name = "Carmine Cristallo Scalzi (IAMCCS)", email = "info@carminecristalloscalzi.com" }
