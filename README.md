@@ -6,7 +6,7 @@
 
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows
-Version: 1.0.0
+Version: 1.2.0
 
 # Overview
 
