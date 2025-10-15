@@ -10,36 +10,54 @@ import comfy.sd
 import folder_paths
 
 
-# --- Log Filter per sopprimere spam img_* keys ---
-class SuppressImgKeysFilter(logging.Filter):
-    """Filtra i log 'lora key not loaded' per chiavi img_*"""
+# --- Log Filter per sopprimere spam img_* e diff_m keys ---
+class SuppressOptionalKeysFilter(logging.Filter):
+    """Filtra i log 'lora key not loaded' per chiavi opzionali (img_*, diff_m, ecc.)"""
     def __init__(self):
         super().__init__()
         self.suppressed_count = 0
         self.suppressed_keys = set()
 
     def filter(self, record):
-        if "NOT LOADED" in record.getMessage():
+        msg_lower = record.getMessage().lower()
+        if "not loaded" in msg_lower:
             msg = record.getMessage()
-            # Estrai la chiave dal messaggio
-            if "diffusion_model.blocks." in msg and any(pattern in msg for pattern in ["k_img", "v_img", "img_emb"]):
+
+            # Sopprimi TUTTE le chiavi con "img" - opzionali per I2V/T2V
+            if "img" in msg_lower and "diffusion_model" in msg:
                 self.suppressed_count += 1
-                # Estrai solo il pattern per non duplicare chiavi identiche
-                if ".k_img." in msg:
-                    self.suppressed_keys.add("k_img layers")
-                elif ".v_img." in msg:
-                    self.suppressed_keys.add("v_img layers")
-                elif ".img_emb." in msg:
-                    self.suppressed_keys.add("img_emb layers")
+                self.suppressed_keys.add("img_* layers (k_img, v_img, norm_*_img, etc.)")
                 return False  # Sopprimi questo log
+
+            # Sopprimi chiavi diff_m (opzionali, non tutte le LORA le hanno)
+            if ".diff_m" in msg or msg.endswith("diff_m"):
+                self.suppressed_count += 1
+                self.suppressed_keys.add("diff_m layers")
+                return False  # Sopprimi questo log
+
         return True  # Lascia passare tutti gli altri log
 
 
-# --- Normalizzatore chiavi WAN (stesso del precedente) ---
+# --- Normalizzatore chiavi WAN ---
 def standardize_wan_lora_keys(sd: dict) -> dict:
+    """
+    Standardizes WAN LORA keys and converts Wan 2.1 format to Wan 2.2
+    - Remaps various naming conventions to diffusion_model.* format
+    - Converts lora_down/up → lora_A/B for Wan 2.1 compatibility
+    - Preserves diff_b, diff, norm_* keys (supported by ComfyUI)
+    """
     new_sd = {}
+
+    # First, check if this is Wan 2.1 format (has lora_down/up)
+    sample_keys = list(sd.keys())[:50]
+    has_down_up = any('.lora_down.' in k or '.lora_up.' in k for k in sample_keys)
+    has_a_b = any('.lora_A.' in k or '.lora_B.' in k for k in sample_keys)
+    is_wan21 = has_down_up and not has_a_b
+
     for k, v in sd.items():
         nk = k
+
+        # Standard key remapping
         if nk.startswith("transformer."):
             nk = nk.replace("transformer.", "diffusion_model.")
         if nk.startswith("pipe.dit."):
@@ -60,7 +78,19 @@ def standardize_wan_lora_keys(sd: dict) -> dict:
         nk = nk.replace("img_attn.qkv", "img_attn_qkv")
         nk = nk.replace("txt_attn.proj", "txt_attn_proj")
         nk = nk.replace("txt_attn.qkv", "txt_attn_qkv")
+
+        # Wan 2.1 → Wan 2.2 conversion
+        if is_wan21:
+            if nk.endswith(".lora_down.weight"):
+                nk = nk.replace(".lora_down.weight", ".lora_A.weight")
+            elif nk.endswith(".lora_up.weight"):
+                nk = nk.replace(".lora_up.weight", ".lora_B.weight")
+
         new_sd[nk] = v
+
+    if is_wan21:
+        logging.info(f"[IAMCCS_WanLoRAStack] Detected Wan 2.1 format - converted lora_down/up → lora_A/B")
+
     return new_sd
 
 
@@ -146,10 +176,10 @@ class IAMCCS_ModelWithLoRA:
 
         model_out = model
 
-        # Installa filtro per sopprimere spam img_* keys
+        # Installa filtro per sopprimere spam di chiavi opzionali (img_*, diff_m, ecc.)
         logger = logging.getLogger()
-        img_filter = SuppressImgKeysFilter()
-        logger.addFilter(img_filter)
+        optional_filter = SuppressOptionalKeysFilter()
+        logger.addFilter(optional_filter)
 
         try:
             for entry in lora:
@@ -159,13 +189,13 @@ class IAMCCS_ModelWithLoRA:
                 logging.info(f"[IAMCCS_ModelWithLoRA] ✅ '{entry['name']}' strength={strength}")
 
             # Mostra riepilogo chiavi soppresse
-            if img_filter.suppressed_count > 0:
-                keys_types = ", ".join(sorted(img_filter.suppressed_keys))
-                logging.info(f"[IAMCCS_ModelWithLoRA] ℹ {img_filter.suppressed_count} optional img_* keys not present in model ({keys_types})")
+            if optional_filter.suppressed_count > 0:
+                keys_types = ", ".join(sorted(optional_filter.suppressed_keys))
+                logging.info(f"[IAMCCS_ModelWithLoRA] ℹ {optional_filter.suppressed_count} optional keys not present in LORA ({keys_types})")
 
         finally:
             # Rimuovi filtro
-            logger.removeFilter(img_filter)
+            logger.removeFilter(optional_filter)
 
         return (model_out,)
 

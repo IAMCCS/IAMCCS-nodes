@@ -6,7 +6,19 @@
 
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows
-Version: 1.2.0
+
+Version: 1.2.1
+
+# UPDATE VERSION 1-2-1
+
+## 🆕 Version 1.2.1 — Extended Wan 2.1 Compatibility
+
+The **WAN-style remap** node now supports **LightX2V 2.1 LoRA models**.  
+This version extends overall compatibility to all LoRA types — even those without dedicated weight tensors (these will simply display a non-critical “missing optional weights” message).  
+
+This ensures smoother cross-compatibility between LightX2V 2.1 / 2.2 and any WAN-based or character LoRA setup.
+
+See full changelog → [CHANGELOG.md](./CHANGELOG.md)
 
 # Overview
 
@@ -53,6 +65,18 @@ Ideal for WANAnimate, WANVideo, or any Flow-based cinematic model.
 
 ![Node piece no_3](assets/ensemble.png)
 
+### LoRA Stack (WAN-style remap)
+Supports the following LoRAs:  
+- New Moe distill WAN 2.2 LightX2V High Model  
+- New Moe distill WAN 2.2 LightX2V High Model 
+- WAN 2.2 LightX2V High Model  
+- WAN 2.2 LightX2V Low Model 
+- WAN Boost Realism  
+- WAN 2.2 LightX2V 4-Step High  
+- WAN 2.2 LightX2V 4-Step Low
+- Character LoRAs   
+- WAN 2.1 LightX2V Model  
+
 # Installation
 
 The node has now been officially accepted on ComfyUI Manager, You can install it directly from there (just search for IAMCCS).
@@ -77,40 +101,6 @@ Torch ≥ 2.8 (CUDA 12.6 or 12.8)
 Compatible with:
 WAN2.1, WAN2.2, WANAnimate, WANAnimate_relight, Pulid, Flux, and multi-LoRA setups.
 
-# UPDATE VERSION 1-2-0
-
-## 🆕 Version 1.2.0 — LightX2V Update
-Extended support for WAN 2.2 LoRA models (LightX2V).
-
-This release introduces a new node — **LightX2V (Remap)** — which supports both **WAN 2.2 high and low LoRA models** as well as **character LoRAs**.  
-For detailed compatibility, check the following list of LoRAs supported by each node:
-
-### LoRA Stack (WAN-style remap)
-Supports the following LoRAs:  
-- WAN 2.2 LightX2V High Model  
-- WAN Boost Realism  
-- WAN 2.2 LightX2V 4-Step High 
-- Character LoRAs  
-- WAN 2.2 LightX2V 4-Step Low  
-- WAN 2.2 LightX2V Low Model  
-
-### LoRA Stack (LightX2V Remap)
-Supports the following LoRAs:  
-- New MoE Distill LightX2V HIGH  
-- WAN 2.2 LightX2V 4-Step  
-- Realism Booster  
-- WAN 2.2 LightX2V High Model  
-- WAN 2.2 LightX2V 4-Step Low  
-- LightX2V Seko Low  
-- Character LoRAs  
-
-### Notes
-Depending on your setup, you can **experiment by pairing** the *LightX2V Remap* node with **High LoRAs**, and the *WAN-style Remap* node with **Low LoRAs** — or vice versa.  
-**Experiment freely!**
-
-Finally, a note on the new *LightX2V MoE Distill* LoRA (supported by the new **LightX2V Remap** node): according to the LightX2V authors,  
-> *“This model focuses on training for high noise.”*  
-So it works perfectly when combined with a different low model accepted by both modules.
 
 # Technical Insight
 
