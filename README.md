@@ -68,7 +68,7 @@ Ideal for WANAnimate, WANVideo, or any Flow-based cinematic model.
 ### LoRA Stack (WAN-style remap)
 Supports the following LoRAs:  
 - New Moe distill WAN 2.2 LightX2V High Model  
-- New Moe distill WAN 2.2 LightX2V High Model 
+- New Moe distill WAN 2.2 LightX2V Low Model 
 - WAN 2.2 LightX2V High Model  
 - WAN 2.2 LightX2V Low Model 
 - WAN Boost Realism  
