@@ -7,6 +7,12 @@
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows
 
+Version: 1.2.3
+
+# UPDATE VERSION 1-2-3
+
+## 🆕 Version 1.2.3 — New input lora - add another StackLoraModel (concatenate) + Extended Wan 2.1 Compatibility
+
 Version: 1.2.1
 
 # UPDATE VERSION 1-2-1
@@ -64,6 +70,10 @@ This structure replaces multiple chained LoRA nodes with a single modular system
 Ideal for WANAnimate, WANVideo, or any Flow-based cinematic model.
 
 ![Node piece no_3](assets/ensemble.png)
+
+# New version 1.2.3!! Lora concatenate!! You can add another Lora stack to the node!
+
+![Node piece no_4](assets/lora_concatenatel.png)lora_concatenatel.png
 
 ### LoRA Stack (WAN-style remap)
 Supports the following LoRAs:  

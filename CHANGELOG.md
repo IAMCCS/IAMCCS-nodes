@@ -1,3 +1,10 @@
+## 🆕 Version 1.2.3 — Stackable LoRA Input
+
+- Added optional `lora` input to IAMCCS_WanLoRAStack node
+- Now supports up to 8 LoRA models in total (4 direct + 4 from chained stack)
+- Enable daisy-chaining multiple IAMCCS_WanLoRAStack nodes for extended LoRA capabilities
+- Maintains backward compatibility with existing workflows
+
 ## 🆕 Version 1.2.1 — Extended Wan 2.1 Compatibility
 
  Removed the deprecated LightX2V node (now merged into WAN-style remap)

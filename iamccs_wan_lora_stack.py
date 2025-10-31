@@ -112,6 +112,9 @@ class IAMCCS_WanLoRAStack:
                 "lora4": (lora_list, {"default": "no"}),
                 "strength4": ("FLOAT", {"default": 0.0, "min": -5.0, "max": 5.0, "step": 0.01}),
                 "model_type": (["wan2x", "flow", "standard"], {"default": "flow"}),
+            },
+            "optional": {
+                "lora": ("LORA",),
             }
         }
 
@@ -123,7 +126,8 @@ class IAMCCS_WanLoRAStack:
                              lora2, strength2,
                              lora3, strength3,
                              lora4, strength4,
-                             model_type="flow"):
+                             model_type="flow",
+                             lora=None):
 
         loras = []
         for name, strength in [
@@ -140,6 +144,10 @@ class IAMCCS_WanLoRAStack:
             if model_type != "standard":
                 sd = standardize_wan_lora_keys(sd)
             loras.append({"name": name, "strength": strength, "state_dict": sd})
+
+        # Concatena la stack LORA opzionale se fornita
+        if lora is not None and isinstance(lora, list):
+            loras.extend(lora)
 
         if not loras:
             logging.warning("[IAMCCS_WanLoRAStack] ⚠ No LoRA selected")
