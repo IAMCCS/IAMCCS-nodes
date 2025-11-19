@@ -7,13 +7,47 @@
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows
 
-Version: 1.2.3
+Version: 1.3.0
 
-# UPDATE VERSION 1-2-3
+# UPDATE VERSION 1-3-0
 
-## 🆕 Version 1.2.3 — New input lora - add another StackLoraModel (concatenate) + Extended Wan 2.1 Compatibility
+## 🆕 Version 1.3.0 — New MODEL IO LoRA Stack + Qwen Loader Instructions
 
-Version: 1.2.1
+Highlights:
+- Added `LoRA Stack (Model In→Out) WAN` node: directly applies up to 4 WAN / Flow / Standard LoRAs to an incoming MODEL and outputs a patched MODEL (ideal for WAN 2.2 workflows where a single node step is preferred).
+- Qwen Image LoRA (IAMCCS QwenImgLoadFix) – Updated for 1.3.0: a fixed Qwen Image LoRA loader with improved offload controls and UX.
+- Extended internal WAN key remapping for seamless WAN 2.2 (Flow) + WAN 2.1 cross-compatibility.
+- Documentation updated with explicit Qwen Image LoRA loader prerequisites for low VRAM users (nunchaku based).
+- Version bump across project files.
+
+### New Node: LoRA Stack (Model In→Out) WAN
+
+![Node piece no_7](assets/lora_stack_model_I_O.png)lora_stack_model_I_O.png
+
+Use this node when you already have a base MODEL loaded (WAN 2.2, Flow, SDXL, etc.) and want a single pass application of multiple LoRAs without an intermediate stack/output hand-off. It mirrors the behavior of the classic stack + apply pair but merges them for simpler graphs (especially animation or chained sampler pipelines).
+
+Inputs:
+- `model`: base diffusion MODEL.
+- `lora1..lora4` + `strength1..strength4` (skips if "no" or strength == 0.0)
+- `model_type`: choose `flow`, `wan2x`, or `standard` to control remapping logic.
+- Optional `lora` (LORA) input: allows concatenating a previously built stack from `IAMCCS_WanLoRAStack` for more than 4 total LoRAs.
+
+Output:
+- Patched `MODEL` ready for samplers / video pipelines.
+
+Recommended Use (WAN 2.2 workflows):
+1. Load base WAN 2.2 / LightX2V model.
+2. Add `LoRA Stack (Model In→Out) WAN` and select up to 4 LoRAs.
+3. (Optional) Chain a classic `IAMCCS_WanLoRAStack` into the optional `lora` input if you need >4.
+4. Connect output to KSampler / Animate nodes.
+
+Why this node: Eliminates one extra node hop, reduces graph complexity and clarifies model lineage in large animation workflows.
+
+## Previous Versions
+
+### Version 1.2.3 — New input lora - add another StackLoraModel (concatenate) + Extended Wan 2.1 Compatibility
+
+### Version 1.2.1
 
 # UPDATE VERSION 1-2-1
 
@@ -71,7 +105,7 @@ Ideal for WANAnimate, WANVideo, or any Flow-based cinematic model.
 
 ![Node piece no_3](assets/ensemble.png)
 
-# New version 1.2.3!! Lora concatenate!! You can add another Lora stack to the node!
+# LoRA Concatenation (1.2.3)
 
 ![Node piece no_4](assets/lora_concatenatel.png)lora_concatenatel.png
 
@@ -128,3 +162,58 @@ This modular architecture makes LoRA management in WANAnimate flexible, transpar
 <a href="https://www.buymeacoffee.com/iamccs" target="_blank">
   <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" width="200" />
 </a>
+
+---
+
+## Qwen Image LoRA (IAMCCS QwenImgLoadFix) – Updated for 1.3.0
+
+This repo ships a fixed Qwen Image LoRA loader with improved offload controls and UX.
+
+![Node piece no_5](assets/LORAQWEN.png)LORAQWEN.png
+
+### Prerequisites (Low VRAM Friendly)
+Required:
+- ComfyUI (≥ 0.3.0)
+- `ComfyUI-nunchaku` (Qwen Image / Sana transformer implementation)
+- `ComfyUI-QwenImageLoraLoader` (wrappers.qwenimage module with `ComfyQwenImageWrapper`)
+- Qwen Image model weights placed as per nunchaku loader instructions
+- LoRA files (`.safetensors`) in `ComfyUI/models/loras`
+
+Recommended for low VRAM systems:
+- Enable `offload_auto_tune` (auto scales transformer block residency)
+- Set `offload_policy=disable` only if you experience instability during composition (keeps everything on GPU while LoRAs active)
+- Keep `offload_num_blocks_on_gpu` low (1–2) if VRAM < 12 GB
+
+### Node Overview
+`IAMCCS QwenImgLoadFix`
+- Wraps a `NunchakuQwenImageTransformer2DModel` / `NunchakuSanaTransformer2DModel` if not already wrapped.
+- Adds LoRA via internal wrapper (`model_wrapper.loras.append(...)`) with strength preset.
+- Supports composition modes:
+  - `append`: legacy shape-changing approach
+  - `merge_v2`: in-place delta merge (preferred; no rank expansion)
+- Offload Controls: dynamic, rebuild or disable strategies; pin-memory toggle; auto-tune; VRAM margin.
+- Device Safety: ensures params & buffers migrate to correct CUDA device before forward.
+
+  
+
+### Dependency Checklist
+| Component | Purpose |
+|-----------|---------|
+| ComfyUI-nunchaku | Provides transformer class loaded by base model node |
+| ComfyUI-QwenImageLoraLoader | Supplies `wrappers/qwenimage.py` used for wrapping |
+| IAMCCS-nodes | Adds fixed loader + WAN LoRA stack system |
+| LoRA safetensors | User-provided style/character adapters |
+
+If `wrappers/qwenimage.py` is not found the node will raise an import error. Ensure `ComfyUI-QwenImageLoraLoader` repository resides in `custom_nodes/`.
+
+### Quick Start (Low VRAM Scenario)
+1. Load Qwen Image model (nunchaku loader node).
+2. Place `IAMCCS QwenImgLoadFix` directly after it.
+3. Select `lora_name` & preset (start with 0.76–1.00 for natural balance).
+4. Set `composition_mode=merge_v2` unless you need legacy behavior.
+5. Keep `offload_auto_tune=ON`; reduce `offload_num_blocks_on_gpu` if memory errors occur.
+6. Run sampler; adjust preset or switch to a higher strength if effect too weak.
+
+### External Requirements Recap
+This loader will not function standalone — both `ComfyUI-nunchaku` and `ComfyUI-QwenImageLoraLoader` must be installed, and the Qwen Image weights must be correctly placed. The IAMCCS node auto-wraps only if it detects a supported transformer class. If wrapping fails, verify repository folder names match expected conventions.
+
