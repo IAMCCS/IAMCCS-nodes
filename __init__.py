@@ -14,6 +14,10 @@ from .iamccs_wan_lora_stack_simple import (
     IAMCCS_WanLoRAStackModelIO,
 )
 
+from .iamccs_wan_svipro_motion import (
+    IAMCCS_WanImageMotion,
+)
+
 
 # Qwen Image LoRA loader (fixed copy)
 from .iamccs_qwen_lora_loader import (
@@ -26,6 +30,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_ModelWithLoRA": IAMCCS_ModelWithLoRA,
     "IAMCCS_WanLoRAStackModelIO": IAMCCS_WanLoRAStackModelIO,
     "IAMCCS_qwenloraloader": IAMCCS_QwenImageLoraLoader,
+    "IAMCCS_WanImageMotion": IAMCCS_WanImageMotion,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -33,6 +38,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_ModelWithLoRA": "Apply LoRA to MODEL (Native)",
     "IAMCCS_WanLoRAStackModelIO": "LoRA Stack (Model In→Out) WAN",
     "IAMCCS_qwenloraloader": "IAMCCS QwenImgLoraLoaderFix",
+    "IAMCCS_WanImageMotion": "IAMCCS WanImageMotion",
 }
 
 # Web directory for JavaScript extensions

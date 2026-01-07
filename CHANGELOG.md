@@ -1,3 +1,20 @@
+## 🆕 Version 1.3.1 — WAN SVI Pro Motion Control Node
+
+Date: 2026-01-07
+
+Changes:
+- Added new node `IAMCCS_WanImageMotion` ("IAMCCS WanImageMotion"):
+  - Drop-in replacement for KJNodes `WanImageToVideoSVIPro` with motion amplitude control
+  - Multiple motion modes: apply to `prev_samples` only or all non-first latents
+  - VRAM profiles: normal / chunked (2/4 blocks) / per-frame loop / CPU offload
+  - Latent precision control: auto / fp16 / fp32 for quality vs VRAM tradeoff
+  - Optional `include_padding_in_motion` toggle: allows motion boost on padded frames when anchor has single frame
+  - Optional `add_reference_latents` for additional conditioning stability
+  - Comprehensive logging with motion_range diagnostics and warnings when no frames are modified
+
+- When anchor_samples has only 1 frame and no prev_samples: enable `include_padding_in_motion=True` to apply motion boost
+- Full documentation in `docs/WanImageMotion.md`
+
 ## 🆕 Version 1.3.0 — MODEL In→Out LoRA Stack & Qwen Loader Docs
 
 Date: 2025-11-19
@@ -12,6 +29,9 @@ Changes:
 Notes:
 - Existing workflows using the older two-node stack + apply pattern continue to work unchanged.
 - Use `IAMCCS_WanLoRAStackModelIO` to simplify WAN 2.2 graphs or reduce node count before samplers.
+
+---
+
 
 ---
 ## 🆕 Version 1.2.3 — Stackable LoRA Input

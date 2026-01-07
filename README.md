@@ -7,7 +7,45 @@
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows
 
-Version: 1.3.0
+Version: 1.3.1
+
+# UPDATE VERSION 1-3-1
+
+## 🆕 Version 1.3.1 — WAN SVI Pro Motion Control
+
+
+![[Node piece](assets/wanmotion.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/wanmotion.png)
+
+Highlights:
+- Added `IAMCCS WanImageMotion` node: drop-in replacement for KJNodes `WanImageToVideoSVIPro` with motion amplitude control to fix slow-motion issues in WAN SVI Pro workflows.
+- Motion modes: apply boost to `prev_samples` only or all non-first latents.
+- VRAM profiles: normal / chunked / per-frame loop / CPU offload for memory-constrained systems.
+- `include_padding_in_motion` toggle: enables motion boost on padded frames when anchor has single frame (T=1).
+- Comprehensive logging with warnings when motion_range is empty.
+- Full documentation: `docs/WanImageMotion.md`
+
+### New Node: IAMCCS WanImageMotion
+
+Use this node in WAN SVI Pro workflows to control motion intensity and prevent slow-motion artifacts.
+
+Inputs:
+- `positive` / `negative`: conditioning
+- `length`: video length
+- `anchor_samples`: base latent samples
+- `motion`: motion amplitude (1.0-2.0, default 1.15)
+- `motion_mode`: choose where to apply boost
+- `motion_latent_count`: frames from prev_samples to use as motion reference
+- `include_padding_in_motion`: enable to apply motion on padded frames
+- `vram_profile`: memory optimization strategy
+- `latent_precision`: dtype control (auto/fp16/fp32)
+- `add_reference_latents`: optional conditioning stabilization
+- Optional `prev_samples`: previous latents for motion continuity
+
+Outputs:
+- Updated `positive` / `negative` conditioning with motion-boosted latents
+- `latent`: empty latent for sampling
+
+---
 
 # UPDATE VERSION 1-3-0
 
