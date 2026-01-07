@@ -22,7 +22,7 @@ Highlights:
 - VRAM profiles: normal / chunked / per-frame loop / CPU offload for memory-constrained systems.
 - `include_padding_in_motion` toggle: enables motion boost on padded frames when anchor has single frame (T=1).
 - Comprehensive logging with warnings when motion_range is empty.
-- Full documentation: `docs/WanImageMotion.md`
+- Full documentation: `WanImageMotion.md`
 
 ### New Node: IAMCCS WanImageMotion
 
