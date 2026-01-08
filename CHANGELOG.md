@@ -15,14 +15,13 @@ Changes:
 - When anchor_samples has only 1 frame and no prev_samples: enable `include_padding_in_motion=True` to apply motion boost
 - Full documentation in `docs/WanImageMotion.md`
 
-## 🆕 Version 1.3.0 — MODEL In→Out LoRA Stack & Qwen Loader Docs
+## 🆕 Version 1.3.0 — MODEL In→Out LoRA Stack
 
 Date: 2025-11-19
 
 Changes:
 - Added new node `IAMCCS_WanLoRAStackModelIO` ("LoRA Stack (Model In→Out) WAN") for direct multi-LoRA application to an incoming MODEL (WAN 2.2 / Flow / Standard).
 - Preserves WAN key remap + optional chaining via existing `IAMCCS_WanLoRAStack` (use optional `lora` input to extend beyond 4 slots).
-- Updated `README.md` with explicit low VRAM instructions for Qwen Image LoRA loader and dependency checklist (`ComfyUI-nunchaku`, `ComfyUI-QwenImageLoraLoader`).
 - Bumped versions (`version.json`, `pyproject.toml`) to 1.3.0.
 - Neutralized deprecated Save&Load DragCrop code (frontend/backend) — removed from active registration.
 

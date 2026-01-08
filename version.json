@@ -2,5 +2,5 @@
   "name": "iamccs-wan-lora-fixer-stack",
   "version": "1.3.1",
   "author": "Carmine Cristallo Scalzi (IAMCCS)",
-  "description": "IAMCCS nodes for ComfyUI: multi-LoRA stack + direct MODEL IO WAN/Flow remap, Qwen Image LoRA loader improvements. v1.3.1 adds WAN image motion node to enhance the motion in WAN 2.2 workflow, MODEL in→out stack node and updated low VRAM Qwen instructions. WAN 2.1 + 2.2 compatible."
+  "description": "IAMCCS nodes for ComfyUI: multi-LoRA stack + direct MODEL IO WAN/Flow remap. v1.3.1 adds WAN image motion node to enhance motion in WAN SVI Pro workflows. WAN 2.1 + 2.2 compatible."
 }
