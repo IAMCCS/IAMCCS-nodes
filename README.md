@@ -19,6 +19,9 @@ Highlights:
 - Added/updated **LTX-2 LoRA nodes** (category `IAMCCS/LoRA`):
   - `LoRA Stack (LTX-2, 3 slots)` (`IAMCCS_LTX2_LoRAStack`)
   - `LoRA Stack (LTX-2, staged: stage1+stage2) (BETA)` (`IAMCCS_LTX2_LoRAStackStaged`)
+
+![[Node piece](assets/stage.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/stage.png)
+
   - `Apply LoRA to MODEL (LTX-2, quiet logs)` (`IAMCCS_ModelWithLoRA_LTX2`)
   - `Apply LoRA to MODEL (LTX-2, staged) (BETA)` (`IAMCCS_ModelWithLoRA_LTX2_Staged`)
   - `LoRA Stack (Model In→Out) LTX-2` (`IAMCCS_LTX2_LoRAStackModelIO`)
