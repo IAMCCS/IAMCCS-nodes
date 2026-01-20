@@ -1,6 +1,6 @@
 {
   "name": "iamccs-wan-lora-fixer-stack",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "author": "Carmine Cristallo Scalzi (IAMCCS)",
-  "description": "IAMCCS nodes for ComfyUI: multi-LoRA stack + direct MODEL IO WAN/Flow remap. v1.3.1 adds WAN image motion node to enhance motion in WAN SVI Pro workflows. WAN 2.1 + 2.2 compatible."
+  "description": "IAMCCS nodes for ComfyUI: multi-LoRA stack + direct MODEL IO WAN/Flow remap + LTX-2 LoRA & utility nodes (FrameRate Sync, Validator, Control Preprocess, LTX-2 LoRA stacks). WAN 2.1 + 2.2 compatible."
 }

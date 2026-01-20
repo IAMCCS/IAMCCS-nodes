@@ -7,7 +7,35 @@
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows
 
-Version: 1.3.1
+Version: 1.3.2
+
+# UPDATE VERSION 1-3-2
+
+## 🆕 Version 1.3.2 — LTX-2 Nodes Pack
+
+![[Node piece](assets/cover_sq.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/cover_sq.png)
+
+Highlights:
+- Added/updated **LTX-2 LoRA nodes** (category `IAMCCS/LoRA`):
+  - `LoRA Stack (LTX-2, 3 slots)` (`IAMCCS_LTX2_LoRAStack`)
+  - `LoRA Stack (LTX-2, staged: stage1+stage2) (BETA)` (`IAMCCS_LTX2_LoRAStackStaged`)
+  - `Apply LoRA to MODEL (LTX-2, quiet logs)` (`IAMCCS_ModelWithLoRA_LTX2`)
+  - `Apply LoRA to MODEL (LTX-2, staged) (BETA)` (`IAMCCS_ModelWithLoRA_LTX2_Staged`)
+  - `LoRA Stack (Model In→Out) LTX-2` (`IAMCCS_LTX2_LoRAStackModelIO`)
+
+![[Node piece](assets/validator.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/validator.png)
+
+- Added/updated **LTX-2 workflow utilities** (category `IAMCCS/LTX-2`):
+  - `LTX-2 FrameRate Sync (int+float)` (`IAMCCS_LTX2_FrameRateSync`) — keeps FPS INT/FLOAT consistent.
+  - `LTX-2 Validator (16px, 8n +1)` (`IAMCCS_LTX2_Validator`) — EmptyImage-like IMAGE + validated `length` output; enforces `8n+1` and a permissive spatial multiple (16px).
+    - `fps` is handled by `LTX-2 FrameRate Sync` (no fps input on the Validator).
+    - `seconds` + `length` are both visible; the UI auto-syncs them.
+  - `LTX-2 TimeFrameCount` (`IAMCCS_LTX2_TimeFrameCount`) — duration-only helper for I2V workflows: `seconds` ↔ `length` kept in sync in the UI (uses nearest FrameRateSync, fallback 24fps).
+  - `LTX-2 Control Preprocess (aux)` (`IAMCCS_LTX2_ControlPreprocess`) — lightweight grayscale/threshold/edges helper for control-style workflows.
+
+![[Node piece](assets/frame.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/frame.png)
+
+---
 
 # UPDATE VERSION 1-3-1
 

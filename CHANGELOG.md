@@ -1,3 +1,23 @@
+## 🆕 Version 1.3.2 — LTX-2 Nodes Pack
+
+Date: 2026-01-15
+
+Changes:
+- Added new LTX-2 LoRA nodes:
+  - `IAMCCS_LTX2_LoRAStackModelIO` ("LoRA Stack (Model In→Out) LTX-2")
+  - `IAMCCS_LTX2_LoRAStackStaged` ("LoRA Stack (LTX-2, staged: stage1+stage2)")
+  - (Existing apply node) `IAMCCS_ModelWithLoRA_LTX2` used to apply staged stacks per stage
+
+- Added new LTX-2 utility nodes:
+  - `IAMCCS_LTX2_FrameRateSync` ("LTX-2 FrameRate Sync (int+float)") — includes `fixed` mode
+  - `IAMCCS_LTX2_Validator` ("LTX-2 Validator (16px, 8n +1)") — replaces the removed ShapeValidator; seconds/length are UI-synced; fps handled by FrameRateSync
+  - `IAMCCS_LTX2_ControlPreprocess` ("LTX-2 Control Preprocess (aux)")
+
+- Added documentation: `LTX2iamccsnodes.md`
+- Bumped versions (`version.json`, `pyproject.toml`) to 1.3.2.
+
+---
+
 ## 🆕 Version 1.3.1 — WAN SVI Pro Motion Control Node
 
 Date: 2026-01-07
