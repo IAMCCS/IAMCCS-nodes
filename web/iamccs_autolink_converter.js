@@ -12,6 +12,96 @@ const KJ_GET_TYPE = "GetNode";
 
 console.log("[IAMCCS AutoLink] Loading extension...");
 
+// === Graph compatibility helpers ===
+// ComfyUI/LiteGraph internals vary across versions. These helpers keep AutoLink
+// working when nodes/links are stored differently.
+function _iamccsGraphNodes(graph) {
+    if (!graph) return [];
+    if (Array.isArray(graph._nodes)) return graph._nodes;
+    if (Array.isArray(graph.nodes)) return graph.nodes;
+    const byId = graph._nodes_by_id || graph._nodesById;
+    if (byId && typeof byId === "object") {
+        try { return Object.values(byId).filter(Boolean); } catch { return []; }
+    }
+    return [];
+}
+
+function _iamccsGraphLinksEntries(graph) {
+    const links = graph?.links;
+    if (!links) return [];
+
+    // Map-like
+    if (typeof links.entries === "function") {
+        try {
+            const out = [];
+            for (const [k, v] of links.entries()) {
+                const nk = Number(k);
+                const id = Number.isFinite(nk) ? nk : (Number.isFinite(Number(v?.id)) ? Number(v.id) : nk);
+                out.push([id, v]);
+            }
+            return out;
+        } catch { /* fallthrough */ }
+    }
+
+    // Array-like
+    if (Array.isArray(links)) {
+        return links.map(l => [Number(l?.id), l]);
+    }
+
+    // Plain object
+    if (typeof links === "object") {
+        try { return Object.entries(links).map(([k, v]) => [Number(k), v]); } catch { return []; }
+    }
+
+    return [];
+}
+
+function _iamccsGetLink(graph, linkId) {
+    const links = graph?.links;
+    if (!links || linkId == null) return null;
+    const id = Number(linkId);
+    if (!Number.isFinite(id)) return null;
+
+    try {
+        if (typeof links.get === "function") {
+            return links.get(id) || links.get(String(id)) || null;
+        }
+    } catch {}
+
+    try {
+        return links[id] || links[String(id)] || null;
+    } catch {
+        return null;
+    }
+}
+
+function _iamccsDeleteLink(graph, linkId) {
+    const links = graph?.links;
+    if (!links || linkId == null) return;
+    const id = Number(linkId);
+    if (!Number.isFinite(id)) return;
+
+    try {
+        if (typeof links.delete === "function") {
+            links.delete(id);
+            links.delete(String(id));
+            return;
+        }
+    } catch {}
+
+    try { delete links[id]; } catch {}
+    try { delete links[String(id)]; } catch {}
+}
+
+function _iamccsIdEq(a, b) {
+    // Robust id comparison across number/string ids.
+    if (a == null || b == null) return false;
+    const an = Number(a);
+    const bn = Number(b);
+    if (Number.isFinite(an) && Number.isFinite(bn)) return an === bn;
+    return String(a) === String(b);
+}
+
 function alphaSort(values) {
     return [...values].sort((a, b) => String(a).localeCompare(String(b), undefined, { sensitivity: 'base' }));
 }
@@ -79,10 +169,10 @@ function normalizeAutolinkIOSlots(graph, node, { wantInputs = 0, wantOutputs = 0
                 const idx = node.inputs.findIndex((inp, i) => i > 0 && inp?.link != null);
                 if (idx > 0) {
                     const linkId = node.inputs[idx].link;
-                    const link = graph?.links?.[linkId];
+                    const link = _iamccsGetLink(graph, linkId);
                     if (link) {
                         try { node.disconnectInput?.(idx); } catch {}
-                        const src = graph?.getNodeById?.(link.origin_id);
+                        const src = getNodeById(graph, link.origin_id);
                         if (src) {
                             try {
                                 // Reconnect to slot 0
@@ -113,9 +203,9 @@ function normalizeAutolinkIOSlots(graph, node, { wantInputs = 0, wantOutputs = 0
                     const links = node.outputs?.[i]?.links;
                     if (!Array.isArray(links) || links.length === 0) continue;
                     for (const linkId of [...links]) {
-                        const link = graph?.links?.[linkId];
+                        const link = _iamccsGetLink(graph, linkId);
                         if (!link) continue;
-                        const dst = graph?.getNodeById?.(link.target_id);
+                        const dst = getNodeById(graph, link.target_id);
                         if (!dst) continue;
                         const ts = link.target_slot;
                         try { dst.disconnectInput?.(ts); } catch {}
@@ -150,7 +240,7 @@ function makeUniqueAutolinkSetName(graph, desired) {
     const baseLower = base.toLowerCase();
 
     const used = new Set(
-        (graph?._nodes || [])
+        _iamccsGraphNodes(graph)
             .filter(n => n?.type === SET_TYPE)
             .map(n => getAutolinkKey(n))
             .filter(v => isValidAutolinkKey(v))
@@ -359,8 +449,9 @@ function applyNodeColors(node, preset) {
 
 function recolorExistingAutoLinks(graph, colorSetName = "Gray", separateCol = false, colorGetName = "Gray", colorTitles = "White") {
     if (!graph) return;
-    const sets = graph._nodes.filter(n => n?.type === SET_TYPE);
-    const gets = graph._nodes.filter(n => n?.type === GET_TYPE);
+    const nodes = _iamccsGraphNodes(graph);
+    const sets = nodes.filter(n => n?.type === SET_TYPE);
+    const gets = nodes.filter(n => n?.type === GET_TYPE);
 
     for (const setNode of sets) {
         // Migrazione: vecchi workflow (prima del widget colore) possono aver scritto il nome nel widget colore.
@@ -395,7 +486,7 @@ function recolorExistingAutoLinks(graph, colorSetName = "Gray", separateCol = fa
     for (const getNode of gets) {
         const key = getAutolinkKey(getNode);
         const chosen = key
-            ? (graph._nodes.find(n => n?.type === SET_TYPE && getAutolinkKey(n) === key)?.properties?.autolink_color_name || colorSetName)
+            ? (nodes.find(n => n?.type === SET_TYPE && getAutolinkKey(n) === key)?.properties?.autolink_color_name || colorSetName)
             : colorSetName;
         applyNodeColors(getNode, getAutolinkColorPreset(chosen, 'get', separateCol, colorGetName));
         getNode.properties = getNode.properties || {};
@@ -409,8 +500,9 @@ function recolorExistingAutoLinks(graph, colorSetName = "Gray", separateCol = fa
 function applyColorToAutolinkKey(graph, key, colorName, separateCol = false, colorGetName = "Gray", colorTitles = "White") {
     if (!graph || !key) return;
     const safeKey = String(key).trim();
-    const sets = graph._nodes.filter(n => n?.type === SET_TYPE && getAutolinkKey(n) === safeKey);
-    const gets = graph._nodes.filter(n => n?.type === GET_TYPE && getAutolinkKey(n) === safeKey);
+    const nodes = _iamccsGraphNodes(graph);
+    const sets = nodes.filter(n => n?.type === SET_TYPE && getAutolinkKey(n) === safeKey);
+    const gets = nodes.filter(n => n?.type === GET_TYPE && getAutolinkKey(n) === safeKey);
 
     for (const setNode of sets) {
         setNode.properties = setNode.properties || {};
@@ -477,8 +569,9 @@ function startFlowAnimation() {
     
     // Trova tutte le coppie Set-Get attive
     activeFlows = [];
-    const setNodes = app.graph._nodes.filter(n => n.type === SET_TYPE);
-    const getNodes = app.graph._nodes.filter(n => n.type === GET_TYPE);
+    const nodes = _iamccsGraphNodes(app.graph);
+    const setNodes = nodes.filter(n => n.type === SET_TYPE);
+    const getNodes = nodes.filter(n => n.type === GET_TYPE);
     
     setNodes.forEach(setNode => {
         const setName = getAutolinkKey(setNode);
@@ -588,12 +681,11 @@ function _iamccsFixLinkIntegrity(graph) {
         if (!graph || !graph.links) return;
 
         // 1) Ensure each graph.links entry is reflected in origin.outputs[*].links and target.inputs[*].link
-        for (const [idStr, link] of Object.entries(graph.links)) {
-            const linkId = Number(idStr);
+        for (const [linkId, link] of _iamccsGraphLinksEntries(graph)) {
             if (!link || !Number.isFinite(linkId)) continue;
 
-            const origin = graph.getNodeById?.(link.origin_id);
-            const target = graph.getNodeById?.(link.target_id);
+            const origin = getNodeById(graph, link.origin_id);
+            const target = getNodeById(graph, link.target_id);
             const os = Number(link.origin_slot);
             const ts = Number(link.target_slot);
             if (!origin || !target || !Number.isFinite(os) || !Number.isFinite(ts)) continue;
@@ -620,13 +712,13 @@ function _iamccsFixLinkIntegrity(graph) {
                     } else if (Number(inp.link) !== linkId) {
                         try {
                             // Remove orphan link from origin output list
-                            const o2 = graph.getNodeById?.(link.origin_id);
+                            const o2 = getNodeById(graph, link.origin_id);
                             const os2 = Number(link.origin_slot);
                             if (o2?.outputs?.[os2]?.links && Array.isArray(o2.outputs[os2].links)) {
                                 o2.outputs[os2].links = o2.outputs[os2].links.filter(x => Number(x) !== linkId);
                             }
                         } catch {}
-                        try { delete graph.links[linkId]; } catch {}
+                        _iamccsDeleteLink(graph, linkId);
                         continue;
                     }
                 }
@@ -634,8 +726,8 @@ function _iamccsFixLinkIntegrity(graph) {
         }
 
         // 2) Remove stale link IDs from outputs[*].links that don't exist in graph.links
-        const existing = new Set(Object.keys(graph.links).map(k => Number(k)).filter(Number.isFinite));
-        for (const node of graph._nodes || []) {
+        const existing = new Set(_iamccsGraphLinksEntries(graph).map(([id]) => id).filter(Number.isFinite));
+        for (const node of _iamccsGraphNodes(graph)) {
             if (!node?.outputs?.length) continue;
             for (const out of node.outputs) {
                 if (!out || !Array.isArray(out.links) || out.links.length === 0) continue;
@@ -651,12 +743,12 @@ function _iamccsForceRemoveLink(graph, linkId) {
     if (!graph || !graph.links || linkId == null) return;
     const id = Number(linkId);
     if (!Number.isFinite(id)) return;
-    const link = graph.links?.[id];
+    const link = _iamccsGetLink(graph, id);
     if (!link) return;
 
     // Remove from origin output links array if possible
     try {
-        const origin = graph.getNodeById?.(link.origin_id);
+        const origin = getNodeById(graph, link.origin_id);
         const os = Number(link.origin_slot);
         if (origin?.outputs?.[os]?.links && Array.isArray(origin.outputs[os].links)) {
             origin.outputs[os].links = origin.outputs[os].links.filter(x => Number(x) !== id);
@@ -665,7 +757,7 @@ function _iamccsForceRemoveLink(graph, linkId) {
 
     // Remove from target input pointer if it points to this link
     try {
-        const target = graph.getNodeById?.(link.target_id);
+        const target = getNodeById(graph, link.target_id);
         const ts = Number(link.target_slot);
         if (target?.inputs?.[ts] && Number(target.inputs[ts].link) === id) {
             target.inputs[ts].link = null;
@@ -680,7 +772,7 @@ function _iamccsForceRemoveLink(graph, linkId) {
         }
     } catch {}
 
-    try { delete graph.links[id]; } catch {}
+    _iamccsDeleteLink(graph, id);
 }
 
 function _iamccsDisconnectTargetInput(graph, dstNode, ts) {
@@ -707,16 +799,14 @@ function _iamccsDisconnectTargetInput(graph, dstNode, ts) {
 
 function _iamccsRemoveOtherLinksToTarget(graph, targetId, targetSlot, keepLinkId) {
     try {
-        const tid = Number(targetId);
         const ts = Number(targetSlot);
         const keep = keepLinkId != null ? Number(keepLinkId) : null;
-        if (!graph?.links || !Number.isFinite(tid) || !Number.isFinite(ts)) return;
+        if (!graph?.links || !Number.isFinite(ts)) return;
 
-        for (const [idStr, link] of Object.entries(graph.links)) {
-            const id = Number(idStr);
+        for (const [id, link] of _iamccsGraphLinksEntries(graph)) {
             if (!Number.isFinite(id) || !link) continue;
             if (keep != null && id === keep) continue;
-            if (Number(link.target_id) === tid && Number(link.target_slot) === ts) {
+            if (_iamccsIdEq(link.target_id, targetId) && Number(link.target_slot) === ts) {
                 _iamccsForceRemoveLink(graph, id);
             }
         }
@@ -1062,7 +1152,7 @@ app.registerExtension({
                         values: () => {
                             if (this.properties.all_nodes_sel) {
                                 // Mostra tutti i nodi singolarmente
-                                const nodes = app.graph._nodes.filter(n => 
+                                const nodes = _iamccsGraphNodes(app.graph).filter(n => 
                                     n.type !== SET_TYPE && 
                                     n.type !== GET_TYPE && 
                                     n.type !== CONVERTER_TYPE &&
@@ -1075,7 +1165,7 @@ app.registerExtension({
                             } else {
                                 // Mostra solo tipi di nodi
                                 const nodeTypes = new Set();
-                                app.graph._nodes.forEach(n => {
+                                _iamccsGraphNodes(app.graph).forEach(n => {
                                     if (n.type !== SET_TYPE && 
                                         n.type !== GET_TYPE && 
                                         n.type !== CONVERTER_TYPE &&
@@ -1229,7 +1319,7 @@ app.registerExtension({
                     },
                     {
                         values: () => {
-                            const autoLinkNodes = app.graph._nodes.filter(n => 
+                            const autoLinkNodes = _iamccsGraphNodes(app.graph).filter(n => 
                                 n.type === SET_TYPE || n.type === GET_TYPE
                             );
                             return ["", ...alphaSort(autoLinkNodes.map(n => `${n.id} - ${n.title || n.type}`))];
@@ -1274,7 +1364,7 @@ app.registerExtension({
                         const key = getAutolinkKey(node);
 
                         // prendi lo stato SeparateCol + colore get dal primo Arguments disponibile (se presente)
-                        const argNode = app.graph._nodes.find(n => n?.type === ARGUMENTS_TYPE);
+                        const argNode = _iamccsGraphNodes(app.graph).find(n => n?.type === ARGUMENTS_TYPE);
                         const separateCol = !!argNode?.properties?.separate_col;
                         const colorGetName = argNode?.properties?.autolink_color_get || "Gray";
                         const colorTitles = argNode?.properties?.color_titles || "White";
@@ -1399,7 +1489,7 @@ app.registerExtension({
                     node.onRename();
                 }, {
                     values: () => {
-                        const setNodes = app.graph._nodes.filter(n => n.type === SET_TYPE);
+                        const setNodes = _iamccsGraphNodes(app.graph).filter(n => n.type === SET_TYPE);
                         return alphaSort(setNodes.map(n => getAutolinkKey(n)).filter(v => v));
                     }
                 });
@@ -1409,7 +1499,7 @@ app.registerExtension({
                 
                 this.onRename = function() {
                     const setterName = getAutolinkKey(node);
-                    const setter = app.graph._nodes.find(n => 
+                    const setter = _iamccsGraphNodes(app.graph).find(n => 
                         n.type === SET_TYPE && getAutolinkKey(n) === setterName
                     );
                     
@@ -1432,15 +1522,18 @@ app.registerExtension({
                 // Override getInputLink per prendere da Set
                 this.getInputLink = function(slot) {
                     const setterName = getAutolinkKey(node);
-                    const setter = app.graph._nodes.find(n => 
+                    const setter = _iamccsGraphNodes(app.graph).find(n => 
                         n.type === SET_TYPE && getAutolinkKey(n) === setterName
                     );
                     
                     if (setter) {
                         const slotInfo = setter.inputs[slot];
                         if (slotInfo) {
-                            const link = app.graph.links[slotInfo.link];
-                            return link;
+                            const linkId = slotInfo.link != null
+                                ? slotInfo.link
+                                : (Array.isArray(slotInfo.links) ? slotInfo.links[0] : null);
+                            const link = _iamccsGetLink(app.graph, linkId);
+                            return link || null;
                         }
                     }
                     return null;
@@ -1458,7 +1551,36 @@ app.registerExtension({
 // === FUNZIONI CONVERSIONE ===
 
 function getNodeById(graph, id) {
-    return graph.getNodeById ? graph.getNodeById(id) : graph._nodes.find(n => n.id === id);
+    if (!graph || id == null) return null;
+
+    try {
+        if (typeof graph.getNodeById === "function") {
+            const direct = graph.getNodeById(id);
+            if (direct) return direct;
+        }
+    } catch {}
+
+    const byId = graph._nodes_by_id || graph._nodesById;
+    if (byId && typeof byId === "object") {
+        // Try raw key first (string/uuid)
+        const raw = byId[id] || byId[String(id)];
+        if (raw) return raw;
+        // Also try numeric key if applicable
+        const nid = Number(id);
+        if (Number.isFinite(nid)) return byId[nid] || byId[String(nid)] || null;
+    }
+
+    const nodes = _iamccsGraphNodes(graph);
+    // Match by string id first (covers UUID)
+    const sid = String(id);
+    const byString = nodes.find(n => n?.id != null && String(n.id) === sid);
+    if (byString) return byString;
+    // Then numeric match (covers classic LiteGraph ids)
+    const nid = Number(id);
+    if (Number.isFinite(nid)) {
+        return nodes.find(n => Number(n?.id) === nid) || null;
+    }
+    return null;
 }
 
 function createNode(graph, type, x, y) {
@@ -1548,7 +1670,7 @@ function getBlacklistFromInput(converterNode) {
         };
     }
     
-    const link = app.graph.links[argInput.link];
+    const link = _iamccsGetLink(app.graph, argInput.link);
     if (!link) {
         return {
             blacklist: [],
@@ -1566,7 +1688,7 @@ function getBlacklistFromInput(converterNode) {
         };
     }
     
-    const argNode = app.graph.getNodeById(link.origin_id);
+    const argNode = getNodeById(app.graph, link.origin_id);
     if (!argNode || argNode.type !== ARGUMENTS_TYPE) {
         return {
             blacklist: [],
@@ -1696,7 +1818,7 @@ function relayoutExistingAutoLinks(graph, alignMode = "TopToDown", packingMode =
             if (occupied.has(posKey)) continue;
 
             let overlaps = false;
-            for (const node of graph._nodes) {
+            for (const node of _iamccsGraphNodes(graph)) {
                 if (!shouldTreatAsObstacle(node)) continue;
                 if (ignoreNode && node === ignoreNode) continue;
                 const [nx, ny] = getNodePos(node);
@@ -1724,15 +1846,16 @@ function relayoutExistingAutoLinks(graph, alignMode = "TopToDown", packingMode =
         return [baseX + offsetX, baseY];
     }
 
-    const sets = graph._nodes.filter(n => n?.type === SET_TYPE);
-    const gets = graph._nodes.filter(n => n?.type === GET_TYPE);
+    const nodes = _iamccsGraphNodes(graph);
+    const sets = nodes.filter(n => n?.type === SET_TYPE);
+    const gets = nodes.filter(n => n?.type === GET_TYPE);
 
     // 1) Re-layout Sets: ancorati al nodo origine che li alimenta
     const occupiedSet = new Set();
     const setRecords = [];
     for (const setNode of sets) {
         const inLinkId = setNode?.inputs?.[0]?.link;
-        const inLink = inLinkId != null ? graph.links?.[inLinkId] : null;
+        const inLink = inLinkId != null ? _iamccsGetLink(graph, inLinkId) : null;
         if (!inLink) continue;
 
         const originNode = getNodeById(graph, inLink.origin_id);
@@ -1772,7 +1895,7 @@ function relayoutExistingAutoLinks(graph, alignMode = "TopToDown", packingMode =
         // preferisci link reale in uscita
         const outLinks = getNode?.outputs?.[0]?.links;
         const linkId = Array.isArray(outLinks) && outLinks.length > 0 ? outLinks[0] : null;
-        const outLink = linkId != null ? graph.links?.[linkId] : null;
+        const outLink = linkId != null ? _iamccsGetLink(graph, linkId) : null;
         const targetId = outLink?.target_id ?? getNode?.properties?.metadata?.target?.id;
         if (targetId == null) continue;
         const targetNode = getNodeById(graph, targetId);
@@ -1910,27 +2033,85 @@ function convertAllLinks(
     console.log("[IAMCCS AutoLink] SeparateCol:", separateCol);
     console.log("[IAMCCS AutoLink] ColorTitles:", colorTitles);
     
-    const linksData = graph.links || {};
     const linksToConvert = [];
+    const groupExcludedCandidates = [];
     const kijNodesToConvert = [];
-    
-    for (const linkId in linksData) {
-        const link = linksData[linkId];
+
+    const linkEntries = _iamccsGraphLinksEntries(graph);
+    console.log("[IAMCCS AutoLink] Total links visible:", linkEntries.length);
+
+    const _didConnect = (srcNode, originSlot, dstNode, targetSlot) => {
+        try {
+            const ts = Number(targetSlot);
+            const os = Number(originSlot);
+            const linkId = dstNode?.inputs?.[ts]?.link;
+            if (linkId == null) return null;
+            const link = _iamccsGetLink(graph, linkId);
+            if (!link) return null;
+            if (!_iamccsIdEq(link.origin_id, srcNode.id)) return null;
+            if (!_iamccsIdEq(link.target_id, dstNode.id)) return null;
+            if (Number(link.origin_slot) !== os) return null;
+            if (Number(link.target_slot) !== ts) return null;
+            return linkId;
+        } catch {
+            return null;
+        }
+    };
+
+    const _safeConnect = (srcNode, originSlot, dstNode, targetSlot) => {
+        const os = Number(originSlot);
+        const ts = Number(targetSlot);
+        if (!Number.isFinite(os) || !Number.isFinite(ts)) return null;
+
+        try {
+            srcNode.connect(os, dstNode, ts);
+            const ok = _didConnect(srcNode, os, dstNode, ts);
+            if (ok != null) return ok;
+        } catch {}
+
+        try {
+            if (typeof graph.connect === "function") {
+                graph.connect(srcNode.id, os, dstNode.id, ts);
+                const ok2 = _didConnect(srcNode, os, dstNode, ts);
+                if (ok2 != null) return ok2;
+            }
+        } catch {}
+
+        return null;
+    };
+
+    const skip = {
+        missing_nodes: 0,
+        autolink: 0,
+        system: 0,
+        kij: 0,
+        blacklisted_mode: 0,
+        blacklisted_type: 0,
+        group_exclude: 0,
+        group_inout_exclude: 0,
+    };
+
+    for (const [linkId, linkRaw] of linkEntries) {
+        const link = linkRaw;
         if (!link) continue;
         
         const srcNode = getNodeById(graph, link.origin_id);
         const dstNode = getNodeById(graph, link.target_id);
         
-        if (!srcNode || !dstNode) continue;
+        if (!srcNode || !dstNode) {
+            skip.missing_nodes++;
+            continue;
+        }
         
         // Skip già AutoLink
-        if (srcNode.type === SET_TYPE || srcNode.type === GET_TYPE) continue;
-        if (dstNode.type === SET_TYPE || dstNode.type === GET_TYPE) continue;
+        if (srcNode.type === SET_TYPE || srcNode.type === GET_TYPE) { skip.autolink++; continue; }
+        if (dstNode.type === SET_TYPE || dstNode.type === GET_TYPE) { skip.autolink++; continue; }
         
         // Blacklist permanente: nodi Arguments e Converter non vengono mai convertiti
         if (srcNode.type === ARGUMENTS_TYPE || srcNode.type === CONVERTER_TYPE ||
             dstNode.type === ARGUMENTS_TYPE || dstNode.type === CONVERTER_TYPE) {
             console.log(`[IAMCCS AutoLink] Skipping AutoLink system node: ${srcNode.type} -> ${dstNode.type}`);
+            skip.system++;
             continue;
         }
         
@@ -1945,6 +2126,7 @@ function convertAllLinks(
             } else {
                 // Esclude permanentemente KijNodes e i loro collegamenti
                 console.log(`[IAMCCS AutoLink] Skipping KijNode: ${srcNode.type} -> ${dstNode.type}`);
+                skip.kij++;
             }
             continue;
         }
@@ -1961,12 +2143,14 @@ function convertAllLinks(
                 console.log(
                     `[IAMCCS AutoLink] Skipping blacklisted node by mode: src=${srcNode.id}(${srcMode || "-"}) dst=${dstNode.id}(${dstMode || "-"})`
                 );
+                skip.blacklisted_mode++;
                 continue;
             }
         }
         
         if (blacklistTypes.includes(srcNode.type) || blacklistTypes.includes(dstNode.type)) {
             console.log(`[IAMCCS AutoLink] Skipping blacklisted node type: ${srcNode.type} or ${dstNode.type}`);
+            skip.blacklisted_type++;
             continue;
         }
 
@@ -1975,7 +2159,11 @@ function convertAllLinks(
         if (groupExclude) {
             const srcGroup = getGroupForNode(graph, srcNode);
             const dstGroup = getGroupForNode(graph, dstNode);
-            if (srcGroup && srcGroup === dstGroup) continue;
+            if (srcGroup && srcGroup === dstGroup) {
+                skip.group_exclude++;
+                groupExcludedCandidates.push({ link, linkId, srcNode, dstNode });
+                continue;
+            }
         }
 
         // GroupInOutExclude: se il link attraversa il confine di un group, puoi escludere le entrate/uscite
@@ -1993,12 +2181,23 @@ function convertAllLinks(
                     (groupInOutExclude === "ExcludeExit" && exitsSrcGroup) ||
                     (groupInOutExclude === "ExcludeBoth" && (entersDstGroup || exitsSrcGroup))
                 ) {
+                    skip.group_inout_exclude++;
                     continue;
                 }
             }
         }
         
-        linksToConvert.push({ link, srcNode, dstNode });
+        linksToConvert.push({ link, linkId, srcNode, dstNode });
+    }
+
+    console.log("[IAMCCS AutoLink] Skip stats:", skip);
+
+    // Fallback: if GroupExclude filtered everything, convert inside groups rather than doing nothing.
+    if (linksToConvert.length === 0 && groupExclude && groupExcludedCandidates.length > 0) {
+        console.warn(
+            `[IAMCCS AutoLink] GroupExclude removed all candidates (${groupExcludedCandidates.length}); proceeding with in-group conversion to avoid 0-links result.`
+        );
+        linksToConvert.push(...groupExcludedCandidates);
     }
     
     // Raggruppa i link per origine (stesso nodo + stesso slot) per creare un solo Set per output multipli
@@ -2016,7 +2215,7 @@ function convertAllLinks(
         linksByOrigin.get(key).destinations.push({
             dstNode: linkData.dstNode,
             targetSlot: linkData.link.target_slot,
-            linkId: linkData.link.id
+            linkId: linkData.linkId
         });
     }
     
@@ -2122,7 +2321,7 @@ function convertAllLinks(
 
             // Controlla sovrapposizione con nodi esistenti
             let overlaps = false;
-            for (const node of graph._nodes) {
+            for (const node of _iamccsGraphNodes(graph)) {
                 if (!shouldTreatAsObstacle(node)) continue;
                 const nodeRight = node.pos[0] + (node.size?.[0] || 200);
                 const nodeBottom = node.pos[1] + (node.size?.[1] || 100);
@@ -2151,7 +2350,7 @@ function convertAllLinks(
     // Traccia i nomi dei Set già esistenti/creati per evitare duplicati
     // - Preserva nomi numerati come "model_0" (non li riduce a "model")
     const usedExactSetNames = new Set();
-    const existingSets = graph._nodes.filter(n => n.type === SET_TYPE);
+    const existingSets = _iamccsGraphNodes(graph).filter(n => n.type === SET_TYPE);
     for (const existingSet of existingSets) {
         const name = getAutolinkKey(existingSet);
         if (name && String(name).trim()) usedExactSetNames.add(String(name).trim());
@@ -2338,12 +2537,42 @@ function convertAllLinks(
                 setNode.properties.metadata = metadata;
             }
             getNode.properties.metadata = metadata;
-            
-            // Disconnetti link originale
-            _iamccsDisconnectTargetInput(graph, dstNode, targetSlot);
-            
-            // Collega Get al nodo destinazione
-            getNode.connect(0, dstNode, targetSlot);
+
+            // Safe rewire: preserve the previous direct link if any.
+            const ts = Number(targetSlot);
+            if (!Number.isFinite(ts)) {
+                try { graph.remove(getNode); } catch {}
+                continue;
+            }
+
+            let prev = null;
+            try {
+                const prevId = dstNode?.inputs?.[ts]?.link;
+                const prevLink = prevId != null ? _iamccsGetLink(graph, prevId) : null;
+                if (prevLink) prev = { origin_id: prevLink.origin_id, origin_slot: prevLink.origin_slot };
+            } catch {}
+
+            // 1) Try connect without disconnect (some graphs auto-replace). If it fails, disconnect and retry.
+            let ok = _safeConnect(getNode, 0, dstNode, ts);
+            if (ok === null) {
+                _iamccsDisconnectTargetInput(graph, dstNode, ts);
+                ok = _safeConnect(getNode, 0, dstNode, ts);
+            }
+
+            if (ok === null) {
+                // Rollback previous direct link
+                if (prev) {
+                    try {
+                        const prevSrc = getNodeById(graph, prev.origin_id);
+                        if (prevSrc) _safeConnect(prevSrc, prev.origin_slot, dstNode, ts);
+                    } catch {}
+                }
+                try { graph.remove(getNode); } catch {}
+                continue;
+            }
+
+            // Remove any other links competing for this target input
+            _iamccsRemoveOtherLinksToTarget(graph, dstNode.id, ts, ok);
         }
     }
     
@@ -2364,7 +2593,7 @@ function convertAllLinks(
                     
                     // Ricollega input del KJ SetNode
                     if (srcNode.inputs?.[0]?.link) {
-                        const inputLink = graph.links[srcNode.inputs[0].link];
+                        const inputLink = _iamccsGetLink(graph, srcNode.inputs[0].link);
                         if (inputLink) {
                             const inputSrcNode = getNodeById(graph, inputLink.origin_id);
                             if (inputSrcNode) {
@@ -2390,7 +2619,7 @@ function convertAllLinks(
                     // Ricollega output del KJ GetNode
                     if (srcNode.outputs?.[0]?.links) {
                         for (const linkId of srcNode.outputs[0].links) {
-                            const outputLink = graph.links[linkId];
+                            const outputLink = _iamccsGetLink(graph, linkId);
                             if (outputLink) {
                                 const outputDstNode = getNodeById(graph, outputLink.target_id);
                                 if (outputDstNode) {
@@ -2414,10 +2643,32 @@ function convertAllLinks(
     graph.setDirtyCanvas(true, true);
 }
 
-function restoreDirectLinks(graph) {
+function restoreDirectLinks(graph, options = {}) {
+    const opts = {
+        // When true, removes Set/Get nodes after successful restore (UI button behavior)
+        removeNodes: true,
+        // When true, removal is delayed via setTimeout to let LiteGraph settle
+        asyncRemove: true,
+        // When true, prune duplicate links to the same target input
+        // (dangerous on some workflows; default off)
+        pruneTargetDuplicates: false,
+        ...options,
+    };
+
     console.log("[IAMCCS AutoLink] Restoring links...");
-    
-    const nodes = graph._nodes || [];
+
+    // Safety: snapshot the graph so we can rollback if restore fails.
+    let __iamccsSnapshot = null;
+    let __iamccsLinkCountBefore = 0;
+    try {
+        __iamccsSnapshot = (typeof graph?.serialize === "function") ? graph.serialize() : null;
+        __iamccsLinkCountBefore = _iamccsGraphLinksEntries(graph).length;
+    } catch (e) {
+        __iamccsSnapshot = null;
+        __iamccsLinkCountBefore = 0;
+    }
+
+    const nodes = _iamccsGraphNodes(graph);
     const setNodes = [];
     const getNodes = [];
     
@@ -2431,6 +2682,11 @@ function restoreDirectLinks(graph) {
     }
     
     console.log(`[IAMCCS AutoLink] Found ${setNodes.length} Set nodes, ${getNodes.length} Get nodes`);
+
+    if (setNodes.length === 0 && getNodes.length === 0) {
+        console.warn("[IAMCCS AutoLink] No AutoLink nodes found; restore skipped (graph format mismatch or nothing to restore)");
+        return;
+    }
     
     // Raggruppa per nome
     const byName = new Map();
@@ -2461,10 +2717,10 @@ function restoreDirectLinks(graph) {
             const os = Number(originSlot);
             const linkId = dstNode?.inputs?.[ts]?.link;
             if (linkId == null) return null;
-            const link = graph.links?.[linkId];
+            const link = _iamccsGetLink(graph, linkId);
             if (!link) return null;
-            if (link.origin_id !== srcNode.id) return null;
-            if (link.target_id !== dstNode.id) return null;
+            if (!_iamccsIdEq(link.origin_id, srcNode.id)) return null;
+            if (!_iamccsIdEq(link.target_id, dstNode.id)) return null;
             if (Number(link.origin_slot) !== os) return null;
             if (Number(link.target_slot) !== ts) return null;
             return linkId;
@@ -2507,6 +2763,20 @@ function restoreDirectLinks(graph) {
         }
 
         return null;
+    };
+
+    const isTargetCurrentlyFromGetNode = (dstNode, targetSlot, getNodeId) => {
+        try {
+            const ts = Number(targetSlot);
+            if (!Number.isFinite(ts) || !dstNode) return false;
+            const linkId = dstNode?.inputs?.[ts]?.link;
+            if (linkId == null) return false;
+            const link = _iamccsGetLink(graph, linkId);
+            if (!link) return false;
+            return _iamccsIdEq(link.origin_id, getNodeId);
+        } catch {
+            return false;
+        }
     };
 
     let restored = 0;
@@ -2556,16 +2826,6 @@ function restoreDirectLinks(graph) {
             continue;
         }
 
-        // Preserve old link in case we fail to restore
-        let prev = null;
-        try {
-            const prevId = dstNode?.inputs?.[ts]?.link;
-            const prevLink = prevId != null ? graph.links?.[prevId] : null;
-            if (prevLink) prev = { origin_id: prevLink.origin_id, origin_slot: prevLink.origin_slot };
-        } catch (e) {
-            prev = null;
-        }
-
         let hadGetLink = false;
         try {
             const out = getNode.outputs?.[0];
@@ -2574,22 +2834,22 @@ function restoreDirectLinks(graph) {
             hadGetLink = false;
         }
 
-        _iamccsDisconnectTargetInput(graph, dstNode, ts);
-
-        const ok = safeConnect(srcNode, originSlot, dstNode, ts);
+        // Non-destructive restore:
+        // - Only touch the target input if it's currently fed by this Get node.
+        // - Never delete other links (unless opts.pruneTargetDuplicates is explicitly enabled).
+        let ok = null;
+        const shouldReplace = isTargetCurrentlyFromGetNode(dstNode, ts, getNode.id);
+        if (shouldReplace) {
+            _iamccsDisconnectTargetInput(graph, dstNode, ts);
+            ok = safeConnect(srcNode, originSlot, dstNode, ts);
+        } else {
+            // If user has already changed wiring, do not override it.
+            // Still try a safe connect without disconnect (won't usually succeed if input is taken).
+            ok = safeConnect(srcNode, originSlot, dstNode, ts);
+        }
         if (ok === null) {
             failed++;
             if (key) keysWithFailures.add(key);
-
-            // rollback previous direct link if present
-            if (prev) {
-                try {
-                    const prevSrc = getNodeById(graph, prev.origin_id);
-                    if (prevSrc) safeConnect(prevSrc, prev.origin_slot, dstNode, ts);
-                } catch (e) {
-                    // ignore
-                }
-            }
 
             if (hadGetLink) {
                 try { getNode.connect(0, dstNode, ts); } catch (e) {}
@@ -2597,8 +2857,10 @@ function restoreDirectLinks(graph) {
             continue;
         }
 
-        // Ensure we don't leave duplicate/orphan links pointing to the same target input
-        _iamccsRemoveOtherLinksToTarget(graph, dstNode.id, ts, ok);
+        // Optional pruning (disabled by default; can break complex graphs)
+        if (opts.pruneTargetDuplicates) {
+            _iamccsRemoveOtherLinksToTarget(graph, dstNode.id, ts, ok);
+        }
 
         restored++;
         restoredGetIds.add(getNode.id);
@@ -2612,7 +2874,7 @@ function restoreDirectLinks(graph) {
 
             const setInputLink = set.inputs?.[0]?.link;
             if (!setInputLink) continue;
-            const link = graph.links?.[setInputLink];
+            const link = _iamccsGetLink(graph, setInputLink);
             if (!link) continue;
 
             const srcNode = getNodeById(graph, link.origin_id);
@@ -2625,7 +2887,7 @@ function restoreDirectLinks(graph) {
 
                 const outLinks = [...getOutput.links];
                 for (const linkId of outLinks) {
-                    const outLink = graph.links?.[linkId];
+                    const outLink = _iamccsGetLink(graph, linkId);
                     if (!outLink) continue;
 
                     const dstNode = getNodeById(graph, outLink.target_id);
@@ -2634,37 +2896,24 @@ function restoreDirectLinks(graph) {
                     const ts = Number(targetSlot);
                     if (!Number.isFinite(ts)) continue;
 
-                    // Preserve old link in case we fail to restore
-                    let prev = null;
-                    try {
-                        const prevId = dstNode?.inputs?.[ts]?.link;
-                        const prevLink = prevId != null ? graph.links?.[prevId] : null;
-                        if (prevLink) prev = { origin_id: prevLink.origin_id, origin_slot: prevLink.origin_slot };
-                    } catch (e) {
-                        prev = null;
+                    // Same non-destructive semantics as metadata restore.
+                    let ok = null;
+                    const shouldReplace = isTargetCurrentlyFromGetNode(dstNode, ts, getNode.id);
+                    if (shouldReplace) {
+                        _iamccsDisconnectTargetInput(graph, dstNode, ts);
+                        ok = safeConnect(srcNode, originSlot, dstNode, ts);
+                    } else {
+                        ok = safeConnect(srcNode, originSlot, dstNode, ts);
                     }
-
-                    _iamccsDisconnectTargetInput(graph, dstNode, ts);
-
-                    const ok = safeConnect(srcNode, originSlot, dstNode, ts);
                     if (ok === null) {
                         failed++;
                         keysWithFailures.add(name);
-
-                        // rollback previous direct link if present
-                        if (prev) {
-                            try {
-                                const prevSrc = getNodeById(graph, prev.origin_id);
-                                if (prevSrc) safeConnect(prevSrc, prev.origin_slot, dstNode, ts);
-                            } catch (e) {
-                                // ignore
-                            }
-                        }
                         continue;
                     }
 
-                    // Ensure we don't leave duplicate/orphan links pointing to the same target input
-                    _iamccsRemoveOtherLinksToTarget(graph, dstNode.id, ts, ok);
+                    if (opts.pruneTargetDuplicates) {
+                        _iamccsRemoveOtherLinksToTarget(graph, dstNode.id, ts, ok);
+                    }
 
                     restored++;
                     restoredGetIds.add(getNode.id);
@@ -2673,15 +2922,31 @@ function restoreDirectLinks(graph) {
         }
     }
 
+    // Rollback if we made things worse (e.g. SubgraphNode refuses connections).
+    try {
+        const after = _iamccsGraphLinksEntries(graph).length;
+        if (__iamccsSnapshot && restored === 0 && failed > 0 && after < __iamccsLinkCountBefore) {
+            console.warn("[IAMCCS AutoLink] Restore appears to have reduced links; rolling back snapshot");
+            if (typeof graph?.configure === "function") {
+                graph.configure(__iamccsSnapshot);
+                try { _iamccsFixLinkIntegrity(graph); } catch {}
+                try { graph.setDirtyCanvas(true, true); } catch {}
+            }
+            return;
+        }
+    } catch {}
+
     const nodesToRemove = new Set();
-    for (const getNode of getNodes) {
-        if (restoredGetIds.has(getNode.id)) nodesToRemove.add(getNode);
-    }
-    for (const [key, setNode] of keyToSet) {
-        const gets = keyToGets.get(key) || [];
-        const allGetsRestored = gets.length > 0 && gets.every(g => restoredGetIds.has(g.id));
-        if (allGetsRestored && !keysWithFailures.has(key)) {
-            nodesToRemove.add(setNode);
+    if (opts.removeNodes) {
+        for (const getNode of getNodes) {
+            if (restoredGetIds.has(getNode.id)) nodesToRemove.add(getNode);
+        }
+        for (const [key, setNode] of keyToSet) {
+            const gets = keyToGets.get(key) || [];
+            const allGetsRestored = gets.length > 0 && gets.every(g => restoredGetIds.has(g.id));
+            if (allGetsRestored && !keysWithFailures.has(key)) {
+                nodesToRemove.add(setNode);
+            }
         }
     }
 
@@ -2691,39 +2956,33 @@ function restoreDirectLinks(graph) {
     try { _iamccsFixLinkIntegrity(graph); } catch (e) {}
     try { graph.setDirtyCanvas(true, true); } catch (e) {}
     
-    // Rimuovi i nodi in modo asincrono per permettere agli eventi di stabilizzarsi
-    if (nodesToRemove.size > 0) {
-        setTimeout(() => {
-            for (const node of nodesToRemove) {
-                try {
-                    // Disconnetti tutti i collegamenti prima di rimuovere
-                    if (node.inputs) {
-                        for (let i = node.inputs.length - 1; i >= 0; i--) {
-                            try {
-                                if (node.disconnectInput) node.disconnectInput(i);
-                            } catch (e) {
-                                // ignore
-                            }
-                        }
+    const removeNow = () => {
+        for (const node of nodesToRemove) {
+            try {
+                // Disconnetti tutti i collegamenti prima di rimuovere
+                if (node.inputs) {
+                    for (let i = node.inputs.length - 1; i >= 0; i--) {
+                        try { node.disconnectInput?.(i); } catch {}
                     }
-                    if (node.outputs) {
-                        for (let i = node.outputs.length - 1; i >= 0; i--) {
-                            try {
-                                if (node.disconnectOutput) node.disconnectOutput(i);
-                            } catch (e) {
-                                // ignore
-                            }
-                        }
-                    }
-                    
-                    graph.remove(node);
-                } catch (e) {
-                    console.error(`[IAMCCS AutoLink] Error removing node ${node.id}:`, e);
                 }
+                if (node.outputs) {
+                    for (let i = node.outputs.length - 1; i >= 0; i--) {
+                        try { node.disconnectOutput?.(i); } catch {}
+                    }
+                }
+                graph.remove(node);
+            } catch (e) {
+                console.error(`[IAMCCS AutoLink] Error removing node ${node.id}:`, e);
             }
-            try { _iamccsFixLinkIntegrity(graph); } catch (e) {}
-            try { graph.setDirtyCanvas(true, true); } catch (e) {}
-        }, 100);
+        }
+        try { _iamccsFixLinkIntegrity(graph); } catch {}
+        try { graph.setDirtyCanvas(true, true); } catch {}
+    };
+
+    // Async removal is ONLY for manual UI use; never do it in queuePrompt.
+    if (nodesToRemove.size > 0) {
+        if (opts.asyncRemove) setTimeout(removeNow, 100);
+        else removeNow();
     }
 
     console.log(`[IAMCCS AutoLink] ✓ Restored ${restored} links`);
@@ -2745,7 +3004,7 @@ function _iamccsPatchQueuePromptForAutolink() {
         const originalQueuePrompt = app.queuePrompt;
         app.queuePrompt = async function (...args) {
             const graph = app?.graph;
-            const hasAutoLink = !!graph?._nodes?.some(n => n?.type === SET_TYPE || n?.type === GET_TYPE);
+            const hasAutoLink = _iamccsGraphNodes(graph).some(n => n?.type === SET_TYPE || n?.type === GET_TYPE);
             if (!hasAutoLink) {
                 return await originalQueuePrompt.apply(this, args);
             }
@@ -2760,7 +3019,9 @@ function _iamccsPatchQueuePromptForAutolink() {
             try {
                 // Convert AutoLink nodes into direct links (and remove them) for execution.
                 // This mutates the live graph, so we restore from snapshot in finally.
-                try { restoreDirectLinks(graph); } catch (e) {
+                try {
+                    restoreDirectLinks(graph, { removeNodes: false, asyncRemove: false, pruneTargetDuplicates: false });
+                } catch (e) {
                     console.warn("[IAMCCS AutoLink] restoreDirectLinks failed before queuePrompt", e);
                 }
 
