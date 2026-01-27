@@ -1,0 +1,247 @@
+{
+  "last_node_id": 8,
+  "last_link_id": 12,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadImage",
+      "pos": [100, 100],
+      "size": [315, 314],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "outputs": [
+        {
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [1],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "example_frames.png"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "IAMCCS_GetAutoLink",
+      "pos": [100, 450],
+      "size": [210, 58],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "outputs": [
+        {
+          "name": "INT",
+          "type": "INT",
+          "links": [2],
+          "slot_index": 0,
+          "label": "OVERLAP_IMAGE_COUNT"
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "IAMCCS_GetAutoLink"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 3,
+      "type": "IAMCCS_LTX2_ExtensionModule",
+      "pos": [450, 100],
+      "size": [400, 600],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "source_images",
+          "type": "IMAGE",
+          "link": 1
+        },
+        {
+          "name": "new_images",
+          "type": "IMAGE",
+          "link": null
+        },
+        {
+          "name": "math_value_b",
+          "type": "INT",
+          "link": null
+        },
+        {
+          "name": "autolink_overlap_in",
+          "type": "INT",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "source_images",
+          "type": "IMAGE",
+          "links": [],
+          "slot_index": 0
+        },
+        {
+          "name": "start_images",
+          "type": "IMAGE",
+          "links": [3],
+          "slot_index": 1
+        },
+        {
+          "name": "extended_images",
+          "type": "IMAGE",
+          "links": [4],
+          "slot_index": 2
+        },
+        {
+          "name": "overlap_frames",
+          "type": "INT",
+          "links": [],
+          "slot_index": 3
+        },
+        {
+          "name": "calculated_frames",
+          "type": "INT",
+          "links": [],
+          "slot_index": 4
+        },
+        {
+          "name": "extension_frames",
+          "type": "INT",
+          "links": [],
+          "slot_index": 5
+        },
+        {
+          "name": "autolink_overlap_out",
+          "type": "INT",
+          "links": [5],
+          "slot_index": 6
+        },
+        {
+          "name": "report",
+          "type": "STRING",
+          "links": [6],
+          "slot_index": 7
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "IAMCCS_LTX2_ExtensionModule"
+      },
+      "widgets_values": [
+        10,
+        "source",
+        "linear_blend",
+        true,
+        "a-1",
+        121,
+        true
+      ]
+    },
+    {
+      "id": 4,
+      "type": "IAMCCS_SetAutoLink",
+      "pos": [900, 100],
+      "size": [210, 58],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "value",
+          "type": "INT",
+          "link": 5,
+          "label": "OVERLAP_IMAGE_COUNT"
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "IAMCCS_SetAutoLink"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 5,
+      "type": "ShowText",
+      "pos": [900, 200],
+      "size": [400, 200],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "text",
+          "type": "STRING",
+          "link": 6
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ShowText"
+      },
+      "widgets_values": []
+    },
+    {
+      "id": 6,
+      "type": "PreviewImage",
+      "pos": [900, 450],
+      "size": [315, 246],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 3
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      }
+    },
+    {
+      "id": 7,
+      "type": "PreviewImage",
+      "pos": [900, 750],
+      "size": [315, 246],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "images",
+          "type": "IMAGE",
+          "link": 4
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "PreviewImage"
+      }
+    }
+  ],
+  "links": [
+    [1, 1, 0, 3, 0, "IMAGE"],
+    [2, 2, 0, 3, 3, "INT"],
+    [3, 3, 1, 6, 0, "IMAGE"],
+    [4, 3, 2, 7, 0, "IMAGE"],
+    [5, 3, 6, 4, 0, "INT"],
+    [6, 3, 7, 5, 0, "STRING"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "ds": {
+      "scale": 1,
+      "offset": [0, 0]
+    }
+  },
+  "version": 0.4,
+  "workflow_info": {
+    "name": "IAMCCS LTX-2 Extension Module - Example Workflow",
+    "description": "Demonstrates the LTX-2 Extension Module with AutoLink integration.\n\nFeatures:\n- GetAutoLink for receiving overlap count from previous iteration\n- LTX2_ExtensionModule for batch extension with blending\n- SetAutoLink for passing overlap count to next iteration\n- Math operation (a-1) to reduce overlap each iteration\n- Preview of start_images and extended_images\n\nUsage:\n1. Load initial frames\n2. First iteration uses static overlap_frames=10\n3. Subsequent iterations use AutoLink value (decremented by 1)\n4. Start images become source for next pass\n5. Loop continues until desired length reached",
+    "author": "IAMCCS",
+    "version": "1.0",
+    "created": "2026-01-24"
+  }
+}

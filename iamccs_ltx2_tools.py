@@ -15,6 +15,9 @@ from typing import Tuple
 import torch
 
 
+_F = torch.nn.functional
+
+
 _log = logging.getLogger("IAMCCS.LTX2.Tools")
 
 
@@ -101,6 +104,13 @@ class IAMCCS_LTX2_Validator:
                 "autofix": ("BOOLEAN", {"default": True}),
                 "length_fix": (["up", "down", "nearest"], {"default": "up"}),
             },
+            # Optional pass-through: if provided, we will make the IMAGE batch frame-count
+            # match the validated length (8n+1) by padding/cropping. This is the workflow-safe
+            # way to guarantee the VAE encode constraint without adding extra nodes.
+            "optional": {
+                "images": ("IMAGE", {}),
+                "images_mode": (["pad_repeat_last", "crop_end"], {"default": "pad_repeat_last"}),
+            },
         }
 
     RETURN_TYPES = ("IMAGE", "INT", "STRING")
@@ -150,6 +160,8 @@ class IAMCCS_LTX2_Validator:
         length: int,
         autofix: bool,
         length_fix: str,
+        images: torch.Tensor | None = None,
+        images_mode: str = "pad_repeat_last",
     ):
         width_in = int(width)
         height_in = int(height)
@@ -178,20 +190,64 @@ class IAMCCS_LTX2_Validator:
         batch_fixed = max(1, batch_in)
         color_fixed = max(0, min(255, color_in))
 
-        # EmptyImage-compatible IMAGE tensor: [B,H,W,3] float in [0,1]
-        fill = float(color_fixed) / 255.0
-        img = torch.full(
-            (batch_fixed, int(height_fixed), int(width_fixed), 3),
-            fill,
-            dtype=torch.float32,
-            device="cpu",
-        )
+        def _pad_repeat_last_frames(x: torch.Tensor, pad: int) -> torch.Tensor:
+            if pad <= 0:
+                return x
+            last = x[-1:, ...].repeat(int(pad), 1, 1, 1)
+            return torch.cat([x, last], dim=0)
+
+        # If an IMAGE batch is provided, enforce that its frames match the validated length.
+        # This is the actual guarantee needed by LTX VAE encode.
+        if images is not None:
+            img_in = images
+            if not torch.is_floating_point(img_in):
+                img_in = img_in.float() / 255.0
+            # Expect ComfyUI IMAGE: [frames,H,W,C]
+            if img_in.ndim != 4:
+                raise ValueError("images must be a ComfyUI IMAGE tensor with shape [frames,H,W,C]")
+
+            frames_in = int(img_in.shape[0])
+            frames_out = int(length_fixed)
+            if not autofix:
+                frames_out = frames_in
+
+            mode = str(images_mode or "pad_repeat_last")
+            if mode not in ("pad_repeat_last", "crop_end"):
+                mode = "pad_repeat_last"
+
+            if frames_out == frames_in:
+                img = img_in
+            elif frames_out < frames_in:
+                # Crop end to match target length
+                img = img_in[:frames_out, ...]
+            else:
+                # Pad by repeating last frame
+                img = _pad_repeat_last_frames(img_in, frames_out - frames_in)
+
+            # Note: we do NOT resize spatially here; this node's width/height validation is
+            # meant for parameter sanity and EmptyImage-like generation. Spatial resizing remains
+            # the responsibility of the workflow.
+        else:
+            # EmptyImage-compatible IMAGE tensor: [B,H,W,3] float in [0,1]
+            fill = float(color_fixed) / 255.0
+            img = torch.full(
+                (batch_fixed, int(height_fixed), int(width_fixed), 3),
+                fill,
+                dtype=torch.float32,
+                device="cpu",
+            )
 
         modified = (width_fixed != width_in) or (height_fixed != height_in) or (length_fixed != length_in) or (batch_fixed != batch_in) or (color_fixed != color_in)
+        if images is not None and isinstance(images, torch.Tensor) and images.ndim == 4:
+            modified = modified or (int(images.shape[0]) != int(img.shape[0]))
         implied_fps_str = "n/a"
         if seconds_in > 0:
             implied_fps = (float(length_fixed) - 1.0) / seconds_in
             implied_fps_str = f"{implied_fps:.3f}"
+        images_note = ""
+        if images is not None and isinstance(images, torch.Tensor) and images.ndim == 4:
+            images_note = f" | images_frames: in={int(images.shape[0])} -> out={int(img.shape[0])} (mode={images_mode}, autofix={autofix})"
+
         report = (
             f"input: {width_in}x{height_in}, batch={batch_in}, color={color_in} | "
             f"seconds_input={seconds_in:.3f}, length_input={length_in} | "
@@ -200,6 +256,7 @@ class IAMCCS_LTX2_Validator:
             f"implied_fps={implied_fps_str} | "
             f"autofix={autofix} (len_fix={length_fix}) | modified={modified} | "
             f"delta: +{pad_w}w, +{pad_h}h, {pad_len:+d} length"
+            f"{images_note}"
         )
 
         if not (w_ok and h_ok and l_ok):
@@ -229,6 +286,13 @@ class IAMCCS_LTX2_TimeFrameCount:
         seconds_in = float(seconds)
         length_in = int(length)
         length_fixed = max(1, length_in)
+        # LTX-2 encode constraint: frames must be 8n + 1.
+        # Round UP to avoid shortening the requested duration.
+        pad = 0
+        rem = (length_fixed - 1) % 8
+        if rem != 0:
+            pad = 8 - rem
+            length_fixed = length_fixed + pad
         seconds_fixed = max(0.01, seconds_in)
 
         implied_fps_str = "n/a"
@@ -236,12 +300,174 @@ class IAMCCS_LTX2_TimeFrameCount:
             implied_fps = (float(length_fixed) - 1.0) / seconds_fixed
             implied_fps_str = f"{implied_fps:.3f}"
 
+        snap = "ok" if pad == 0 else f"up(+{pad})"
         report = (
             f"seconds_input={seconds_in:.3f}, length_input={length_in} -> "
-            f"seconds={seconds_fixed:.3f}, length={length_fixed} | implied_fps={implied_fps_str}"
+            f"seconds={seconds_fixed:.3f}, length={length_fixed} | implied_fps={implied_fps_str} | ltx2_8n+1={snap}"
         )
 
         return (int(length_fixed), float(seconds_fixed), report)
+
+
+class IAMCCS_LTX2_ImageBatchPadReflect:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {}),
+                "pad_x": ("INT", {"default": 16, "min": 0, "max": 512, "step": 1}),
+                "pad_y": ("INT", {"default": 16, "min": 0, "max": 512, "step": 1}),
+                "pad_mode": (["reflect", "replicate"], {"default": "reflect"}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "INT", "INT", "STRING")
+    RETURN_NAMES = ("images", "pad_x", "pad_y", "report")
+    FUNCTION = "pad"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    def pad(self, images: torch.Tensor, pad_x: int, pad_y: int, pad_mode: str):
+        # images: [B,H,W,C] float
+        if images is None:
+            raise ValueError("images is required")
+
+        b, h, w, c = images.shape
+        px = max(0, int(pad_x))
+        py = max(0, int(pad_y))
+
+        # reflect requires pad < dim; clamp to avoid runtime errors
+        px_eff = min(px, max(0, w - 1))
+        py_eff = min(py, max(0, h - 1))
+
+        if px_eff == 0 and py_eff == 0:
+            return (images, 0, 0, f"PadReflect: no-op (input {w}x{h})")
+
+        mode = str(pad_mode or "reflect")
+        if mode not in ("reflect", "replicate"):
+            mode = "reflect"
+
+        x = images.permute(0, 3, 1, 2)  # [B,C,H,W]
+        # pad format: (left, right, top, bottom)
+        x = _F.pad(x, (px_eff, px_eff, py_eff, py_eff), mode=mode)
+        out = x.permute(0, 2, 3, 1).contiguous()
+
+        report = (
+            f"PadReflect: mode={mode}, requested=({px},{py}), used=({px_eff},{py_eff}) | "
+            f"{w}x{h} -> {int(out.shape[2])}x{int(out.shape[1])}"
+        )
+        return (out, int(px_eff), int(py_eff), report)
+
+
+class IAMCCS_LTX2_ImageBatchCropByPad:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {}),
+                "pad_x": ("INT", {"default": 16, "min": 0, "max": 512, "step": 1}),
+                "pad_y": ("INT", {"default": 16, "min": 0, "max": 512, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("images", "report")
+    FUNCTION = "crop"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    def crop(self, images: torch.Tensor, pad_x: int, pad_y: int):
+        if images is None:
+            raise ValueError("images is required")
+
+        b, h, w, c = images.shape
+        px = max(0, int(pad_x))
+        py = max(0, int(pad_y))
+
+        if px == 0 and py == 0:
+            return (images, f"CropByPad: no-op (input {w}x{h})")
+
+        # Clamp so we never invert the crop
+        px_eff = min(px, max(0, (w - 1) // 2))
+        py_eff = min(py, max(0, (h - 1) // 2))
+
+        out = images[:, py_eff : h - py_eff, px_eff : w - px_eff, :]
+        report = (
+            f"CropByPad: requested=({px},{py}), used=({px_eff},{py_eff}) | "
+            f"{w}x{h} -> {int(out.shape[2])}x{int(out.shape[1])}"
+        )
+        return (out, report)
+
+
+class IAMCCS_LTX2_EnsureFrames8nPlus1:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {}),
+                # LTX-2 encode constraint: frames must be 1 + 8*k.
+                # "pad" is workflow-safe (never shortens), "crop" is deterministic.
+                "mode": (["pad_repeat_last", "crop_end"], {"default": "pad_repeat_last"}),
+                "fix": (["up", "down", "nearest"], {"default": "up"}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "INT", "STRING")
+    RETURN_NAMES = ("images", "frames", "report")
+    FUNCTION = "ensure"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    def _frames_rule_fix(self, frames: int, mode: str) -> tuple[int, int]:
+        frames = int(frames)
+        if frames < 1:
+            frames = 1
+
+        rem = (frames - 1) % 8
+        if rem == 0:
+            return frames, 0
+
+        down = frames - rem
+        up = frames + (8 - rem)
+
+        if mode == "down":
+            fixed = max(1, down)
+        elif mode == "nearest":
+            fixed = up if (up - frames) <= (frames - down) else max(1, down)
+        else:
+            fixed = up
+
+        return fixed, fixed - frames
+
+    def ensure(self, images: torch.Tensor, mode: str, fix: str):
+        if images is None:
+            raise ValueError("images is required")
+
+        if not isinstance(images, torch.Tensor) or images.ndim != 4:
+            raise ValueError("images must be a ComfyUI IMAGE tensor with shape [frames,H,W,C]")
+
+        frames_in = int(images.shape[0])
+        frames_fixed, delta = self._frames_rule_fix(frames_in, str(fix or "up"))
+
+        if frames_fixed == frames_in:
+            return (images, frames_in, f"EnsureFrames8n+1: ok ({frames_in})")
+
+        mode = str(mode or "pad_repeat_last")
+        if mode == "crop_end":
+            # For crop mode, prefer shortening, regardless of requested 'fix'.
+            rem = (frames_in - 1) % 8
+            frames_fixed = frames_in if rem == 0 else max(1, frames_in - rem)
+            out = images[:frames_fixed, ...]
+            return (out, frames_fixed, f"EnsureFrames8n+1: crop_end {frames_in} -> {frames_fixed}")
+
+        # pad_repeat_last (workflow-safe)
+        if frames_fixed < frames_in:
+            # If user selected fix=down/nearest and it resulted in fewer frames,
+            # still keep behavior consistent with padding node: do a crop.
+            out = images[:frames_fixed, ...]
+            return (out, frames_fixed, f"EnsureFrames8n+1: crop_end {frames_in} -> {frames_fixed} (fix={fix})")
+
+        pad = int(frames_fixed - frames_in)
+        last = images[-1:, ...].repeat(pad, 1, 1, 1)
+        out = torch.cat([images, last], dim=0)
+        return (out, frames_fixed, f"EnsureFrames8n+1: pad_repeat_last {frames_in} -> {frames_fixed} (pad={pad}, fix={fix})")
 
 
 class IAMCCS_LTX2_ControlPreprocess:
@@ -341,6 +567,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_FrameRateSync": IAMCCS_LTX2_FrameRateSync,
     "IAMCCS_LTX2_Validator": IAMCCS_LTX2_Validator,
     "IAMCCS_LTX2_TimeFrameCount": IAMCCS_LTX2_TimeFrameCount,
+    "IAMCCS_LTX2_EnsureFrames8nPlus1": IAMCCS_LTX2_EnsureFrames8nPlus1,
     "IAMCCS_LTX2_ControlPreprocess": IAMCCS_LTX2_ControlPreprocess,
 }
 
@@ -348,5 +575,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_FrameRateSync": "LTX-2 FrameRate Sync (int+float)",
     "IAMCCS_LTX2_Validator": "LTX-2 Validator (32px, 8n +1)",
     "IAMCCS_LTX2_TimeFrameCount": "LTX-2 TimeFrameCount",
+    "IAMCCS_LTX2_EnsureFrames8nPlus1": "LTX-2 Ensure Frames (8n + 1)",
     "IAMCCS_LTX2_ControlPreprocess": "LTX-2 Control Preprocess (aux)",
 }

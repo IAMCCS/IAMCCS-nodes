@@ -1,7 +1,7 @@
 [project]
 name = "iamccs-wan-lora-fixer-stack"
-version = "1.3.2"
-description = "IAMCCS multi-LoRA stack & MODEL IO WAN remap + LTX-2 LoRA/tools nodes (FrameRate Sync, Validator, Control Preprocess, LTX-2 LoRA stacks)."
+version = "1.3.3"
+description = "IAMCCS nodes for ComfyUI: multi-LoRA stack + MODEL IO WAN/Flow remap + LTX-2 LoRA/tools + LTX-2 Extension Module + AutoLink Set/Get + Converter (frontend)."
 license = { text = "MIT" }
 authors = [
   { name = "Carmine Cristallo Scalzi (IAMCCS)", email = "info@carminecristalloscalzi.com" }

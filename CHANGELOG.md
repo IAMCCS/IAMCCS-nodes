@@ -1,3 +1,47 @@
+# IAMCCS Nodes - Changelog
+
+## 🆕 Version 1.3.3 — AutoLink + LTX-2 Extension Module (Stability Update)
+
+Date: 2026-01-26
+
+### AutoLink (frontend)
+- AutoLink Set/Get + Converter for compact “wireless” graphs
+- Convert/Restore tools:
+  - `Convert All Links`
+  - `Restore Direct Links`
+- Group-aware filters: `GroupExclude`, `GroupInOutExclude`
+- Layout controls: multiple align modes (including `Proportional`) + packing/anti-overlap
+- Styling controls: color presets, optional separate Set/Get colors, title text color
+- Blacklist improvements: per-node (directional) and per-type entries
+
+Stability fixes:
+- AutoLink links are now materialized automatically during queue/prompt serialization (then restored), preventing “missing required input” prompt errors
+- Works with nested graphs/subgraphs
+- Long AutoLink titles are truncated with an ellipsis (`…`) to prevent overflow
+
+### LTX-2 Extension (backend nodes)
+- Added **LTX-2 Extension Module** (`IAMCCS_LTX2_ExtensionModule`):
+  - Extends/merges image batches with overlap management
+  - Built-in math operations for overlap/start-frames logic
+  - AutoLink integration for overlap sharing between iterations (`autolink_overlap_in/out`)
+  - Multiple blending modes: cut, linear_blend, ease_in_out, filmic_crossfade, perceptual_crossfade
+  - Automatic `start_images` extraction for the next pass
+  - `total_frames` / `validate_ltx2` moved out to dedicated validation utilities
+
+- Added **LTX-2 Get Images From Batch** (`IAMCCS_LTX2_GetImageFromBatch`):
+  - Extract frames from start/end or by explicit range
+
+- Added **LTX-2 Frame Count Validator** (`IAMCCS_LTX2_FrameCountValidator`):
+  - Validates/corrects counts to the LTX-2 `8n+1` rule
+  - Intended to be placed before the LTX Sampler
+
+### LTX-2 frame-count robustness
+- `IAMCCS_LTX2_TimeFrameCount` snaps computed `length` to the next valid `8n+1`
+- UI seconds↔length sync snaps to valid `8n+1` lengths
+- Optional VAE encode auto-padding to valid `8n+1` (defensive safeguard)
+
+---
+
 ## 🆕 Version 1.3.2 — LTX-2 Nodes Pack
 
 Date: 2026-01-15

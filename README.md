@@ -7,7 +7,59 @@
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows
 
-Version: 1.3.2
+Version: 1.3.3
+
+# UPDATE VERSION 1-3-3
+
+## 🆕 Version 1.3.3 — AutoLink + LTX-2 Extension Module
+
+Date: 2026-01-26
+
+Highlights (EN):
+- AutoLink (frontend): convert direct links into compact Set/Get nodes + restore when needed.
+
+![[Node piece](assets/autolink.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/autolink.png)
+
+- LTX-2: Extension Module + helpers for iterative long video extension workflows.
+
+![[Node piece](assets/extension.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/extension.png)
+
+Docs:
+
+- LTX-2 Extension Module (EN/IT): `LTX2_EXTENSION_MODULE_README.md`
+- LTX-2 Nodes Guide: `LTX2_EXTENSION_NODES_GUIDE_EN.md`
+
+GGUF / OOM tips:
+- If you use `IAMCCS_GGUF_accelerator` and you are close to the VRAM limit, consider PyTorch allocator tuning to reduce fragmentation (must be set **before** launching ComfyUI).
+  - Example: `PYTORCH_ALLOC_CONF=backend:cudaMallocAsync`
+  - Example (native allocator): `PYTORCH_ALLOC_CONF=max_split_size_mb:128,garbage_collection_threshold:0.8`
+  - Example (experimental, native allocator): `PYTORCH_ALLOC_CONF=expandable_segments:True`
+
+### IAMCCS_GGUF_accelerator (how to use)
+
+![[Node piece](assets/gguf.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/gguf.png)
+
+This node modifies a GGUF `MODEL` so ComfyUI-GGUF can avoid expensive per-step CPU↔GPU patch movement.
+
+Recommended usage:
+- Place it **after** your GGUF model loader and **before** LoRA application / sampling.
+- Default: `mode = auto_oom_safe`.
+  - If free VRAM is low, it automatically disables `patch_on_device` and avoids pre-moving patches.
+  - If a CUDA OOM happens while moving patches, it falls back to CPU/offload (when `oom_fallback = true`).
+
+Suggested starting values on 12GB GPUs:
+- `mode = auto_oom_safe`
+- `min_free_vram_mb = 1500` (raise to 2000–3000 if you still get OOMs)
+- Keep `move_patches_now = true` only if you have headroom; set to `false` if you want the safest VRAM behavior.
+
+PyTorch allocator tuning (set before start):
+- You can use `PYTORCH_ALLOC_CONF` (or the legacy alias `PYTORCH_CUDA_ALLOC_CONF`) to reduce fragmentation.
+- Windows example (PowerShell, current session):
+  - `$env:PYTORCH_ALLOC_CONF = "backend:cudaMallocAsync"`
+- Windows example (CMD / .bat):
+  - `set PYTORCH_ALLOC_CONF=backend:cudaMallocAsync`
+
+---
 
 # UPDATE VERSION 1-3-2
 
@@ -48,7 +100,7 @@ Highlights:
 ![[Node piece](assets/wanmotion.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/wanmotion.png)
 
 Highlights:
-- Added `IAMCCS WanImageMotion` node: drop-in replacement for KJNodes `WanImageToVideoSVIPro` with motion amplitude control to fix slow-motion issues in WAN SVI Pro workflows.
+- Added `IAMCCS WanImageMotion` node: drop-in replacement for common WAN SVI Pro image-to-video nodes, with motion amplitude control to fix slow-motion issues in WAN SVI Pro workflows.
 - Motion modes: apply boost to `prev_samples` only or all non-first latents.
 - VRAM profiles: normal / chunked / per-frame loop / CPU offload for memory-constrained systems.
 - `include_padding_in_motion` toggle: enables motion boost on padded frames when anchor has single frame (T=1).
