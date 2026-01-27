@@ -11,6 +11,8 @@ Version: 1.3.3
 
 # UPDATE VERSION 1-3-3
 
+![[Node piece](assets/cover_sq.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/cover_sq.png)
+
 ## 🆕 Version 1.3.3 — AutoLink + LTX-2 Extension Module
 
 Date: 2026-01-26
@@ -64,8 +66,6 @@ PyTorch allocator tuning (set before start):
 # UPDATE VERSION 1-3-2
 
 ## 🆕 Version 1.3.2 — LTX-2 Nodes Pack
-
-![[Node piece](assets/cover_sq.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/cover_sq.png)
 
 Highlights:
 - Added/updated **LTX-2 LoRA nodes** (category `IAMCCS/LoRA`):
