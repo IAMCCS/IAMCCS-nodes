@@ -1,5 +1,37 @@
 # IAMCCS Nodes - Changelog
 
+## 🆕 Version 1.3.4 — Video Performance + Low-RAM Tools
+
+Date: 2026-02-01
+
+### Sampler wrapper (video workflows)
+- Added `IAMCCS_SamplerAdvancedVersion1` ("Sampler Advanced v1"):
+  - Delegates to ComfyUI `SamplerCustomAdvanced` (no algorithm swap), but adds:
+    - `disable_progress` to reduce progress/UI overhead on long video queues
+    - optional VRAM cleanup after sampling
+  - Improved compatibility with newer ComfyUI return types (`NodeOutput`).
+
+### VAE decoding (low RAM)
+- Added `IAMCCS_VAEDecodeToDisk` ("VAE Decode → Disk"):
+  - Frame-by-frame decode with on-disk output to minimize peak system RAM for long clips.
+
+### Hardware probe
+- Added `IAMCCS_HWProbeRecommendations`:
+  - Exposes the HW probe recommendations as JSON + extracted fields usable in workflows.
+
+### GGUF Accelerator
+- Extended `IAMCCS_GGUF_accelerator`:
+  - New patch move strategies (`move_policy`) and VRAM reserve (`leave_free_vram_mb`).
+  - Input ordering kept backward-compatible with existing workflows.
+
+### Frontend UX
+- Bus Group: “Hide options” state now persists across sessions.
+- HW probe apply is user-controlled:
+  - apply mode: `overwrite` vs `fill_missing`
+  - preset sync can be disabled to keep manual tuning.
+
+---
+
 ## 🆕 Version 1.3.3 — AutoLink + LTX-2 Extension Module (Stability Update)
 
 Date: 2026-01-26

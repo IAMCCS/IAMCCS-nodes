@@ -60,6 +60,30 @@ from .iamccs_gguf_accelerator import (
     IAMCCS_GGUF_accelerator,
 )
 
+from .iamccs_sampler_advanced_v1 import (
+    IAMCCS_SamplerAdvancedVersion1,
+)
+
+from .iamccs_bus_group import (
+    IAMCCS_bus_group,
+)
+
+from .iamccs_multiswitch import (
+    IAMCCS_MultiSwitch,
+)
+
+from .iamccs_hw_supporter import (
+    IAMCCS_HwSupporter,
+    IAMCCS_HwSupporterAny,
+    IAMCCS_VRAMCleanup,
+    IAMCCS_VAEDecodeTiledSafe,
+    IAMCCS_VAEDecodeToDisk,
+)
+
+from .iamccs_hw_probe_node import (
+    IAMCCS_HWProbeRecommendations,
+)
+
 # Nodi principali
 NODE_CLASS_MAPPINGS = {
     "IAMCCS_WanLoRAStack": IAMCCS_WanLoRAStack,
@@ -97,6 +121,20 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_AutoLinkArguments": IAMCCS_AutoLinkArguments,
 
     "IAMCCS_GGUF_accelerator": IAMCCS_GGUF_accelerator,
+
+    "IAMCCS_SamplerAdvancedVersion1": IAMCCS_SamplerAdvancedVersion1,
+
+    "IAMCCS_bus_group": IAMCCS_bus_group,
+
+    "IAMCCS_MultiSwitch": IAMCCS_MultiSwitch,
+
+    "IAMCCS_HwSupporter": IAMCCS_HwSupporter,
+    "IAMCCS_HwSupporterAny": IAMCCS_HwSupporterAny,
+    "IAMCCS_VRAMCleanup": IAMCCS_VRAMCleanup,
+    "IAMCCS_VAEDecodeTiledSafe": IAMCCS_VAEDecodeTiledSafe,
+    "IAMCCS_VAEDecodeToDisk": IAMCCS_VAEDecodeToDisk,
+    "IAMCCS_HWProbeRecommendations": IAMCCS_HWProbeRecommendations,
+
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -133,11 +171,117 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_AutoLinkArguments": "AutoLink Arguments",
 
     "IAMCCS_GGUF_accelerator": "GGUF Accelerator (patch_on_device)",
+
+    "IAMCCS_SamplerAdvancedVersion1": "Sampler Advanced v1",
+
+    "IAMCCS_bus_group": "Bus Group (Mute + Solo) (frontend-only)",
+
+    "IAMCCS_MultiSwitch": "MultiSwitch (dynamic inputs)",
+
+    "IAMCCS_HwSupporter": "HW Supporter (auto VRAM/attention/torch knobs)",
+    "IAMCCS_HwSupporterAny": "HW Supporter (ANY passthrough)",
+    "IAMCCS_VRAMCleanup": "VRAM Cleanup (unload + empty cache)",
+    "IAMCCS_VAEDecodeTiledSafe": "VAE Decode Tiled (safe, optional cleanup)",
+    "IAMCCS_VAEDecodeToDisk": "VAE Decode → Disk (frames, low RAM)",
+    "IAMCCS_HWProbeRecommendations": "HW Probe Recommendations (JSON)",
+
 }
 
 WEB_DIRECTORY = "./web"
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+
+
+def _print_startup_banner() -> None:
+    # Print once per process.
+    if getattr(_print_startup_banner, "_done", False):
+        return
+    _print_startup_banner._done = True  # type: ignore[attr-defined]
+
+    banner = r"""
+  ___    _    __  __  ____ ____  ____   ____            _           
+ |_ _|  / \  |  \/  |/ ___/ ___|/ ___| |  _ \ ___   ___| | _____    
+  | |  / _ \ | |\/| | |  | |    \___ \ | |_) / _ \ / __| |/ / __|   
+  | | / ___ \| |  | | |__| |___  ___) ||  __/ (_) | (__|   <\__ \   
+ |___/_/   \_\_|  |_|\____\____||____/ |_|   \___/ \___|_|\_\___/   
+
+"""
+    log = logging.getLogger("IAMCCS")
+    log.info("%s", banner)
+    log.info("by IAMCCS (follow me on patreon.com/IAMCCS or carminecristalloscalzi.com)")
+
+    try:
+        keys = sorted(list(NODE_CLASS_MAPPINGS.keys()))
+        log.info("IAMCCS nodes loaded: %d", len(keys))
+        # Keep log readable: print in chunks.
+        chunk = []
+        for k in keys:
+            chunk.append(k)
+            if len(chunk) >= 10:
+                log.info("- %s", ", ".join(chunk))
+                chunk = []
+        if chunk:
+            log.info("- %s", ", ".join(chunk))
+    except Exception:
+        pass
+
+
+def setup_api_routes() -> None:
+    """IAMCCS API routes used by frontend widgets."""
+
+    try:
+        from server import PromptServer
+        from aiohttp import web
+
+        from .iamccs_hw_probe import recommend_settings
+
+        routes = PromptServer.instance.routes
+
+        @routes.get("/api/iamccs/hw_probe")
+        async def iamccs_hw_probe_endpoint(request):
+            try:
+                q = request.rel_url.query
+                def _to_int(x):
+                    try:
+                        return int(float(x))
+                    except Exception:
+                        return None
+                def _to_float(x):
+                    try:
+                        return float(x)
+                    except Exception:
+                        return None
+
+                width = _to_int(q.get("width"))
+                height = _to_int(q.get("height"))
+                frames = _to_int(q.get("frames"))
+                fps = _to_float(q.get("fps"))
+
+                data = recommend_settings(width=width, height=height, frames=frames, fps=fps)
+                logging.getLogger("IAMCCS.API").info(
+                    "[iamccs/hw_probe] cuda=%s vram_gb=%s ram_gb=%s profile=%s vae_tile=%s frames=%s fps=%s",
+                    data.get("hardware", {}).get("cuda_available"),
+                    data.get("hardware", {}).get("cuda_total_vram_gb"),
+                    data.get("hardware", {}).get("system_ram_gb"),
+                    data.get("recommendations", {}).get("hw_supporter", {}).get("profile"),
+                    data.get("recommendations", {}).get("vae_decode", {}).get("tile_size"),
+                    frames,
+                    fps,
+                )
+                return web.json_response(data)
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+
+    except Exception as e:
+        # Never hard-fail ComfyUI startup due to optional API endpoints.
+        logging.getLogger("IAMCCS.API").warning("Could not setup IAMCCS API routes: %r", e)
+
+
+# Setup API routes when extension loads
+setup_api_routes()
+
+# Print banner after we are fully imported and mappings exist.
+_print_startup_banner()
 
 
 def _iamccs_install_ltx2_vae_encode_autofix() -> None:

@@ -1982,6 +1982,128 @@ function getGroupForNode(graph, node) {
     return bestGroup;
 }
 
+function getGroupForPoint(graph, x, y) {
+    const rawGroups = graph?._groups ?? graph?.groups ?? [];
+    const groups = Array.isArray(rawGroups)
+        ? rawGroups
+        : (rawGroups && typeof rawGroups === 'object' ? Object.values(rawGroups) : []);
+    if (!groups || groups.length === 0) return null;
+
+    const px = Number(x);
+    const py = Number(y);
+    if (!Number.isFinite(px) || !Number.isFinite(py)) return null;
+
+    const isArrayLike = (v, minLen) => v != null && typeof v.length === 'number' && v.length >= minLen;
+    let bestGroup = null;
+    let bestArea = Infinity;
+
+    for (let i = 0; i < groups.length; i++) {
+        const g = groups[i];
+        if (!g) continue;
+
+        let bounding = null;
+        if (isArrayLike(g.bounding, 4)) {
+            bounding = [g.bounding[0], g.bounding[1], g.bounding[2], g.bounding[3]];
+        } else if (typeof g.getBounding === 'function') {
+            const b = g.getBounding();
+            if (isArrayLike(b, 4)) bounding = [b[0], b[1], b[2], b[3]];
+        }
+        if (!bounding && isArrayLike(g.pos, 2) && isArrayLike(g.size, 2)) {
+            bounding = [g.pos[0], g.pos[1], g.size[0], g.size[1]];
+        }
+        if (!bounding) continue;
+
+        const [gx, gy, gw, gh] = bounding;
+        if (px >= gx && px <= gx + gw && py >= gy && py <= gy + gh) {
+            const area = Math.abs(gw * gh);
+            if (area < bestArea) {
+                bestArea = area;
+                bestGroup = g;
+            }
+        }
+    }
+
+    return bestGroup;
+}
+
+function _iamccsGetGroupState(group) {
+    const g = group || null;
+    if (!g) return { hidden: false, disabled: false };
+
+    const props = (g.properties && typeof g.properties === 'object') ? g.properties : {};
+    const flags = (g.flags && typeof g.flags === 'object') ? g.flags : {};
+
+    const hidden = !!(
+        g.hidden || g.is_hidden || g.isHidden ||
+        flags.hidden ||
+        props.hidden || props.is_hidden || props.isHidden ||
+        g.visible === false || props.visible === false
+    );
+
+    // "collapsed" is used by some LiteGraph/ComfyUI variants to mean the group is folded/hidden.
+    const collapsed = !!(
+        g.collapsed || g.is_collapsed || g.isCollapsed ||
+        flags.collapsed ||
+        props.collapsed || props.is_collapsed || props.isCollapsed
+    );
+
+    const disabled = !!(
+        g.enabled === false || g.disabled === true ||
+        props.enabled === false || props.disabled === true
+    );
+
+    return { hidden: hidden || collapsed, disabled };
+}
+
+function _iamccsApplyGroupStateToNode(graph, node, referenceNode, pos) {
+    if (!node) return;
+
+    const NEVER = (window?.LiteGraph?.NEVER != null) ? window.LiteGraph.NEVER : 2;
+
+    // Prefer group detected at the node position; fallback to reference node's group.
+    const cx = pos && Number.isFinite(pos.x) ? pos.x : null;
+    const cy = pos && Number.isFinite(pos.y) ? pos.y : null;
+    const groupAtPos = (cx != null && cy != null) ? getGroupForPoint(graph, cx, cy) : null;
+    const groupAtRef = referenceNode ? getGroupForNode(graph, referenceNode) : null;
+    const group = groupAtPos || groupAtRef;
+
+    const { hidden, disabled } = _iamccsGetGroupState(group);
+
+    node.properties = node.properties || {};
+    node.properties.autolink_inherit_group_state = true;
+
+    // If the group is hidden, AutoLink nodes must be hidden AND non-active.
+    if (hidden) {
+        node.flags = node.flags || {};
+        node.flags.hidden = true;
+        node.hidden = true;
+        node.flags.collapsed = true;
+        node.collapsed = true;
+        node.mode = NEVER;
+        try {
+            if (typeof node.collapse === 'function') node.collapse();
+        } catch {}
+        return;
+    }
+
+    // If the group is disabled (but still visible), keep the node visible but non-active.
+    if (disabled) {
+        node.mode = NEVER;
+    } else if (referenceNode && referenceNode.mode != null) {
+        // Otherwise, inherit the reference node mode (covers workflows where the group implementation
+        // propagates "disabled" via node.mode instead of group flags).
+        node.mode = referenceNode.mode;
+    }
+
+    // Best-effort: inherit hidden flag if reference node is currently hidden by some custom UI logic.
+    if (referenceNode?.flags?.hidden || referenceNode?.hidden || referenceNode?.is_hidden) {
+        node.flags = node.flags || {};
+        node.flags.hidden = true;
+        node.hidden = true;
+        node.mode = NEVER;
+    }
+}
+
 function convertAllLinks(
     graph,
     blacklist = [],
@@ -2032,6 +2154,76 @@ function convertAllLinks(
     console.log("[IAMCCS AutoLink] ColorGet:", colorGet);
     console.log("[IAMCCS AutoLink] SeparateCol:", separateCol);
     console.log("[IAMCCS AutoLink] ColorTitles:", colorTitles);
+
+    // Safety cleanup: if previous Restore left some AutoLink nodes behind (due to older bugs
+    // or partial restores), they can cause repeated Convert/Restore cycles to spawn new
+    // Set/Get nodes with suffixed names (model_0 -> model_1 -> model_2 ...).
+    // We only prune nodes that are clearly dangling (no links / Set has no Gets).
+    try {
+        const NEVER = (window?.LiteGraph?.NEVER != null) ? window.LiteGraph.NEVER : 2;
+        const isInactive = (n) => !!(n?.flags?.hidden || n?.hidden || n?.is_hidden || Number(n?.mode) === Number(NEVER));
+
+        const nodes = _iamccsGraphNodes(graph);
+        const sets = nodes.filter(n => n?.type === SET_TYPE);
+        const gets = nodes.filter(n => n?.type === GET_TYPE);
+
+        const links = _iamccsGraphLinksEntries(graph).map(([, l]) => l).filter(Boolean);
+        const linkCountById = new Map();
+        const incomingCountById = new Map();
+        const outgoingCountById = new Map();
+
+        for (const l of links) {
+            const oid = l.origin_id;
+            const tid = l.target_id;
+            const ok = (id) => id != null;
+            if (ok(oid)) {
+                const k = String(oid);
+                outgoingCountById.set(k, (outgoingCountById.get(k) || 0) + 1);
+                linkCountById.set(k, (linkCountById.get(k) || 0) + 1);
+            }
+            if (ok(tid)) {
+                const k = String(tid);
+                incomingCountById.set(k, (incomingCountById.get(k) || 0) + 1);
+                linkCountById.set(k, (linkCountById.get(k) || 0) + 1);
+            }
+        }
+
+        const keyHasGet = new Set(gets.map(g => getAutolinkKey(g)).filter(Boolean));
+
+        let pruned = 0;
+        // Remove Get nodes with no outgoing links in the graph.
+        for (const g of gets) {
+            const id = g?.id;
+            if (id == null) continue;
+            const out = outgoingCountById.get(String(id)) || 0;
+            const any = linkCountById.get(String(id)) || 0;
+            if (any === 0 || out === 0) {
+                try { graph.remove(g); pruned++; } catch {}
+            }
+        }
+
+        // Remove Set nodes that have no Gets using their key and are not inactive-hidden placeholders.
+        for (const s of sets) {
+            const id = s?.id;
+            if (id == null) continue;
+            const key = getAutolinkKey(s);
+            if (key && keyHasGet.has(key)) continue;
+            if (isInactive(s)) continue;
+
+            const out = outgoingCountById.get(String(id)) || 0;
+            const any = linkCountById.get(String(id)) || 0;
+            // Typical Set has exactly one incoming link (source -> set) and no outgoing.
+            if (any <= 1 && out === 0) {
+                try { graph.remove(s); pruned++; } catch {}
+            }
+        }
+
+        if (pruned > 0) {
+            console.log(`[IAMCCS AutoLink] Pruned ${pruned} dangling AutoLink nodes before converting`);
+            try { _iamccsFixLinkIntegrity(graph); } catch {}
+            try { graph.setDirtyCanvas(true, true); } catch {}
+        }
+    } catch {}
     
     const linksToConvert = [];
     const groupExcludedCandidates = [];
@@ -2350,7 +2542,9 @@ function convertAllLinks(
     // Traccia i nomi dei Set già esistenti/creati per evitare duplicati
     // - Preserva nomi numerati come "model_0" (non li riduce a "model")
     const usedExactSetNames = new Set();
-    const existingSets = _iamccsGraphNodes(graph).filter(n => n.type === SET_TYPE);
+    const NEVER = (window?.LiteGraph?.NEVER != null) ? window.LiteGraph.NEVER : 2;
+    const isInactiveSetForNaming = (n) => !!(n?.flags?.hidden || n?.hidden || n?.is_hidden || Number(n?.mode) === Number(NEVER));
+    const existingSets = _iamccsGraphNodes(graph).filter(n => n.type === SET_TYPE && !isInactiveSetForNaming(n));
     for (const existingSet of existingSets) {
         const name = getAutolinkKey(existingSet);
         if (name && String(name).trim()) usedExactSetNames.add(String(name).trim());
@@ -2405,6 +2599,14 @@ function convertAllLinks(
         
         const setNode = createNode(graph, SET_TYPE, setPos[0], setPos[1]);
         if (!setNode) continue;
+
+        // If the source is inside a hidden/disabled group, the created AutoLink must follow.
+        _iamccsApplyGroupStateToNode(
+            graph,
+            setNode,
+            srcNode,
+            { x: setPos[0] + 75, y: setPos[1] + 13 }
+        );
 
         setNode.properties = setNode.properties || {};
         setNode.properties.autolink_color_name = colorSet;
@@ -2502,6 +2704,14 @@ function convertAllLinks(
             const getNode = createNode(graph, GET_TYPE, getPos[0], getPos[1]);
             if (!getNode) continue;
 
+            // If the destination is inside a hidden/disabled group, the created AutoLink must follow.
+            _iamccsApplyGroupStateToNode(
+                graph,
+                getNode,
+                dstNode,
+                { x: getPos[0] + 75, y: getPos[1] + 13 }
+            );
+
             getNode.properties = getNode.properties || {};
             // il get segue sempre il colore della sua chiave (quindi del set)
             getNode.properties.autolink_color_name = setNode.properties?.autolink_color_name || colorSet;
@@ -2578,60 +2788,151 @@ function convertAllLinks(
     
     // Converti KijNodes in AutoLink se richiesto
     if (includeKijNodes && kijNodesToConvert.length > 0) {
-        console.log(`[IAMCCS AutoLink] Converting ${kijNodesToConvert.length} KijNode connections...`);
-        
-        for (const { link, srcNode, dstNode, srcIsKij, dstIsKij } of kijNodesToConvert) {
-            // Se src è KijNode (SetNode o GetNode), lo sostituiamo con AutoLink
-            if (srcIsKij && srcNode.type === KJ_SET_TYPE) {
-                // Converti KJ SetNode in IAMCCS SetNode
-                const kijName = srcNode.widgets?.[0]?.value || "output";
-                const newSetNode = createNode(graph, SET_TYPE, srcNode.pos[0], srcNode.pos[1]);
-                
-                if (newSetNode) {
-                    setWidgetValue(newSetNode, "name", kijName);
-                    newSetNode.title = `${kijName}`;
-                    
-                    // Ricollega input del KJ SetNode
-                    if (srcNode.inputs?.[0]?.link) {
-                        const inputLink = _iamccsGetLink(graph, srcNode.inputs[0].link);
-                        if (inputLink) {
-                            const inputSrcNode = getNodeById(graph, inputLink.origin_id);
-                            if (inputSrcNode) {
-                                inputSrcNode.connect(inputLink.origin_slot, newSetNode, 0);
-                            }
-                        }
-                    }
-                    
-                    // Rimuovi il KJ SetNode
-                    graph.remove(srcNode);
+        // NOTE: kijNodesToConvert is collected per-link; converting/removing nodes inside that loop
+        // can lead to partial conversions (Set converted, Get left behind) and broken workflows.
+        // Fix: dedupe by node id and convert BOTH src and dst KJ nodes.
+        const kijNodesById = new Map();
+        for (const { srcNode, dstNode, srcIsKij, dstIsKij } of kijNodesToConvert) {
+            if (srcIsKij && srcNode?.id != null) kijNodesById.set(String(srcNode.id), srcNode);
+            if (dstIsKij && dstNode?.id != null) kijNodesById.set(String(dstNode.id), dstNode);
+        }
+
+        const kijNodes = [...kijNodesById.values()].filter(n => n && (n.type === KJ_SET_TYPE || n.type === KJ_GET_TYPE));
+        console.log(`[IAMCCS AutoLink] Converting ${kijNodes.length} KijNodes (deduped)...`);
+
+        // Snapshot link entries before we start removing nodes.
+        const linkEntriesSnapshot = _iamccsGraphLinksEntries(graph)
+            .map(([id, l]) => [id, l])
+            .filter(([, l]) => !!l);
+
+        const getKijName = (node) => {
+            try {
+                // Prefer a named widget when present; fallback to first widget value.
+                const byName = getWidgetValue(node, "name");
+                const v = (byName != null && String(byName).trim()) ? byName : node?.widgets?.[0]?.value;
+                const s = String(v ?? "output").trim();
+                return s || "output";
+            } catch {
+                return "output";
+            }
+        };
+
+        const outgoingFor = (nodeId) => {
+            const out = [];
+            for (const [, l] of linkEntriesSnapshot) {
+                if (_iamccsIdEq(l?.origin_id, nodeId)) out.push(l);
+            }
+            return out;
+        };
+
+        const incomingFor = (nodeId) => {
+            const inc = [];
+            for (const [, l] of linkEntriesSnapshot) {
+                if (_iamccsIdEq(l?.target_id, nodeId)) inc.push(l);
+            }
+            return inc;
+        };
+
+        // Convert nodes in a stable order (left-to-right, top-to-bottom) to minimize visual jitter.
+        kijNodes.sort((a, b) => {
+            const ax = Array.isArray(a?.pos) ? a.pos[0] : 0;
+            const ay = Array.isArray(a?.pos) ? a.pos[1] : 0;
+            const bx = Array.isArray(b?.pos) ? b.pos[0] : 0;
+            const by = Array.isArray(b?.pos) ? b.pos[1] : 0;
+            return ax === bx ? (ay - by) : (ax - bx);
+        });
+
+        for (const oldNode of kijNodes) {
+            // Node might already be removed by a previous conversion step.
+            if (!oldNode || oldNode.id == null) continue;
+            const stillThere = getNodeById(graph, oldNode.id);
+            if (!stillThere || stillThere.type !== oldNode.type) continue;
+
+            const kijName = getKijName(oldNode);
+            const x = Array.isArray(oldNode.pos) ? oldNode.pos[0] : 0;
+            const y = Array.isArray(oldNode.pos) ? oldNode.pos[1] : 0;
+
+            const newType = (oldNode.type === KJ_SET_TYPE) ? SET_TYPE : GET_TYPE;
+            const newNode = createNode(graph, newType, x, y);
+            if (!newNode) continue;
+
+            // Preserve group hidden/disabled state (and node mode) from the original.
+            _iamccsApplyGroupStateToNode(
+                graph,
+                newNode,
+                oldNode,
+                { x: x + 75, y: y + 13 }
+            );
+
+            setWidgetValue(newNode, "name", kijName);
+            newNode.title = `${kijName}`;
+
+            // Ensure expected slots exist.
+            if (newType === SET_TYPE) {
+                normalizeAutolinkIOSlots(graph, newNode, { wantInputs: 1, wantOutputs: 1 });
+            } else {
+                normalizeAutolinkIOSlots(graph, newNode, { wantInputs: 0, wantOutputs: 1 });
+            }
+
+            const oldId = oldNode.id;
+            const outLinks = outgoingFor(oldId);
+            const inLinks = incomingFor(oldId);
+
+            let rewiredOutgoing = 0;
+            let rewiredIncoming = 0;
+
+            // Rewire outgoing links (covers GetNode outputs, and any SetNode passthrough outputs).
+            for (const l of outLinks) {
+                const dst = getNodeById(graph, l.target_id);
+                if (!dst) continue;
+                const ts = Number(l.target_slot);
+                if (!Number.isFinite(ts)) continue;
+
+                // Prefer slot 0 (AutoLink nodes are 1-output helpers)
+                let ok = _safeConnect(newNode, 0, dst, ts);
+                if (ok === null) {
+                    _iamccsDisconnectTargetInput(graph, dst, ts);
+                    ok = _safeConnect(newNode, 0, dst, ts);
+                }
+                if (ok !== null) {
+                    rewiredOutgoing++;
+                    _iamccsRemoveOtherLinksToTarget(graph, dst.id, ts, ok);
                 }
             }
-            
-            if (srcIsKij && srcNode.type === KJ_GET_TYPE) {
-                // Converti KJ GetNode in IAMCCS GetNode
-                const kijName = srcNode.widgets?.[0]?.value || "output";
-                const newGetNode = createNode(graph, GET_TYPE, srcNode.pos[0], srcNode.pos[1]);
-                
-                if (newGetNode) {
-                    setWidgetValue(newGetNode, "name", kijName);
-                    newGetNode.title = `${kijName}`;
-                    
-                    // Ricollega output del KJ GetNode
-                    if (srcNode.outputs?.[0]?.links) {
-                        for (const linkId of srcNode.outputs[0].links) {
-                            const outputLink = _iamccsGetLink(graph, linkId);
-                            if (outputLink) {
-                                const outputDstNode = getNodeById(graph, outputLink.target_id);
-                                if (outputDstNode) {
-                                    newGetNode.connect(0, outputDstNode, outputLink.target_slot);
-                                }
-                            }
+
+            // Rewire incoming links ONLY for SetNode (it is an input sink).
+            if (newType === SET_TYPE) {
+                // SetNode should have a single input; if multiple exist, keep the first.
+                const first = inLinks.find(l => Number(l.target_slot) === 0) || inLinks[0];
+                if (first) {
+                    const src = getNodeById(graph, first.origin_id);
+                    const os = Number(first.origin_slot);
+                    if (src && Number.isFinite(os)) {
+                        let ok = _safeConnect(src, os, newNode, 0);
+                        if (ok === null) {
+                            _iamccsDisconnectTargetInput(graph, newNode, 0);
+                            ok = _safeConnect(src, os, newNode, 0);
                         }
+                        if (ok !== null) rewiredIncoming++;
                     }
-                    
-                    // Rimuovi il KJ GetNode
-                    graph.remove(srcNode);
                 }
+            }
+
+            // Decide whether to remove the original node.
+            // If it had connections and we couldn't rewire them, rollback by removing the new node.
+            const hadOut = outLinks.length > 0;
+            const hadIn = inLinks.length > 0;
+
+            const outgoingOk = !hadOut || rewiredOutgoing > 0;
+            const incomingOk = (newType !== SET_TYPE) || (!hadIn) || rewiredIncoming > 0;
+
+            if (outgoingOk && incomingOk) {
+                try { graph.remove(oldNode); } catch {}
+            } else {
+                console.warn(
+                    `[IAMCCS AutoLink] KijNode conversion incomplete for node ${oldNode.id} (${oldNode.type}). Keeping original.`
+                );
+                try { graph.remove(newNode); } catch {}
             }
         }
     }
@@ -2671,12 +2972,36 @@ function restoreDirectLinks(graph, options = {}) {
     const nodes = _iamccsGraphNodes(graph);
     const setNodes = [];
     const getNodes = [];
+
+    const NEVER = (window?.LiteGraph?.NEVER != null) ? window.LiteGraph.NEVER : 2;
+    const isInactiveAutoLinkNode = (n) => {
+        if (!n) return true;
+        // LiteGraph/ComfyUI can represent hidden/disabled in several ways.
+        if (n?.flags?.hidden || n?.hidden || n?.is_hidden) return true;
+        if (Number(n?.mode) === Number(NEVER)) return true;
+        return false;
+    };
+
+    const hasAnyGraphLink = (nodeId) => {
+        if (nodeId == null) return false;
+        try {
+            for (const [, l] of _iamccsGraphLinksEntries(graph)) {
+                if (!l) continue;
+                if (_iamccsIdEq(l.origin_id, nodeId) || _iamccsIdEq(l.target_id, nodeId)) return true;
+            }
+        } catch {}
+        return false;
+    };
     
     // Raccogli tutti i nodi Set e Get
     for (const node of nodes) {
         if (node.type === SET_TYPE) {
+            // For UI "restore all links" we want to restore/remove *everything*.
+            // For queuePrompt execution (removeNodes=false) we must ignore hidden/inactive autolinks.
+            if (!opts.removeNodes && isInactiveAutoLinkNode(node)) continue;
             setNodes.push(node);
         } else if (node.type === GET_TYPE) {
+            if (!opts.removeNodes && isInactiveAutoLinkNode(node)) continue;
             getNodes.push(node);
         }
     }
@@ -2826,6 +3151,21 @@ function restoreDirectLinks(graph, options = {}) {
             continue;
         }
 
+        // If the target is already wired to the expected source, treat it as restored.
+        // This prevents leftover Get/Set nodes when the user runs restore multiple times
+        // or when earlier restores already rewired the connection.
+        try {
+            const existingId = dstNode?.inputs?.[ts]?.link;
+            if (existingId != null) {
+                const existing = _iamccsGetLink(graph, existingId);
+                if (existing && _iamccsIdEq(existing.origin_id, srcNode.id) && Number(existing.origin_slot) === Number(originSlot)) {
+                    restored++;
+                    restoredGetIds.add(getNode.id);
+                    continue;
+                }
+            }
+        } catch {}
+
         let hadGetLink = false;
         try {
             const out = getNode.outputs?.[0];
@@ -2896,6 +3236,19 @@ function restoreDirectLinks(graph, options = {}) {
                     const ts = Number(targetSlot);
                     if (!Number.isFinite(ts)) continue;
 
+                    // Already correct? Mark restored so we can remove the AutoLink nodes.
+                    try {
+                        const existingId = dstNode?.inputs?.[ts]?.link;
+                        if (existingId != null) {
+                            const existing = _iamccsGetLink(graph, existingId);
+                            if (existing && _iamccsIdEq(existing.origin_id, srcNode.id) && Number(existing.origin_slot) === Number(originSlot)) {
+                                restored++;
+                                restoredGetIds.add(getNode.id);
+                                continue;
+                            }
+                        }
+                    } catch {}
+
                     // Same non-destructive semantics as metadata restore.
                     let ok = null;
                     const shouldReplace = isTargetCurrentlyFromGetNode(dstNode, ts, getNode.id);
@@ -2938,13 +3291,37 @@ function restoreDirectLinks(graph, options = {}) {
 
     const nodesToRemove = new Set();
     if (opts.removeNodes) {
+        // Remove restored Gets + any dangling Gets (prevents Convert/Restore duplication loops).
         for (const getNode of getNodes) {
-            if (restoredGetIds.has(getNode.id)) nodesToRemove.add(getNode);
+            if (!getNode) continue;
+            if (restoredGetIds.has(getNode.id)) {
+                nodesToRemove.add(getNode);
+                continue;
+            }
+            // If a Get is no longer connected to anything, it is safe to remove.
+            if (!hasAnyGraphLink(getNode.id)) {
+                nodesToRemove.add(getNode);
+            }
         }
+
+        // Remove Sets when their Gets are fully restored OR when there are no Gets at all for that key.
+        // A Set without Gets is useless after restore and causes name-suffix explosions on the next Convert.
         for (const [key, setNode] of keyToSet) {
+            if (!setNode) continue;
             const gets = keyToGets.get(key) || [];
             const allGetsRestored = gets.length > 0 && gets.every(g => restoredGetIds.has(g.id));
-            if (allGetsRestored && !keysWithFailures.has(key)) {
+            const noGetsExist = gets.length === 0;
+
+            // If restore had explicit failures for this key, keep the Set to avoid data loss.
+            if (keysWithFailures.has(key)) continue;
+
+            // If the Set isn't linked to anything, remove it unconditionally.
+            if (!hasAnyGraphLink(setNode.id)) {
+                nodesToRemove.add(setNode);
+                continue;
+            }
+
+            if (allGetsRestored || noGetsExist) {
                 nodesToRemove.add(setNode);
             }
         }

@@ -1,17 +1,53 @@
 # 🌀 IAMCCS-nodes
 
-<img src="icon.png" width="150" height="150">
+![[Node piece](assets/cover_sq.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/cover_sq.png)
 
 ## Author: IAMCCS (Carmine Cristallo Scalzi)
 
-### Category: ComfyUI Custom Nodes
-### Main Feature: Fix for LoRA loading in native WANAnimate workflows
+<img src="icon.png" width="150" height="150">
 
-Version: 1.3.3
+### Category: ComfyUI Custom Nodes
+### Main Feature: Fix for LoRA loading in native WANAnimate workflows + general nodes 4 ComfyUI
+
+Version: 1.3.4
+
+# UPDATE VERSION 1-3-4
+
+## 🆕 Version 1.3.4 — Video Performance + Low-RAM Tools
+
+Date: 2026-02-01
+
+Highlights (EN):
+- New sampler wrapper: `Sampler Advanced v1` (`IAMCCS_SamplerAdvancedVersion1`)
+  - Delegates sampling to ComfyUI `SamplerCustomAdvanced` (same sampling core), but adds workflow-friendly knobs:
+    - `disable_progress`: reduces UI/progress update overhead on long video runs (often feels smoother)
+    - `cleanup`: optional VRAM cleanup after sampling
+  - Compatibility: supports newer ComfyUI returns (`NodeOutput`) and older tuple returns.
+
+- True low-RAM decoding: `VAE Decode → Disk (frames, low RAM)` (`IAMCCS_VAEDecodeToDisk`)
+  - Decodes one frame at a time and saves frames to disk to avoid large `IMAGE` batches in system RAM.
+
+- HW recommendations as a node: `HW Probe Recommendations (JSON)` (`IAMCCS_HWProbeRecommendations`)
+  - Outputs a JSON report + extracted recommended values for long video workflows.
+
+- GGUF Accelerator improvements: `GGUF Accelerator (patch_on_device)` (`IAMCCS_GGUF_accelerator`)
+  - Added safer patch move strategies (`move_policy`) and a VRAM reserve budget (`leave_free_vram_mb`).
+  - Backward-compatible input ordering preserved for older workflows.
+
+- Frontend quality-of-life:
+  - Bus Group “Hide options” now persists across sessions.
+  - HW probe apply is user-controlled (overwrite vs fill-missing) and preset sync can be disabled to keep manual tuning.
+
+- MultiSwitch (frontend + workflow UX): `MultiSwitch (dynamic inputs)` (`IAMCCS_MultiSwitch`)
+  - Active-link indicator: visually shows which input is currently connected/used.
+  - Input rename: you can rename inputs to keep complex graphs readable (especially when routing MANY signals).
+
+Docs:
+- Low VRAM Video Tips: `LOW_VRAM_VIDEO_TIPS.md`
+
+---
 
 # UPDATE VERSION 1-3-3
-
-![[Node piece](assets/cover_sq.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/cover_sq.png)
 
 ## 🆕 Version 1.3.3 — AutoLink + LTX-2 Extension Module
 

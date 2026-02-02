@@ -1,6 +1,6 @@
 {
-  "name": "iamccs-wan-lora-fixer-stack",
-  "version": "1.3.3",
+  "name": "iamccs-nodes",
+  "version": "1.3.4",
   "author": "Carmine Cristallo Scalzi (IAMCCS)",
-  "description": "IAMCCS nodes for ComfyUI: multi-LoRA stack + direct MODEL IO WAN/Flow remap + LTX-2 LoRA & utility nodes + LTX-2 Extension Module + AutoLink (Set/Get + Converter, frontend). WAN 2.1 + 2.2 compatible."
+  "description": "IAMCCS nodes for ComfyUI: IAMCCS echosystem for ComfyUI, nodes 4 LoRA, WAN 2.2, WAN 2.1 and LTX-2 pipelines."
 }
