@@ -153,6 +153,20 @@ function normalizeAutolinkIOSlots(graph, node, { wantInputs = 0, wantOutputs = 0
     if (!node.inputs) node.inputs = [];
     if (!node.outputs) node.outputs = [];
 
+    // Remove ALL inputs when none are wanted (fixes Get nodes that were incorrectly
+    // serialized with stale input slots from old buggy workflows or the queue patch).
+    if (wantInputs === 0 && node.inputs.length > 0) {
+        try {
+            for (let i = node.inputs.length - 1; i >= 0; i--) {
+                try { if (typeof node.disconnectInput === "function") node.disconnectInput(i); } catch {}
+                try {
+                    if (typeof node.removeInput === "function") node.removeInput(i);
+                    else node.inputs.splice(i, 1);
+                } catch {}
+            }
+        } catch {}
+    }
+
     // Ensure at least one slot exists when requested
     if (wantInputs > 0 && node.inputs.length === 0 && typeof node.addInput === "function") {
         node.addInput("*", "*");
@@ -1350,6 +1364,10 @@ app.registerExtension({
         if (nodeData?.name === SET_TYPE) {
             const onNodeCreated = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function() {
+                // --- MUST be set BEFORE anything else so ComfyUI skips this node
+                //     during graphToPrompt serialization and uses getInputLink chain ---
+                this.isVirtualNode = true;
+
                 const result = onNodeCreated?.apply(this, arguments);
                 const node = this;
 
@@ -1411,38 +1429,67 @@ app.registerExtension({
                 
                 // Input/output: normalizza workflow vecchi (che possono avere input duplicati)
                 normalizeAutolinkIOSlots(app.graph, node, { wantInputs: 1, wantOutputs: 1 });
-                
-                // Callback quando si collega
-                this.onConnectionsChange = function(slotType, slot, isConnect, link_info) {
-                    if (slotType === 1 && isConnect && link_info) {
-                        const fromNode = app.graph.getNodeById(link_info.origin_id);
-                        if (fromNode && fromNode.outputs && fromNode.outputs[link_info.origin_slot]) {
-                            const outputType = fromNode.outputs[link_info.origin_slot].type;
 
-                            // Usa sempre un nome leggibile e stabile (slot-name), non il tipo puro.
-                            // Questo produce base tipo "model"/"image" e poi lo rendiamo unico: model_0, image_2, ...
-                            let suggestedBase = getSlotName(fromNode, link_info.origin_slot, true);
-                            if (!isValidAutolinkKey(suggestedBase)) {
-                                if (outputType && outputType !== "*") suggestedBase = String(outputType).trim().toLowerCase();
-                                else suggestedBase = `output_${link_info.origin_slot}`;
+                // --- KJ-style update: propagate type changes to all matching Get nodes ---
+                this._iamccsUpdateGetters = function() {
+                    try {
+                        const key = getAutolinkKey(node);
+                        if (!key) return;
+                        const curType = node.inputs?.[0]?.type || "*";
+                        const gets = _iamccsGraphNodes(app.graph).filter(
+                            n => n?.type === GET_TYPE && getAutolinkKey(n) === key
+                        );
+                        for (const g of gets) {
+                            if (g.outputs?.[0]) {
+                                g.outputs[0].type = curType;
+                                g.outputs[0].name = curType;
                             }
-                            
-                            // Imposta tipo
-                            node.inputs[0].type = outputType;
-                            node.outputs[0].type = outputType;
+                            // Validate and remove type-incompatible links from each Get
+                            try { g.validateLinks?.(); } catch {}
+                        }
+                    } catch {}
+                };
 
-                            // Se il converter ha già impostato un nome unico, NON sovrascriverlo qui.
-                            // Auto-fill solo quando il widget è vuoto.
-                            const currentKey = getAutolinkKey(node);
-                            const desiredKey = isValidAutolinkKey(currentKey)
-                                ? currentKey
-                                : makeUniqueAutolinkSetName(app.graph, suggestedBase);
+                // Callback quando si collega / scollega
+                this.onConnectionsChange = function(slotType, slot, isConnect, link_info) {
+                    if (slotType === 1) {  // input slot changed
+                        if (isConnect && link_info) {
+                            const fromNode = app.graph.getNodeById
+                                ? app.graph.getNodeById(link_info.origin_id)
+                                : getNodeById(app.graph, link_info.origin_id);
+                            if (fromNode?.outputs?.[link_info.origin_slot]) {
+                                const outputType = fromNode.outputs[link_info.origin_slot].type;
 
-                            // Imposta chiave + UI + porta coerenti
-                            setAutolinkKeyAndTitle(node, desiredKey);
+                                // Stabilize a name using the slot label (not the raw type)
+                                let suggestedBase = getSlotName(fromNode, link_info.origin_slot, true);
+                                if (!isValidAutolinkKey(suggestedBase)) {
+                                    if (outputType && outputType !== "*")
+                                        suggestedBase = String(outputType).trim().toLowerCase();
+                                    else
+                                        suggestedBase = `output_${link_info.origin_slot}`;
+                                }
 
-                            // Applica colore testo titolo (se configurato)
-                            applyNodeTitleTextColor(node, getCurrentColorTitlesMode());
+                                // Update type on both slots
+                                if (node.inputs?.[0])  node.inputs[0].type  = outputType;
+                                if (node.outputs?.[0]) node.outputs[0].type = outputType;
+
+                                // Auto-fill name only when the widget is still empty
+                                const currentKey = getAutolinkKey(node);
+                                const desiredKey = isValidAutolinkKey(currentKey)
+                                    ? currentKey
+                                    : makeUniqueAutolinkSetName(app.graph, suggestedBase);
+
+                                setAutolinkKeyAndTitle(node, desiredKey);
+                                applyNodeTitleTextColor(node, getCurrentColorTitlesMode());
+
+                                // Propagate new type to all Get nodes sharing our key
+                                node._iamccsUpdateGetters?.();
+                            }
+                        } else if (!isConnect) {
+                            // On disconnect: reset type to wildcard
+                            if (node.inputs?.[0])  { node.inputs[0].type  = "*"; node.inputs[0].name  = "*"; }
+                            if (node.outputs?.[0]) { node.outputs[0].type = "*"; node.outputs[0].name = "*"; }
+                            node._iamccsUpdateGetters?.();
                         }
                     }
                 };
@@ -1469,23 +1516,26 @@ app.registerExtension({
                     if (String(rawName ?? "").trim() === "*") setWidgetValue(node, "name", "");
                     if (String(node.title ?? "").trim() === "*") node.title = "Set AutoLink";
                 } catch {}
-                
-                // Nodo virtuale - non serializza per il prompt
+
+                // isVirtualNode already set at top – keep here for safety (serialization guard)
                 this.isVirtualNode = true;
-                
+
                 return result;
             };
         }
-        
-        // Get node - come KJ GetNode  
+
+        // Get node - 1:1 KJ GetNode pattern with IAMCCS styling
         if (nodeData?.name === GET_TYPE) {
             const onNodeCreated = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function() {
+                // --- MUST be set BEFORE anything else ---
+                this.isVirtualNode = true;
+
                 const result = onNodeCreated?.apply(this, arguments);
                 const node = this;
-                
-                // Combo dinamico con lista Set disponibili
-                this.addWidget("combo", "name", "", (value) => {
+
+                // Combo dinamico con lista Set disponibili (identical to KJ "Constant" combo)
+                this.addWidget("combo", "name", "", () => {
                     node.onRename();
                 }, {
                     values: () => {
@@ -1494,22 +1544,64 @@ app.registerExtension({
                     }
                 });
 
-                // Normalizza output duplicati su workflow vecchi
+                // Normalizza output/input duplicati su workflow vecchi
+                // wantInputs: 0  →  any stale inputs will be stripped by normalizeAutolinkIOSlots
                 normalizeAutolinkIOSlots(app.graph, node, { wantInputs: 0, wantOutputs: 1 });
-                
+
+                // --- KJ-style: remove links whose type no longer matches our output ---
+                this.validateLinks = function() {
+                    try {
+                        if (!node.outputs?.[0]) return;
+                        const outType = node.outputs[0].type;
+                        if (!outType || outType === "*") return;
+                        const links = node.outputs[0].links;
+                        if (!Array.isArray(links) || links.length === 0) return;
+                        for (const linkId of [...links]) {
+                            const link = _iamccsGetLink(app.graph, linkId);
+                            if (!link) continue;
+                            const lt = link.type;
+                            if (lt && lt !== "*" && lt !== outType &&
+                                !lt.split(",").includes(outType) &&
+                                !outType.split(",").includes(lt)) {
+                                try { app.graph.removeLink(linkId); } catch {}
+                            }
+                        }
+                    } catch {}
+                };
+
+                this.setType = function(type) {
+                    if (!node.outputs?.[0]) return;
+                    node.outputs[0].name = type;
+                    node.outputs[0].type = type;
+                    node.validateLinks();
+                };
+
+                // KJ-style setName: updates widget and triggers onRename
+                this.setName = function(name) {
+                    setWidgetValue(node, "name", name);
+                    node.onRename();
+                };
+
                 this.onRename = function() {
                     const setterName = getAutolinkKey(node);
-                    const setter = _iamccsGraphNodes(app.graph).find(n => 
+                    const setter = _iamccsGraphNodes(app.graph).find(n =>
                         n.type === SET_TYPE && getAutolinkKey(n) === setterName
                     );
-                    
-                    if (setter) {
-                        const linkType = setter.outputs[0].type;
-                        node.outputs[0].type = linkType;
-                        node.outputs[0].name = linkType;
-                        node.title = setterName;
 
+                    if (setter) {
+                        const linkType = setter.inputs?.[0]?.type || "*";
+                        node.setType(linkType);
+                        node.title = setterName;
                         applyNodeTitleTextColor(node, getCurrentColorTitlesMode());
+                    } else {
+                        node.setType("*");
+                    }
+                };
+
+                // On output connection change, validate link types (KJ pattern)
+                this.onConnectionsChange = function(slotType /*1=input,2=output*/, slot, isConnect) {
+                    if (slotType === 2) {
+                        node.validateLinks();
                     }
                 };
 
@@ -1517,31 +1609,34 @@ app.registerExtension({
                 try {
                     if (String(node.title ?? "").trim() === "*") node.title = "Get AutoLink";
                 } catch {}
-                // (removed) per-node overlay title drawing; native title is colored via canvas hook
-                
-                // Override getInputLink per prendere da Set
+
+                // getInputLink: called by ComfyUI graphToPrompt to resolve the real source link.
+                // ComfyUI calls this with `slot` = the OUTPUT slot index of this GetNode (always 0).
+                // We look up our paired SetNode and return the link on its input slot 0,
+                // which has origin_id = the real upstream node (not virtual).
                 this.getInputLink = function(slot) {
-                    const setterName = getAutolinkKey(node);
-                    const setter = _iamccsGraphNodes(app.graph).find(n => 
-                        n.type === SET_TYPE && getAutolinkKey(n) === setterName
-                    );
-                    
-                    if (setter) {
-                        const slotInfo = setter.inputs[slot];
-                        if (slotInfo) {
-                            const linkId = slotInfo.link != null
-                                ? slotInfo.link
-                                : (Array.isArray(slotInfo.links) ? slotInfo.links[0] : null);
-                            const link = _iamccsGetLink(app.graph, linkId);
-                            return link || null;
-                        }
+                    try {
+                        const setterName = getAutolinkKey(node);
+                        if (!setterName) return null;
+                        const setter = _iamccsGraphNodes(app.graph).find(n =>
+                            n.type === SET_TYPE && getAutolinkKey(n) === setterName
+                        );
+                        if (!setter?.inputs?.length) return null;
+                        // slot index maps to the Set's input (both nodes use slot 0)
+                        const slotInfo = setter.inputs[0];
+                        if (!slotInfo) return null;
+                        const linkId = slotInfo.link != null
+                            ? slotInfo.link
+                            : (Array.isArray(slotInfo.links) ? slotInfo.links[0] : null);
+                        return _iamccsGetLink(app.graph, linkId) || null;
+                    } catch {
+                        return null;
                     }
-                    return null;
                 };
-                
-                // Nodo virtuale - non serializza per il prompt
+
+                // isVirtualNode redundant here (set at top) but kept as an insurance belt
                 this.isVirtualNode = true;
-                
+
                 return result;
             };
         }
@@ -2538,7 +2633,7 @@ function convertAllLinks(
     const occupiedSetPositions = new Set();
     const occupiedGetPositions = new Set();
     const createdSets = new Map();
-    
+
     // Traccia i nomi dei Set già esistenti/creati per evitare duplicati
     // - Preserva nomi numerati come "model_0" (non li riduce a "model")
     const usedExactSetNames = new Set();
@@ -2548,6 +2643,18 @@ function convertAllLinks(
     for (const existingSet of existingSets) {
         const name = getAutolinkKey(existingSet);
         if (name && String(name).trim()) usedExactSetNames.add(String(name).trim());
+    }
+
+    // Build a map of (srcNodeId, originSlot) → existing SetNode so we can REUSE
+    // a Set that already consumes from that output instead of creating a duplicate.
+    // This prevents the "double Set for same source slot" bug when Convert is called
+    // on a partially-converted graph.
+    const existingSetBySourceKey = new Map();
+    for (const es of existingSets) {
+        const inLink = es?.inputs?.[0]?.link != null ? _iamccsGetLink(graph, es.inputs[0].link) : null;
+        if (!inLink) continue;
+        const sk = `${inLink.origin_id}_${inLink.origin_slot}`;
+        if (!existingSetBySourceKey.has(sk)) existingSetBySourceKey.set(sk, es);
     }
 
     function makeUniqueSetName(desiredName) {
@@ -2582,83 +2689,96 @@ function convertAllLinks(
         return candidate;
     }
     
-    console.log(`[IAMCCS AutoLink] Creating ${linksByOrigin.size} Set nodes...`);
-    
-    // Crea Set nodes (uno per origine)
+    console.log(`[IAMCCS AutoLink] Creating/reusing ${linksByOrigin.size} Set nodes...`);
+
+    // Crea Set nodes (uno per origine), RIUTILIZZANDO Set già esistenti per la stessa sorgente.
+    // Questo evita il bug "doppio Set per lo stesso slot" quando Convert viene chiamato
+    // su un grafo parzialmente convertito.
     for (const [key, originData] of linksByOrigin) {
         const { srcNode, originSlot, outputName, destinations } = originData;
-        
-        const setPos = findFreePosition(
-            graph, 
-            srcNode.pos[0] + (srcNode.size?.[0] || 200), 
-            (alignMode === "Proportional" ? getAnchorY(srcNode, originSlot, true) : srcNode.pos[1]),
-            20,
-            occupiedSetPositions,
-            alignMode
-        );
-        
-        const setNode = createNode(graph, SET_TYPE, setPos[0], setPos[1]);
-        if (!setNode) continue;
 
-        // If the source is inside a hidden/disabled group, the created AutoLink must follow.
-        _iamccsApplyGroupStateToNode(
-            graph,
-            setNode,
-            srcNode,
-            { x: setPos[0] + 75, y: setPos[1] + 13 }
-        );
-
-        setNode.properties = setNode.properties || {};
-        setNode.properties.autolink_color_name = colorSet;
-        if (setNode.properties.autolink_color_locked === undefined) setNode.properties.autolink_color_locked = false;
-        applyNodeColors(setNode, getAutolinkColorPreset(colorSet, 'set', separateCol, colorGet));
-        applyNodeTitleTextColor(setNode, colorTitles);
-        
-        // Ottieni il tipo dall'output del nodo sorgente
+        // Tipo dell'output sorgente
         const outputType = srcNode.outputs?.[originSlot]?.type || "*";
         let outputSlotName = getSlotName(srcNode, originSlot, true);
-
-        // Ulteriore fix: non permettere mai "*" come chiave
         if (!outputSlotName || String(outputSlotName).trim() === "*") {
             if (outputType && outputType !== "*") outputSlotName = String(outputType).trim().toLowerCase();
             else outputSlotName = `output_${originSlot}`;
         }
-        
+
         console.log(`[IAMCCS AutoLink] Processing: ${srcNode.title || srcNode.type}[${originSlot}] with name "${outputSlotName}"`);
-        
-        // Genera nome unico se esiste già un Set con questo nome.
-        // Importante: NON ridurre mai "model_0" a "model".
-        const uniqueName = makeUniqueSetName(outputSlotName);
-        
-        // Imposta tipo e nome correttamente
-        if (setNode.inputs && setNode.inputs[0]) {
-            setNode.inputs[0].type = outputType;
-            setNode.inputs[0].name = uniqueName;
+
+        // --- CHECK: is there already a Set node consuming this exact source slot? ---
+        const sourceKey = `${srcNode.id}_${originSlot}`;
+        const reuseSet = existingSetBySourceKey.get(sourceKey);
+
+        let setNode;
+        let uniqueName;
+
+        if (reuseSet) {
+            // Reuse the existing Set node — just add new Get nodes for the new destinations.
+            setNode = reuseSet;
+            uniqueName = getAutolinkKey(reuseSet) || makeUniqueSetName(outputSlotName);
+            console.log(`[IAMCCS AutoLink] ↺ Reusing existing Set node: "${uniqueName}" for ${srcNode.title || srcNode.type}[${originSlot}]`);
+            // Make sure the type name widget is still consistent
+            if (setNode.inputs?.[0])  setNode.inputs[0].type  = outputType;
+            if (setNode.outputs?.[0]) setNode.outputs[0].type = outputType;
+        } else {
+            // Create a brand-new Set node
+            const setPos = findFreePosition(
+                graph,
+                srcNode.pos[0] + (srcNode.size?.[0] || 200),
+                (alignMode === "Proportional" ? getAnchorY(srcNode, originSlot, true) : srcNode.pos[1]),
+                20,
+                occupiedSetPositions,
+                alignMode
+            );
+
+            setNode = createNode(graph, SET_TYPE, setPos[0], setPos[1]);
+            if (!setNode) continue;
+
+            _iamccsApplyGroupStateToNode(
+                graph,
+                setNode,
+                srcNode,
+                { x: setPos[0] + 75, y: setPos[1] + 13 }
+            );
+
+            setNode.properties = setNode.properties || {};
+            setNode.properties.autolink_color_name = colorSet;
+            if (setNode.properties.autolink_color_locked === undefined) setNode.properties.autolink_color_locked = false;
+            applyNodeColors(setNode, getAutolinkColorPreset(colorSet, 'set', separateCol, colorGet));
+            applyNodeTitleTextColor(setNode, colorTitles);
+
+            // Genera nome unico — NON ridurre mai "model_0" a "model"
+            uniqueName = makeUniqueSetName(outputSlotName);
+
+            if (setNode.inputs?.[0])  { setNode.inputs[0].type  = outputType; setNode.inputs[0].name  = uniqueName; }
+            if (setNode.outputs?.[0]) { setNode.outputs[0].type = outputType; setNode.outputs[0].name = uniqueName; }
+
+            setWidgetValue(setNode, "name", uniqueName);
+            setNode.title = uniqueName;
+
+            console.log(`[IAMCCS AutoLink] ✓ Created Set node: "${uniqueName}" (from ${srcNode.title || srcNode.type})`);
+
+            const nameWidget = getWidget(setNode, "name");
+            if (nameWidget) nameWidget.lastValue = uniqueName;
+
+            // Collapse immediately
+            setTimeout(() => {
+                if (setNode.collapse) setNode.collapse();
+                setNode.size = [150, 26];
+            }, 0);
+
+            // Connect source → Set; any existing source→somewhere link on this slot is preserved
+            // (LiteGraph allows multiple outgoing links; old dstNode links will be replaced when
+            // we create the Get nodes below and call _iamccsRemoveOtherLinksToTarget).
+            srcNode.connect(originSlot, setNode, 0);
+
+            // Register for future reuse in this same convertAllLinks call
+            existingSetBySourceKey.set(sourceKey, setNode);
         }
-        if (setNode.outputs && setNode.outputs[0]) {
-            setNode.outputs[0].type = outputType;
-            setNode.outputs[0].name = uniqueName;
-        }
-        
-        setWidgetValue(setNode, "name", uniqueName);
-        setNode.title = `${uniqueName}`;
-        
-        console.log(`[IAMCCS AutoLink] ✓ Created Set node: "${uniqueName}" (from ${srcNode.title || srcNode.type})`);
-        
-        // Inizializza lastValue per il tracking delle modifiche
-        const nameWidget = getWidget(setNode, "name");
-        if (nameWidget) nameWidget.lastValue = uniqueName;
-        
-        // Collassa
-        setTimeout(() => {
-            if (setNode.collapse) setNode.collapse();
-            setNode.size = [150, 26];
-        }, 0);
-        
-        // Collega il Set al nodo sorgente
-        srcNode.connect(originSlot, setNode, 0);
-        
-        // Salva il Set creato per creare i Get dopo
+
+        // Salva il Set (nuovo o riutilizzato) per creare i Get dopo
         createdSets.set(key, {
             setNode,
             outputName: uniqueName,
@@ -2733,12 +2853,17 @@ function convertAllLinks(
                 getNode.size = [150, 26];
             }, 0);
             
+            const ts = Number(targetSlot);
+            const targetInputName = Number.isFinite(ts) ? (dstNode?.inputs?.[ts]?.name ?? null) : null;
+
             // Salva metadata per restore
             const metadata = {
                 iamccs_autolink: true,
                 output_name: outputName,
                 origin: { id: srcNode.id, slot: originSlot },
-                target: { id: dstNode.id, slot: targetSlot }
+                target: { id: dstNode.id, slot: targetSlot },
+                // Used by Restore Direct Links to avoid slot drift
+                target_input_name: targetInputName,
             };
             
             setNode.properties = setNode.properties || {};
@@ -2749,7 +2874,6 @@ function convertAllLinks(
             getNode.properties.metadata = metadata;
 
             // Safe rewire: preserve the previous direct link if any.
-            const ts = Number(targetSlot);
             if (!Number.isFinite(ts)) {
                 try { graph.remove(getNode); } catch {}
                 continue;
@@ -3059,6 +3183,13 @@ function restoreDirectLinks(graph, options = {}) {
         const ts = Number(targetSlot);
         if (!Number.isFinite(os) || !Number.isFinite(ts)) return null;
 
+        // Safety: never connect to an out-of-range target slot.
+        // On many LiteGraph/ComfyUI builds this triggers dynamic input creation,
+        // which shows up as many inactive/empty inputs after Restore.
+        if (Array.isArray(dstNode?.inputs)) {
+            if (ts < 0 || ts >= dstNode.inputs.length) return null;
+        }
+
         try {
             srcNode.connect(os, dstNode, ts);
             const ok = _iamccsDidConnect(srcNode, os, dstNode, ts);
@@ -3088,6 +3219,26 @@ function restoreDirectLinks(graph, options = {}) {
         }
 
         return null;
+    };
+
+    const resolveTargetSlot = (dstNode, md) => {
+        if (!dstNode) return null;
+        const inputs = dstNode.inputs;
+
+        // Prefer restoring by input name when available (slot indices can drift).
+        const targetName = md?.target_input_name;
+        if (targetName && Array.isArray(inputs)) {
+            const idx = inputs.findIndex((i) => i?.name === targetName);
+            if (idx >= 0) return idx;
+        }
+
+        const slot = md?.target?.slot;
+        const ts = Number(slot);
+        if (!Number.isFinite(ts)) return null;
+        if (Array.isArray(inputs)) {
+            if (ts < 0 || ts >= inputs.length) return null;
+        }
+        return ts;
     };
 
     const isTargetCurrentlyFromGetNode = (dstNode, targetSlot, getNodeId) => {
@@ -3136,7 +3287,7 @@ function restoreDirectLinks(graph, options = {}) {
         const srcNode = getNodeById(graph, origin.id);
         const dstNode = getNodeById(graph, target.id);
         const originSlot = origin.slot;
-        const targetSlot = target.slot;
+        const ts = resolveTargetSlot(dstNode, md);
 
         if (!srcNode || !dstNode) {
             failed++;
@@ -3144,8 +3295,7 @@ function restoreDirectLinks(graph, options = {}) {
             continue;
         }
 
-        const ts = Number(targetSlot);
-        if (!Number.isFinite(ts)) {
+        if (ts == null) {
             failed++;
             if (key) keysWithFailures.add(key);
             continue;
@@ -3232,9 +3382,8 @@ function restoreDirectLinks(graph, options = {}) {
 
                     const dstNode = getNodeById(graph, outLink.target_id);
                     if (!dstNode) continue;
-                    const targetSlot = outLink.target_slot;
-                    const ts = Number(targetSlot);
-                    if (!Number.isFinite(ts)) continue;
+                    const ts = resolveTargetSlot(dstNode, { target: { slot: outLink.target_slot } });
+                    if (ts == null) continue;
 
                     // Already correct? Mark restored so we can remove the AutoLink nodes.
                     try {
@@ -3369,65 +3518,12 @@ function restoreDirectLinks(graph, options = {}) {
 
 console.log("[IAMCCS AutoLink] Extension loaded");
 
-// ---- Runtime patch: ensure AutoLink graphs can execute ----
-// AutoLink Set/Get nodes are frontend helpers; the backend nodes are no-op.
-// To run a workflow, we temporarily restore direct links before queueing,
-// then reload the original graph so the user keeps AutoLink nodes.
-function _iamccsPatchQueuePromptForAutolink() {
-    try {
-        if (app.__iamccs_autolink_queue_patch_installed) return;
-        if (typeof app?.queuePrompt !== "function") return;
-
-        const originalQueuePrompt = app.queuePrompt;
-        app.queuePrompt = async function (...args) {
-            const graph = app?.graph;
-            const hasAutoLink = _iamccsGraphNodes(graph).some(n => n?.type === SET_TYPE || n?.type === GET_TYPE);
-            if (!hasAutoLink) {
-                return await originalQueuePrompt.apply(this, args);
-            }
-
-            let snapshot = null;
-            try {
-                snapshot = typeof graph.serialize === "function" ? graph.serialize() : null;
-            } catch (e) {
-                snapshot = null;
-            }
-
-            try {
-                // Convert AutoLink nodes into direct links (and remove them) for execution.
-                // This mutates the live graph, so we restore from snapshot in finally.
-                try {
-                    restoreDirectLinks(graph, { removeNodes: false, asyncRemove: false, pruneTargetDuplicates: false });
-                } catch (e) {
-                    console.warn("[IAMCCS AutoLink] restoreDirectLinks failed before queuePrompt", e);
-                }
-
-                try { _iamccsFixLinkIntegrity(graph); } catch {}
-
-                return await originalQueuePrompt.apply(this, args);
-            } finally {
-                // Restore the original AutoLink graph for the UI.
-                if (snapshot) {
-                    try {
-                        if (typeof app.loadGraphData === "function") {
-                            await app.loadGraphData(snapshot);
-                        } else if (typeof graph?.configure === "function") {
-                            graph.configure(snapshot);
-                            graph.setDirtyCanvas?.(true, true);
-                        }
-                    } catch (e) {
-                        console.warn("[IAMCCS AutoLink] Failed to restore graph snapshot after queuePrompt", e);
-                    }
-                }
-            }
-        };
-
-        app.__iamccs_autolink_queue_patch_installed = true;
-        console.log("[IAMCCS AutoLink] Patched app.queuePrompt (temporary restore for execution)");
-    } catch (e) {
-        console.warn("[IAMCCS AutoLink] Failed to patch queuePrompt", e);
-    }
-}
-
-_iamccsPatchQueuePromptForAutolink();
+// Queue patch REMOVED.
+// AutoLink Set/Get nodes use isVirtualNode = true + getInputLink(), which is the same
+// mechanism as KJ SetNode/GetNode. ComfyUI's graphToPrompt() traces through virtual
+// nodes transparently, so no live-graph mutation is needed before queueing.
+// The old patch was destructive: it called restoreDirectLinks() (mutating the graph),
+// then reloaded the graph via loadGraphData() on every queue, causing duplicated inputs
+// on Get nodes and broken link chains.
+console.log("[IAMCCS AutoLink] Queue execution via isVirtualNode/getInputLink (no patch needed)");
 

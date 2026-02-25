@@ -43,10 +43,12 @@ from .iamccs_ltx2_extension_module import (
     IAMCCS_LTX2_ReferenceImageSwitch,
     IAMCCS_LTX2_ReferenceStartFramesInjector,
     IAMCCS_LTX2_FrameCountValidator,
+    IAMCCS_LTX2_FirstLastFramesController,
 )
 
 from .iamccs_wan_svipro_motion import (
     IAMCCS_WanImageMotion,
+    WanImageMotionPro,
 )
 
 from .iamccs_autolink import (
@@ -84,6 +86,11 @@ from .iamccs_hw_probe_node import (
     IAMCCS_HWProbeRecommendations,
 )
 
+from .iamccs_qwen_vl_flf import (
+    IAMCCS_QWEN_VL_FLF,
+    IAMCCS_QWEN_VL_FLF_Advanced,
+)
+
 # Nodi principali
 NODE_CLASS_MAPPINGS = {
     "IAMCCS_WanLoRAStack": IAMCCS_WanLoRAStack,
@@ -113,7 +120,10 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_ReferenceImageSwitch": IAMCCS_LTX2_ReferenceImageSwitch,
     "IAMCCS_LTX2_ReferenceStartFramesInjector": IAMCCS_LTX2_ReferenceStartFramesInjector,
     "IAMCCS_LTX2_FrameCountValidator": IAMCCS_LTX2_FrameCountValidator,
+    "IAMCCS_LTX2_FirstLastFramesController": IAMCCS_LTX2_FirstLastFramesController,
     "IAMCCS_WanImageMotion": IAMCCS_WanImageMotion,
+    "WanImageMotionPro": WanImageMotionPro,
+    "IAMCCS_WanImageMotionPro": WanImageMotionPro,
     
     "IAMCCS_SetAutoLink": IAMCCS_SetAutoLink,
     "IAMCCS_GetAutoLink": IAMCCS_GetAutoLink,
@@ -134,6 +144,12 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_VAEDecodeTiledSafe": IAMCCS_VAEDecodeTiledSafe,
     "IAMCCS_VAEDecodeToDisk": IAMCCS_VAEDecodeToDisk,
     "IAMCCS_HWProbeRecommendations": IAMCCS_HWProbeRecommendations,
+
+    # QwenVL First/Last Frame (registered only if QwenVL is installed)
+    **({
+        "IAMCCS_QWEN_VL_FLF":          IAMCCS_QWEN_VL_FLF,
+        "IAMCCS_QWEN_VL_FLF_Advanced": IAMCCS_QWEN_VL_FLF_Advanced,
+    } if IAMCCS_QWEN_VL_FLF is not None else {}),
 
 }
 
@@ -163,7 +179,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_ReferenceImageSwitch": "LTX-2 Reference Image Switch 🧷",
     "IAMCCS_LTX2_ReferenceStartFramesInjector": "LTX-2 Inject Reference Into Start Frames 🧬",
     "IAMCCS_LTX2_FrameCountValidator": "LTX-2 Frame Count Validator ✅ (8n+1)",
+    "IAMCCS_LTX2_FirstLastFramesController": "LTX-2 First/Last Frames Controller 🧲",
     "IAMCCS_WanImageMotion": "WanImageMotion",
+    "WanImageMotionPro": "WanImageMotionPro (Motion + FLF End Lock)",
+    "IAMCCS_WanImageMotionPro": "WanImageMotionPro (Motion + FLF End Lock)",
     
     "IAMCCS_SetAutoLink": "Set AutoLink",
     "IAMCCS_GetAutoLink": "Get AutoLink",
@@ -184,6 +203,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_VAEDecodeTiledSafe": "VAE Decode Tiled (safe, optional cleanup)",
     "IAMCCS_VAEDecodeToDisk": "VAE Decode → Disk (frames, low RAM)",
     "IAMCCS_HWProbeRecommendations": "HW Probe Recommendations (JSON)",
+
+    # QwenVL FLF
+    **({
+        "IAMCCS_QWEN_VL_FLF":          "QwenVL FLF — First/Last Frame Prompt 🎬",
+        "IAMCCS_QWEN_VL_FLF_Advanced": "QwenVL FLF — First/Last Frame Prompt (Advanced) 🎬",
+    } if IAMCCS_QWEN_VL_FLF is not None else {}),
 
 }
 

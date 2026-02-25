@@ -1,5 +1,19 @@
 # IAMCCS Nodes - Changelog
 
+## 🆕 2026-02-24 — 🆕 Version 1.3.5  WanImageMotionPro + Motion Safety Preset
+
+Changes:
+- Added new video node: `WanImageMotionPro` (Motion + FLF End Lock)
+  - Optional `end_samples` to lock the ending latent slots (FLF-style end control)
+- Added `safety_preset` to motion nodes (`IAMCCS_WanImageMotion` and `WanImageMotionPro`)
+  - `safe` (default): enables stabilizations only when `motion > 1.15`
+  - `safer`: stronger stabilization for higher motion values
+  - `legacy`: keeps the older behavior
+
+Docs:
+- Added `docs/wanimagemotion_instructions.md` (Simple + Pro guide + example recipes)
+- Updated `docs/WanImageMotion.md`
+
 ## 🆕 Version 1.3.4 — Video Performance + Low-RAM Tools
 
 Date: 2026-02-01

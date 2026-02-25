@@ -9,7 +9,21 @@
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows + general nodes 4 ComfyUI
 
-Version: 1.3.4
+Version: 1.3.5
+
+## 🆕 Motion Nodes Update (2026-02-24)
+
+This update extends the WAN SVI Pro motion toolset:
+
+- New node: `WanImageMotionPro (Motion + FLF End Lock)`
+  - Adds optional `end_samples` end-lock (FLF-style) on top of motion continuity.
+- New artifact-mitigation widget on both motion nodes: `safety_preset`
+  - `safe` (default): activates stabilizations only when `motion > 1.15`
+  - `safer`: stronger stabilization for higher motion values
+  - `legacy`: keeps the older behavior
+
+![[Node piece](assets/wanimagemotionpro.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/wanimagemotionpro.png)
+
 
 # UPDATE VERSION 1-3-4
 
@@ -35,15 +49,12 @@ Highlights (EN):
   - Backward-compatible input ordering preserved for older workflows.
 
 - Frontend quality-of-life:
-  - Bus Group “Hide options” now persists across sessions.
+  - Bus Group with MACRO settings.
   - HW probe apply is user-controlled (overwrite vs fill-missing) and preset sync can be disabled to keep manual tuning.
 
 - MultiSwitch (frontend + workflow UX): `MultiSwitch (dynamic inputs)` (`IAMCCS_MultiSwitch`)
   - Active-link indicator: visually shows which input is currently connected/used.
   - Input rename: you can rename inputs to keep complex graphs readable (especially when routing MANY signals).
-
-Docs:
-- Low VRAM Video Tips: `LOW_VRAM_VIDEO_TIPS.md`
 
 ---
 
@@ -62,10 +73,6 @@ Highlights (EN):
 
 ![[Node piece](assets/extension.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/extension.png)
 
-Docs:
-
-- LTX-2 Extension Module (EN/IT): `LTX2_EXTENSION_MODULE_README.md`
-- LTX-2 Nodes Guide: `LTX2_EXTENSION_NODES_GUIDE_EN.md`
 
 GGUF / OOM tips:
 - If you use `IAMCCS_GGUF_accelerator` and you are close to the VRAM limit, consider PyTorch allocator tuning to reduce fragmentation (must be set **before** launching ComfyUI).
@@ -140,8 +147,9 @@ Highlights:
 - Motion modes: apply boost to `prev_samples` only or all non-first latents.
 - VRAM profiles: normal / chunked / per-frame loop / CPU offload for memory-constrained systems.
 - `include_padding_in_motion` toggle: enables motion boost on padded frames when anchor has single frame (T=1).
+- `safety_preset` (safe defaults for higher motion): helps reduce color artifacts and seam degradation when pushing `motion`.
 - Comprehensive logging with warnings when motion_range is empty.
-- Full documentation: `WanImageMotion.md`
+- Full documentation: `docs/WanImageMotion.md` and `docs/wanimagemotion_instructions.md`
 - Removed the previously included external-model LoRA loader node and related documentation.
 
 ### New Node: IAMCCS WanImageMotion
@@ -158,6 +166,7 @@ Inputs:
 - `include_padding_in_motion`: enable to apply motion on padded frames
 - `vram_profile`: memory optimization strategy
 - `latent_precision`: dtype control (auto/fp16/fp32)
+- `safety_preset`: `safe` / `safer` / `legacy` (artifact mitigation when `motion > 1.15`)
 - `add_reference_latents`: optional conditioning stabilization
 - Optional `prev_samples`: previous latents for motion continuity
 

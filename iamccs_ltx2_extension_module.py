@@ -1141,6 +1141,181 @@ class IAMCCS_LTX2_ExtensionModule_simple(IAMCCS_LTX2_ExtensionModule):
         )
 
 
+class IAMCCS_LTX2_FirstLastFramesController:
+    """
+    First-Last Frame (FLF) controller for LTX-2 image conditioning.
+
+    Injects a reference first_frame and/or last_frame directly into the
+    `images` conditioning tensor used by the sampler.  Works on the
+    'MISTO' pattern: the tensor already contains both external images and
+    generated frames — this node simply overwrites / blends the head and/or
+    tail K frames with the supplied references.
+
+    Modes
+    -----
+    hard_lock   : replace the K frames completely with the reference
+    linear_blend: weighted blend  (reference * strength + original * (1-strength))
+    ramp        : progressive blend, strength ramps from 0 → strength over K frames
+                  (for head: 0→strength left-to-right;  for tail: strength→0 left-to-right)
+
+    Positions
+    ---------
+    head  : operate on first K frames only
+    tail  : operate on last  K frames only
+    both  : operate on both ends simultaneously
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {
+                    "tooltip": "Conditioning image batch (the 'images' input to the sampler)"
+                }),
+                "k_frames": ("INT", {
+                    "default": 4,
+                    "min": 1,
+                    "max": 64,
+                    "step": 1,
+                    "tooltip": "Number of frames to affect at each injection site"
+                }),
+                "mode": (["hard_lock", "linear_blend", "ramp"], {
+                    "default": "hard_lock",
+                    "tooltip": (
+                        "hard_lock: full replace  |  "
+                        "linear_blend: uniform blend at given strength  |  "
+                        "ramp: progressive blend from 0 to strength"
+                    ),
+                }),
+                "position": (["head", "tail", "both"], {
+                    "default": "both",
+                    "tooltip": "Where to inject references (head=first K, tail=last K, both=head+tail)",
+                }),
+                "blend_strength": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.05,
+                    "tooltip": "Max blend weight (ignored for hard_lock which always uses 1.0)"
+                }),
+            },
+            "optional": {
+                "first_frame": ("IMAGE", {
+                    "tooltip": "Reference image to inject at the HEAD of the batch (ignored if position=tail)"
+                }),
+                "last_frame": ("IMAGE", {
+                    "tooltip": "Reference image to inject at the TAIL of the batch (ignored if position=head)"
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("images", "report")
+    FUNCTION = "apply"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    # ------------------------------------------------------------------
+    # helpers
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _resize_to(image: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
+        """Resize image tensor [N,H,W,C] to (target_h, target_w)."""
+        if int(image.shape[1]) == target_h and int(image.shape[2]) == target_w:
+            return image
+        x = image.permute(0, 3, 1, 2)
+        x = F.interpolate(x.float(), size=(target_h, target_w), mode="bilinear", align_corners=False)
+        return x.permute(0, 2, 3, 1).clamp(0.0, 1.0).to(image.dtype)
+
+    @staticmethod
+    def _broadcast_ref(ref: torch.Tensor, k: int) -> torch.Tensor:
+        """Ensure ref has exactly k frames (repeat single-frame or crop)."""
+        n = int(ref.shape[0])
+        if n == k:
+            return ref
+        if n == 1:
+            return ref.repeat(k, 1, 1, 1)
+        return ref[:k]
+
+    @staticmethod
+    def _blend_weights(k: int, mode: str, max_s: float, ramp_direction: str) -> list:
+        """
+        Returns list of k blend weights.
+        ramp_direction: 'up' = 0→max_s, 'down' = max_s→0
+        """
+        if mode == "hard_lock":
+            return [1.0] * k
+        if mode == "linear_blend":
+            return [max_s] * k
+        # ramp
+        if k == 1:
+            return [max_s]
+        if ramp_direction == "up":
+            return [max_s * float(i + 1) / float(k) for i in range(k)]
+        else:  # down
+            return [max_s * float(k - i) / float(k) for i in range(k)]
+
+    def _inject(
+        self,
+        out: torch.Tensor,
+        ref: torch.Tensor,
+        idxs: list,
+        weights: list,
+    ) -> torch.Tensor:
+        """Blend ref frames into out at given indices with given per-frame weights."""
+        h, w = int(out.shape[1]), int(out.shape[2])
+        ref_r = self._resize_to(ref, h, w)
+        ref_r = self._broadcast_ref(ref_r, len(idxs))
+        for j, i in enumerate(idxs):
+            s = float(weights[j])
+            out[i] = ((1.0 - s) * out[i].float() + s * ref_r[j].float()).clamp(0.0, 1.0).to(out.dtype)
+        return out
+
+    # ------------------------------------------------------------------
+    # main
+    # ------------------------------------------------------------------
+    def apply(
+        self,
+        images: torch.Tensor,
+        k_frames: int,
+        mode: str,
+        position: str,
+        blend_strength: float,
+        first_frame: Optional[torch.Tensor] = None,
+        last_frame: Optional[torch.Tensor] = None,
+    ):
+        total = int(images.shape[0])
+        k = max(1, min(int(k_frames), total // 2 if total > 1 else 1))
+        max_s = 1.0 if mode == "hard_lock" else float(max(0.0, min(1.0, blend_strength)))
+
+        out = images.clone()
+        ops = []
+
+        do_head = position in ("head", "both")
+        do_tail = position in ("tail", "both")
+
+        if do_head and first_frame is not None:
+            idxs = list(range(0, k))
+            # ramp up: 0 → max_s  (anchor gets full weight at the end)
+            weights = self._blend_weights(k, mode, max_s, "up")
+            out = self._inject(out, first_frame, idxs, weights)
+            ops.append(f"head(k={k},mode={mode},s={max_s:.2f})")
+
+        if do_tail and last_frame is not None:
+            idxs = list(range(total - k, total))
+            # ramp down: max_s → 0  (anchor gets full weight at the start)
+            weights = self._blend_weights(k, mode, max_s, "down")
+            out = self._inject(out, last_frame, idxs, weights)
+            ops.append(f"tail(k={k},mode={mode},s={max_s:.2f})")
+
+        if not ops:
+            report = f"FLF Controller: no-op (position={position}, first_frame={'yes' if first_frame is not None else 'no'}, last_frame={'yes' if last_frame is not None else 'no'})"
+        else:
+            report = "FLF Controller: " + " + ".join(ops) + f" | total_frames={total}"
+
+        _log.debug(report)
+        return (out, report)
+
+
 # Node registration
 NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_ExtensionModule": IAMCCS_LTX2_ExtensionModule,
@@ -1149,6 +1324,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_ReferenceImageSwitch": IAMCCS_LTX2_ReferenceImageSwitch,
     "IAMCCS_LTX2_ReferenceStartFramesInjector": IAMCCS_LTX2_ReferenceStartFramesInjector,
     "IAMCCS_LTX2_FrameCountValidator": IAMCCS_LTX2_FrameCountValidator,
+    "IAMCCS_LTX2_FirstLastFramesController": IAMCCS_LTX2_FirstLastFramesController,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1158,4 +1334,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_ReferenceImageSwitch": "LTX-2 Reference Image Switch 🧷",
     "IAMCCS_LTX2_ReferenceStartFramesInjector": "LTX-2 Inject Reference Into Start Frames 🧬",
     "IAMCCS_LTX2_FrameCountValidator": "LTX-2 Frame Count Validator ✅ (8n+1)",
+    "IAMCCS_LTX2_FirstLastFramesController": "LTX-2 First-Last Frames Controller 🎯",
 }
