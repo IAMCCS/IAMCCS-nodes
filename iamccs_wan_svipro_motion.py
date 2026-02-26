@@ -45,42 +45,48 @@ def _center_diff(diff: torch.Tensor, *, mean_mode: str) -> tuple[torch.Tensor, t
 
 
 def _preset_params(safety_preset: str, motion_amplitude: float) -> dict:
-    # Keep changes non-invasive unless motion is pushed above the common safe zone.
-    only_if_gt = 1.15
+    # "base": 1:1 with WanImageToVideoSVIProFLF / WanImageToVideoSVIPro.
+    # No amplitude processing at all — pure latent concatenation, zero modification.
+    base = {
+        "enabled": False,
+    }
 
+    # "legacy": mirrors PainterI2V algorithm (frame-scalar diff centering, hard clamp ±6, no ramp).
     legacy = {
         "enabled": True,
-        "only_if_gt": float("inf"),
         "mean_mode": "frame_scalar",
         "limiter_mode": "hard",
         "limiter_limit": 6.0,
         "ramp_frames": 0,
     }
 
+    # "safe": per-channel stabilisation + tanh limiter + 2-frame ramp.
+    # Reduces hue/saturation drift at any motion value.
     safe = {
         "enabled": True,
-        "only_if_gt": only_if_gt,
         "mean_mode": "per_channel",
         "limiter_mode": "tanh",
         "limiter_limit": 6.0,
         "ramp_frames": 2,
     }
 
+    # "safer": same as safe but tighter limiter and longer ramp.
+    # Recommended above motion=1.5 or for longer chains.
     safer = {
         "enabled": True,
-        "only_if_gt": only_if_gt,
         "mean_mode": "per_channel",
         "limiter_mode": "tanh",
-        # slightly tighter limiter to avoid outliers at high motion
         "limiter_limit": 5.5,
         "ramp_frames": 4,
     }
 
+    if safety_preset == "base":
+        return base
     if safety_preset == "legacy":
         return legacy
     if safety_preset == "safer":
         return safer
-    # default
+    # default: "safe"
     return safe
 
 
@@ -128,6 +134,7 @@ class IAMCCS_WanImageMotion:
                 # Keep this at the end to preserve existing widgets_values indexing in saved workflows.
                 "safety_preset": (
                     [
+                        "base",
                         "safe",
                         "safer",
                         "legacy",
@@ -135,9 +142,10 @@ class IAMCCS_WanImageMotion:
                     {
                         "default": "safe",
                         "tooltip": (
-                            "Safe preset reduces color/seam artifacts when motion > 1.15. "
-                            "It applies per-channel stabilization, smooth limiter, and a short ramp. "
-                            "Set legacy to use the original hard-clamp behavior."
+                            "base   : 1:1 with WanImageToVideoSVIProFLF — no amplitude processing at all. "
+                            "safe   : per-channel stabilisation + tanh limiter + 2-frame ramp (active at any motion value, recommended default). "
+                            "safer  : same as safe but tighter limiter + longer ramp (best above motion=1.5). "
+                            "legacy : hard clamp ±6 + frame-scalar diff centering, mirrors PainterI2V algorithm."
                         ),
                     },
                 ),
@@ -170,6 +178,12 @@ class IAMCCS_WanImageMotion:
     def _apply_motion_amplitude(self, image_cond_latent: torch.Tensor, *, real_latents: int, anchor_latents: int,
                                motion_latents: int, motion_amplitude: float, motion_mode: str,
                                vram_profile: str, safety_preset: str = "safe") -> torch.Tensor:
+        preset = _preset_params(safety_preset, motion_amplitude)
+
+        # "base" preset: 1:1 with reference nodes — no processing at all.
+        if not preset.get("enabled", True):
+            return image_cond_latent
+
         if motion_amplitude is None or motion_amplitude <= 1.0:
             return image_cond_latent
 
@@ -177,12 +191,6 @@ class IAMCCS_WanImageMotion:
             return image_cond_latent
 
         base_latent = image_cond_latent[:, :, 0:1]  # first latent frame
-
-        preset = _preset_params(safety_preset, motion_amplitude)
-        # Non-invasive: if motion is within the usual safe zone, keep legacy behavior.
-        # This preserves 1:1 results for typical workflows.
-        if motion_amplitude <= preset["only_if_gt"]:
-            preset = _preset_params("legacy", motion_amplitude)
 
         def _scale_slice_gpu(view_slice: torch.Tensor, *, gain: torch.Tensor | float) -> torch.Tensor:
             # view_slice: [B,C,T,H,W]
@@ -511,6 +519,7 @@ class WanImageMotionPro:
                 # Keep this at the end to preserve existing widgets_values indexing in saved workflows.
                 "safety_preset": (
                     [
+                        "base",
                         "safe",
                         "safer",
                         "legacy",
@@ -518,8 +527,10 @@ class WanImageMotionPro:
                     {
                         "default": "safe",
                         "tooltip": (
-                            "Safe preset reduces color/seam artifacts when motion > 1.15. "
-                            "Set legacy to use original hard-clamp behavior."
+                            "base   : 1:1 with WanImageToVideoSVIProFLF — no amplitude processing at all. "
+                            "safe   : per-channel stabilisation + tanh limiter + 2-frame ramp (active at any motion value, recommended default). "
+                            "safer  : same as safe but tighter limiter + longer ramp (best above motion=1.5). "
+                            "legacy : hard clamp ±6 + frame-scalar diff centering, mirrors PainterI2V algorithm."
                         ),
                     },
                 ),
@@ -589,6 +600,12 @@ class WanImageMotionPro:
         safety_preset: str = "safe",
     ) -> torch.Tensor:
         # Reuse the exact logic from IAMCCS_WanImageMotion (copy to keep node self-contained).
+        preset = _preset_params(safety_preset, motion_amplitude)
+
+        # "base" preset: 1:1 with reference nodes — no processing at all.
+        if not preset.get("enabled", True):
+            return image_cond_latent
+
         if motion_amplitude is None or motion_amplitude <= 1.0:
             return image_cond_latent
 
@@ -596,10 +613,6 @@ class WanImageMotionPro:
             return image_cond_latent
 
         base_latent = image_cond_latent[:, :, 0:1]
-
-        preset = _preset_params(safety_preset, motion_amplitude)
-        if motion_amplitude <= preset["only_if_gt"]:
-            preset = _preset_params("legacy", motion_amplitude)
 
         def _scale_slice_gpu(view_slice: torch.Tensor, *, gain: torch.Tensor | float) -> torch.Tensor:
             with torch.no_grad():
@@ -764,8 +777,9 @@ class WanImageMotionPro:
             # Pre-compute end_t_fix so we can exclude the end-locked zone from motion amplitude.
             # Motion should NOT touch slots that will be hard-locked to end_samples: scaling those
             # intermediate latents would generate noise that hurts the model's first→last interpolation.
+            # Respect use_end_frame: if disabled, never cap the motion range.
             end_t_fix_early = 0
-            if end_samples is not None:
+            if end_samples is not None and use_end_frame:
                 _e = end_samples["samples"]
                 if (
                     _e.shape[1] == C
