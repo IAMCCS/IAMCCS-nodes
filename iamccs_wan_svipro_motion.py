@@ -349,9 +349,10 @@ class IAMCCS_WanImageMotion:
             effective_latents = total_latents if include_padding_in_motion else min(total_latents, T_anchor + T_motion)
 
             motion_mode_effective = motion_mode
-            # If there are no motion latents, "motion_only" would be a no-op.
-            # When include_padding_in_motion=True, treat padding frames as motion targets.
-            if motion_mode == "motion_only (prev_samples)" and T_motion == 0 and include_padding_in_motion:
+            # When include_padding_in_motion=True, always extend motion boost to all non-anchor
+            # frames (including zero-padded slots), regardless of whether prev_samples are set.
+            # This ensures consistent full-range boost across all chunks in a chained workflow.
+            if motion_mode == "motion_only (prev_samples)" and include_padding_in_motion:
                 motion_mode_effective = "all_nonfirst (anchor+motion)"
 
             # --- Logging (concise but informative) ---
@@ -522,6 +523,31 @@ class WanImageMotionPro:
                         ),
                     },
                 ),
+                # --- End-frame controls (keep at end to preserve widgets_values ordering) ---
+                "use_end_frame": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "When False, end_samples is ignored even if the wire is connected. "
+                            "Use this to safely bypass the end-frame encoder without disconnecting the node, "
+                            "preventing ping-pong artifacts."
+                        ),
+                    },
+                ),
+                "end_transition_frames": (
+                    "INT",
+                    {
+                        "default": 4,
+                        "min": 0,
+                        "max": 32,
+                        "step": 1,
+                        "tooltip": (
+                            "Number of latent frames before the end-lock zone to gradually blend toward "
+                            "the end frame. 0 = hard cut (original behavior). Higher = smoother convergence."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 # prev_samples is optional – mirrors original FLF node and IAMCCS_WanImageMotion.
@@ -686,6 +712,8 @@ class WanImageMotionPro:
         vram_profile,
         include_padding_in_motion,
         safety_preset="safe",
+        use_end_frame=True,
+        end_transition_frames=4,
         prev_samples=None,
         end_samples=None,
     ):
@@ -752,7 +780,9 @@ class WanImageMotionPro:
             effective_latents = max(1, min(effective_latents_base, total_latents - end_t_fix_early))
 
             motion_mode_effective = motion_mode
-            if motion_mode == "motion_only (prev_samples)" and T_motion == 0 and include_padding_in_motion:
+            # When include_padding_in_motion=True, always extend motion boost to all non-anchor
+            # frames (including zero-padded slots), regardless of whether prev_samples are set.
+            if motion_mode == "motion_only (prev_samples)" and include_padding_in_motion:
                 motion_mode_effective = "all_nonfirst (anchor+motion)"
 
             try:
@@ -761,7 +791,7 @@ class WanImageMotionPro:
                 free_vram, total_vram = None, None
 
             self._log.info(
-                "[WanImageMotionPro] length=%s -> total_latents=%s | motion=%s | mode=%s | vram_profile=%s | latent_precision=%s | add_reference_latents=%s | include_padding_in_motion=%s",
+                "[WanImageMotionPro] length=%s -> total_latents=%s | motion=%s | mode=%s | vram_profile=%s | latent_precision=%s | add_reference_latents=%s | include_padding_in_motion=%s | use_end_frame=%s | end_transition_frames=%s",
                 length,
                 total_latents,
                 motion,
@@ -770,6 +800,8 @@ class WanImageMotionPro:
                 latent_precision,
                 add_reference_latents,
                 include_padding_in_motion,
+                use_end_frame,
+                end_transition_frames,
             )
             self._log.info(
                 "[WanImageMotionPro] anchor: B=%s C=%s T=%s H=%s W=%s dtype=%s device=%s | prev=%s motion_latent_count=%s T_motion=%s | padding_size=%s | end_samples=%s",
@@ -828,8 +860,10 @@ class WanImageMotionPro:
             )
 
             # FLF end lock: overwrite last slots with end_samples (if provided).
+            # use_end_frame=False lets the user keep the wire connected without activating the lock,
+            # prevents ping-pong artifacts when the end-frame encoder node is bypassed.
             end_t_fix = 0
-            if end_samples is not None:
+            if end_samples is not None and use_end_frame:
                 # Clone to prevent mutations from affecting the caller's tensor.
                 end_latent = end_samples["samples"].clone()
 
@@ -845,6 +879,37 @@ class WanImageMotionPro:
                     end_t_fix = min(T_end, total_latents)
                     if end_t_fix > 0:
                         image_cond_latent[:, :, -end_t_fix:] = end_latent[:, :, -end_t_fix:]
+
+                        # Smooth transition zone: blend image_cond_latent toward the end frame over
+                        # `end_transition_frames` slots immediately before the hard-locked zone.
+                        # This prevents the abrupt jump / stop-motion artifact at chunk boundaries.
+                        if end_transition_frames > 0:
+                            # Use the first frame of end_latent as the blend target (entry to end seq).
+                            end_ref = end_latent[:, :, 0:1].to(
+                                device=image_cond_latent.device, dtype=image_cond_latent.dtype
+                            )
+                            trans_end = total_latents - end_t_fix       # exclusive upper bound
+                            trans_start = max(1, trans_end - end_transition_frames)  # inclusive
+                            trans_count = trans_end - trans_start
+                            if trans_count > 0:
+                                self._log.info(
+                                    "[WanImageMotionPro] end_transition zone=[%s:%s] (%s frame(s)) blending toward end frame",
+                                    trans_start, trans_end, trans_count,
+                                )
+                                # Smoothstep weights from 0 (far from end) → 1 (adjacent to locked zone)
+                                x_vals = torch.linspace(
+                                    0.0, 1.0,
+                                    steps=trans_count + 2,
+                                    device=image_cond_latent.device,
+                                    dtype=image_cond_latent.dtype,
+                                )[1:-1]  # exclude the 0 and 1 endpoints
+                                for i in range(trans_count):
+                                    alpha = _smoothstep(x_vals[i : i + 1]).item()
+                                    t = trans_start + i
+                                    image_cond_latent[:, :, t : t + 1] = (
+                                        (1.0 - alpha) * image_cond_latent[:, :, t : t + 1]
+                                        + alpha * end_ref
+                                    )
                 else:
                     end_t_fix = 0
                     self._log.warning(
@@ -852,6 +917,10 @@ class WanImageMotionPro:
                         tuple(end_latent.shape),
                         tuple(anchor_latent.shape),
                     )
+            elif end_samples is not None and not use_end_frame:
+                self._log.info(
+                    "[WanImageMotionPro] end_samples connected but use_end_frame=False — end lock skipped."
+                )
 
             # Mask: lock first slot + lock last end_t_fix slots.
             mask = torch.ones((1, 1, total_latents, H, W), device=device, dtype=dtype)

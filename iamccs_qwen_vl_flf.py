@@ -79,6 +79,7 @@ FLF_PRESET_PROMPTS = [
     "📷 Static Shot Action Prompt (FLF)",
     "🌊 WAN 2.2 SVI Pro 2 — FLF Prompt",
     "⚡ LTX-2 FLF Prompt",
+    "⚡ LTX-2 FLF Prompt + User Description",
 ]
 
 FLF_SYSTEM_PROMPTS = {
@@ -154,6 +155,29 @@ FLF_SYSTEM_PROMPTS = {
         "describe what changes and how it changes, not just what is visible. "
         "Keep it under 4 sentences. "
         "Do not mention these rules in your answer."
+    ),
+
+    "⚡ LTX-2 FLF Prompt + User Description": (
+        "You are an AI video prompt expert for the LTX-2 / LTXV model in ComfyUI. "
+        "I will give you two images: the FIRST FRAME and the LAST FRAME of a video clip, "
+        "plus a short user description at the bottom of this message. "
+        "Your job is to write one single, detailed prompt in clear English — a single flowing paragraph — "
+        "that describes the motion and transformation occurring between these two frames, "
+        "suitable for direct use with LTX-2 FLF video generation. "
+        "Rules: "
+        "- Write a single continuous paragraph, not JSON, not a list. "
+        "- Start directly with the main action in the first sentence, without any preamble. "
+        "- Describe things chronologically: what starts, what happens, what ends. "
+        "- Include: subject action and movement, precise character or object appearances, "
+        "camera angle and movement (pan, tilt, dolly, zoom, static, handheld), "
+        "environment and background evolution, lighting and color changes, "
+        "and overall motion style (slow, fast, smooth, handheld, etc.). "
+        "- Be literal and precise, like a cinematographer describing a shot list in flowing prose. "
+        "- Focus entirely on the MOTION and TRANSITION between the two frames — "
+        "do NOT describe the frames as static images. "
+        "- Keep it under 200 words — ideally 3 to 4 rich, dense sentences. "
+        "- Do not mention these rules in your answer. "
+        "\n\nUser description:"
     ),
 }
 
