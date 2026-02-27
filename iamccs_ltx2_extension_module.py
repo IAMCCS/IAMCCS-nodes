@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -130,6 +130,19 @@ class IAMCCS_LTX2_ExtensionModule:
                     "max": 5.0,
                     "step": 0.1,
                     "tooltip": "Weight for edge continuity metric"
+                }),
+
+                # Stitching presets (UI convenience). Frontend JS will also update widgets live.
+                # Default is 'custom' to preserve existing workflows.
+                "preset": ([
+                    "custom",
+                    "cut_bestofk_16",
+                    "cut_bestofk_16_luma",
+                    "cut_bestofk_32",
+                    "micro_crossfade_3",
+                ], {
+                    "default": "custom",
+                    "tooltip": "Preset that auto-configures overlap/blend/seam search options (and updates widgets live). Choose 'custom' to keep manual settings."
                 }),
             },
             "optional": {
@@ -435,12 +448,75 @@ class IAMCCS_LTX2_ExtensionModule:
         k_search: int,
         metric_weight_color: float,
         metric_weight_edges: float,
+        preset: str = "custom",
         new_images: Optional[torch.Tensor] = None,
         math_value_b: int = 1,
     ):
         # Initialize
         source_count = int(source_images.shape[0])
         overlap_frames_in = int(overlap_frames)
+
+        preset = str(preset or "custom")
+        if preset != "custom":
+            # NOTE: These presets are meant for stitching segments where crossfade is undesirable.
+            # Frontend updates the widgets live; backend enforces the same mapping so renders match.
+            preset_map: Dict[str, Dict[str, Any]] = {
+                # Prova 1: no crossfade, cut seam + best_of_k
+                "cut_bestofk_16": {
+                    "overlap_frames": 10,
+                    "overlap_mode": "cut",
+                    "overlap_side": "new_images",
+                    "seam_search_mode": "best_of_k",
+                    "k_search": 16,
+                    "color_match_mode": "none",
+                    "color_match_strength": 0.0,
+                    "color_reference_window": 8,
+                },
+                # Prova 2: cut seam + luma match
+                "cut_bestofk_16_luma": {
+                    "overlap_frames": 10,
+                    "overlap_mode": "cut",
+                    "overlap_side": "new_images",
+                    "seam_search_mode": "best_of_k",
+                    "k_search": 16,
+                    "color_match_mode": "luma_only",
+                    "color_match_strength": 0.25,
+                    "color_reference_window": 8,
+                },
+                # Prova 3: stronger seam search window
+                "cut_bestofk_32": {
+                    "overlap_frames": 16,
+                    "overlap_mode": "cut",
+                    "overlap_side": "new_images",
+                    "seam_search_mode": "best_of_k",
+                    "k_search": 32,
+                    "color_match_mode": "none",
+                    "color_match_strength": 0.0,
+                    "color_reference_window": 8,
+                },
+                # Alternative: very short perceptual crossfade (minimizes visible dissolve)
+                "micro_crossfade_3": {
+                    "overlap_frames": 3,
+                    "overlap_mode": "perceptual_crossfade",
+                    "overlap_side": "source",
+                    "seam_search_mode": "none",
+                    "k_search": 0,
+                    "color_match_mode": "none",
+                    "color_match_strength": 0.0,
+                    "color_reference_window": 8,
+                },
+            }
+
+            cfg = preset_map.get(preset)
+            if cfg is not None:
+                overlap_frames_in = int(cfg.get("overlap_frames", overlap_frames_in))
+                overlap_mode = str(cfg.get("overlap_mode", overlap_mode))
+                overlap_side = str(cfg.get("overlap_side", overlap_side))
+                seam_search_mode = str(cfg.get("seam_search_mode", seam_search_mode))
+                k_search = int(cfg.get("k_search", k_search))
+                color_match_mode = str(cfg.get("color_match_mode", color_match_mode))
+                color_match_strength = float(cfg.get("color_match_strength", color_match_strength))
+                color_reference_window = int(cfg.get("color_reference_window", color_reference_window))
         
         # Validate inputs (match KJNodes semantics: if overlap is too large, just passthrough)
         if source_count < 1:
@@ -479,6 +555,7 @@ class IAMCCS_LTX2_ExtensionModule:
         
         # Process extension if new images are provided
         if new_images is not None:
+            assert new_images is not None
             new_count = int(new_images.shape[0])
 
             # Validate shapes
@@ -579,6 +656,7 @@ class IAMCCS_LTX2_ExtensionModule:
             f"Math: {math_operation if enable_math else 'disabled'} | "
             f"Start frames rule: {start_frames_rule} | "
             f"Safe mode: {safe_mode} | "
+            f"Preset: {preset} | "
             f"Extended: {int(extended_images.shape[0]) if extended_images is not None else 0} frames | "
             f"Extension delta: +{extension_frames_count} frames | "
             f"Blend mode: {overlap_mode} | "
@@ -616,7 +694,7 @@ class IAMCCS_LTX2_GetImageFromBatch:
                 "images": ("IMAGE", {
                     "tooltip": "Input image batch"
                 }),
-                "mode": (["from_start", "from_end", "range"], {
+                "mode": (["from_start", "from_end", "range", "drop_start", "drop_end"], {
                     "default": "from_end",
                     "tooltip": "Extraction mode"
                 }),
@@ -731,8 +809,28 @@ class IAMCCS_LTX2_GetImageFromBatch:
             return (result, result.shape[0], report, used_start, used_end)
 
         # Optional: enforce LTX (1+8*x) rule for VideoVAE encode
+        # Only meaningful when we EXTRACT a fixed number of frames.
         if mode in ("from_start", "from_end"):
             effective_count = apply_ltx_rule(effective_count, str(count_rule), int(total))
+
+        # Drop modes: remove frames but keep the remaining tail/head.
+        # These are intentionally NOT LTX-rule adjusted: they are trimming utilities.
+        if mode == "drop_start":
+            drop = max(0, min(int(effective_count), max(0, int(total) - 1)))
+            result = images[drop:]
+            used_start = int(drop)
+            used_end = int(total)
+            report = f"Dropped first {drop} frames from batch of {total}; kept {result.shape[0]} frames"
+            return (result, result.shape[0], report, used_start, used_end)
+
+        if mode == "drop_end":
+            drop = max(0, min(int(effective_count), max(0, int(total) - 1)))
+            keep_end = int(total) - int(drop)
+            result = images[:keep_end]
+            used_start = 0
+            used_end = int(keep_end)
+            report = f"Dropped last {drop} frames from batch of {total}; kept {result.shape[0]} frames"
+            return (result, result.shape[0], report, used_start, used_end)
         
         if mode == "from_start":
             result = images[:effective_count]
@@ -1316,6 +1414,386 @@ class IAMCCS_LTX2_FirstLastFramesController:
         return (out, report)
 
 
+class IAMCCS_LTX2_ContextLatent:
+    """LTX-2 video continuation context injection (LATENT).
+
+    IAMCCS-native equivalent of TTP's `LTXVContext_TTP`.
+
+    Takes the last N frames from `previous_video`, encodes with VAE, and embeds
+    them into the beginning of `latent` plus a `noise_mask` to partially lock
+    those frames.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "previous_video": ("IMAGE", {
+                    "tooltip": "Previous segment frames (IMAGE batch = frames)"
+                }),
+                "vae": ("VAE", {}),
+                "latent": ("LATENT", {
+                    "tooltip": "Empty latent for the next segment"
+                }),
+                "enable": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "If false, passthrough latent (disables context injection)"
+                }),
+                "context_latent_frames": ("INT", {
+                    "default": 6,
+                    "min": 1,
+                    "max": 64,
+                    "step": 1,
+                    "tooltip": "How many latent frames to embed at start (LTX uses 8n+1 mapping)"
+                }),
+                "exclude_last_frame": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "If true, excludes the very last frame of previous_video when building context (often reduces over-constraint)"
+                }),
+            },
+            "optional": {
+                "context_strength": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.05,
+                    "tooltip": "1.0=fully locked context, 0.0=no lock"
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("LATENT", "STRING")
+    RETURN_NAMES = ("latent", "report")
+    FUNCTION = "apply_context"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    @staticmethod
+    def _common_upscale_nhwc_to(images: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
+        # NOTE: name kept internal; use comfy.utils.common_upscale for exact ComfyUI behavior.
+        try:
+            import comfy.utils  # type: ignore
+        except Exception as e:
+            raise ImportError("comfy.utils is required for this node") from e
+
+        if int(images.shape[1]) == int(target_h) and int(images.shape[2]) == int(target_w):
+            return images
+        x = comfy.utils.common_upscale(
+            images.movedim(-1, 1),
+            int(target_w),
+            int(target_h),
+            "bilinear",
+            "center",
+        ).movedim(1, -1)
+        return x
+
+    @staticmethod
+    def _match_latent_batch(base_samples: torch.Tensor, other_samples: torch.Tensor) -> torch.Tensor:
+        bb = int(base_samples.shape[0])
+        ob = int(other_samples.shape[0])
+        if bb == ob:
+            return other_samples
+        if ob == 1 and bb > 1:
+            reps = [bb] + [1] * (other_samples.dim() - 1)
+            return other_samples.repeat(*reps)
+        return other_samples[:bb]
+
+    def apply_context(self, previous_video, vae, latent, enable, context_latent_frames, exclude_last_frame=True, context_strength=1.0):
+        if not bool(enable):
+            return (latent, "Context: disabled (passthrough)")
+        if previous_video is None:
+            return (latent, "Context: no-op (previous_video=None)")
+
+        samples_in = latent.get("samples")
+        if samples_in is None:
+            raise ValueError("LATENT input is missing 'samples'")
+
+        samples = samples_in.clone()
+        batch, channels, latent_frames, latent_height, latent_width = samples.shape
+
+        # VAE scale factors -> target pixel dims
+        _, height_scale_factor, width_scale_factor = vae.downscale_index_formula
+        target_width = int(latent_width) * int(width_scale_factor)
+        target_height = int(latent_height) * int(height_scale_factor)
+
+        # LTX mapping: original_frames = (latent_frames - 1) * 8 + 1
+        lf = max(1, int(context_latent_frames))
+        required_frames = (lf - 1) * 8 + 1
+
+        total_video_frames = int(previous_video.shape[0])
+        if total_video_frames < 1:
+            return (latent, "Context: no-op (previous_video empty)")
+
+        end_idx = total_video_frames - 1 if bool(exclude_last_frame) else total_video_frames
+        end_idx = max(0, min(end_idx, total_video_frames))
+        start_idx = max(0, end_idx - required_frames)
+        context_frames = previous_video[start_idx:end_idx]
+
+        if int(context_frames.shape[0]) < 1:
+            return (latent, "Context: no-op (no frames after exclude_last_frame)")
+
+        pixels = self._common_upscale_nhwc_to(context_frames, target_height, target_width)
+        encode_pixels = pixels[:, :, :, :3]
+        context_latent = vae.encode(encode_pixels)
+
+        context_latent = self._match_latent_batch(samples, context_latent)
+        actual_latent_frames = int(context_latent.shape[2])
+        embed_frames = min(actual_latent_frames, int(latent_frames))
+        if embed_frames <= 0:
+            return (latent, "Context: no-op (embed_frames=0)")
+
+        samples[:, :, :embed_frames] = context_latent[:, :, :embed_frames]
+
+        # Initialize / merge noise_mask (keep stronger constraints)
+        if "noise_mask" in latent and latent["noise_mask"] is not None:
+            noise_mask = latent["noise_mask"].clone()
+        else:
+            noise_mask = torch.ones((batch, 1, latent_frames, 1, 1), dtype=torch.float32, device=samples.device)
+
+        s = float(max(0.0, min(1.0, context_strength)))
+        new_mask_val = 1.0 - s
+        current = noise_mask[:, :, :embed_frames]
+        noise_mask[:, :, :embed_frames] = torch.minimum(current, torch.full_like(current, new_mask_val))
+
+        out_latent = dict(latent)
+        out_latent["samples"] = samples
+        out_latent["noise_mask"] = noise_mask
+
+        report = f"Context: frames[{start_idx}:{end_idx}] -> embed_latent_frames={embed_frames} (strength={s:.2f})"
+        return (out_latent, report)
+
+
+class IAMCCS_LTX2_MiddleFrames:
+    """Accumulate middle-frame constraints for FLF (anytype).
+
+    IAMCCS-native equivalent of TTP's `LTXVMiddleFrame_TTP`.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE", {}),
+                "position": ("FLOAT", {
+                    "default": 0.5,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Relative position inside the latent timeline (0=head, 1=tail)"
+                }),
+                "strength": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.05,
+                }),
+            },
+            "optional": {
+                "middle_frames": ("*", {
+                    "tooltip": "Accumulator input (anytype)"
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("*",)
+    RETURN_NAMES = ("middle_frames",)
+    FUNCTION = "execute"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    def execute(self, image, position, strength, middle_frames=None):
+        if middle_frames is None:
+            frames_list = []
+        else:
+            frames_list = list(middle_frames.get("frames", []))
+
+        frames_list.append({
+            "image": image,
+            "position": float(position),
+            "strength": float(strength),
+        })
+
+        return ({"frames": frames_list},)
+
+
+class IAMCCS_LTX2_FirstLastLatentControl:
+    """First/Last frame control for LTX-2 via LATENT + noise_mask.
+
+    IAMCCS-native equivalent of TTP's `LTXVFirstLastFrameControl_TTP`.
+
+    Embeds first/last (and optional middle) images into the latent samples via
+    VAE encode and applies a noise_mask lock strength.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "vae": ("VAE", {}),
+                "latent": ("LATENT", {}),
+                "first_strength": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.05,
+                }),
+                "last_strength": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.05,
+                }),
+            },
+            "optional": {
+                "first_image": ("IMAGE", {"tooltip": "Optional first frame image"}),
+                "last_image": ("IMAGE", {"tooltip": "Optional last frame image"}),
+                "middle_frames": ("*", {"tooltip": "Optional middle-frame accumulator (anytype)"}),
+            },
+        }
+
+    RETURN_TYPES = ("LATENT", "STRING")
+    RETURN_NAMES = ("latent", "report")
+    FUNCTION = "execute"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    @staticmethod
+    def _common_upscale_nhwc_to(images: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
+        try:
+            import comfy.utils  # type: ignore
+        except Exception as e:
+            raise ImportError("comfy.utils is required for this node") from e
+
+        if int(images.shape[1]) == int(target_h) and int(images.shape[2]) == int(target_w):
+            return images
+        return comfy.utils.common_upscale(
+            images.movedim(-1, 1),
+            int(target_w),
+            int(target_h),
+            "bilinear",
+            "center",
+        ).movedim(1, -1)
+
+    @classmethod
+    def _encode_image(cls, vae, image: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
+        pixels = cls._common_upscale_nhwc_to(image, int(target_h), int(target_w))
+        encode_pixels = pixels[:, :, :, :3]
+        return vae.encode(encode_pixels)
+
+    @staticmethod
+    def _match_latent_batch(base_samples: torch.Tensor, other_samples: torch.Tensor) -> torch.Tensor:
+        bb = int(base_samples.shape[0])
+        ob = int(other_samples.shape[0])
+        if bb == ob:
+            return other_samples
+        if ob == 1 and bb > 1:
+            reps = [bb] + [1] * (other_samples.dim() - 1)
+            return other_samples.repeat(*reps)
+        return other_samples[:bb]
+
+    @staticmethod
+    def _ensure_noise_mask(latent: Dict[str, Any], samples: torch.Tensor) -> torch.Tensor:
+        batch, _, latent_frames, _, _ = samples.shape
+        if "noise_mask" in latent and latent["noise_mask"] is not None:
+            noise_mask = latent["noise_mask"].clone()
+            if int(noise_mask.shape[0]) != int(batch):
+                # best-effort crop/repeat
+                if int(noise_mask.shape[0]) == 1 and int(batch) > 1:
+                    noise_mask = noise_mask.repeat(int(batch), 1, 1, 1, 1)
+                else:
+                    noise_mask = noise_mask[: int(batch)]
+            return noise_mask
+        return torch.ones((batch, 1, latent_frames, 1, 1), dtype=torch.float32, device=samples.device)
+
+    def execute(self, vae, latent, first_strength=1.0, last_strength=1.0, first_image=None, last_image=None, middle_frames=None):
+        has_middle = middle_frames is not None and len(middle_frames.get("frames", [])) > 0
+        if first_image is None and last_image is None and not has_middle:
+            return (latent, "FLF(latent): no-op")
+
+        # Robustness: callers sometimes pass a multi-frame IMAGE batch (e.g. 8n+1 start frames).
+        # This node is meant to constrain only the first/last *frame*, so we collapse to 1 frame.
+        if first_image is not None and int(first_image.shape[0]) > 1:
+            first_image = first_image[:1]
+        if last_image is not None and int(last_image.shape[0]) > 1:
+            last_image = last_image[-1:]
+
+        samples_in = latent.get("samples")
+        if samples_in is None:
+            raise ValueError("LATENT input is missing 'samples'")
+
+        samples = samples_in.clone()
+        batch, _, latent_frames, latent_height, latent_width = samples.shape
+
+        _, height_scale_factor, width_scale_factor = vae.downscale_index_formula
+        width = int(latent_width) * int(width_scale_factor)
+        height = int(latent_height) * int(height_scale_factor)
+
+        noise_mask = self._ensure_noise_mask(latent, samples)
+
+        ops = []
+
+        fs = float(max(0.0, min(1.0, first_strength)))
+        if first_image is not None and fs > 0.0:
+            first_latent = self._encode_image(vae, first_image, height, width)
+            first_latent = self._match_latent_batch(samples, first_latent)
+            flf = int(first_latent.shape[2])
+            if flf > 0:
+                flf = min(flf, int(latent_frames))
+                samples[:, :, :flf] = first_latent[:, :, :flf]
+                cur = noise_mask[:, :, :flf]
+                noise_mask[:, :, :flf] = torch.minimum(cur, torch.full_like(cur, 1.0 - fs))
+                ops.append(f"first(frames={flf},s={fs:.2f})")
+
+        ls = float(max(0.0, min(1.0, last_strength)))
+        if last_image is not None and ls > 0.0:
+            last_latent = self._encode_image(vae, last_image, height, width)
+            last_latent = self._match_latent_batch(samples, last_latent)
+            llf = int(last_latent.shape[2])
+            if llf > 0:
+                if llf > int(latent_frames):
+                    last_latent = last_latent[:, :, : int(latent_frames)]
+                    llf = int(latent_frames)
+                    last_start_idx = 0
+                else:
+                    last_start_idx = int(latent_frames) - llf
+                samples[:, :, last_start_idx:] = last_latent[:, :, :llf]
+                cur = noise_mask[:, :, last_start_idx:]
+                noise_mask[:, :, last_start_idx:] = torch.minimum(cur, torch.full_like(cur, 1.0 - ls))
+                ops.append(f"last(frames={llf},s={ls:.2f})")
+
+        if has_middle:
+            frames_list = [] if middle_frames is None else middle_frames.get("frames", [])
+            for frame_data in frames_list:
+                image = frame_data.get("image")
+                position = float(frame_data.get("position", 0.5))
+                strength = float(frame_data.get("strength", 1.0))
+                strength = float(max(0.0, min(1.0, strength)))
+                if image is None or strength <= 0.0:
+                    continue
+
+                mid_latent = self._encode_image(vae, image, height, width)
+                mid_latent = self._match_latent_batch(samples, mid_latent)
+                mlf = int(mid_latent.shape[2])
+                if mlf <= 0:
+                    continue
+
+                middle_frame_idx = round(position * (int(latent_frames) - 1))
+                middle_frame_idx = max(0, min(int(middle_frame_idx), int(latent_frames) - mlf))
+
+                samples[:, :, middle_frame_idx:middle_frame_idx + mlf] = mid_latent[:, :, :mlf]
+                cur = noise_mask[:, :, middle_frame_idx:middle_frame_idx + mlf]
+                noise_mask[:, :, middle_frame_idx:middle_frame_idx + mlf] = torch.minimum(
+                    cur,
+                    torch.full_like(cur, 1.0 - strength),
+                )
+
+            ops.append(f"middle(count={len(frames_list)})")
+
+        out_latent = dict(latent)
+        out_latent["samples"] = samples
+        out_latent["noise_mask"] = noise_mask
+
+        report = "FLF(latent): " + (" + ".join(ops) if ops else "no-op")
+        return (out_latent, report)
+
+
 # Node registration
 NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_ExtensionModule": IAMCCS_LTX2_ExtensionModule,
@@ -1325,6 +1803,9 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_ReferenceStartFramesInjector": IAMCCS_LTX2_ReferenceStartFramesInjector,
     "IAMCCS_LTX2_FrameCountValidator": IAMCCS_LTX2_FrameCountValidator,
     "IAMCCS_LTX2_FirstLastFramesController": IAMCCS_LTX2_FirstLastFramesController,
+    "IAMCCS_LTX2_ContextLatent": IAMCCS_LTX2_ContextLatent,
+    "IAMCCS_LTX2_MiddleFrames": IAMCCS_LTX2_MiddleFrames,
+    "IAMCCS_LTX2_FirstLastLatentControl": IAMCCS_LTX2_FirstLastLatentControl,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1335,4 +1816,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_ReferenceStartFramesInjector": "LTX-2 Inject Reference Into Start Frames 🧬",
     "IAMCCS_LTX2_FrameCountValidator": "LTX-2 Frame Count Validator ✅ (8n+1)",
     "IAMCCS_LTX2_FirstLastFramesController": "LTX-2 First-Last Frames Controller 🎯",
+    "IAMCCS_LTX2_ContextLatent": "LTX-2 Context → Latent (continue) 🧩",
+    "IAMCCS_LTX2_MiddleFrames": "LTX-2 Middle Frames (accumulator) 🧷",
+    "IAMCCS_LTX2_FirstLastLatentControl": "LTX-2 First/Last → Latent (noise_mask) 🎯",
 }

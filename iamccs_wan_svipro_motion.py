@@ -559,6 +559,21 @@ class WanImageMotionPro:
                         ),
                     },
                 ),
+                "end_lock_slots": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 1,
+                        "max": 8,
+                        "step": 1,
+                        "tooltip": (
+                            "How many final latent slots to hard-lock to end_samples. "
+                            "Default 1 = only the very last slot (~last 4 video frames) is locked, "
+                            "so the end frame appears exactly at the last frame defined by 'length'. "
+                            "Increase only if a single locked slot is not enough for convergence."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 # prev_samples is optional – mirrors original FLF node and IAMCCS_WanImageMotion.
@@ -727,6 +742,7 @@ class WanImageMotionPro:
         safety_preset="safe",
         use_end_frame=True,
         end_transition_frames=4,
+        end_lock_slots=1,
         prev_samples=None,
         end_samples=None,
     ):
@@ -786,7 +802,9 @@ class WanImageMotionPro:
                     and _e.shape[3] == H
                     and _e.shape[4] == W
                 ):
-                    end_t_fix_early = min(_e.shape[2], total_latents)
+                    # Cap to end_lock_slots so the motion range is not incorrectly
+                    # shortened by the full VAE temporal size (which can be T>1 for a single image).
+                    end_t_fix_early = min(_e.shape[2], total_latents, end_lock_slots)
 
             # Motion boost applied before FLF overwrite.
             # Cap effective_latents so motion never reaches into the end-locked zone.
@@ -805,7 +823,7 @@ class WanImageMotionPro:
                 free_vram, total_vram = None, None
 
             self._log.info(
-                "[WanImageMotionPro] length=%s -> total_latents=%s | motion=%s | mode=%s | vram_profile=%s | latent_precision=%s | add_reference_latents=%s | include_padding_in_motion=%s | use_end_frame=%s | end_transition_frames=%s",
+                "[WanImageMotionPro] length=%s -> total_latents=%s | motion=%s | mode=%s | vram_profile=%s | latent_precision=%s | add_reference_latents=%s | include_padding_in_motion=%s | use_end_frame=%s | end_transition_frames=%s | end_lock_slots=%s",
                 length,
                 total_latents,
                 motion,
@@ -816,6 +834,7 @@ class WanImageMotionPro:
                 include_padding_in_motion,
                 use_end_frame,
                 end_transition_frames,
+                end_lock_slots,
             )
             self._log.info(
                 "[WanImageMotionPro] anchor: B=%s C=%s T=%s H=%s W=%s dtype=%s device=%s | prev=%s motion_latent_count=%s T_motion=%s | padding_size=%s | end_samples=%s",
@@ -890,20 +909,39 @@ class WanImageMotionPro:
                     and end_latent.shape[4] == W
                 ):
                     T_end = end_latent.shape[2]
-                    end_t_fix = min(T_end, total_latents)
+                    # end_lock_slots caps the lock to the intended number of slots.
+                    # The Wan VAE always encodes an image to T≥2 latent slots, so without
+                    # this cap end_t_fix would be 2 even for a single frame, locking the
+                    # last 8 video frames instead of only the last ~4 (= 1 latent slot).
+                    end_t_fix = min(T_end, total_latents, end_lock_slots)
                     if end_t_fix > 0:
+                        self._log.info(
+                            "[WanImageMotionPro] end lock: T_end=%s end_lock_slots=%s -> end_t_fix=%s (locking latent slots [%s:%s] = last ~%s video frames)",
+                            T_end, end_lock_slots, end_t_fix,
+                            total_latents - end_t_fix, total_latents,
+                            end_t_fix * 4,
+                        )
                         image_cond_latent[:, :, -end_t_fix:] = end_latent[:, :, -end_t_fix:]
 
                         # Smooth transition zone: blend image_cond_latent toward the end frame over
                         # `end_transition_frames` slots immediately before the hard-locked zone.
                         # This prevents the abrupt jump / stop-motion artifact at chunk boundaries.
                         if end_transition_frames > 0:
-                            # Use the first frame of end_latent as the blend target (entry to end seq).
-                            end_ref = end_latent[:, :, 0:1].to(
+                            # Blend target = first slot of the hard-locked zone.
+                            # Using end_latent[:,0:1] would be wrong: for Wan VAE, that slot
+                            # may differ from the actual locked entry.
+                            # NOTE: be careful with negative slicing: for end_t_fix=1,
+                            # [-1:0] is an empty slice. Use a positive index instead.
+                            end_ref_idx = max(0, T_end - end_t_fix)
+                            end_ref = end_latent[:, :, end_ref_idx : end_ref_idx + 1].to(
                                 device=image_cond_latent.device, dtype=image_cond_latent.dtype
                             )
                             trans_end = total_latents - end_t_fix       # exclusive upper bound
-                            trans_start = max(1, trans_end - end_transition_frames)  # inclusive
+                            # Safety: never let the transition zone enter the anchor area.
+                            # T_anchor latent slots are occupied by the start image;
+                            # blending into them creates a frozen-dissolve artifact.
+                            safe_trans_start = T_anchor + 1
+                            trans_start = max(safe_trans_start, trans_end - end_transition_frames)
                             trans_count = trans_end - trans_start
                             if trans_count > 0:
                                 self._log.info(

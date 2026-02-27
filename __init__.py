@@ -5,6 +5,9 @@
 import logging
 import os
 
+# ComfyUI frontend assets
+WEB_DIRECTORY = "web"
+
 from .iamccs_wan_lora_stack import (
     IAMCCS_WanLoRAStack,
     IAMCCS_ModelWithLoRA,
@@ -44,6 +47,9 @@ from .iamccs_ltx2_extension_module import (
     IAMCCS_LTX2_ReferenceStartFramesInjector,
     IAMCCS_LTX2_FrameCountValidator,
     IAMCCS_LTX2_FirstLastFramesController,
+    IAMCCS_LTX2_ContextLatent,
+    IAMCCS_LTX2_MiddleFrames,
+    IAMCCS_LTX2_FirstLastLatentControl,
 )
 
 from .iamccs_wan_svipro_motion import (
@@ -121,6 +127,9 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_ReferenceStartFramesInjector": IAMCCS_LTX2_ReferenceStartFramesInjector,
     "IAMCCS_LTX2_FrameCountValidator": IAMCCS_LTX2_FrameCountValidator,
     "IAMCCS_LTX2_FirstLastFramesController": IAMCCS_LTX2_FirstLastFramesController,
+    "IAMCCS_LTX2_ContextLatent": IAMCCS_LTX2_ContextLatent,
+    "IAMCCS_LTX2_MiddleFrames": IAMCCS_LTX2_MiddleFrames,
+    "IAMCCS_LTX2_FirstLastLatentControl": IAMCCS_LTX2_FirstLastLatentControl,
     "IAMCCS_WanImageMotion": IAMCCS_WanImageMotion,
     "WanImageMotionPro": WanImageMotionPro,
     "IAMCCS_WanImageMotionPro": WanImageMotionPro,
@@ -180,6 +189,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_ReferenceStartFramesInjector": "LTX-2 Inject Reference Into Start Frames 🧬",
     "IAMCCS_LTX2_FrameCountValidator": "LTX-2 Frame Count Validator ✅ (8n+1)",
     "IAMCCS_LTX2_FirstLastFramesController": "LTX-2 First/Last Frames Controller 🧲",
+    "IAMCCS_LTX2_ContextLatent": "LTX-2 Context → Latent (continue) 🧩",
+    "IAMCCS_LTX2_MiddleFrames": "LTX-2 Middle Frames (accumulator) 🧷",
+    "IAMCCS_LTX2_FirstLastLatentControl": "LTX-2 First/Last → Latent (noise_mask) 🎯",
     "IAMCCS_WanImageMotion": "WanImageMotion",
     "WanImageMotionPro": "WanImageMotionPro (Motion + FLF End Lock)",
     "IAMCCS_WanImageMotionPro": "WanImageMotionPro (Motion + FLF End Lock)",
