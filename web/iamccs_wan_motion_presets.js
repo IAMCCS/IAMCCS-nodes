@@ -71,8 +71,8 @@ const PRESETS_MOTION = {
         vram_profile: "normal",
         include_padding_in_motion: true,
         safety_preset: "safer",
-        // Allow motion immediately (no initial 4-frame hold).
-        lock_start_slots: 0,
+        // Keep the first frame anchored to the provided input.
+        lock_start_slots: 1,
     },
 
     // ── Low VRAM safe ───────────────────────────────────────
@@ -92,7 +92,7 @@ const PRESETS_MOTION = {
 const PRESETS_MOTION_PRO = {
     "[custom]": null,
 
-    // ── 1:1 con WanImageToVideoSVIProFLF (no end frame) ────
+    // ── 1:1 con WanImageToVideoSVIProFLF ───────────────────
     "parity 1:1": {
         motion_latent_count: 1,
         motion: 1.0,
@@ -102,9 +102,12 @@ const PRESETS_MOTION_PRO = {
         vram_profile: "normal",
         include_padding_in_motion: false,
         safety_preset: "base",
-        use_end_frame: false,
-        end_transition_frames: 4,
-        end_lock_slots: 1,
+        // Match original FLF behavior: end_samples is honored and hard-locked.
+        use_end_frame: true,
+        // Original node has no end-transition blend.
+        end_transition_frames: 0,
+        // Match: end_t_fix = min(T_end, total_latents)
+        end_lock_slots: 16,
         lock_start_slots: 1,
     },
 
@@ -118,7 +121,8 @@ const PRESETS_MOTION_PRO = {
         vram_profile: "normal",
         include_padding_in_motion: false,
         safety_preset: "safe",
-        use_end_frame: false,
+        // Always honor end_samples when connected (first/last reference).
+        use_end_frame: true,
         end_transition_frames: 4,
         end_lock_slots: 1,
         lock_start_slots: 1,
@@ -150,7 +154,8 @@ const PRESETS_MOTION_PRO = {
         vram_profile: "normal",
         include_padding_in_motion: true,
         safety_preset: "safer",
-        use_end_frame: false,
+        // Always honor end_samples when connected (first/last reference).
+        use_end_frame: true,
         end_transition_frames: 4,
         end_lock_slots: 1,
         lock_start_slots: 1,
@@ -189,8 +194,8 @@ const PRESETS_MOTION_PRO = {
         use_end_frame: true,
         end_transition_frames: 4,
         end_lock_slots: 1,
-        // Allow motion immediately. Keep end locked.
-        lock_start_slots: 0,
+        // Keep the first frame anchored to the provided input.
+        lock_start_slots: 1,
     },
 
     // ── Low VRAM + FLF ─────────────────────────────────────

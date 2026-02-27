@@ -156,7 +156,7 @@ class IAMCCS_WanImageMotion:
                     {
                         "default": 1,
                         "min": 0,
-                        "max": 8,
+                        "max": 16,
                         "step": 1,
                         "tooltip": (
                             "How many initial latent slots to hard-lock to the start image via concat_mask. "
@@ -454,7 +454,7 @@ class IAMCCS_WanImageMotion:
             )
 
             mask = torch.ones((1, 1, empty_latent.shape[2], H, W), device=device, dtype=dtype)
-            lock_start_slots_i = int(max(0, min(8, lock_start_slots)))
+            lock_start_slots_i = int(max(0, min(16, lock_start_slots)))
             if lock_start_slots_i > 0:
                 mask[:, :, :lock_start_slots_i] = 0.0
 
@@ -582,13 +582,14 @@ class WanImageMotionPro:
                     {
                         "default": 1,
                         "min": 1,
-                        "max": 8,
+                        "max": 16,
                         "step": 1,
                         "tooltip": (
                             "How many final latent slots to hard-lock to end_samples. "
                             "Default 1 = only the very last slot (~last 4 video frames) is locked, "
                             "so the end frame appears exactly at the last frame defined by 'length'. "
-                            "Increase only if a single locked slot is not enough for convergence."
+                            "Increase only if a single locked slot is not enough for convergence. "
+                            "Set 16 for 1:1 parity with the original FLF node (locks min(T_end, total_latents))."
                         ),
                     },
                 ),
@@ -598,7 +599,7 @@ class WanImageMotionPro:
                     {
                         "default": 1,
                         "min": 0,
-                        "max": 8,
+                        "max": 16,
                         "step": 1,
                         "tooltip": (
                             "How many initial latent slots to hard-lock to the start image via concat_mask. "
@@ -975,7 +976,7 @@ class WanImageMotionPro:
                             # Safety: never let the transition zone enter the anchor area.
                             # T_anchor latent slots are occupied by the start image;
                             # blending into them creates a frozen-dissolve artifact.
-                            lock_start_slots_i = int(max(0, min(8, lock_start_slots)))
+                            lock_start_slots_i = int(max(0, min(16, lock_start_slots)))
                             safe_trans_start = max(T_anchor, lock_start_slots_i) + 1
                             trans_start = max(safe_trans_start, trans_end - end_transition_frames)
                             trans_count = trans_end - trans_start
@@ -1012,7 +1013,7 @@ class WanImageMotionPro:
 
             # Mask: lock first slot + lock last end_t_fix slots.
             mask = torch.ones((1, 1, total_latents, H, W), device=device, dtype=dtype)
-            lock_start_slots_i = int(max(0, min(8, lock_start_slots)))
+            lock_start_slots_i = int(max(0, min(16, lock_start_slots)))
             if lock_start_slots_i > 0:
                 mask[:, :, :lock_start_slots_i] = 0.0
             if end_t_fix > 0:

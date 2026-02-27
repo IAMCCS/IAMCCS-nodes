@@ -50,6 +50,7 @@ from .iamccs_ltx2_extension_module import (
     IAMCCS_LTX2_ContextLatent,
     IAMCCS_LTX2_MiddleFrames,
     IAMCCS_LTX2_FirstLastLatentControl,
+    IAMCCS_LTX2_FirstLastLatentControl_Pro,
 )
 
 from .iamccs_wan_svipro_motion import (
@@ -130,6 +131,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_ContextLatent": IAMCCS_LTX2_ContextLatent,
     "IAMCCS_LTX2_MiddleFrames": IAMCCS_LTX2_MiddleFrames,
     "IAMCCS_LTX2_FirstLastLatentControl": IAMCCS_LTX2_FirstLastLatentControl,
+    "IAMCCS_LTX2_FirstLastLatentControl_Pro": IAMCCS_LTX2_FirstLastLatentControl_Pro,
     "IAMCCS_WanImageMotion": IAMCCS_WanImageMotion,
     "WanImageMotionPro": WanImageMotionPro,
     "IAMCCS_WanImageMotionPro": WanImageMotionPro,
@@ -192,6 +194,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_ContextLatent": "LTX-2 Context → Latent (continue) 🧩",
     "IAMCCS_LTX2_MiddleFrames": "LTX-2 Middle Frames (accumulator) 🧷",
     "IAMCCS_LTX2_FirstLastLatentControl": "LTX-2 First/Last → Latent (noise_mask) 🎯",
+    "IAMCCS_LTX2_FirstLastLatentControl_Pro": "LTX-2 First/Last → Latent (Pro, slot caps) 🎯",
     "IAMCCS_WanImageMotion": "WanImageMotion",
     "WanImageMotionPro": "WanImageMotionPro (Motion + FLF End Lock)",
     "IAMCCS_WanImageMotionPro": "WanImageMotionPro (Motion + FLF End Lock)",

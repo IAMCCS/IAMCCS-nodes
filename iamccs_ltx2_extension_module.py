@@ -1794,6 +1794,210 @@ class IAMCCS_LTX2_FirstLastLatentControl:
         return (out_latent, report)
 
 
+class IAMCCS_LTX2_FirstLastLatentControl_Pro(IAMCCS_LTX2_FirstLastLatentControl):
+    """First/Last frame control for LTX-2 via LATENT + noise_mask (Pro).
+
+    This variant mirrors the *core* stability trick used in `WanImageMotionPro`:
+    cap how many temporal latent slots are locked for start/end, because some VAEs
+    may encode even a single image to T>1 latent slots.
+
+    Extras:
+    - first_lock_slots / last_lock_slots: cap temporal slots to overwrite+lock.
+    - end_transition_slots: optional smooth transition zone before the hard-locked end.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        base = super().INPUT_TYPES()
+        required = dict(base.get("required", {}))
+        # Insert the extra widgets right after strengths (stable + discoverable).
+        # NOTE: This is a NEW node type, so adding widgets won't break old workflows.
+        required.update({
+            "first_lock_slots": ("INT", {
+                "default": 1,
+                "min": 0,
+                "max": 8,
+                "step": 1,
+                "tooltip": "Max temporal latent slots to overwrite+lock at the start (0 disables start lock).",
+            }),
+            "last_lock_slots": ("INT", {
+                "default": 1,
+                "min": 0,
+                "max": 8,
+                "step": 1,
+                "tooltip": "Max temporal latent slots to overwrite+lock at the end (0 disables end lock).",
+            }),
+            "end_transition_slots": ("INT", {
+                "default": 0,
+                "min": 0,
+                "max": 32,
+                "step": 1,
+                "tooltip": "Optional transition zone (in latent slots) before the hard-locked end.",
+            }),
+        })
+        return {
+            "required": required,
+            "optional": base.get("optional", {}),
+        }
+
+    RETURN_TYPES = IAMCCS_LTX2_FirstLastLatentControl.RETURN_TYPES
+    RETURN_NAMES = IAMCCS_LTX2_FirstLastLatentControl.RETURN_NAMES
+    FUNCTION = IAMCCS_LTX2_FirstLastLatentControl.FUNCTION
+    CATEGORY = IAMCCS_LTX2_FirstLastLatentControl.CATEGORY
+
+    @staticmethod
+    def _smoothstep(x: torch.Tensor) -> torch.Tensor:
+        return x * x * (3.0 - 2.0 * x)
+
+    def execute(
+        self,
+        vae,
+        latent,
+        first_strength=1.0,
+        last_strength=1.0,
+        first_lock_slots=1,
+        last_lock_slots=1,
+        end_transition_slots=0,
+        first_image=None,
+        last_image=None,
+        middle_frames=None,
+    ):
+        has_middle = middle_frames is not None and len(middle_frames.get("frames", [])) > 0
+        if first_image is None and last_image is None and not has_middle:
+            return (latent, "FLF(latent_pro): no-op")
+
+        # Same robustness as the base node: collapse multi-frame IMAGE batches to 1 frame.
+        if first_image is not None and int(first_image.shape[0]) > 1:
+            first_image = first_image[:1]
+        if last_image is not None and int(last_image.shape[0]) > 1:
+            last_image = last_image[-1:]
+
+        samples_in = latent.get("samples")
+        if samples_in is None:
+            raise ValueError("LATENT input is missing 'samples'")
+
+        samples = samples_in.clone()
+        batch, _, latent_frames, latent_height, latent_width = samples.shape
+
+        _, height_scale_factor, width_scale_factor = vae.downscale_index_formula
+        width = int(latent_width) * int(width_scale_factor)
+        height = int(latent_height) * int(height_scale_factor)
+
+        noise_mask = self._ensure_noise_mask(latent, samples)
+
+        ops = []
+
+        lock_first = int(max(0, min(8, int(first_lock_slots))))
+        lock_last = int(max(0, min(8, int(last_lock_slots))))
+        trans_slots = int(max(0, min(32, int(end_transition_slots))))
+
+        fs = float(max(0.0, min(1.0, first_strength)))
+        flf = 0
+        if first_image is not None and fs > 0.0 and lock_first > 0:
+            first_latent = self._encode_image(vae, first_image, height, width)
+            first_latent = self._match_latent_batch(samples, first_latent)
+            flf_raw = int(first_latent.shape[2])
+            flf = min(flf_raw, int(latent_frames), int(lock_first))
+            if flf > 0:
+                samples[:, :, :flf] = first_latent[:, :, :flf]
+                cur = noise_mask[:, :, :flf]
+                noise_mask[:, :, :flf] = torch.minimum(cur, torch.full_like(cur, 1.0 - fs))
+                ops.append(f"first(frames={flf}/{flf_raw},s={fs:.2f})")
+        elif first_image is not None and fs > 0.0 and lock_first == 0:
+            ops.append("first(disabled)")
+
+        ls = float(max(0.0, min(1.0, last_strength)))
+        llf = 0
+        last_start_idx = 0
+        end_ref = None
+        if last_image is not None and ls > 0.0 and lock_last > 0:
+            last_latent = self._encode_image(vae, last_image, height, width)
+            last_latent = self._match_latent_batch(samples, last_latent)
+            llf_raw = int(last_latent.shape[2])
+
+            llf = min(llf_raw, int(latent_frames), int(lock_last))
+            if llf > 0:
+                last_start_idx = int(latent_frames) - llf
+                # Overwrite+lock ONLY the last `llf` slots.
+                samples[:, :, last_start_idx:] = last_latent[:, :, -llf:]
+                cur = noise_mask[:, :, last_start_idx:]
+                noise_mask[:, :, last_start_idx:] = torch.minimum(cur, torch.full_like(cur, 1.0 - ls))
+
+                # End reference slot = first slot of the locked zone in last_latent.
+                end_ref_idx = max(0, int(last_latent.shape[2]) - llf)
+                end_ref = last_latent[:, :, end_ref_idx : end_ref_idx + 1].to(
+                    device=samples.device, dtype=samples.dtype
+                )
+
+                ops.append(f"last(frames={llf}/{llf_raw},s={ls:.2f})")
+        elif last_image is not None and ls > 0.0 and lock_last == 0:
+            ops.append("last(disabled)")
+
+        # Optional end transition zone (helps avoid a visible 'stop' right before the locked end).
+        if end_ref is not None and llf > 0 and trans_slots > 0 and last_start_idx > 0:
+            trans_end = int(last_start_idx)  # exclusive
+            # Never transition inside the start-locked zone.
+            trans_start = max(int(flf), trans_end - trans_slots)
+            trans_count = int(trans_end - trans_start)
+            if trans_count > 0:
+                x_vals = torch.linspace(
+                    0.0,
+                    1.0,
+                    steps=trans_count + 2,
+                    device=samples.device,
+                    dtype=torch.float32,
+                )[1:-1]
+                for i in range(trans_count):
+                    alpha = float(self._smoothstep(x_vals[i : i + 1]).item())
+                    t = trans_start + i
+                    # Blend samples toward end_ref.
+                    samples[:, :, t : t + 1] = (
+                        (1.0 - alpha) * samples[:, :, t : t + 1] + alpha * end_ref
+                    )
+                    # Gradually lock via noise_mask (stronger closer to the end).
+                    target_mask = 1.0 - (ls * alpha)
+                    cur = noise_mask[:, :, t : t + 1]
+                    noise_mask[:, :, t : t + 1] = torch.minimum(cur, torch.full_like(cur, float(target_mask)))
+
+                ops.append(f"end_transition(slots={trans_count})")
+
+        # Middle frames behavior is inherited from base (same semantics).
+        if has_middle:
+            frames_list = [] if middle_frames is None else middle_frames.get("frames", [])
+            for frame_data in frames_list:
+                image = frame_data.get("image")
+                position = float(frame_data.get("position", 0.5))
+                strength = float(frame_data.get("strength", 1.0))
+                strength = float(max(0.0, min(1.0, strength)))
+                if image is None or strength <= 0.0:
+                    continue
+
+                mid_latent = self._encode_image(vae, image, height, width)
+                mid_latent = self._match_latent_batch(samples, mid_latent)
+                mlf = int(mid_latent.shape[2])
+                if mlf <= 0:
+                    continue
+
+                middle_frame_idx = round(position * (int(latent_frames) - 1))
+                middle_frame_idx = max(0, min(int(middle_frame_idx), int(latent_frames) - mlf))
+
+                samples[:, :, middle_frame_idx:middle_frame_idx + mlf] = mid_latent[:, :, :mlf]
+                cur = noise_mask[:, :, middle_frame_idx:middle_frame_idx + mlf]
+                noise_mask[:, :, middle_frame_idx:middle_frame_idx + mlf] = torch.minimum(
+                    cur,
+                    torch.full_like(cur, 1.0 - strength),
+                )
+
+            ops.append(f"middle(count={len(frames_list)})")
+
+        out_latent = dict(latent)
+        out_latent["samples"] = samples
+        out_latent["noise_mask"] = noise_mask
+
+        report = "FLF(latent_pro): " + (" + ".join(ops) if ops else "no-op")
+        return (out_latent, report)
+
+
 # Node registration
 NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_ExtensionModule": IAMCCS_LTX2_ExtensionModule,
@@ -1806,6 +2010,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_ContextLatent": IAMCCS_LTX2_ContextLatent,
     "IAMCCS_LTX2_MiddleFrames": IAMCCS_LTX2_MiddleFrames,
     "IAMCCS_LTX2_FirstLastLatentControl": IAMCCS_LTX2_FirstLastLatentControl,
+    "IAMCCS_LTX2_FirstLastLatentControl_Pro": IAMCCS_LTX2_FirstLastLatentControl_Pro,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1819,4 +2024,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_ContextLatent": "LTX-2 Context → Latent (continue) 🧩",
     "IAMCCS_LTX2_MiddleFrames": "LTX-2 Middle Frames (accumulator) 🧷",
     "IAMCCS_LTX2_FirstLastLatentControl": "LTX-2 First/Last → Latent (noise_mask) 🎯",
+    "IAMCCS_LTX2_FirstLastLatentControl_Pro": "LTX-2 First/Last → Latent (Pro, slot caps) 🎯",
 }
