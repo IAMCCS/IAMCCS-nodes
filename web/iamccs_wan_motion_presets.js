@@ -29,6 +29,7 @@ const PRESETS_MOTION = {
         vram_profile: "normal",
         include_padding_in_motion: false,
         safety_preset: "base",
+        lock_start_slots: 1,
     },
 
     // ── Default recommended ─────────────────────────────────
@@ -42,6 +43,7 @@ const PRESETS_MOTION = {
         vram_profile: "normal",
         include_padding_in_motion: false,
         safety_preset: "safe",
+        lock_start_slots: 1,
     },
 
     // ── Multi-chunk chaining ────────────────────────────────
@@ -56,6 +58,7 @@ const PRESETS_MOTION = {
         vram_profile: "normal",
         include_padding_in_motion: true,
         safety_preset: "safer",
+        lock_start_slots: 1,
     },
 
     // ── Large/dynamic motion ────────────────────────────────
@@ -68,6 +71,8 @@ const PRESETS_MOTION = {
         vram_profile: "normal",
         include_padding_in_motion: true,
         safety_preset: "safer",
+        // Allow motion immediately (no initial 4-frame hold).
+        lock_start_slots: 0,
     },
 
     // ── Low VRAM safe ───────────────────────────────────────
@@ -80,6 +85,7 @@ const PRESETS_MOTION = {
         vram_profile: "chunked_blocks_2",
         include_padding_in_motion: false,
         safety_preset: "safe",
+        lock_start_slots: 1,
     },
 };
 
@@ -99,6 +105,7 @@ const PRESETS_MOTION_PRO = {
         use_end_frame: false,
         end_transition_frames: 4,
         end_lock_slots: 1,
+        lock_start_slots: 1,
     },
 
     // ── Start frame only (no end lock) ────────────────────
@@ -114,6 +121,7 @@ const PRESETS_MOTION_PRO = {
         use_end_frame: false,
         end_transition_frames: 4,
         end_lock_slots: 1,
+        lock_start_slots: 1,
     },
 
     // ── Standard FLF (start + end, 1 locked slot) ─────────
@@ -129,6 +137,7 @@ const PRESETS_MOTION_PRO = {
         use_end_frame: true,
         end_transition_frames: 4,
         end_lock_slots: 1,
+        lock_start_slots: 1,
     },
 
     // ── Multi-chunk chain (no end lock) ───────────────────
@@ -144,6 +153,7 @@ const PRESETS_MOTION_PRO = {
         use_end_frame: false,
         end_transition_frames: 4,
         end_lock_slots: 1,
+        lock_start_slots: 1,
     },
 
     // ── Smooth FLF chain (start + end + smooth transition) ─
@@ -161,6 +171,7 @@ const PRESETS_MOTION_PRO = {
         use_end_frame: true,
         end_transition_frames: 4,
         end_lock_slots: 1,
+        lock_start_slots: 1,
     },
 
     // ── High motion FLF (big movement, longer convergence) ─
@@ -178,6 +189,8 @@ const PRESETS_MOTION_PRO = {
         use_end_frame: true,
         end_transition_frames: 4,
         end_lock_slots: 1,
+        // Allow motion immediately. Keep end locked.
+        lock_start_slots: 0,
     },
 
     // ── Low VRAM + FLF ─────────────────────────────────────
@@ -193,6 +206,7 @@ const PRESETS_MOTION_PRO = {
         use_end_frame: true,
         end_transition_frames: 4,
         end_lock_slots: 1,
+        lock_start_slots: 1,
     },
 };
 
