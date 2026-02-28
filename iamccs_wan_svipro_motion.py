@@ -165,6 +165,28 @@ class IAMCCS_WanImageMotion:
                         ),
                     },
                 ),
+                # Append-only: diagnostic logging toggle (does not change outputs).
+                "diagnostic_log": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "When enabled, prints compact diagnostics about concat_latent_image/mask and motion ranges. "
+                            "Useful to debug 'static clip' or segment discontinuities."
+                        ),
+                    },
+                ),
+                # Append-only: allow keeping prev_samples wired (autolink) but ignoring it.
+                "use_prev_samples": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "When False, prev_samples is ignored even if the wire is connected. "
+                            "Use this on the first segment when autolink forces prev_samples to be connected."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 "prev_samples": ("LATENT",),
@@ -174,7 +196,7 @@ class IAMCCS_WanImageMotion:
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
     RETURN_NAMES = ("positive", "negative", "latent")
     FUNCTION = "apply"
-    CATEGORY = "IAMCCS/video"
+    CATEGORY = "IAMCCS/Wan"
 
     _log = logging.getLogger("IAMCCS.WanImageMotion")
 
@@ -322,7 +344,7 @@ class IAMCCS_WanImageMotion:
 
     def apply(self, positive, negative, length, anchor_samples, motion_latent_count, motion, motion_mode,
               add_reference_latents, latent_precision, vram_profile, include_padding_in_motion,
-              safety_preset="safe", lock_start_slots=1, prev_samples=None):
+              safety_preset="safe", lock_start_slots=1, diagnostic_log=False, use_prev_samples=True, prev_samples=None):
         with torch.no_grad():
             # Clone to prevent in-place motion amplitude writes from corrupting the caller's tensor.
             anchor_latent = anchor_samples["samples"].clone()
@@ -344,9 +366,9 @@ class IAMCCS_WanImageMotion:
             motion_latent = None
             T_motion = 0
 
-            has_prev = prev_samples is not None and motion_latent_count != 0
+            has_prev = bool(use_prev_samples) and prev_samples is not None and motion_latent_count != 0
 
-            if prev_samples is None or motion_latent_count == 0:
+            if (prev_samples is None) or (not use_prev_samples) or (motion_latent_count == 0):
                 padding_size = total_latents - T_anchor
                 image_cond_latent = anchor_latent
             else:
@@ -370,14 +392,21 @@ class IAMCCS_WanImageMotion:
                 image_cond_latent = image_cond_latent[:, :, :total_latents]
 
             # Apply motion amplitude before injecting into conditioning
-            effective_latents = total_latents if include_padding_in_motion else min(total_latents, T_anchor + T_motion)
+            # IMPORTANT: do not apply motion scaling to *pure padding*.
+            # Padding slots are zeros and should remain sampler-driven; modifying them can cause
+            # near-static clips and segment disconnect artifacts.
+            if include_padding_in_motion and not has_prev:
+                self._log.info(
+                    "[WanImageMotion] include_padding_in_motion=True but prev_samples is not connected; "
+                    "skipping padding boost to avoid static/locked-looking clips."
+                )
+
+            if include_padding_in_motion and has_prev and (T_anchor + T_motion) > 1:
+                effective_latents = total_latents
+            else:
+                effective_latents = min(total_latents, T_anchor + T_motion)
 
             motion_mode_effective = motion_mode
-            # When include_padding_in_motion=True, always extend motion boost to all non-anchor
-            # frames (including zero-padded slots), regardless of whether prev_samples are set.
-            # This ensures consistent full-range boost across all chunks in a chained workflow.
-            if motion_mode == "motion_only (prev_samples)" and include_padding_in_motion:
-                motion_mode_effective = "all_nonfirst (anchor+motion)"
 
             # --- Logging (concise but informative) ---
             try:
@@ -410,6 +439,8 @@ class IAMCCS_WanImageMotion:
                 T_motion,
                 padding_size,
             )
+            if prev_samples is not None and not use_prev_samples:
+                self._log.info("[WanImageMotion] prev_samples connected but use_prev_samples=False — prev ignored.")
             if free_vram is not None:
                 self._log.info("[WanImageMotion] free_vram=%s total_vram=%s", free_vram, total_vram)
 
@@ -453,10 +484,52 @@ class IAMCCS_WanImageMotion:
                 safety_preset=safety_preset,
             )
 
+            if diagnostic_log:
+                try:
+                    x = image_cond_latent
+                    x_f = x.float()
+                    t = int(x.shape[2])
+                    x_min = float(x_f.min().item())
+                    x_max = float(x_f.max().item())
+                    x_mean = float(x_f.mean().item())
+                    # std can be slightly expensive, but only runs when enabled
+                    x_std = float(x_f.std(unbiased=False).item())
+                    self._log.info(
+                        "[WanImageMotion][diag] concat_latent_image stats: T=%s min=%.4f max=%.4f mean=%.4f std=%.4f",
+                        t, x_min, x_max, x_mean, x_std,
+                    )
+
+                    # Per-slot mean abs diff vs first slot: helps spot 'everything identical'.
+                    base = x_f[:, :, 0:1]
+                    diffs = (x_f - base).abs().mean(dim=(0, 1, 3, 4))  # [T]
+                    head_n = min(6, t)
+                    tail_n = min(6, t)
+                    head = [float(v) for v in diffs[:head_n].tolist()]
+                    tail = [float(v) for v in diffs[-tail_n:].tolist()]
+                    self._log.info(
+                        "[WanImageMotion][diag] mean|Δ| vs t0: head=%s tail=%s",
+                        head, tail,
+                    )
+                except Exception as e:
+                    self._log.warning("[WanImageMotion][diag] failed to compute diagnostics: %s", e)
+
             mask = torch.ones((1, 1, empty_latent.shape[2], H, W), device=device, dtype=dtype)
             lock_start_slots_i = int(max(0, min(16, lock_start_slots)))
             if lock_start_slots_i > 0:
                 mask[:, :, :lock_start_slots_i] = 0.0
+
+            # Device safety: keep conditioning tensors on the same device as the sampler latent.
+            # Some workflows produce CPU latents; moving avoids implicit transfers / conditioning issues.
+            cond_device = empty_latent.device
+            if image_cond_latent.device != cond_device:
+                if diagnostic_log:
+                    self._log.info(
+                        "[WanImageMotion][diag] moving conditioning tensors %s -> %s",
+                        str(image_cond_latent.device),
+                        str(cond_device),
+                    )
+                image_cond_latent = image_cond_latent.to(cond_device)
+                mask = mask.to(cond_device)
 
             positive = node_helpers.conditioning_set_values(
                 positive, {"concat_latent_image": image_cond_latent, "concat_mask": mask}
@@ -567,13 +640,15 @@ class WanImageMotionPro:
                 "end_transition_frames": (
                     "INT",
                     {
-                        "default": 4,
+                        "default": 0,
                         "min": 0,
                         "max": 32,
                         "step": 1,
                         "tooltip": (
-                            "Number of latent frames before the end-lock zone to gradually blend toward "
-                            "the end frame. 0 = hard cut (original behavior). Higher = smoother convergence."
+                            "⚠️ DEPRECATED — keep at 0. "
+                            "Values > 0 blend padding latents toward the end frame in latent space, "
+                            "which produces static/frozen output because VAE latent interpolation is not linear. "
+                            "0 = hard cut, identical to the original FLF node behavior."
                         ),
                     },
                 ),
@@ -608,6 +683,28 @@ class WanImageMotionPro:
                         ),
                     },
                 ),
+                # Append-only: diagnostic logging toggle (does not change outputs).
+                "diagnostic_log": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "When enabled, prints compact diagnostics about concat_latent_image/mask and motion/end-lock ranges. "
+                            "Useful to debug 'static clip' or segment discontinuities."
+                        ),
+                    },
+                ),
+                # Append-only: allow keeping prev_samples wired (autolink) but ignoring it.
+                "use_prev_samples": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": (
+                            "When False, prev_samples is ignored even if the wire is connected. "
+                            "Use this on the first segment when autolink forces prev_samples to be connected."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 # prev_samples is optional – mirrors original FLF node and IAMCCS_WanImageMotion.
@@ -620,7 +717,7 @@ class WanImageMotionPro:
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
     RETURN_NAMES = ("positive", "negative", "latent")
     FUNCTION = "apply"
-    CATEGORY = "IAMCCS/video"
+    CATEGORY = "IAMCCS/Wan"
 
     _log = logging.getLogger("IAMCCS.WanImageMotionPro")
 
@@ -778,6 +875,8 @@ class WanImageMotionPro:
         end_transition_frames=4,
         end_lock_slots=1,
         lock_start_slots=1,
+        diagnostic_log=False,
+        use_prev_samples=True,
         prev_samples=None,
         end_samples=None,
     ):
@@ -802,9 +901,9 @@ class WanImageMotionPro:
             T_motion = 0
             # In the original FLF node, prev_samples is a required socket.
             # If a workflow leaves it disconnected, ComfyUI may pass None.
-            has_prev = prev_samples is not None and motion_latent_count != 0
+            has_prev = bool(use_prev_samples) and prev_samples is not None and motion_latent_count != 0
 
-            if prev_samples is None or motion_latent_count == 0:
+            if (prev_samples is None) or (not use_prev_samples) or (motion_latent_count == 0):
                 padding_size = total_latents - T_anchor
                 image_cond_latent = anchor_latent
             else:
@@ -843,14 +942,23 @@ class WanImageMotionPro:
 
             # Motion boost applied before FLF overwrite.
             # Cap effective_latents so motion never reaches into the end-locked zone.
-            effective_latents_base = total_latents if include_padding_in_motion else min(total_latents, T_anchor + T_motion)
+            # IMPORTANT: do not apply motion scaling to *pure padding*.
+            # Padding slots are zeros and should remain sampler-driven.
+            if include_padding_in_motion and not has_prev:
+                self._log.info(
+                    "[WanImageMotionPro] include_padding_in_motion=True but prev_samples is not connected; "
+                    "skipping padding boost to avoid static/locked-looking clips."
+                )
+
+            if include_padding_in_motion and has_prev and (T_anchor + T_motion) > 1:
+                effective_latents_base = total_latents
+            else:
+                effective_latents_base = min(total_latents, T_anchor + T_motion)
             effective_latents = max(1, min(effective_latents_base, total_latents - end_t_fix_early))
 
             motion_mode_effective = motion_mode
-            # When include_padding_in_motion=True, always extend motion boost to all non-anchor
-            # frames (including zero-padded slots), regardless of whether prev_samples are set.
-            if motion_mode == "motion_only (prev_samples)" and include_padding_in_motion:
-                motion_mode_effective = "all_nonfirst (anchor+motion)"
+            # NOTE: we intentionally do NOT auto-switch to all_nonfirst here.
+            # Auto-switching would end up modifying padding slots on the first segment.
 
             try:
                 free_vram, total_vram = comfy.model_management.get_free_memory(device)
@@ -887,6 +995,8 @@ class WanImageMotionPro:
                 padding_size,
                 end_samples is not None,
             )
+            if prev_samples is not None and not use_prev_samples:
+                self._log.info("[WanImageMotionPro] prev_samples connected but use_prev_samples=False — prev ignored.")
             if free_vram is not None:
                 self._log.info("[WanImageMotionPro] free_vram=%s total_vram=%s", free_vram, total_vram)
 
@@ -928,6 +1038,37 @@ class WanImageMotionPro:
                 safety_preset=safety_preset,
             )
 
+            if diagnostic_log:
+                try:
+                    x = image_cond_latent
+                    x_f = x.float()
+                    t = int(x.shape[2])
+                    x_min = float(x_f.min().item())
+                    x_max = float(x_f.max().item())
+                    x_mean = float(x_f.mean().item())
+                    x_std = float(x_f.std(unbiased=False).item())
+                    self._log.info(
+                        "[WanImageMotionPro][diag] concat_latent_image stats: T=%s min=%.4f max=%.4f mean=%.4f std=%.4f",
+                        t, x_min, x_max, x_mean, x_std,
+                    )
+
+                    base = x_f[:, :, 0:1]
+                    diffs = (x_f - base).abs().mean(dim=(0, 1, 3, 4))  # [T]
+                    head_n = min(6, t)
+                    tail_n = min(6, t)
+                    head = [float(v) for v in diffs[:head_n].tolist()]
+                    tail = [float(v) for v in diffs[-tail_n:].tolist()]
+                    self._log.info(
+                        "[WanImageMotionPro][diag] mean|Δ| vs t0: head=%s tail=%s",
+                        head, tail,
+                    )
+                    self._log.info(
+                        "[WanImageMotionPro][diag] end_t_fix_early=%s (motion cap) use_end_frame=%s end_lock_slots=%s",
+                        end_t_fix_early, use_end_frame, end_lock_slots,
+                    )
+                except Exception as e:
+                    self._log.warning("[WanImageMotionPro][diag] failed to compute diagnostics: %s", e)
+
             # FLF end lock: overwrite last slots with end_samples (if provided).
             # use_end_frame=False lets the user keep the wire connected without activating the lock,
             # prevents ping-pong artifacts when the end-frame encoder node is bypassed.
@@ -959,46 +1100,18 @@ class WanImageMotionPro:
                         )
                         image_cond_latent[:, :, -end_t_fix:] = end_latent[:, :, -end_t_fix:]
 
-                        # Smooth transition zone: blend image_cond_latent toward the end frame over
-                        # `end_transition_frames` slots immediately before the hard-locked zone.
-                        # This prevents the abrupt jump / stop-motion artifact at chunk boundaries.
+                        # end_transition_frames is DEPRECATED and intentionally disabled.
+                        # Linear interpolation between padding latents and end_latent in VAE
+                        # latent space does not produce meaningful intermediate frames —
+                        # it generates static/corrupted conditioning that freezes the clip.
+                        # The original FLF node uses a plain hard-lock (no blending).
                         if end_transition_frames > 0:
-                            # Blend target = first slot of the hard-locked zone.
-                            # Using end_latent[:,0:1] would be wrong: for Wan VAE, that slot
-                            # may differ from the actual locked entry.
-                            # NOTE: be careful with negative slicing: for end_t_fix=1,
-                            # [-1:0] is an empty slice. Use a positive index instead.
-                            end_ref_idx = max(0, T_end - end_t_fix)
-                            end_ref = end_latent[:, :, end_ref_idx : end_ref_idx + 1].to(
-                                device=image_cond_latent.device, dtype=image_cond_latent.dtype
+                            self._log.warning(
+                                "[WanImageMotionPro] ⚠️  end_transition_frames=%s is DEPRECATED and has been DISABLED. "
+                                "Linear latent interpolation before the end-lock produces static/frozen output. "
+                                "Set end_transition_frames=0 to match original FLF behavior.",
+                                end_transition_frames,
                             )
-                            trans_end = total_latents - end_t_fix       # exclusive upper bound
-                            # Safety: never let the transition zone enter the anchor area.
-                            # T_anchor latent slots are occupied by the start image;
-                            # blending into them creates a frozen-dissolve artifact.
-                            lock_start_slots_i = int(max(0, min(16, lock_start_slots)))
-                            safe_trans_start = max(T_anchor, lock_start_slots_i) + 1
-                            trans_start = max(safe_trans_start, trans_end - end_transition_frames)
-                            trans_count = trans_end - trans_start
-                            if trans_count > 0:
-                                self._log.info(
-                                    "[WanImageMotionPro] end_transition zone=[%s:%s] (%s frame(s)) blending toward end frame",
-                                    trans_start, trans_end, trans_count,
-                                )
-                                # Smoothstep weights from 0 (far from end) → 1 (adjacent to locked zone)
-                                x_vals = torch.linspace(
-                                    0.0, 1.0,
-                                    steps=trans_count + 2,
-                                    device=image_cond_latent.device,
-                                    dtype=image_cond_latent.dtype,
-                                )[1:-1]  # exclude the 0 and 1 endpoints
-                                for i in range(trans_count):
-                                    alpha = _smoothstep(x_vals[i : i + 1]).item()
-                                    t = trans_start + i
-                                    image_cond_latent[:, :, t : t + 1] = (
-                                        (1.0 - alpha) * image_cond_latent[:, :, t : t + 1]
-                                        + alpha * end_ref
-                                    )
                 else:
                     end_t_fix = 0
                     self._log.warning(
@@ -1018,6 +1131,18 @@ class WanImageMotionPro:
                 mask[:, :, :lock_start_slots_i] = 0.0
             if end_t_fix > 0:
                 mask[:, :, -end_t_fix:] = 0.0
+
+            # Device safety: keep conditioning tensors on the same device as the sampler latent.
+            cond_device = empty_latent.device
+            if image_cond_latent.device != cond_device:
+                if diagnostic_log:
+                    self._log.info(
+                        "[WanImageMotionPro][diag] moving conditioning tensors %s -> %s",
+                        str(image_cond_latent.device),
+                        str(cond_device),
+                    )
+                image_cond_latent = image_cond_latent.to(cond_device)
+                mask = mask.to(cond_device)
 
             positive = node_helpers.conditioning_set_values(
                 positive, {"concat_latent_image": image_cond_latent, "concat_mask": mask}
@@ -1042,11 +1167,12 @@ class WanImageMotionPro:
 NODE_CLASS_MAPPINGS = {
     "IAMCCS_WanImageMotion": IAMCCS_WanImageMotion,
     "WanImageMotionPro": WanImageMotionPro,
+    # Hidden alias: present for backward-compat (saved workflows load correctly)
+    # but intentionally absent from NODE_DISPLAY_NAME_MAPPINGS → never shows in the menu.
     "IAMCCS_WanImageMotionPro": WanImageMotionPro,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_WanImageMotion": "IAMCCS WanImageMotion",
     "WanImageMotionPro": "WanImageMotionPro",
-    "IAMCCS_WanImageMotionPro": "WanImageMotionPro",
 }

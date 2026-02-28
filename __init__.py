@@ -134,6 +134,8 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_FirstLastLatentControl_Pro": IAMCCS_LTX2_FirstLastLatentControl_Pro,
     "IAMCCS_WanImageMotion": IAMCCS_WanImageMotion,
     "WanImageMotionPro": WanImageMotionPro,
+    # Hidden alias: loads saved workflows that used the old key, but NOT listed in NODE_DISPLAY_NAME_MAPPINGS
+    # so it never appears in the ComfyUI Add Node menu.
     "IAMCCS_WanImageMotionPro": WanImageMotionPro,
     
     "IAMCCS_SetAutoLink": IAMCCS_SetAutoLink,
@@ -197,7 +199,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_FirstLastLatentControl_Pro": "LTX-2 First/Last → Latent (Pro, slot caps) 🎯",
     "IAMCCS_WanImageMotion": "WanImageMotion",
     "WanImageMotionPro": "WanImageMotionPro (Motion + FLF End Lock)",
-    "IAMCCS_WanImageMotionPro": "WanImageMotionPro (Motion + FLF End Lock)",
     
     "IAMCCS_SetAutoLink": "Set AutoLink",
     "IAMCCS_GetAutoLink": "Get AutoLink",

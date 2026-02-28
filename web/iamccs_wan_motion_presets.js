@@ -30,6 +30,39 @@ const PRESETS_MOTION = {
         include_padding_in_motion: false,
         safety_preset: "base",
         lock_start_slots: 1,
+        use_prev_samples: true,
+    },
+
+    // ── Diagnostic (no-op + extra logs) ────────────────────
+    // Same as parity, but enables backend diagnostic_log.
+    "diagnostic (no-op logs)": {
+        motion_latent_count: 1,
+        motion: 1.0,
+        motion_mode: "motion_only (prev_samples)",
+        add_reference_latents: false,
+        latent_precision: "fp32",
+        vram_profile: "normal",
+        include_padding_in_motion: false,
+        safety_preset: "base",
+        lock_start_slots: 1,
+        diagnostic_log: true,
+        use_prev_samples: true,
+    },
+
+    // ── First segment helper ──────────────────────────────
+    // For workflows where prev_samples is always connected by autolink.
+    "first segment (ignore prev)": {
+        motion_latent_count: 1,
+        motion: 1.15,
+        motion_mode: "motion_only (prev_samples)",
+        add_reference_latents: false,
+        latent_precision: "fp32",
+        vram_profile: "normal",
+        include_padding_in_motion: false,
+        safety_preset: "safe",
+        lock_start_slots: 1,
+        use_prev_samples: false,
+        diagnostic_log: true,
     },
 
     // ── Default recommended ─────────────────────────────────
@@ -44,6 +77,7 @@ const PRESETS_MOTION = {
         include_padding_in_motion: false,
         safety_preset: "safe",
         lock_start_slots: 1,
+        use_prev_samples: true,
     },
 
     // ── Multi-chunk chaining ────────────────────────────────
@@ -56,9 +90,10 @@ const PRESETS_MOTION = {
         add_reference_latents: false,
         latent_precision: "fp32",
         vram_profile: "normal",
-        include_padding_in_motion: true,
+        include_padding_in_motion: false,
         safety_preset: "safer",
         lock_start_slots: 1,
+        use_prev_samples: true,
     },
 
     // ── Large/dynamic motion ────────────────────────────────
@@ -69,10 +104,11 @@ const PRESETS_MOTION = {
         add_reference_latents: false,
         latent_precision: "fp32",
         vram_profile: "normal",
-        include_padding_in_motion: true,
+        include_padding_in_motion: false,
         safety_preset: "safer",
         // Keep the first frame anchored to the provided input.
         lock_start_slots: 1,
+        use_prev_samples: true,
     },
 
     // ── Low VRAM safe ───────────────────────────────────────
@@ -86,6 +122,7 @@ const PRESETS_MOTION = {
         include_padding_in_motion: false,
         safety_preset: "safe",
         lock_start_slots: 1,
+        use_prev_samples: true,
     },
 };
 
@@ -109,6 +146,45 @@ const PRESETS_MOTION_PRO = {
         // Match: end_t_fix = min(T_end, total_latents)
         end_lock_slots: 16,
         lock_start_slots: 1,
+        use_prev_samples: true,
+    },
+
+    // ── Diagnostic (no-op + extra logs) ────────────────────
+    // Same as parity, but enables backend diagnostic_log.
+    "diagnostic (no-op logs)": {
+        motion_latent_count: 1,
+        motion: 1.0,
+        motion_mode: "motion_only (prev_samples)",
+        add_reference_latents: false,
+        latent_precision: "fp32",
+        vram_profile: "normal",
+        include_padding_in_motion: false,
+        safety_preset: "base",
+        use_end_frame: true,
+        end_transition_frames: 0,
+        end_lock_slots: 16,
+        lock_start_slots: 1,
+        diagnostic_log: true,
+        use_prev_samples: true,
+    },
+
+    // ── First segment helper ──────────────────────────────
+    // For workflows where prev_samples is always connected by autolink.
+    "first segment (ignore prev)": {
+        motion_latent_count: 1,
+        motion: 1.15,
+        motion_mode: "motion_only (prev_samples)",
+        add_reference_latents: false,
+        latent_precision: "fp32",
+        vram_profile: "normal",
+        include_padding_in_motion: false,
+        safety_preset: "safe",
+        use_end_frame: true,
+        end_transition_frames: 0,
+        end_lock_slots: 1,
+        lock_start_slots: 1,
+        use_prev_samples: false,
+        diagnostic_log: true,
     },
 
     // ── Start frame only (no end lock) ────────────────────
@@ -123,9 +199,10 @@ const PRESETS_MOTION_PRO = {
         safety_preset: "safe",
         // Always honor end_samples when connected (first/last reference).
         use_end_frame: true,
-        end_transition_frames: 4,
+        end_transition_frames: 0,
         end_lock_slots: 1,
         lock_start_slots: 1,
+        use_prev_samples: true,
     },
 
     // ── Standard FLF (start + end, 1 locked slot) ─────────
@@ -139,9 +216,10 @@ const PRESETS_MOTION_PRO = {
         include_padding_in_motion: false,
         safety_preset: "safe",
         use_end_frame: true,
-        end_transition_frames: 4,
+        end_transition_frames: 0,
         end_lock_slots: 1,
         lock_start_slots: 1,
+        use_prev_samples: true,
     },
 
     // ── Multi-chunk chain (no end lock) ───────────────────
@@ -152,13 +230,14 @@ const PRESETS_MOTION_PRO = {
         add_reference_latents: false,
         latent_precision: "fp32",
         vram_profile: "normal",
-        include_padding_in_motion: true,
+        include_padding_in_motion: false,
         safety_preset: "safer",
         // Always honor end_samples when connected (first/last reference).
         use_end_frame: true,
-        end_transition_frames: 4,
+        end_transition_frames: 0,
         end_lock_slots: 1,
         lock_start_slots: 1,
+        use_prev_samples: true,
     },
 
     // ── Smooth FLF chain (start + end + smooth transition) ─
@@ -171,12 +250,13 @@ const PRESETS_MOTION_PRO = {
         add_reference_latents: false,
         latent_precision: "fp32",
         vram_profile: "normal",
-        include_padding_in_motion: true,
+        include_padding_in_motion: false,
         safety_preset: "safer",
         use_end_frame: true,
-        end_transition_frames: 4,
+        end_transition_frames: 0,
         end_lock_slots: 1,
         lock_start_slots: 1,
+        use_prev_samples: true,
     },
 
     // ── High motion FLF (big movement, longer convergence) ─
@@ -189,13 +269,14 @@ const PRESETS_MOTION_PRO = {
         add_reference_latents: false,
         latent_precision: "fp32",
         vram_profile: "normal",
-        include_padding_in_motion: true,
+        include_padding_in_motion: false,
         safety_preset: "safer",
         use_end_frame: true,
-        end_transition_frames: 4,
+        end_transition_frames: 0,
         end_lock_slots: 1,
         // Keep the first frame anchored to the provided input.
         lock_start_slots: 1,
+        use_prev_samples: true,
     },
 
     // ── Low VRAM + FLF ─────────────────────────────────────
@@ -209,9 +290,10 @@ const PRESETS_MOTION_PRO = {
         include_padding_in_motion: false,
         safety_preset: "safe",
         use_end_frame: true,
-        end_transition_frames: 4,
+        end_transition_frames: 0,
         end_lock_slots: 1,
         lock_start_slots: 1,
+        use_prev_samples: true,
     },
 };
 
@@ -335,8 +417,7 @@ app.registerExtension({
         }
 
         // WanImageMotionPro — extended FLF node
-        // Also covers the alias IAMCCS_WanImageMotionPro (same class, same widgets).
-        if (nodeName === "WanImageMotionPro" || nodeName === "IAMCCS_WanImageMotionPro") {
+        if (nodeName === "WanImageMotionPro") {
             const onNodeCreated = nodeType.prototype.onNodeCreated;
             nodeType.prototype.onNodeCreated = function () {
                 const r = onNodeCreated?.apply(this, arguments);
