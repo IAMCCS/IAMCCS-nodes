@@ -1,6 +1,6 @@
 # IAMCCS Nodes - Changelog
 
-## 🆕 2026-02-24 — 🆕 Version 1.3.5  WanImageMotionPro + Motion Safety Preset
+## 🆕 2026-02-24 — 🆕 Version 1.3.6  WanImageMotionPro + Motion Safety Preset + Bug Fixed
 
 Changes:
 - Added new video node: `WanImageMotionPro` (Motion + FLF End Lock)

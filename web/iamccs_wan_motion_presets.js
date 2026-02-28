@@ -8,7 +8,7 @@
 
 import { app } from "../../scripts/app.js";
 
-console.log("[IAMCCS WanMotion] Loading motion presets...");
+console.log("[IAMCCS WanMotion] Loading motion presets... (persist-fix v3)");
 
 // ─── Preset definitions ────────────────────────────────────
 // Keys must match widget *name* as declared in INPUT_TYPES.
@@ -346,41 +346,7 @@ function applyPreset(node, presetKey, presetMap) {
 
 // ─── Top-preset widget injection ──────────────────────────
 
-function ensureTopPresetWidget(node, presetMap) {
-    // Guard: only once per node instance.
-    if (getWidget(node, "_iamccs_preset_ui")) return;
-
-    const presetKeys = Object.keys(presetMap);
-    const initial = "[custom]";
-
-    node.properties = node.properties || {};
-
-    // Restore saved choice from node properties (survives Save→Load because
-    // properties ARE serialized in ComfyUI, unlike widget values for non-backend widgets).
-    const saved = node.properties._iamccs_wan_preset ?? initial;
-
-    const w = node.addWidget(
-        "combo",
-        "⚡ Quick Preset",
-        saved,
-        (v) => {
-            const chosen = String(v ?? "[custom]");
-            node.properties._iamccs_wan_preset = chosen;
-            applyPreset(node, chosen, presetMap);
-            // After applying, reset the combo back to "[custom]" so users see
-            // it as a "fire-once" action and are free to tweak further.
-            // Comment out the next line if you prefer it to stay on the chosen value.
-            // w.value = "[custom]";
-        },
-        { values: presetKeys }
-    );
-
-    // Critical: serialize=false prevents this widget from appearing in
-    // widgets_values, keeping full backward-compat with saved workflows.
-    w.serialize = false;
-    w.name = "_iamccs_preset_ui";
-
-    // Move to index 0 so it renders at the very top of the node.
+function _movePresetWidgetToTop(node) {
     try {
         const idx = getWidgetIndex(node, "_iamccs_preset_ui");
         if (idx > 0) {
@@ -390,11 +356,154 @@ function ensureTopPresetWidget(node, presetMap) {
     } catch {
         // ignore
     }
+}
 
-    // Apply saved preset immediately (for loaded workflows).
-    if (saved !== "[custom]") {
-        applyPreset(node, saved, presetMap);
+function _removePresetWidget(node) {
+    try {
+        const idx = getWidgetIndex(node, "_iamccs_preset_ui");
+        if (idx >= 0) {
+            node.widgets.splice(idx, 1);
+        }
+    } catch {
+        // ignore
     }
+}
+
+function _detachPresetWidget(node) {
+    try {
+        const idx = getWidgetIndex(node, "_iamccs_preset_ui");
+        if (idx >= 0) {
+            const [item] = node.widgets.splice(idx, 1);
+            return item;
+        }
+    } catch {
+        // ignore
+    }
+    return null;
+}
+
+function _attachPresetWidgetToTop(node, widget) {
+    if (!widget) return;
+    try {
+        if (getWidget(node, "_iamccs_preset_ui")) return;
+        node.widgets = node.widgets || [];
+        node.widgets.unshift(widget);
+    } catch {
+        // ignore
+    }
+}
+
+/**
+ * Create and append the preset combo widget at the END of node.widgets.
+ * Reads the saved label from node.properties (which configure() has already
+ * restored from the workflow JSON by the time onConfigure fires).
+ * Always creates a fresh widget — callers are responsible for removing any
+ * stale instance first via _removePresetWidget().
+ */
+function _createPresetWidgetAtEnd(node, presetMap) {
+    const presetKeys = Object.keys(presetMap);
+    node.properties = node.properties || {};
+    const savedLabel = node.properties._iamccs_wan_preset_label;
+    const initial =
+        typeof savedLabel === "string" && presetKeys.includes(savedLabel)
+            ? savedLabel
+            : "[custom]";
+
+    const w = node.addWidget(
+        "combo",
+        "⚡ Quick Preset",
+        initial,
+        (v) => {
+            const chosen = String(v ?? "[custom]");
+            node.properties._iamccs_wan_preset_label = chosen;
+            applyPreset(node, chosen, presetMap);
+        },
+        { values: presetKeys, serialize: false }
+    );
+
+    // Belt-and-suspenders: set serialize=false both on the widget and in options
+    // so it is excluded from widgets_values regardless of which LiteGraph version
+    // checks which property.
+    w.serialize = false;
+    w.name = "_iamccs_preset_ui";
+    return w;
+}
+
+function _installPresetHooks(nodeType, presetMap) {
+    // Idempotent: protect against multiple extension reloads.
+    if (nodeType?.prototype?._iamccs_preset_hooks_installed) return;
+    nodeType.prototype._iamccs_preset_hooks_installed = true;
+
+    // ── onNodeCreated ──────────────────────────────────────────────────────────
+    // Fires when a fresh node instance is constructed (both for new nodes dropped
+    // from the menu AND for nodes recreated during workflow load before configure).
+    // We add the preset widget at the END so it never sits at position 0 while
+    // configure() / widgets_values assignment is running.
+    // For the workflow-load path, onConfigure (below) will move it to the top
+    // after widgets_values are safely restored.
+    // For the "new node" path (no configure follows), we schedule a microtask to
+    // move it to position 0 — the microtask runs after any synchronous configure
+    // that may immediately follow (so it never races with widgets_values).
+    const onNodeCreated = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+        const r = onNodeCreated?.apply(this, arguments);
+        if (!getWidget(this, "_iamccs_preset_ui")) {
+            _createPresetWidgetAtEnd(this, presetMap);
+        }
+        // Deferred: runs after any synchronous configure() that follows in the
+        // same call stack (e.g. during graph.configure / loadGraphData).
+        // onConfigure will have already moved it to top if a configure happened;
+        // _movePresetWidgetToTop is a no-op when idx === 0.
+        const self = this;
+        Promise.resolve().then(() => {
+            if (!getWidget(self, "_iamccs_preset_ui")) {
+                _createPresetWidgetAtEnd(self, presetMap);
+            }
+            _movePresetWidgetToTop(self);
+        });
+        return r;
+    };
+
+    // ── onConfigure ───────────────────────────────────────────────────────────
+    // LiteGraph calls onConfigure() at the END of LGraphNode.prototype.configure(),
+    // AFTER widgets_values have been applied and AFTER node.properties has been
+    // restored from the saved workflow JSON.
+    // This is the canonical place to re-insert the preset widget: it is guaranteed
+    // to fire after the real widget values are in place, so re-adding the widget
+    // here can never corrupt the index mapping.
+    const onConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function (data) {
+        const r = onConfigure?.apply(this, arguments);
+        // Strip any existing preset widget (added by onNodeCreated at END, or
+        // possibly left at position 0 from a previous configure cycle).
+        _removePresetWidget(this);
+        // Re-create at END, reading the fresh node.properties label.
+        _createPresetWidgetAtEnd(this, presetMap);
+        // Move to position 0 for the UX (preset combo always visible at top).
+        _movePresetWidgetToTop(this);
+        return r;
+    };
+
+    // ── serialize ─────────────────────────────────────────────────────────────
+    // Belt-and-suspenders: strip the preset widget before serialization so it
+    // never appears in widgets_values, even on LiteGraph builds that don't check
+    // w.serialize === false consistently.
+    const serialize = nodeType.prototype.serialize;
+    nodeType.prototype.serialize = function () {
+        const detached = _detachPresetWidget(this);
+        const r = serialize?.apply(this, arguments);
+        if (detached) {
+            _attachPresetWidgetToTop(this, detached);
+            _movePresetWidgetToTop(this);
+        }
+        return r;
+    };
+}
+
+// Legacy alias — kept for any call sites that may still reference it.
+function ensureTopPresetWidget(node, presetMap) {
+    if (getWidget(node, "_iamccs_preset_ui")) return;
+    _createPresetWidgetAtEnd(node, presetMap);
 }
 
 // ─── Extension registration ────────────────────────────────
@@ -407,23 +516,13 @@ app.registerExtension({
 
         // IAMCCS_WanImageMotion — standard motion node
         if (nodeName === "IAMCCS_WanImageMotion") {
-            const onNodeCreated = nodeType.prototype.onNodeCreated;
-            nodeType.prototype.onNodeCreated = function () {
-                const r = onNodeCreated?.apply(this, arguments);
-                ensureTopPresetWidget(this, PRESETS_MOTION);
-                return r;
-            };
+            _installPresetHooks(nodeType, PRESETS_MOTION);
             return;
         }
 
         // WanImageMotionPro — extended FLF node
         if (nodeName === "WanImageMotionPro") {
-            const onNodeCreated = nodeType.prototype.onNodeCreated;
-            nodeType.prototype.onNodeCreated = function () {
-                const r = onNodeCreated?.apply(this, arguments);
-                ensureTopPresetWidget(this, PRESETS_MOTION_PRO);
-                return r;
-            };
+            _installPresetHooks(nodeType, PRESETS_MOTION_PRO);
         }
     },
 });
