@@ -56,6 +56,7 @@ from .iamccs_ltx2_extension_module import (
 from .iamccs_wan_svipro_motion import (
     IAMCCS_WanImageMotion,
     WanImageMotionPro,
+    WanMotionProTrimmer,
 )
 
 from .iamccs_autolink import (
@@ -137,6 +138,7 @@ NODE_CLASS_MAPPINGS = {
     # Hidden alias: loads saved workflows that used the old key, but NOT listed in NODE_DISPLAY_NAME_MAPPINGS
     # so it never appears in the ComfyUI Add Node menu.
     "IAMCCS_WanImageMotionPro": WanImageMotionPro,
+    "WanMotionProTrimmer": WanMotionProTrimmer,
     
     "IAMCCS_SetAutoLink": IAMCCS_SetAutoLink,
     "IAMCCS_GetAutoLink": IAMCCS_GetAutoLink,
@@ -199,6 +201,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_FirstLastLatentControl_Pro": "LTX-2 First/Last → Latent (Pro, slot caps) 🎯",
     "IAMCCS_WanImageMotion": "WanImageMotion",
     "WanImageMotionPro": "WanImageMotionPro (Motion + FLF End Lock)",
+    "WanMotionProTrimmer": "WanMotionProTrimmer (trim overshoot tail)",
     
     "IAMCCS_SetAutoLink": "Set AutoLink",
     "IAMCCS_GetAutoLink": "Get AutoLink",

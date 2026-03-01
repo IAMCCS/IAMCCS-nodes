@@ -11,9 +11,11 @@
 
 Version: 1.3.6
 
-## 🆕 Motion Nodes Update (2026-02-28)
+## 🆕 Motion Nodes Update (2026-02-28) + 
 
 WanImageMotionPro Bux fixed 
+Added WanMotionProTrimmer
+added reference workflow
 
 Version: 1.3.5
 

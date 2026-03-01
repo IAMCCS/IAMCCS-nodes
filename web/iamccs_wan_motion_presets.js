@@ -147,6 +147,7 @@ const PRESETS_MOTION_PRO = {
         end_lock_slots: 16,
         lock_start_slots: 1,
         use_prev_samples: true,
+        end_overshoot_slots: 0,
     },
 
     // ── Diagnostic (no-op + extra logs) ────────────────────
@@ -166,6 +167,7 @@ const PRESETS_MOTION_PRO = {
         lock_start_slots: 1,
         diagnostic_log: true,
         use_prev_samples: true,
+        end_overshoot_slots: 0,
     },
 
     // ── First segment helper ──────────────────────────────
@@ -185,6 +187,7 @@ const PRESETS_MOTION_PRO = {
         lock_start_slots: 1,
         use_prev_samples: false,
         diagnostic_log: true,
+        end_overshoot_slots: 0,
     },
 
     // ── Start frame only (no end lock) ────────────────────
@@ -197,12 +200,12 @@ const PRESETS_MOTION_PRO = {
         vram_profile: "normal",
         include_padding_in_motion: false,
         safety_preset: "safe",
-        // Always honor end_samples when connected (first/last reference).
         use_end_frame: true,
         end_transition_frames: 0,
         end_lock_slots: 1,
         lock_start_slots: 1,
         use_prev_samples: true,
+        end_overshoot_slots: 0,
     },
 
     // ── Standard FLF (start + end, 1 locked slot) ─────────
@@ -220,6 +223,27 @@ const PRESETS_MOTION_PRO = {
         end_lock_slots: 1,
         lock_start_slots: 1,
         use_prev_samples: true,
+        end_overshoot_slots: 0,
+    },
+
+    // ── FLF with overshoot (soft convergence, no freeze) ──
+    // end_overshoot_slots=1: adds 4 hidden frames so the end-lock zone is trimmed
+    // away after sampling. Wire trim_slots → Cut Latent Frames.
+    "flf overshoot": {
+        motion_latent_count: 1,
+        motion: 1.15,
+        motion_mode: "motion_only (prev_samples)",
+        add_reference_latents: false,
+        latent_precision: "fp32",
+        vram_profile: "normal",
+        include_padding_in_motion: false,
+        safety_preset: "safe",
+        use_end_frame: true,
+        end_transition_frames: 0,
+        end_lock_slots: 1,
+        lock_start_slots: 1,
+        use_prev_samples: true,
+        end_overshoot_slots: 1,
     },
 
     // ── Multi-chunk chain (no end lock) ───────────────────
@@ -232,17 +256,15 @@ const PRESETS_MOTION_PRO = {
         vram_profile: "normal",
         include_padding_in_motion: false,
         safety_preset: "safer",
-        // Always honor end_samples when connected (first/last reference).
         use_end_frame: true,
         end_transition_frames: 0,
         end_lock_slots: 1,
         lock_start_slots: 1,
         use_prev_samples: true,
+        end_overshoot_slots: 0,
     },
 
-    // ── Smooth FLF chain (start + end + smooth transition) ─
-    // end_transition_frames=4: safe for clips as short as 33F.
-    // The Python backend additionally clamps trans_start >= T_anchor+1.
+    // ── Smooth FLF chain ───────────────────────────────────
     "smooth flf": {
         motion_latent_count: 1,
         motion: 1.3,
@@ -257,11 +279,10 @@ const PRESETS_MOTION_PRO = {
         end_lock_slots: 1,
         lock_start_slots: 1,
         use_prev_samples: true,
+        end_overshoot_slots: 0,
     },
 
-    // ── High motion FLF (big movement, longer convergence) ─
-    // end_lock_slots=1 (not 2): avoids locking 8 extra video frames.
-    // end_transition_frames=4: safe. Python guard prevents frozen-dissolve.
+    // ── High motion FLF ────────────────────────────────────
     "high motion flf": {
         motion_latent_count: 1,
         motion: 1.6,
@@ -274,9 +295,9 @@ const PRESETS_MOTION_PRO = {
         use_end_frame: true,
         end_transition_frames: 0,
         end_lock_slots: 1,
-        // Keep the first frame anchored to the provided input.
         lock_start_slots: 1,
         use_prev_samples: true,
+        end_overshoot_slots: 1,
     },
 
     // ── Low VRAM + FLF ─────────────────────────────────────
@@ -294,6 +315,7 @@ const PRESETS_MOTION_PRO = {
         end_lock_slots: 1,
         lock_start_slots: 1,
         use_prev_samples: true,
+        end_overshoot_slots: 0,
     },
 };
 

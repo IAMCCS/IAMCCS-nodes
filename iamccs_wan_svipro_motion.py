@@ -705,6 +705,29 @@ class WanImageMotionPro:
                         ),
                     },
                 ),
+                # Append-only: end-frame overshoot — extends the internal generation window so the
+                # hard-locked end frame lands beyond the visible output range, letting motion converge
+                # toward the end image without freezing on it. Connect trim_slots output to a downstream
+                # Cut Latent Frames or Get Latent Range node to remove the extra slots after sampling.
+                # 0 = disabled (original behavior). 1 recommended when end-frame freeze breaks continuity.
+                "end_overshoot_slots": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 8,
+                        "step": 1,
+                        "tooltip": (
+                            "Extends the internal generation window by this many latent slots when the end lock "
+                            "is active (use_end_frame=True + end_samples connected). "
+                            "The end image is locked at the tail of the EXTENDED range, so the visible clip "
+                            "converges toward the end frame without hard-freezing on it. "
+                            "Use the trim_slots output to cut the overshoot frames after sampling. "
+                            "0 = disabled, original behavior. 1 = +4 video frames (recommended). "
+                            "2 = +8 video frames (looser convergence)."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 # prev_samples is optional – mirrors original FLF node and IAMCCS_WanImageMotion.
@@ -714,8 +737,8 @@ class WanImageMotionPro:
             },
         }
 
-    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
-    RETURN_NAMES = ("positive", "negative", "latent")
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT", "INT")
+    RETURN_NAMES = ("positive", "negative", "latent", "trim_slots")
     FUNCTION = "apply"
     CATEGORY = "IAMCCS/Wan"
 
@@ -877,6 +900,7 @@ class WanImageMotionPro:
         lock_start_slots=1,
         diagnostic_log=False,
         use_prev_samples=True,
+        end_overshoot_slots=0,
         prev_samples=None,
         end_samples=None,
     ):
@@ -887,12 +911,23 @@ class WanImageMotionPro:
 
             total_latents = (length - 1) // 4 + 1
 
+            # Overshoot: when end lock is active and end_overshoot_slots > 0, extend the internal
+            # generation window so the end-locked zone lands beyond what the sampler actually produces
+            # as "visible" output. trim_slots (4th output) tells the downstream crop node how many
+            # latent slots to remove from the tail after sampling.
+            _overshoot = (
+                int(end_overshoot_slots)
+                if (use_end_frame and end_samples is not None and int(end_overshoot_slots) > 0)
+                else 0
+            )
+            total_latents_gen = total_latents + _overshoot
+
             device = anchor_latent.device
             dtype = anchor_latent.dtype
 
             empty_latent_dtype = self._pick_empty_latent_dtype(dtype, latent_precision)
             empty_latent = torch.zeros(
-                [B, 16, total_latents, H, W],
+                [B, 16, total_latents_gen, H, W],
                 device=comfy.model_management.intermediate_device(),
                 dtype=empty_latent_dtype,
             )
@@ -904,12 +939,12 @@ class WanImageMotionPro:
             has_prev = bool(use_prev_samples) and prev_samples is not None and motion_latent_count != 0
 
             if (prev_samples is None) or (not use_prev_samples) or (motion_latent_count == 0):
-                padding_size = total_latents - T_anchor
+                padding_size = total_latents_gen - T_anchor
                 image_cond_latent = anchor_latent
             else:
                 motion_latent = prev_samples["samples"][:, :, -motion_latent_count:]
                 T_motion = motion_latent.shape[2]
-                padding_size = total_latents - T_anchor - T_motion
+                padding_size = total_latents_gen - T_anchor - T_motion
                 image_cond_latent = torch.cat([anchor_latent, motion_latent], dim=2)
 
             padding_size = max(0, padding_size)
@@ -918,11 +953,11 @@ class WanImageMotionPro:
                 padding = comfy.latent_formats.Wan21().process_out(padding)
                 image_cond_latent = torch.cat([image_cond_latent, padding], dim=2)
 
-            # FLF/SVI reference behavior: enforce exact temporal length.
-            if image_cond_latent.shape[2] > total_latents:
-                image_cond_latent = image_cond_latent[:, :, :total_latents]
-            elif image_cond_latent.shape[2] < total_latents:
-                image_cond_latent = image_cond_latent[:, :, :total_latents]
+            # FLF/SVI reference behavior: enforce exact temporal length (extended by overshoot).
+            if image_cond_latent.shape[2] > total_latents_gen:
+                image_cond_latent = image_cond_latent[:, :, :total_latents_gen]
+            elif image_cond_latent.shape[2] < total_latents_gen:
+                image_cond_latent = image_cond_latent[:, :, :total_latents_gen]
 
             # Pre-compute end_t_fix so we can exclude the end-locked zone from motion amplitude.
             # Motion should NOT touch slots that will be hard-locked to end_samples: scaling those
@@ -938,7 +973,7 @@ class WanImageMotionPro:
                 ):
                     # Cap to end_lock_slots so the motion range is not incorrectly
                     # shortened by the full VAE temporal size (which can be T>1 for a single image).
-                    end_t_fix_early = min(_e.shape[2], total_latents, end_lock_slots)
+                    end_t_fix_early = min(_e.shape[2], total_latents_gen, end_lock_slots)
 
             # Motion boost applied before FLF overwrite.
             # Cap effective_latents so motion never reaches into the end-locked zone.
@@ -951,10 +986,10 @@ class WanImageMotionPro:
                 )
 
             if include_padding_in_motion and has_prev and (T_anchor + T_motion) > 1:
-                effective_latents_base = total_latents
+                effective_latents_base = total_latents_gen
             else:
-                effective_latents_base = min(total_latents, T_anchor + T_motion)
-            effective_latents = max(1, min(effective_latents_base, total_latents - end_t_fix_early))
+                effective_latents_base = min(total_latents_gen, T_anchor + T_motion)
+            effective_latents = max(1, min(effective_latents_base, total_latents_gen - end_t_fix_early))
 
             motion_mode_effective = motion_mode
             # NOTE: we intentionally do NOT auto-switch to all_nonfirst here.
@@ -966,9 +1001,11 @@ class WanImageMotionPro:
                 free_vram, total_vram = None, None
 
             self._log.info(
-                "[WanImageMotionPro] length=%s -> total_latents=%s | motion=%s | mode=%s | vram_profile=%s | latent_precision=%s | add_reference_latents=%s | include_padding_in_motion=%s | use_end_frame=%s | end_transition_frames=%s | end_lock_slots=%s | lock_start_slots=%s",
+                "[WanImageMotionPro] length=%s -> total_latents=%s (+overshoot=%s -> gen=%s) | motion=%s | mode=%s | vram_profile=%s | latent_precision=%s | add_reference_latents=%s | include_padding_in_motion=%s | use_end_frame=%s | end_transition_frames=%s | end_lock_slots=%s | lock_start_slots=%s",
                 length,
                 total_latents,
+                _overshoot,
+                total_latents_gen,
                 motion,
                 motion_mode,
                 vram_profile,
@@ -1063,8 +1100,8 @@ class WanImageMotionPro:
                         head, tail,
                     )
                     self._log.info(
-                        "[WanImageMotionPro][diag] end_t_fix_early=%s (motion cap) use_end_frame=%s end_lock_slots=%s",
-                        end_t_fix_early, use_end_frame, end_lock_slots,
+                        "[WanImageMotionPro][diag] end_t_fix_early=%s (motion cap) use_end_frame=%s end_lock_slots=%s | overshoot=%s total_latents_gen=%s",
+                        end_t_fix_early, use_end_frame, end_lock_slots, _overshoot, total_latents_gen,
                     )
                 except Exception as e:
                     self._log.warning("[WanImageMotionPro][diag] failed to compute diagnostics: %s", e)
@@ -1090,13 +1127,14 @@ class WanImageMotionPro:
                     # The Wan VAE always encodes an image to T≥2 latent slots, so without
                     # this cap end_t_fix would be 2 even for a single frame, locking the
                     # last 8 video frames instead of only the last ~4 (= 1 latent slot).
-                    end_t_fix = min(T_end, total_latents, end_lock_slots)
+                    end_t_fix = min(T_end, total_latents_gen, end_lock_slots)
                     if end_t_fix > 0:
                         self._log.info(
-                            "[WanImageMotionPro] end lock: T_end=%s end_lock_slots=%s -> end_t_fix=%s (locking latent slots [%s:%s] = last ~%s video frames)",
+                            "[WanImageMotionPro] end lock: T_end=%s end_lock_slots=%s -> end_t_fix=%s (locking latent slots [%s:%s] = last ~%s video frames) | overshoot=%s trim_slots=%s",
                             T_end, end_lock_slots, end_t_fix,
-                            total_latents - end_t_fix, total_latents,
+                            total_latents_gen - end_t_fix, total_latents_gen,
                             end_t_fix * 4,
+                            _overshoot, _overshoot,
                         )
                         image_cond_latent[:, :, -end_t_fix:] = end_latent[:, :, -end_t_fix:]
 
@@ -1125,7 +1163,7 @@ class WanImageMotionPro:
                 )
 
             # Mask: lock first slot + lock last end_t_fix slots.
-            mask = torch.ones((1, 1, total_latents, H, W), device=device, dtype=dtype)
+            mask = torch.ones((1, 1, total_latents_gen, H, W), device=device, dtype=dtype)
             lock_start_slots_i = int(max(0, min(16, lock_start_slots)))
             if lock_start_slots_i > 0:
                 mask[:, :, :lock_start_slots_i] = 0.0
@@ -1161,7 +1199,78 @@ class WanImageMotionPro:
                 )
 
             out_latent = {"samples": empty_latent}
-            return (positive, negative, out_latent)
+            return (positive, negative, out_latent, _overshoot)
+
+
+class WanMotionProTrimmer:
+    """WanMotionProTrimmer
+
+    Companion node for WanImageMotionPro.
+    Removes the overshoot latent slots from the sampler output when
+    end_overshoot_slots > 0 was set on WanImageMotionPro.
+
+    Wiring:
+        WanImageMotionPro.latent  → KSampler → latent_in
+        WanImageMotionPro.trim_slots            → trim_slots
+        latent_out → downstream decode / next segment
+
+    When trim_slots == 0 the node is a transparent pass-through (no copy).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent_in": ("LATENT",),
+                "trim_slots": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 64,
+                        "step": 1,
+                        "tooltip": (
+                            "Number of latent slots to remove from the tail of latent_in. "
+                            "Wire directly from the trim_slots output of WanImageMotionPro. "
+                            "0 = pass-through, no modification."
+                        ),
+                    },
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT", "INT")
+    RETURN_NAMES = ("latent", "video_frames")
+    FUNCTION = "trim"
+    CATEGORY = "IAMCCS/Wan"
+
+    _log = logging.getLogger("IAMCCS.WanMotionProTrimmer")
+
+    def trim(self, latent_in: dict, trim_slots: int):
+        samples = latent_in["samples"]  # [B, C, T, H, W]
+        T_in = samples.shape[2]
+        slots = int(trim_slots)
+
+        if slots <= 0:
+            # Pass-through: do not copy the tensor.
+            video_frames = (T_in - 1) * 4 + 1
+            self._log.info(
+                "[WanMotionProTrimmer] trim_slots=0 — pass-through. T=%s -> video_frames=%s",
+                T_in, video_frames,
+            )
+            return (latent_in, video_frames)
+
+        T_out = max(1, T_in - slots)
+        trimmed = samples[:, :, :T_out].clone()
+        video_frames = (T_out - 1) * 4 + 1
+        self._log.info(
+            "[WanMotionProTrimmer] T_in=%s trim_slots=%s -> T_out=%s video_frames=%s",
+            T_in, slots, T_out, video_frames,
+        )
+
+        out = dict(latent_in)
+        out["samples"] = trimmed
+        return (out, video_frames)
 
 
 NODE_CLASS_MAPPINGS = {
@@ -1170,9 +1279,11 @@ NODE_CLASS_MAPPINGS = {
     # Hidden alias: present for backward-compat (saved workflows load correctly)
     # but intentionally absent from NODE_DISPLAY_NAME_MAPPINGS → never shows in the menu.
     "IAMCCS_WanImageMotionPro": WanImageMotionPro,
+    "WanMotionProTrimmer": WanMotionProTrimmer,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_WanImageMotion": "IAMCCS WanImageMotion",
     "WanImageMotionPro": "WanImageMotionPro",
+    "WanMotionProTrimmer": "WanMotionProTrimmer",
 }
