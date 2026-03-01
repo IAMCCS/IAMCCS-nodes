@@ -136,6 +136,7 @@ class IAMCCS_LTX2_ExtensionModule:
                 # Default is 'custom' to preserve existing workflows.
                 "preset": ([
                     "custom",
+                    "target_extension_ltx2",
                     "cut_bestofk_16",
                     "cut_bestofk_16_luma",
                     "cut_bestofk_32",
