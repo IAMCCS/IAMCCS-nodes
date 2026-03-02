@@ -2,6 +2,19 @@
 # ===============================================================
 # IAMCCS WanImageMotion
 # Drop-in replacement for KJNodes WanImageToVideoSVIPro with motion control
+#
+# Copyright (C) 2025-2026 Carmine Cristallo Scalzi (IAMCCS)
+#
+# This file is part of IAMCCS-nodes and is distributed under the
+# GNU General Public License v3.0 (GPL-3.0).
+#
+# This file contains logic derived from the following GPL-3.0 projects:
+#   - ComfyUI-Wan-SVI2Pro-FLF (https://github.com/IAMCCS/ComfyUI-Wan-SVI2Pro-FLF)
+#   - ComfyUI-KJNodes (https://github.com/kijai/ComfyUI-KJNodes)
+#   - ComfyUI (https://github.com/comfyanonymous/ComfyUI)
+#
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <https://www.gnu.org/licenses/>.
 # ===============================================================
 
 import torch
@@ -724,7 +737,10 @@ class WanImageMotionPro:
                             "converges toward the end frame without hard-freezing on it. "
                             "Use the trim_slots output to cut the overshoot frames after sampling. "
                             "0 = disabled, original behavior. 1 = +4 video frames (recommended). "
-                            "2 = +8 video frames (looser convergence)."
+                            "2 = +8 video frames (looser convergence). "
+                            "NOTE: If you have KJNodes WAN attention optimizations (FETA / wrapped_attention) enabled, "
+                            "some versions may crash with an einops shape mismatch when overshoot > 0. "
+                            "Workaround: set end_overshoot_slots=0 or disable/update that KJNodes optimization."
                         ),
                     },
                 ),
@@ -921,6 +937,16 @@ class WanImageMotionPro:
                 else 0
             )
             total_latents_gen = total_latents + _overshoot
+
+            if _overshoot > 0:
+                self._log.warning(
+                    "[WanImageMotionPro] end_overshoot_slots=%s enabled (total_latents=%s -> gen=%s). "
+                    "If you use KJNodes WAN attention optimizations (FETA / wrapped_attention) and hit an einops shape mismatch, "
+                    "set end_overshoot_slots=0 or disable/update that optimization.",
+                    int(end_overshoot_slots),
+                    total_latents,
+                    total_latents_gen,
+                )
 
             device = anchor_latent.device
             dtype = anchor_latent.dtype
