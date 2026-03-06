@@ -137,7 +137,51 @@ function findFirstNodeByType(typeName) {
     }
 }
 
-function tryGetLtxContext() {
+function _readWidgetValue(node, ...names) {
+    // Try each name in order; also fall back to widget index if name is a number.
+    for (const n of names) {
+        let w;
+        if (typeof n === "number") {
+            w = node?.widgets?.[n];
+        } else {
+            w = findWidget(node, n);
+        }
+        if (w?.value != null) {
+            const v = Number(w.value);
+            if (Number.isFinite(v)) return v;
+        }
+    }
+    return null;
+}
+
+function _followLinkedInputByName(node, widgetName) {
+    // When a widget is wired via link, ComfyUI converts it to an input that retains
+    // the original widget name.  This helper finds that input by name, follows the
+    // link to the source node, and returns the first numeric widget value found there.
+    // Works reliably for INTConstant, PrimitiveInt, PrimitiveFloat, etc.
+    try {
+        const inp = (node?.inputs || []).find(i => i?.name === widgetName);
+        if (!inp || inp.link == null) return null;
+        const linkData = app.graph?.links?.[inp.link];
+        if (!linkData) return null;
+        // LiteGraph stores links as LLink objects with .origin_id (named property).
+        // Guard with array fallback for older serialized plain-array links.
+        const srcNodeId = linkData.origin_id ?? linkData[1];
+        if (srcNodeId == null) return null;
+        const srcNode = app.graph?.getNodeById(srcNodeId);
+        if (!srcNode) return null;
+        // Try every widget; return the first that is a finite number.
+        for (const w of srcNode.widgets || []) {
+            const v = Number(w?.value);
+            if (Number.isFinite(v)) return v;
+        }
+        return null;
+    } catch {
+        return null;
+    }
+}
+
+function tryGetLtxContext(hintNode) {
     // Best-effort: looks for LTX nodes commonly present in this workflow.
     // EmptyLTXVLatentVideo widgets: [width, height, length, ...]
     // LTXVConditioning widgets: [fps]
@@ -147,21 +191,67 @@ function tryGetLtxContext() {
         const latentNode = findFirstNodeByType("EmptyLTXVLatentVideo");
         const fpsNode = findFirstNodeByType("LTXVConditioning");
 
-        if (latentNode?.widgets?.length) {
-            const wW = latentNode.widgets.find(w => w?.name === "width") || latentNode.widgets[0];
-            const wH = latentNode.widgets.find(w => w?.name === "height") || latentNode.widgets[1];
-            const wL = latentNode.widgets.find(w => w?.name === "length") || latentNode.widgets[2];
-            ctx.width = wW?.value != null ? Number(wW.value) : null;
-            ctx.height = wH?.value != null ? Number(wH.value) : null;
-            ctx.frames = wL?.value != null ? Number(wL.value) : null;
+        if (latentNode) {
+            // Try named widgets first (direct values), then follow link by name if widget was converted.
+            ctx.width  = _readWidgetValue(latentNode, "width",  0) ?? _followLinkedInputByName(latentNode, "width");
+            ctx.height = _readWidgetValue(latentNode, "height", 1) ?? _followLinkedInputByName(latentNode, "height");
+            // length = frames; widget may be hidden if wired via link.
+            ctx.frames = _readWidgetValue(latentNode, "length", 2) ?? _followLinkedInputByName(latentNode, "length");
         }
 
         if (fpsNode?.widgets?.length) {
-            const wFps = fpsNode.widgets.find(w => w?.name === "frame_rate") || fpsNode.widgets[0];
-            ctx.fps = wFps?.value != null ? Number(wFps.value) : null;
+            ctx.fps = _readWidgetValue(fpsNode, "frame_rate", "fps", 0);
+        }
+
+        // Fallback: look for IAMCCS-style INTConstant nodes with recognizable titles.
+        if (ctx.frames == null) {
+            // Scan all nodes for a "length" constant; prefer ones with title containing "second"
+            const all = app?.graph?._nodes || [];
+            const lenNode = all.find(n => {
+                const t = (n.title || "").toLowerCase();
+                return (t.includes("length") || t.includes("duration") || t.includes("second"));
+            });
+            if (lenNode) {
+                const val = _readWidgetValue(lenNode, "value", 0);
+                if (val != null) {
+                    // Treat as seconds if title contains "second" or "duration", else frames.
+                    const t = (lenNode.title || "").toLowerCase();
+                    if (t.includes("second") || t.includes("duration")) {
+                        // convert to frames below after fps is resolved
+                        ctx._length_seconds = val;
+                    } else {
+                        ctx.frames = val;
+                    }
+                }
+            }
+        }
+
+        if (ctx.fps == null) {
+            const all = app?.graph?._nodes || [];
+            const fNode = all.find(n => (n.title || "").toLowerCase() === "fps");
+            if (fNode) ctx.fps = _readWidgetValue(fNode, "value", 0);
+        }
+
+        // Convert length_seconds → frames if we got one
+        if (ctx.frames == null && ctx._length_seconds != null) {
+            const fps = ctx.fps || 24;
+            ctx.frames = Math.round(ctx._length_seconds * fps);
         }
     } catch {
         // ignore
+    }
+
+    // --- Override from the probe node's own duration_hint_s widget (most reliable) ---
+    if (hintNode) {
+        // _readWidgetValue works when the value is typed directly;
+        // _followLinkedInputByName works when a link was connected (widget → input).
+        const dur = _readWidgetValue(hintNode, "duration_hint_s") ??
+                    _followLinkedInputByName(hintNode, "duration_hint_s");
+        if (dur != null && dur > 0) {
+            const fps = ctx.fps || 24;
+            ctx.frames = Math.round(dur * fps);
+            ctx._duration_hint_s = dur;
+        }
     }
 
     // Normalize
@@ -269,6 +359,18 @@ function formatSummaryReport(data) {
         const vaeOv = vae?.overlap;
         const vaeT = vae?.temporal_size;
         const vaeTo = vae?.temporal_overlap;
+        const vaeCtx = vae?.context || {};
+        const vaeDurS = vaeCtx?.duration_s;
+        const vaeMp = vaeCtx?.megapixels;
+        const vaeFrames = vaeCtx?.frames;
+        const vaeFps = vaeCtx?.fps;
+
+        const durStr = vaeDurS != null
+            ? `${vaeDurS.toFixed(1)}s`
+            : (vaeFrames != null && vaeFps != null)
+                ? `${(vaeFrames / vaeFps).toFixed(1)}s`
+                : "? s";
+        const mpStr = vaeMp != null ? ` ${vaeMp.toFixed(2)}MP` : "";
 
         const gguf = rec?.gguf_accelerator || {};
         const ggufPolicy = gguf?.move_policy;
@@ -282,7 +384,7 @@ function formatSummaryReport(data) {
             `GPU: ${gpu}`,
             `RAM: ${ram}`,
             `HW profile: ${profile} | reserved headroom: ${headroom} GB | reserved(est): ${reservedEff} GB`,
-            `VAE decode: tile=${vaeTile} overlap=${vaeOv} temporal=${vaeT} t_overlap=${vaeTo}`,
+            `VAE decode: tile=${vaeTile} overlap=${vaeOv} temporal=${vaeT} t_overlap=${vaeTo} | duration=${durStr}${mpStr}`,
             `GGUF: move_policy=${ggufPolicy} leave_free_vram_mb=${ggufLeave} | Sampler: cleanup=${samplerCleanup}`,
         ].join("\n");
     } catch {
@@ -331,7 +433,7 @@ function ensureReportWidgets(node) {
             const wSummary = findWidget(node, "hw_probe_summary");
             try {
                 setWidgetValue(wSummary, "(probing...)");
-                const ctx = tryGetLtxContext();
+                const ctx = tryGetLtxContext(node);
                 const data = await probeHardware(ctx);
 
                 const applyMode = String(getProp(node, "iamccs_hw_probe_apply_mode", "overwrite"));

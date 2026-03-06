@@ -168,26 +168,58 @@ def _recommend_vae_decode(
 ) -> Dict[str, Any]:
     """Heuristic recommendations for IAMCCS_VAEDecodeTiledSafe.
 
-    Goal: reduce peak VRAM during decode for long clips/high resolution.
+    Goal: reduce peak VRAM *and* CPU RAM during decode for long clips/high resolution.
+
+    tile_size is the primary VRAM lever (spatial tile footprint).  Duration-based
+    penalties are proportional to the base tile so that high-VRAM cards keep larger
+    tiles while low-VRAM cards gracefully fall to the minimum.
+
+    Reference tables (LTX video VAE, 1280x780 ~1 MP):
+
+    GPU (VRAM)          | base | 10 s | 15 s | 20 s | 25 s+
+    --------------------|------|------|------|------|------
+    3050/4060 mob (6 GB)| 256  | 256  | 192* | 192* | 192*
+    3070/4060   (8 GB) | 320  | 320  | 256  | 192* | 192*
+    3080        (10 GB)| 448  | 448  | 320  | 256  | 192*
+    3060/4070   (12 GB)| 512  | 512  | 384  | 320  | 256   (* user-validated ✓)
+    4080/5080   (16 GB)| 640  | 640  | 448  | 384  | 320
+    3090/4090   (24 GB)| 768  | 768  | 576  | 448  | 384
+    5090        (32 GB)| 1024 | 1024 | 768  | 640  | 512
+    (* clamped to min=192)
     """
 
-    # Base tile size by VRAM (image-space pixels)
+    # Base tile_size by VRAM (image-space pixels, calibrated for ≤10 s clips).
+    #
+    #  ≤  6.5 GB : RTX 3050 8 GB, 3060 6 GB mobile, 4060 Ti mobile, 5060 mobile
+    #  ≤  8.5 GB : RTX 3060 Ti 8 GB, 3070 8 GB, 3070 Ti 8 GB,
+    #              4060 8 GB, 4060 Ti 8 GB, 5060 8 GB
+    #  ≤ 10.5 GB : RTX 3080 10 GB  (sits between 8 GB and 12 GB tiers)
+    #  ≤ 12.5 GB : RTX 3060 12 GB *, 3080 12 GB, 3080 Ti 12 GB,
+    #              4070 12 GB, 4070 Super 12 GB, 4070 Ti 12 GB, 5070 12 GB
+    #              (* user-validated: tile 512 @ ≤10 s on 3060 12 GB ✓)
+    #  ≤ 16.5 GB : RTX 4060 Ti 16 GB, 4070 Ti Super 16 GB,
+    #              4080 16 GB, 4080 Super 16 GB,
+    #              5060 Ti 16 GB, 5070 Ti 16 GB, 5080 16 GB
+    #  ≤ 24.5 GB : RTX 3090 24 GB, 3090 Ti 24 GB, 4090 24 GB
+    #    > 24.5 GB : RTX 5090 32 GB
     if vram_gb is None:
         tile_size = 384
     elif vram_gb <= 6.5:
         tile_size = 256
     elif vram_gb <= 8.5:
         tile_size = 320
+    elif vram_gb <= 10.5:
+        tile_size = 448   # RTX 3080 10 GB
     elif vram_gb <= 12.5:
-        tile_size = 384
+        tile_size = 512   # RTX 3060 12 GB / 3080 12 GB / 4070 — validated ✓
     elif vram_gb <= 16.5:
-        tile_size = 512
+        tile_size = 640   # RTX 4080 / 4070 Ti Super / 5080 class
     elif vram_gb <= 24.5:
-        tile_size = 640
+        tile_size = 768   # RTX 3090 / 4090
     else:
-        tile_size = 768
+        tile_size = 1024  # RTX 5090 32 GB
 
-    # Adjust by resolution and length.
+    # Resolve frame / resolution context.
     mp = None
     if width and height and width > 0 and height > 0:
         mp = (float(width) * float(height)) / 1_000_000.0
@@ -195,21 +227,44 @@ def _recommend_vae_decode(
     fcount = int(frames) if frames and frames > 0 else None
     fps_val = float(fps) if fps and fps > 0 else None
 
-    # Penalize very high resolutions.
-    if mp is not None:
-        if mp >= 1.5:
-            tile_size -= 128
-        elif mp >= 1.0:
-            tile_size -= 64
-
-    # Penalize long clips (decode memory spikes scale with temporal chunking).
+    # Duration in seconds (best estimate).
+    duration_s: float | None = None
     if fcount is not None:
-        if fcount >= 320:
-            tile_size -= 64
-        elif fcount >= 200:
-            tile_size -= 32
+        if fps_val is not None:
+            duration_s = float(fcount) / float(fps_val)
+        else:
+            duration_s = float(fcount) / 24.0  # fallback: assume 24 fps
 
-    # Slight penalty for very high fps (tends to correlate with longer/denser outputs)
+    # --- Duration-based penalty (proportional to base) ----------------------------
+    # Percentage-based scaling keeps results proportional across VRAM tiers:
+    # high-VRAM cards remain at higher tiles; low-VRAM cards gracefully floor at 192.
+    # The main goal is to keep the primary decode path within CPU RAM so the
+    # temporal-chunked fallback is a safety net, not the default path.
+    if duration_s is not None:
+        if duration_s >= 25.0:
+            tile_size = int(tile_size * 0.50)   # −50 %
+        elif duration_s >= 20.0:
+            tile_size = int(tile_size * 0.625)  # −37.5 %
+        elif duration_s >= 15.0:
+            tile_size = int(tile_size * 0.75)   # −25 %
+        elif duration_s > 10.0:
+            tile_size = int(tile_size * 0.875)  # −12.5 %
+        # ≤ 10 s: no duration penalty
+
+    # --- Resolution penalty (proportional) ----------------------------------------
+    # tile_size scales by 1/sqrt(mp) so that the tile *area* (and VRAM pressure per
+    # step) stays roughly constant as resolution grows.
+    #   1.0 MP  (1280×780)  → scale 1.000 → no change   (validated base)
+    #   1.5 MP  (1440×1080) → scale 0.816 → −19 %
+    #   2.0 MP  (1920×1080) → scale 0.707 → −29 %
+    #   2.5 MP  (1600×1600) → scale 0.632 → −37 %
+    #   4.0 MP  (2560×1440) → scale 0.500 → −50 % (capped)
+    # Only applied when mp > 1.0; below that the base values are used directly.
+    if mp is not None and mp > 1.0:
+        res_scale = max(0.5, 1.0 / (float(mp) ** 0.5))
+        tile_size = int(tile_size * res_scale)
+
+    # Slight penalty for very high fps (correlates with longer/denser outputs).
     if fps_val is not None and fps_val >= 48:
         tile_size -= 32
 
@@ -218,13 +273,14 @@ def _recommend_vae_decode(
     if tile_size < overlap * 4:
         overlap = _snap_int(tile_size // 4, step=32, min_value=0, max_value=160)
 
-    # Temporal chunking: key lever for long videos.
-    # IMPORTANT: keep temporal_size >= 64 (widget-scale) for quality.
-    # Video VAEs often apply temporal compression internally, so too-small values
-    # can produce visible chunk boundary artifacts.
+    # Temporal chunking: key lever for VRAM during per-tile decode steps.
+    # Keep temporal_size >= 64 (widget-scale) for quality; video VAEs with
+    # internal temporal compression can produce seam artifacts below that.
     if vram_gb is None:
         temporal_size = 64
     elif vram_gb <= 8.5:
+        temporal_size = 64
+    elif vram_gb <= 10.5:
         temporal_size = 64
     elif vram_gb <= 12.5:
         temporal_size = 64
@@ -234,7 +290,7 @@ def _recommend_vae_decode(
         temporal_size = 128
 
     if fcount is not None:
-        # Can't exceed total frames. If frames < 64, use frames.
+        # Can't exceed total frames; short clips: stay at fcount.
         temporal_size = min(temporal_size, max(8, fcount))
         if fcount >= 64:
             temporal_size = max(64, temporal_size)
@@ -259,6 +315,7 @@ def _recommend_vae_decode(
             "height": height,
             "frames": frames,
             "fps": fps,
+            "duration_s": float(duration_s) if duration_s is not None else None,
             "megapixels": mp,
         },
     }

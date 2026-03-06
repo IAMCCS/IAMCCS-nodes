@@ -1092,25 +1092,32 @@ class IAMCCS_VRAMCleanup:
 class IAMCCS_VAEDecodeTiledSafe:
     @staticmethod
     def _auto_tile_params(vram_gb: float | None, compression: int) -> tuple[int, int]:
-        # Conservative defaults for SD/SDXL VAE decode.
-        # Note: tile_size refers to final image-space pixels (like many tiled-decode UIs).
-        # We also ensure divisibility by (compression * 8) to reduce odd edge cases.
-        # NOTE: More conservative than many image-only defaults, since video VAEs
-        # tend to spike memory during decode.
+        # Conservative defaults for video VAE decode (auto mode, no duration context).
+        # tile_size = image-space pixels; we snap to (compression*8) multiples.
+        #
+        #  ≤  6.5 GB : RTX 3050 / 3060 mobile
+        #  ≤  8.5 GB : RTX 3060 Ti, 3070, 3070 Ti, 4060, 4060 Ti 8 GB, 5060
+        #  ≤ 10.5 GB : RTX 3080 10 GB
+        #  ≤ 12.5 GB : RTX 3060 12 GB, 3080 12 GB, 3080 Ti, 4070, 4070 Super, 5070
+        #  ≤ 16.5 GB : RTX 4060 Ti 16 GB, 4070 Ti Super, 4080, 4080 Super, 5060 Ti, 5070 Ti, 5080
+        #  ≤ 24.5 GB : RTX 3090, 3090 Ti, 4090
+        #    > 24.5 GB : RTX 5090 32 GB
         if vram_gb is None:
             tile_size = 384
         elif vram_gb <= 6.5:
             tile_size = 256
         elif vram_gb <= 8.5:
             tile_size = 320
+        elif vram_gb <= 10.5:
+            tile_size = 448   # RTX 3080 10 GB
         elif vram_gb <= 12.5:
-            tile_size = 384
-        elif vram_gb <= 16.5:
             tile_size = 512
-        elif vram_gb <= 24.5:
+        elif vram_gb <= 16.5:
             tile_size = 640
-        else:
+        elif vram_gb <= 24.5:
             tile_size = 768
+        else:
+            tile_size = 1024
 
         snap = max(64, int(compression) * 8)
         tile_size = max(64, (int(tile_size) // snap) * snap)
@@ -1153,6 +1160,16 @@ class IAMCCS_VAEDecodeTiledSafe:
                     },
                 ),
                 "cleanup_before_decode": ("BOOLEAN", {"default": False}),
+                "duration_hint_s": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 3600,
+                        "step": 1,
+                        "tooltip": "Video duration in seconds — used only by 'Probe HW & Apply' to compute the correct tile size recommendation. 0 = auto-detect from workflow. Does NOT affect the actual decode.",
+                    },
+                ),
             }
         }
 
@@ -1160,7 +1177,7 @@ class IAMCCS_VAEDecodeTiledSafe:
     FUNCTION = "decode"
     CATEGORY = "IAMCCS/HW"
 
-    def decode(self, samples, vae, tile, tiling_mode, tile_size, overlap, temporal_size, temporal_overlap, cleanup_before_decode):
+    def decode(self, samples, vae, tile, tiling_mode, tile_size, overlap, temporal_size, temporal_overlap, cleanup_before_decode, duration_hint_s=0):
         if cleanup_before_decode:
             # IMPORTANT: do not unload all models here.
             # Unloading can cause large stalls because ComfyUI will re-load/offload models again.
@@ -1215,49 +1232,52 @@ class IAMCCS_VAEDecodeTiledSafe:
             )
 
         def _decode_video_by_time_slices(ts: int, ov: int):
-            # Avoid ComfyUI's decode_tiled_3d/tiled_scale_multidim CPU accumulation buffers,
-            # which can OOM even when the final output might fit.
+            # Decode the video latent in small temporal chunks to avoid the large
+            # CPU buffers that tiled_scale_multidim pre-allocates for the full clip.
+            # tiled_scale_multidim allocates two full-video tensors (output + output_div)
+            # plus an intermediate for process_output, regardless of tile_t.  By
+            # slicing the latent into small 5-D chunks and decoding each independently
+            # we keep every per-step buffer proportional to chunk_t, not total duration.
             if not hasattr(latents, "shape"):
                 return None
             if len(latents.shape) != 5:
                 return None
 
-            b, c, t, h, w = latents.shape
-            if t <= 1:
+            b, c, t_lat, h, w = latents.shape
+            if t_lat <= 1:
                 return None
 
-            images_out = None
-            for ti in range(int(t)):
-                frame_latents = latents[:, :, ti, :, :]
-                if tile and hasattr(vae, "decode_tiled"):
-                    frame_img = vae.decode_tiled(
-                        frame_latents,
-                        tile_x=int(ts) // compression,
-                        tile_y=int(ts) // compression,
-                        overlap=int(ov) // compression,
-                        tile_t=None,
-                        overlap_t=None,
-                    )
-                else:
-                    frame_img = vae.decode(frame_latents)
-
-                # Expected ComfyUI image tensor: [B, H, W, C]
-                if images_out is None:
-                    if len(frame_img.shape) != 4:
-                        raise RuntimeError(
-                            f"Unexpected VAE decoded frame shape: {tuple(frame_img.shape)} (expected 4D [B,H,W,C])"
+            # 4 latent frames per chunk ≈ 32 pixel frames at 8× temporal compression.
+            # Peak CPU buffer per chunk: ~380 MB at 1280×780 float32 (vs ~11 GB for the
+            # full 10-second clip in one shot).
+            chunk_lat = 4
+            decoded_chunks: list = []
+            for t_start in range(0, t_lat, chunk_lat):
+                t_end = min(t_lat, t_start + chunk_lat)
+                chunk = latents[:, :, t_start:t_end, :, :]  # 5-D, keeps temporal dim
+                try:
+                    if tile and hasattr(vae, "decode_tiled"):
+                        chunk_img = vae.decode_tiled(
+                            chunk,
+                            tile_x=int(ts) // compression,
+                            tile_y=int(ts) // compression,
+                            overlap=int(ov) // compression,
+                            tile_t=None,
+                            overlap_t=None,
                         )
-                    images_out = torch.empty(
-                        (int(b) * int(t), int(frame_img.shape[1]), int(frame_img.shape[2]), int(frame_img.shape[3])),
-                        device=frame_img.device,
-                        dtype=frame_img.dtype,
-                    )
+                    else:
+                        chunk_img = vae.decode(chunk)
+                except Exception:
+                    return None  # Let caller fall through to smaller-tile attempt
+                decoded_chunks.append(chunk_img)
 
-                start = int(ti) * int(b)
-                end = start + int(b)
-                images_out[start:end] = frame_img
-
-            return images_out
+            if not decoded_chunks:
+                return None
+            try:
+                # ComfyUI image tensors: [B×T, H, W, C] – cat along the frame/batch dim.
+                return torch.cat(decoded_chunks, dim=0)
+            except Exception:
+                return None
 
         def _try_decode(ts: int, ov: int, tt: int | None, ot: int | None):
             if tile and hasattr(vae, "decode_tiled"):
@@ -1295,36 +1315,30 @@ class IAMCCS_VAEDecodeTiledSafe:
                 last_err = e
                 msg = str(e).lower()
                 is_oom = ("out of memory" in msg) or ("cuda" in msg and "memory" in msg)
-                if not is_oom:
-                    # Special case: CPU allocator OOM during video decode.
-                    if _is_cpu_allocator_oom(e):
-                        try:
-                            images = _decode_video_by_time_slices(ts, ov)
-                            if images is not None:
-                                log.warning(
-                                    "[IAMCCS_VAEDecodeTiledSafe] CPU OOM avoided by decoding video per-frame (tile=%s overlap=%s).",
-                                    ts,
-                                    ov,
-                                )
-                                break
-                        except Exception as e2:
-                            last_err = e2
+                is_cpu_oom = _is_cpu_allocator_oom(e)
+
+                if not is_oom and not is_cpu_oom:
+                    # Non-OOM runtime error: re-raise immediately, nothing to retry.
                     raise
 
-                # If this is CPU allocator OOM, try per-frame decode before shrinking tiles.
-                if _is_cpu_allocator_oom(e):
+                # VRAM OOM or CPU RAM OOM: try temporal-chunked decode first.
+                # Temporal chunking bypasses tiled_scale_multidim's full-video
+                # output buffer allocation, which is the cause of CPU RAM OOM
+                # on long clips even when VRAM is sufficient.
+                if is_cpu_oom:
                     try:
                         images = _decode_video_by_time_slices(ts, ov)
                         if images is not None:
                             log.warning(
-                                "[IAMCCS_VAEDecodeTiledSafe] CPU OOM avoided by decoding video per-frame (tile=%s overlap=%s).",
+                                "[IAMCCS_VAEDecodeTiledSafe] CPU OOM avoided by temporal chunking (tile=%s overlap=%s).",
                                 ts,
                                 ov,
                             )
                             break
                     except Exception as e2:
                         last_err = e2
-                        # Fall through to the existing retry logic.
+                    # Chunked decode also failed; fall through to smaller-tile retry.
+
                 log.warning(
                     "[IAMCCS_VAEDecodeTiledSafe] OOM during decode attempt %d; shrinking tiles and retrying. Error: %s",
                     i,
