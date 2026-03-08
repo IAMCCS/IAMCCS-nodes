@@ -86,6 +86,7 @@ from .iamccs_hw_supporter import (
     IAMCCS_HwSupporter,
     IAMCCS_HwSupporterAny,
     IAMCCS_VRAMCleanup,
+    IAMCCS_VRAMFlushLatent,
     IAMCCS_VAEDecodeTiledSafe,
     IAMCCS_VAEDecodeToDisk,
 )
@@ -156,6 +157,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_HwSupporter": IAMCCS_HwSupporter,
     "IAMCCS_HwSupporterAny": IAMCCS_HwSupporterAny,
     "IAMCCS_VRAMCleanup": IAMCCS_VRAMCleanup,
+    "IAMCCS_VRAMFlushLatent": IAMCCS_VRAMFlushLatent,
     "IAMCCS_VAEDecodeTiledSafe": IAMCCS_VAEDecodeTiledSafe,
     "IAMCCS_VAEDecodeToDisk": IAMCCS_VAEDecodeToDisk,
     "IAMCCS_HWProbeRecommendations": IAMCCS_HWProbeRecommendations,
@@ -219,6 +221,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_HwSupporter": "HW Supporter (auto VRAM/attention/torch knobs)",
     "IAMCCS_HwSupporterAny": "HW Supporter (ANY passthrough)",
     "IAMCCS_VRAMCleanup": "VRAM Cleanup (unload + empty cache)",
+    "IAMCCS_VRAMFlushLatent": "VRAM Flush → Latent passthrough (empty cache)",
     "IAMCCS_VAEDecodeTiledSafe": "VAE Decode Tiled (safe, optional cleanup)",
     "IAMCCS_VAEDecodeToDisk": "VAE Decode → Disk (frames, low RAM)",
     "IAMCCS_HWProbeRecommendations": "HW Probe Recommendations (JSON)",
