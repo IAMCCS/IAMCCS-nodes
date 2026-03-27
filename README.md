@@ -9,6 +9,10 @@
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows + general nodes 4 ComfyUI
 
+Versuin: 1.4.0
+
+## 🆕 LTX-2.3 audio extension modules + VAE RAM safers
+
 Version: 1.3.6
 
 ## 🆕 Motion Nodes Update (2026-02-28) + 

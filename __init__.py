@@ -5,6 +5,10 @@
 import logging
 import os
 
+from .iamccs_comfy_compat import apply_iamccs_comfy_compat_patches
+
+apply_iamccs_comfy_compat_patches()
+
 # ComfyUI frontend assets
 WEB_DIRECTORY = "web"
 
@@ -37,10 +41,21 @@ from .iamccs_ltx2_tools import (
     IAMCCS_LTX2_ControlPreprocess,
     IAMCCS_LTX2_ImageBatchPadReflect,
     IAMCCS_LTX2_ImageBatchCropByPad,
+    IAMCCS_SegmentPlanner,
+    IAMCCS_SegmentPlanFromPlanner,
+    IAMCCS_SourceRangeFromSegmentPlan,
+    IAMCCS_TwoSegmentPlanner,
+    IAMCCS_ThreeSegmentPlanner,
+    IAMCCS_SegmentSwitch,
 )
 
 from .iamccs_ltx2_extension_module import (
     IAMCCS_LTX2_ExtensionModule,
+    IAMCCS_LTX2_ExtensionModule_Disk,
+    IAMCCS_LoadImagesFromDirLite,
+    IAMCCS_SourceFramesToDisk,
+    IAMCCS_StartDirToVideoLatent,
+    IAMCCS_VideoCombineFromDir,
     IAMCCS_LTX2_ExtensionModule_simple,
     IAMCCS_LTX2_GetImageFromBatch,
     IAMCCS_LTX2_ReferenceImageSwitch,
@@ -53,10 +68,23 @@ from .iamccs_ltx2_extension_module import (
     IAMCCS_LTX2_FirstLastLatentControl_Pro,
 )
 
+from .iamccs_ltx2_temporal_overlap_samplers import (
+    IAMCCS_LTX2_ConditionNextLatentWithPrevOverlap,
+    IAMCCS_LTX2_LoopingSampler,
+    IAMCCS_LTX2_ExtendSampler,
+)
+
 from .iamccs_wan_svipro_motion import (
     IAMCCS_WanImageMotion,
-    WanImageMotionPro,
+    WanImageMotionPro as WanImageMotionProPlus,
+    IAMCCS_WanImageMotionPro_Simple as IAMCCS_WanImageMotionProPlus_Simple,
+    IAMCCS_WanSVIToFLFBridgePro as IAMCCS_WanSVIToFLFBridgeProPlus,
+    IAMCCS_WanSVIToFLFBridgePro_Simple as IAMCCS_WanSVIToFLFBridgeProPlus_Simple,
     WanMotionProTrimmer,
+)
+
+from .iamccs_wan_svipro_motion_legacy import (
+    WanImageMotionProLegacy,
 )
 
 from .iamccs_autolink import (
@@ -100,6 +128,30 @@ from .iamccs_qwen_vl_flf import (
     IAMCCS_QWEN_VL_FLF_Advanced,
 )
 
+from .iamccs_move_ahead import (
+    IAMCCS_MoveAhead,
+    IAMCCS_MoveAheadEnforcer,
+    IAMCCS_MotionScale,
+    IAMCCS_MotionScaleAdvanced,
+)
+
+from .iamccs_motion_bridge import (
+    IAMCCS_MotionBridgeSave,
+    IAMCCS_MotionBridgeLoad,
+    IAMCCS_LatentTailSlice,
+)
+
+from .iamccs_audio_extender import (
+    IAMCCS_AudioExtensionMath,
+    IAMCCS_AudioExtender,
+    IAMCCS_AudioTimelineAssembler,
+    IAMCCS_AudioTimelineGate,
+)
+
+from .iamccs_image_resize import (
+    IAMCCS_ImageResizeBatchSafe,
+)
+
 # Nodi principali
 NODE_CLASS_MAPPINGS = {
     "IAMCCS_WanLoRAStack": IAMCCS_WanLoRAStack,
@@ -123,7 +175,18 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_ControlPreprocess": IAMCCS_LTX2_ControlPreprocess,
     "IAMCCS_LTX2_ImageBatchPadReflect": IAMCCS_LTX2_ImageBatchPadReflect,
     "IAMCCS_LTX2_ImageBatchCropByPad": IAMCCS_LTX2_ImageBatchCropByPad,
+    "IAMCCS_SegmentPlanner": IAMCCS_SegmentPlanner,
+    "IAMCCS_SegmentPlanFromPlanner": IAMCCS_SegmentPlanFromPlanner,
+    "IAMCCS_SourceRangeFromSegmentPlan": IAMCCS_SourceRangeFromSegmentPlan,
+    "IAMCCS_TwoSegmentPlanner": IAMCCS_TwoSegmentPlanner,
+    "IAMCCS_ThreeSegmentPlanner": IAMCCS_ThreeSegmentPlanner,
+    "IAMCCS_SegmentSwitch": IAMCCS_SegmentSwitch,
     "IAMCCS_LTX2_ExtensionModule": IAMCCS_LTX2_ExtensionModule,
+    "IAMCCS_LTX2_ExtensionModule_Disk": IAMCCS_LTX2_ExtensionModule_Disk,
+    "IAMCCS_LoadImagesFromDirLite": IAMCCS_LoadImagesFromDirLite,
+    "IAMCCS_SourceFramesToDisk": IAMCCS_SourceFramesToDisk,
+    "IAMCCS_StartDirToVideoLatent": IAMCCS_StartDirToVideoLatent,
+    "IAMCCS_VideoCombineFromDir": IAMCCS_VideoCombineFromDir,
     "IAMCCS_LTX2_ExtensionModule_simple": IAMCCS_LTX2_ExtensionModule_simple,
     "IAMCCS_LTX2_GetImageFromBatch": IAMCCS_LTX2_GetImageFromBatch,
     "IAMCCS_LTX2_ReferenceImageSwitch": IAMCCS_LTX2_ReferenceImageSwitch,
@@ -134,11 +197,22 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_MiddleFrames": IAMCCS_LTX2_MiddleFrames,
     "IAMCCS_LTX2_FirstLastLatentControl": IAMCCS_LTX2_FirstLastLatentControl,
     "IAMCCS_LTX2_FirstLastLatentControl_Pro": IAMCCS_LTX2_FirstLastLatentControl_Pro,
+    "IAMCCS_LTX2_LoopingSampler": IAMCCS_LTX2_LoopingSampler,
+    "IAMCCS_LTX2_ExtendSampler": IAMCCS_LTX2_ExtendSampler,
+    "IAMCCS_LTX2_ConditionNextLatentWithPrevOverlap": IAMCCS_LTX2_ConditionNextLatentWithPrevOverlap,
     "IAMCCS_WanImageMotion": IAMCCS_WanImageMotion,
-    "WanImageMotionPro": WanImageMotionPro,
+    # Backward-compat alias: workflow JSONs saved with the _AdaIN name still load.
+    "IAMCCS_WanImageMotion_AdaIN": IAMCCS_WanImageMotion,
+    "WanImageMotionPro": WanImageMotionProLegacy,
+    "IAMCCS_WanImageMotionPro_AdaIN": WanImageMotionProLegacy,
     # Hidden alias: loads saved workflows that used the old key, but NOT listed in NODE_DISPLAY_NAME_MAPPINGS
     # so it never appears in the ComfyUI Add Node menu.
-    "IAMCCS_WanImageMotionPro": WanImageMotionPro,
+    "IAMCCS_WanImageMotionPro": WanImageMotionProLegacy,
+    "WanImageMotionProPlus": WanImageMotionProPlus,
+    "IAMCCS_WanImageMotionProPlus": WanImageMotionProPlus,
+    "IAMCCS_WanImageMotionProPlus_Simple": IAMCCS_WanImageMotionProPlus_Simple,
+    "IAMCCS_WanSVIToFLFBridgeProPlus": IAMCCS_WanSVIToFLFBridgeProPlus,
+    "IAMCCS_WanSVIToFLFBridgeProPlus_Simple": IAMCCS_WanSVIToFLFBridgeProPlus_Simple,
     "WanMotionProTrimmer": WanMotionProTrimmer,
     
     "IAMCCS_SetAutoLink": IAMCCS_SetAutoLink,
@@ -162,9 +236,22 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_VAEDecodeToDisk": IAMCCS_VAEDecodeToDisk,
     "IAMCCS_HWProbeRecommendations": IAMCCS_HWProbeRecommendations,
 
+    "IAMCCS_MoveAhead": IAMCCS_MoveAhead,
+    "IAMCCS_MoveAheadEnforcer": IAMCCS_MoveAheadEnforcer,
+    "IAMCCS_MotionScale": IAMCCS_MotionScale,
+    "IAMCCS_MotionScaleAdvanced": IAMCCS_MotionScaleAdvanced,
+
+    "IAMCCS_MotionBridgeSave": IAMCCS_MotionBridgeSave,
+    "IAMCCS_MotionBridgeLoad": IAMCCS_MotionBridgeLoad,
+    "IAMCCS_LatentTailSlice":  IAMCCS_LatentTailSlice,
+    "IAMCCS_AudioExtensionMath": IAMCCS_AudioExtensionMath,
+    "IAMCCS_AudioExtender": IAMCCS_AudioExtender,
+    "IAMCCS_AudioTimelineAssembler": IAMCCS_AudioTimelineAssembler,
+    "IAMCCS_AudioTimelineGate": IAMCCS_AudioTimelineGate,
+    "IAMCCS_ImageResizeBatchSafe": IAMCCS_ImageResizeBatchSafe,
+
     # QwenVL First/Last Frame (registered only if QwenVL is installed)
-    **({
-        "IAMCCS_QWEN_VL_FLF":          IAMCCS_QWEN_VL_FLF,
+    **({"IAMCCS_QWEN_VL_FLF": IAMCCS_QWEN_VL_FLF,
         "IAMCCS_QWEN_VL_FLF_Advanced": IAMCCS_QWEN_VL_FLF_Advanced,
     } if IAMCCS_QWEN_VL_FLF is not None else {}),
 
@@ -184,13 +271,24 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_ModelWithLoRA_Segmented6": "Apply LoRA to MODEL (LTX-2, segmented: 3 seg × 2 stages)",
 
     "IAMCCS_LTX2_FrameRateSync": "LTX-2 FrameRate Sync (int+float)",
-    "IAMCCS_LTX2_Validator": "LTX-2 Validator (16px, 8n +1)",
+    "IAMCCS_LTX2_Validator": "LTX-2 Validator",
     "IAMCCS_LTX2_TimeFrameCount": "LTX-2 TimeFrameCount",
     "IAMCCS_LTX2_EnsureFrames8nPlus1": "LTX-2 Ensure Frames (8n + 1)",
     "IAMCCS_LTX2_ControlPreprocess": "LTX-2 Control Preprocess (aux)",
     "IAMCCS_LTX2_ImageBatchPadReflect": "LTX-2 Pad Reflect (IMAGE batch)",
     "IAMCCS_LTX2_ImageBatchCropByPad": "LTX-2 Crop By Pad (IMAGE batch)",
+    "IAMCCS_SegmentPlanner": "Segment Planner (song -> LTX frames)",
+    "IAMCCS_SegmentPlanFromPlanner": "Segment Plan From Planner (per index)",
+    "IAMCCS_SourceRangeFromSegmentPlan": "Source Range From Segment Plan",
+    "IAMCCS_TwoSegmentPlanner": "Two Segment Planner (stable 2SEG)",
+    "IAMCCS_ThreeSegmentPlanner": "Three Segment Planner (stable 3SEG)",
+    "IAMCCS_SegmentSwitch": "Segment Switch (by segment_index)",
     "IAMCCS_LTX2_ExtensionModule": "LTX-2 Extension Module 🎬",
+    "IAMCCS_LTX2_ExtensionModule_Disk": "LTX-2 Extension Module (Disk / Low RAM) 💾",
+    "IAMCCS_LoadImagesFromDirLite": "Load Images From Dir (Lite) 📁",
+    "IAMCCS_SourceFramesToDisk": "Source Frames To Disk 📼💾",
+    "IAMCCS_StartDirToVideoLatent": "Start Dir To Video Latent 🚀",
+    "IAMCCS_VideoCombineFromDir": "Video Combine From Dir 🎞️",
     "IAMCCS_LTX2_ExtensionModule_simple": "LTX-2 Extension Module (simple) 🎬",
     "IAMCCS_LTX2_GetImageFromBatch": "LTX-2 Get Images From Batch 🎞️",
     "IAMCCS_LTX2_ReferenceImageSwitch": "LTX-2 Reference Image Switch 🧷",
@@ -201,8 +299,18 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_MiddleFrames": "LTX-2 Middle Frames (accumulator) 🧷",
     "IAMCCS_LTX2_FirstLastLatentControl": "LTX-2 First/Last → Latent (noise_mask) 🎯",
     "IAMCCS_LTX2_FirstLastLatentControl_Pro": "LTX-2 First/Last → Latent (Pro, slot caps) 🎯",
+    "IAMCCS_LTX2_LoopingSampler": "LTX-2 Looping Sampler (temporal overlap) 🧷",
+    "IAMCCS_LTX2_ExtendSampler": "LTX-2 Extend Sampler (temporal overlap) 🧷",
+    "IAMCCS_LTX2_ConditionNextLatentWithPrevOverlap": "LTX-2 Condition Next Latent (prev overlap) 🧷",
     "IAMCCS_WanImageMotion": "WanImageMotion",
+    "IAMCCS_WanImageMotion_AdaIN": "WanImageMotion",
     "WanImageMotionPro": "WanImageMotionPro (Motion + FLF End Lock)",
+    "IAMCCS_WanImageMotionPro_AdaIN": "WanImageMotionPro (Motion + FLF End Lock)",
+    "WanImageMotionProPlus": "WanImageMotionPro Plus",
+    "IAMCCS_WanImageMotionProPlus": "WanImageMotionPro Plus",
+    "IAMCCS_WanImageMotionProPlus_Simple": "WanImageMotionPro Plus Simple",
+    "IAMCCS_WanSVIToFLFBridgeProPlus": "Wan SVI→FLF Bridge Pro Plus",
+    "IAMCCS_WanSVIToFLFBridgeProPlus_Simple": "Wan SVI→FLF Bridge Pro Plus",
     "WanMotionProTrimmer": "WanMotionProTrimmer (trim overshoot tail)",
     
     "IAMCCS_SetAutoLink": "Set AutoLink",
@@ -226,9 +334,22 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_VAEDecodeToDisk": "VAE Decode → Disk (frames, low RAM)",
     "IAMCCS_HWProbeRecommendations": "HW Probe Recommendations (JSON)",
 
+    "IAMCCS_MoveAhead": "MoveAhead (FreeLong spectral blend) 🎬",
+    "IAMCCS_MoveAheadEnforcer": "MoveAhead Enforcer (3-tier motion lock) 🎬",
+    "IAMCCS_MotionScale": "MotionScale (temporal RoPE scale) ⚡",
+    "IAMCCS_MotionScaleAdvanced": "MotionScale Advanced (RoPE + theta) ⚡",
+
+    "IAMCCS_MotionBridgeSave": "Motion Bridge Save 🎬💾",
+    "IAMCCS_MotionBridgeLoad": "Motion Bridge Load 🎬📂",
+    "IAMCCS_LatentTailSlice":  "Latent Tail Slice ✂️",
+    "IAMCCS_AudioExtensionMath": "Audio Extension Math (timeline sync)",
+    "IAMCCS_AudioExtender": "Audio Extender (segment + overlap)",
+    "IAMCCS_AudioTimelineAssembler": "Audio Timeline Assembler (full track)",
+    "IAMCCS_AudioTimelineGate": "Audio Timeline Gate (continue/stop)",
+    "IAMCCS_ImageResizeBatchSafe": "Image Resize Batch Safe (IAMCCS)",
+
     # QwenVL FLF
-    **({
-        "IAMCCS_QWEN_VL_FLF":          "QwenVL FLF — First/Last Frame Prompt 🎬",
+    **({"IAMCCS_QWEN_VL_FLF":          "QwenVL FLF — First/Last Frame Prompt 🎬",
         "IAMCCS_QWEN_VL_FLF_Advanced": "QwenVL FLF — First/Last Frame Prompt (Advanced) 🎬",
     } if IAMCCS_QWEN_VL_FLF is not None else {}),
 

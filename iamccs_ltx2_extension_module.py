@@ -9,13 +9,134 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+import wave
+from collections.abc import Mapping
 from typing import Any, Dict, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 
 
 _log = logging.getLogger("IAMCCS.LTX2.ExtensionModule")
+
+
+def _resolve_output_path(path_value: str) -> str:
+    out_dir = str(path_value or "").strip()
+    if not out_dir:
+        out_dir = "iamccs_extension_disk"
+    if not os.path.isabs(out_dir):
+        try:
+            from folder_paths import get_output_directory  # type: ignore
+
+            base_out = get_output_directory()
+        except Exception:
+            base_out = os.getcwd()
+        out_dir = os.path.join(base_out, out_dir)
+    return out_dir
+
+
+def _list_frame_files(directory: str) -> list[str]:
+    if not directory or not os.path.isdir(directory):
+        return []
+    files = []
+    for name in os.listdir(directory):
+        name_l = name.lower()
+        if name_l.endswith(".png") or name_l.endswith(".jpg") or name_l.endswith(".jpeg") or name_l.endswith(".webp"):
+            files.append(os.path.join(directory, name))
+    files.sort()
+    return files
+
+
+def _clean_directory(directory: str):
+    if os.path.isdir(directory):
+        for name in os.listdir(directory):
+            path = os.path.join(directory, name)
+            try:
+                if os.path.isdir(path):
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
+            except Exception:
+                pass
+    os.makedirs(directory, exist_ok=True)
+
+
+def _promote_staged_directory(staged_dir: str, target_dir: str):
+    _clean_directory(target_dir)
+    for name in os.listdir(staged_dir):
+        shutil.move(os.path.join(staged_dir, name), os.path.join(target_dir, name))
+    shutil.rmtree(staged_dir, ignore_errors=True)
+
+
+def _copy_frame(src_path: str, dst_path: str):
+    shutil.copy2(src_path, dst_path)
+
+
+def _blend_frame_pair(src_path: str, dst_path: str, out_path: str, mode: str, alpha: float):
+    from PIL import Image  # type: ignore
+
+    src_img = Image.open(src_path).convert("RGB")
+    dst_img = Image.open(dst_path).convert("RGB")
+    src_np = np.asarray(src_img, dtype=np.float32) / 255.0
+    dst_np = np.asarray(dst_img, dtype=np.float32) / 255.0
+
+    a = float(max(0.0, min(1.0, alpha)))
+    if mode == "linear_blend":
+        blended = (1.0 - a) * src_np + a * dst_np
+    elif mode == "ease_in_out":
+        eased = 3.0 * a * a - 2.0 * a * a * a
+        blended = (1.0 - eased) * src_np + eased * dst_np
+    elif mode == "filmic_crossfade":
+        gamma = 2.2
+        src_lin = np.power(np.clip(src_np, 0.0, 1.0), gamma)
+        dst_lin = np.power(np.clip(dst_np, 0.0, 1.0), gamma)
+        mix = (1.0 - a) * src_lin + a * dst_lin
+        blended = np.power(np.clip(mix, 0.0, 1.0), 1.0 / gamma)
+    else:
+        blended = (1.0 - a) * src_np + a * dst_np
+
+    out = (np.clip(blended, 0.0, 1.0) * 255.0).round().astype(np.uint8)
+    Image.fromarray(out).save(out_path)
+
+
+def _build_ext(path_a: str, path_b: str) -> str:
+    ext = os.path.splitext(path_a)[1] or os.path.splitext(path_b)[1]
+    ext = ext.lower()
+    if ext not in (".png", ".jpg", ".jpeg", ".webp"):
+        ext = ".png"
+    return ext
+
+
+def _load_images_from_files(files: list[str]) -> torch.Tensor:
+    from PIL import Image  # type: ignore
+
+    images = []
+    base_size = None
+    load_errors = []
+    for path in files:
+        try:
+            img = Image.open(path).convert("RGB")
+        except Exception as exc:
+            load_errors.append(f"{os.path.basename(path)}: {exc}")
+            continue
+        if base_size is None:
+            base_size = img.size
+        elif img.size != base_size:
+            img = img.resize(base_size, Image.BILINEAR)
+        arr = np.asarray(img, dtype=np.float32) / 255.0
+        images.append(torch.from_numpy(arr))
+    if not images:
+        if files and load_errors:
+            preview = "; ".join(load_errors[:3])
+            raise ValueError(f"No images loaded from files. Sample errors: {preview}")
+        raise ValueError("No images loaded from files")
+    return torch.stack(images, dim=0).contiguous()
 
 
 class IAMCCS_LTX2_ExtensionModule:
@@ -137,6 +258,8 @@ class IAMCCS_LTX2_ExtensionModule:
                 "preset": ([
                     "custom",
                     "target_extension_ltx2",
+                    "videoclip_audio_24fps",
+                    "monologue_audio_24fps",
                     "cut_bestofk_16",
                     "cut_bestofk_16_luma",
                     "cut_bestofk_32",
@@ -462,6 +585,26 @@ class IAMCCS_LTX2_ExtensionModule:
             # NOTE: These presets are meant for stitching segments where crossfade is undesirable.
             # Frontend updates the widgets live; backend enforces the same mapping so renders match.
             preset_map: Dict[str, Dict[str, Any]] = {
+                "videoclip_audio_24fps": {
+                    "overlap_frames": 9,
+                    "overlap_mode": "cut",
+                    "overlap_side": "source",
+                    "seam_search_mode": "best_of_k",
+                    "k_search": 16,
+                    "color_match_mode": "luma_only",
+                    "color_match_strength": 0.25,
+                    "color_reference_window": 8,
+                },
+                "monologue_audio_24fps": {
+                    "overlap_frames": 13,
+                    "overlap_mode": "cut",
+                    "overlap_side": "source",
+                    "seam_search_mode": "best_of_k",
+                    "k_search": 16,
+                    "color_match_mode": "luma_only",
+                    "color_match_strength": 0.15,
+                    "color_reference_window": 8,
+                },
                 # Prova 1: no crossfade, cut seam + best_of_k
                 "cut_bestofk_16": {
                     "overlap_frames": 10,
@@ -677,6 +820,782 @@ class IAMCCS_LTX2_ExtensionModule:
             extension_frames_count,  # How many frames were added
             report                   # Detailed report
         )
+
+
+class IAMCCS_LTX2_ExtensionModule_Disk:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "source_dir": ("STRING", {"default": "iamccs_vae_frames/seg0", "tooltip": "Directory containing the current accumulated frames."}),
+                "output_dir": ("STRING", {"default": "iamccs_extension_disk/extended", "tooltip": "Directory where the stitched sequence will be written."}),
+                "start_dir": ("STRING", {"default": "iamccs_extension_disk/start", "tooltip": "Directory where start/overlap frames for the next pass will be written."}),
+                "overlap_frames": ("INT", {"default": 9, "min": 1, "max": 256, "step": 1}),
+                "overlap_side": (["source", "new_images"], {"default": "source"}),
+                "overlap_mode": (["cut", "linear_blend", "ease_in_out", "filmic_crossfade"], {"default": "cut"}),
+                "enable_math": ("BOOLEAN", {"default": True}),
+                "math_operation": (["none", "a-b", "a-1", "a+b", "a*b", "a/b", "min(a,b)", "max(a,b)"], {"default": "none"}),
+                "safe_mode": (["none", "native_workflow_safe"], {"default": "none"}),
+                "start_frames_rule": (["none", "ltx2_round_down", "ltx2_nearest"], {"default": "none"}),
+                "preset": (["custom", "target_extension_ltx2", "videoclip_audio_24fps", "monologue_audio_24fps", "cut_bestofk_16", "cut_bestofk_16_luma", "cut_bestofk_32", "micro_crossfade_3"], {"default": "custom"}),
+            },
+            "optional": {
+                "new_dir": ("STRING", {"default": "", "tooltip": "Optional directory containing the new generated frames for the current pass."}),
+                "math_value_b": ("INT", {"default": 1, "min": 0, "max": 256, "step": 1}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "INT", "INT", "INT", "STRING")
+    RETURN_NAMES = ("extended_dir", "start_dir", "overlap_frames", "calculated_frames", "extension_frames", "report")
+    FUNCTION = "process_extension_disk"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # This node mutates output directories on disk. Always rerun to avoid stale
+        # stitched sequences or start-frame folders being reused from cache.
+        return float("nan")
+
+    def _apply_ltx2_frame_rule(self, frames: int, rule: str, max_allowed: int) -> int:
+        frames = int(frames)
+        max_allowed = max(1, int(max_allowed))
+        frames = max(1, min(frames, max_allowed))
+        if rule == "none" or rule == "":
+            return frames
+        remainder = (frames - 1) % 8
+        if remainder == 0:
+            return frames
+        down = max(1, frames - remainder)
+        up = frames + (8 - remainder)
+        if rule == "ltx2_round_down":
+            return max(1, min(down, max_allowed))
+        candidates = []
+        if down <= max_allowed:
+            candidates.append(down)
+        if up <= max_allowed:
+            candidates.append(up)
+        if not candidates:
+            return max(1, min(down, max_allowed))
+        candidates.sort(key=lambda v: (abs(v - frames), v > frames))
+        return int(candidates[0])
+
+    def _execute_math(self, operation: str, a: int, b: int) -> int:
+        if operation == "none" or operation == "":
+            return a
+        if operation == "a-b":
+            return max(0, a - b)
+        if operation == "a-1":
+            return max(0, a - 1)
+        if operation == "a+b":
+            return a + b
+        if operation == "a*b":
+            return a * b
+        if operation == "a/b":
+            return int(a / b) if b != 0 else a
+        if operation == "min(a,b)":
+            return min(a, b)
+        if operation == "max(a,b)":
+            return max(a, b)
+        return a
+
+    def process_extension_disk(
+        self,
+        source_dir: str,
+        output_dir: str,
+        start_dir: str,
+        overlap_frames: int,
+        overlap_side: str,
+        overlap_mode: str,
+        enable_math: bool,
+        math_operation: str,
+        safe_mode: str,
+        start_frames_rule: str,
+        preset: str = "custom",
+        new_dir: str = "",
+        math_value_b: int = 1,
+    ):
+        preset = str(preset or "custom")
+        preset_map: Dict[str, Dict[str, Any]] = {
+            "videoclip_audio_24fps": {
+                "overlap_frames": 9,
+                "overlap_mode": "cut",
+                "overlap_side": "source",
+                "math_operation": "none",
+                "safe_mode": "none",
+                "start_frames_rule": "none",
+            },
+            "monologue_audio_24fps": {
+                "overlap_frames": 13,
+                "overlap_mode": "cut",
+                "overlap_side": "source",
+                "math_operation": "none",
+                "safe_mode": "none",
+                "start_frames_rule": "none",
+            },
+            "target_extension_ltx2": {
+                "overlap_frames": 10,
+                "overlap_mode": "linear_blend",
+                "overlap_side": "source",
+                "math_operation": "a-1",
+                "safe_mode": "none",
+                "start_frames_rule": "none",
+            },
+            "cut_bestofk_16": {"overlap_frames": 10, "overlap_mode": "cut", "overlap_side": "new_images"},
+            "cut_bestofk_16_luma": {"overlap_frames": 10, "overlap_mode": "cut", "overlap_side": "new_images"},
+            "cut_bestofk_32": {"overlap_frames": 16, "overlap_mode": "cut", "overlap_side": "new_images"},
+            "micro_crossfade_3": {"overlap_frames": 3, "overlap_mode": "filmic_crossfade", "overlap_side": "source"},
+        }
+        cfg = preset_map.get(preset)
+        overlap_frames_in = int(overlap_frames)
+        if cfg is not None:
+            overlap_frames_in = int(cfg.get("overlap_frames", overlap_frames_in))
+            overlap_mode = str(cfg.get("overlap_mode", overlap_mode))
+            overlap_side = str(cfg.get("overlap_side", overlap_side))
+            math_operation = str(cfg.get("math_operation", math_operation))
+            safe_mode = str(cfg.get("safe_mode", safe_mode))
+            start_frames_rule = str(cfg.get("start_frames_rule", start_frames_rule))
+
+        source_dir = _resolve_output_path(source_dir)
+        output_dir = _resolve_output_path(output_dir)
+        start_dir = _resolve_output_path(start_dir)
+        new_dir = _resolve_output_path(new_dir) if str(new_dir or "").strip() else ""
+
+        source_files = _list_frame_files(source_dir)
+        if not source_files:
+            raise ValueError(f"source_dir has no frame files: {source_dir}")
+        new_files = _list_frame_files(new_dir) if new_dir else []
+
+        source_count = len(source_files)
+
+        temp_dirs_to_cleanup = []
+        output_write_dir = output_dir
+        start_write_dir = start_dir
+        staged_output = False
+        staged_start = False
+
+        if output_dir in {source_dir, new_dir}:
+            output_write_dir = tempfile.mkdtemp(prefix="iamccs_ext_out_", dir=os.path.dirname(output_dir) or None)
+            temp_dirs_to_cleanup.append(output_write_dir)
+            staged_output = True
+        if start_dir in {source_dir, new_dir, output_dir}:
+            start_write_dir = tempfile.mkdtemp(prefix="iamccs_ext_start_", dir=os.path.dirname(start_dir) or None)
+            temp_dirs_to_cleanup.append(start_write_dir)
+            staged_start = True
+
+        _clean_directory(output_write_dir)
+        _clean_directory(start_write_dir)
+
+        if overlap_frames_in < 1:
+            overlap_frames_in = 1
+
+        written = 0
+        extension_frames_count = 0
+
+        try:
+            if not new_files:
+                for idx, src_path in enumerate(source_files):
+                    ext = os.path.splitext(src_path)[1] or ".png"
+                    _copy_frame(src_path, os.path.join(output_write_dir, f"frame_{idx:05d}{ext}"))
+                    written += 1
+                base_count = written
+            else:
+                new_count = len(new_files)
+                blend_overlap = min(overlap_frames_in, source_count, new_count)
+                ext = _build_ext(source_files[0], new_files[0])
+
+                if overlap_mode == "cut":
+                    if overlap_side == "new_images":
+                        ordered = source_files + new_files[blend_overlap:]
+                    else:
+                        ordered = source_files[:-blend_overlap] + new_files
+                    for idx, src_path in enumerate(ordered):
+                        _copy_frame(src_path, os.path.join(output_write_dir, f"frame_{idx:05d}{ext}"))
+                    written = len(ordered)
+                else:
+                    if overlap_side == "source":
+                        prefix = source_files[:-blend_overlap]
+                        src_overlap = source_files[-blend_overlap:]
+                        dst_overlap = new_files[:blend_overlap]
+                        suffix = new_files[blend_overlap:]
+                    else:
+                        prefix = source_files
+                        src_overlap = new_files[:blend_overlap]
+                        dst_overlap = source_files[-blend_overlap:]
+                        suffix = new_files[blend_overlap:]
+
+                    for src_path in prefix:
+                        _copy_frame(src_path, os.path.join(output_write_dir, f"frame_{written:05d}{ext}"))
+                        written += 1
+
+                    for i in range(blend_overlap):
+                        alpha = float(i + 1) / float(blend_overlap + 1)
+                        _blend_frame_pair(src_overlap[i], dst_overlap[i], os.path.join(output_write_dir, f"frame_{written:05d}{ext}"), overlap_mode, alpha)
+                        written += 1
+
+                    for src_path in suffix:
+                        _copy_frame(src_path, os.path.join(output_write_dir, f"frame_{written:05d}{ext}"))
+                        written += 1
+
+                base_count = written
+                extension_frames_count = max(0, int(base_count - source_count))
+
+            if base_count <= 0:
+                raise ValueError("No output frames were written")
+
+            if safe_mode == "native_workflow_safe":
+                if base_count <= 1:
+                    start_index = 0
+                    calculated_frames = 1
+                else:
+                    start_end = base_count - 1
+                    start_index = max(0, start_end - overlap_frames_in)
+                    calculated_frames = max(1, start_end - start_index)
+            else:
+                start_index = max(0, base_count - overlap_frames_in)
+                calculated_frames = overlap_frames_in
+                if enable_math and math_operation != "none":
+                    calculated_frames = self._execute_math(math_operation, overlap_frames_in, math_value_b)
+                max_start_frames = max(1, base_count - start_index)
+                calculated_frames = max(1, min(int(calculated_frames), max_start_frames))
+                calculated_frames = self._apply_ltx2_frame_rule(calculated_frames, str(start_frames_rule), max_start_frames)
+
+            output_files = _list_frame_files(output_write_dir)
+            start_files = output_files[start_index:start_index + calculated_frames]
+            for idx, src_path in enumerate(start_files):
+                ext = os.path.splitext(src_path)[1] or ".png"
+                _copy_frame(src_path, os.path.join(start_write_dir, f"start_{idx:05d}{ext}"))
+
+            if staged_output:
+                _promote_staged_directory(output_write_dir, output_dir)
+                output_write_dir = output_dir
+            if staged_start:
+                _promote_staged_directory(start_write_dir, start_dir)
+                start_write_dir = start_dir
+        finally:
+            for temp_dir in temp_dirs_to_cleanup:
+                if os.path.isdir(temp_dir):
+                    shutil.rmtree(temp_dir, ignore_errors=True)
+
+        report = (
+            f"Source dir: {source_dir} ({source_count} frames) | "
+            f"New dir: {new_dir or '[none]'} ({len(new_files)} frames) | "
+            f"Output dir: {output_dir} ({base_count} frames) | "
+            f"Start dir: {start_dir} ({len(start_files)} frames) | "
+            f"Overlap: {overlap_frames_in} | Mode: {overlap_mode} | Side: {overlap_side} | "
+            f"Math: {math_operation if enable_math else 'disabled'} | Safe: {safe_mode} | "
+            f"Preset: {preset} | Extension delta: +{extension_frames_count}"
+        )
+        _log.info("[LTX2_ExtensionModule_Disk] %s", report)
+        return (output_dir, start_dir, int(overlap_frames_in), int(len(start_files)), int(extension_frames_count), report)
+
+
+class IAMCCS_LoadImagesFromDirLite:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "directory": ("STRING", {"default": "iamccs_extension_disk/extended", "tooltip": "Directory containing image frames."}),
+                "mode": (["all", "from_start", "from_end", "range"], {"default": "all"}),
+                "count": ("INT", {"default": 9, "min": 1, "max": 100000, "step": 1}),
+                "start_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+                "end_index": ("INT", {"default": 9, "min": 0, "max": 100000, "step": 1}),
+            },
+            "optional": {
+                "count_in": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1, "tooltip": "Optional linked override for count."}),
+                "start_index_in": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1, "tooltip": "Optional linked override for range start index."}),
+                "end_index_in": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1, "tooltip": "Optional linked override for range end index."}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "INT", "STRING")
+    RETURN_NAMES = ("images", "count", "report")
+    FUNCTION = "load"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Directory contents can change without the path string changing.
+        return float("nan")
+
+    def load(
+        self,
+        directory: str,
+        mode: str,
+        count: int,
+        start_index: int,
+        end_index: int,
+        count_in: int | None = None,
+        start_index_in: int | None = None,
+        end_index_in: int | None = None,
+    ):
+        directory = _resolve_output_path(directory)
+        files = _list_frame_files(directory)
+        total = len(files)
+        if total <= 0:
+            raise ValueError(f"No images found in directory: {directory}")
+
+        # Optional linked overrides can arrive as zero-valued defaults even when
+        # the socket is not meaningfully used. Treat non-positive count/end
+        # values as "no override" to preserve widget-configured ranges.
+        if count_in is not None and int(count_in) > 0:
+            count = int(count_in)
+        if start_index_in is not None:
+            start_index = int(start_index_in)
+        if end_index_in is not None and int(end_index_in) > 0:
+            end_index = int(end_index_in)
+
+        count = max(1, int(count))
+        start_index = max(0, int(start_index))
+        end_index = max(0, int(end_index))
+
+        if mode == "from_start":
+            selected = files[:count]
+        elif mode == "from_end":
+            selected = files[-count:]
+        elif mode == "range":
+            if start_index >= total:
+                fallback_start = max(0, total - count)
+                _log.warning(
+                    "[LoadImagesFromDirLite] start_index=%s out of range for total=%s in %s; falling back to tail slice [%s:%s]",
+                    start_index,
+                    total,
+                    directory,
+                    fallback_start,
+                    total,
+                )
+                start_index = fallback_start
+                end_index = total
+            else:
+                end_index = max(start_index, min(end_index, total))
+            selected = files[start_index:end_index]
+        else:
+            selected = files
+
+        if not selected and total > 0:
+            raise ValueError(
+                f"No files selected from {directory} (total={total}, mode={mode}, count={count}, start_index={start_index}, end_index={end_index})"
+            )
+
+        images = _load_images_from_files(selected)
+        report = (
+            f"Loaded {int(images.shape[0])} frames from {directory} "
+            f"(total={total}, mode={mode}, count={count}, start_index={start_index}, end_index={end_index})"
+        )
+        return (images, int(images.shape[0]), report)
+
+
+class IAMCCS_SourceFramesToDisk:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {"tooltip": "Source video frames loaded once from a single video input."}),
+                "output_dir": ("STRING", {"default": "iamccs_source_frames/source_video", "tooltip": "Directory where the source frame cache will be written."}),
+                "prefix": ("STRING", {"default": "source", "tooltip": "Frame filename prefix."}),
+                "image_format": (["jpg", "png", "webp"], {"default": "jpg"}),
+                "jpg_quality": ("INT", {"default": 95, "min": 1, "max": 100, "step": 1}),
+                "clear_existing": ("BOOLEAN", {"default": True}),
+                "start_number": ("INT", {"default": 0, "min": 0, "max": 100000000, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "INT", "STRING")
+    RETURN_NAMES = ("frames_dir", "frame_count", "report")
+    FUNCTION = "save"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        return float("nan")
+
+    def save(self, images, output_dir: str, prefix: str, image_format: str, jpg_quality: int, clear_existing: bool, start_number: int):
+        try:
+            from PIL import Image  # type: ignore
+        except Exception as e:
+            raise RuntimeError(f"PIL (Pillow) is required for IAMCCS_SourceFramesToDisk: {e!r}")
+
+        if not torch.is_tensor(images) or images.ndim != 4:
+            raise ValueError("images must be an IMAGE tensor batch with shape [N,H,W,C]")
+
+        out_dir = _resolve_output_path(output_dir)
+        os.makedirs(out_dir, exist_ok=True)
+        prefix = str(prefix or "source").strip() or "source"
+        image_format = str(image_format or "jpg").lower()
+        if image_format not in ("jpg", "png", "webp"):
+            image_format = "jpg"
+        jpg_quality = max(1, min(100, int(jpg_quality)))
+        start_number = max(0, int(start_number))
+
+        if bool(clear_existing):
+            try:
+                pfx = f"{prefix}_"
+                for name in os.listdir(out_dir):
+                    name_l = name.lower()
+                    if not name.startswith(pfx):
+                        continue
+                    if not (name_l.endswith(".png") or name_l.endswith(".jpg") or name_l.endswith(".jpeg") or name_l.endswith(".webp")):
+                        continue
+                    try:
+                        os.remove(os.path.join(out_dir, name))
+                    except Exception:
+                        pass
+            except Exception as cleanup_error:
+                _log.warning("[IAMCCS_SourceFramesToDisk] cleanup failed in %s: %s", out_dir, cleanup_error)
+
+        img_cpu = torch.clamp(images.detach().to("cpu"), 0.0, 1.0)
+        frame_count = int(img_cpu.shape[0])
+        for idx in range(frame_count):
+            filename = f"{prefix}_{start_number + idx:05d}.{image_format}"
+            arr = (img_cpu[idx].numpy() * 255.0).round().astype(np.uint8)
+            image = Image.fromarray(arr)
+            save_path = os.path.join(out_dir, filename)
+            if image_format == "jpg":
+                image.save(save_path, format="JPEG", quality=jpg_quality)
+            elif image_format == "webp":
+                image.save(save_path, format="WEBP", quality=jpg_quality)
+            else:
+                image.save(save_path, format="PNG")
+
+        report = f"Saved {frame_count} source frames to {out_dir} with prefix={prefix} format={image_format}"
+        _log.info("[IAMCCS_SourceFramesToDisk] %s", report)
+        return (out_dir, frame_count, report)
+
+
+class IAMCCS_StartDirToVideoLatent:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "start_dir": ("STRING", {"default": "iamccs_extension_disk/start", "tooltip": "Directory containing the start frames for the next segment."}),
+                "vae": ("VAE",),
+                "latent": ("LATENT",),
+                "mode": (["all", "from_start", "from_end"], {"default": "all"}),
+                "count": ("INT", {"default": 9, "min": 1, "max": 512, "step": 1}),
+                "insert_at_pixel_frame": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "preprocess": ("BOOLEAN", {"default": True}),
+                "preprocess_crf": ("INT", {"default": 33, "min": 0, "max": 100, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT", "INT", "STRING")
+    RETURN_NAMES = ("latent", "frames_loaded", "report")
+    FUNCTION = "inject"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Reads start frames from disk. The folder path often stays constant while
+        # the actual files change each iteration, so cache must be bypassed.
+        return float("nan")
+
+    def inject(self, start_dir: str, vae, latent, mode: str, count: int, insert_at_pixel_frame: int, strength: float, preprocess: bool, preprocess_crf: int):
+        start_dir = _resolve_output_path(start_dir)
+        files = _list_frame_files(start_dir)
+        if not files:
+            raise ValueError(f"No start frames found in directory: {start_dir}")
+
+        count = max(1, int(count))
+        if mode == "from_start":
+            files = files[:count]
+        elif mode == "from_end":
+            files = files[-count:]
+
+        images = _load_images_from_files(files)
+
+        if preprocess:
+            try:
+                import comfy_extras.nodes_lt as nodes_lt  # type: ignore
+
+                images = nodes_lt.LTXVPreprocess().execute(images, int(preprocess_crf))[0]
+            except Exception as e:
+                _log.warning("[IAMCCS_StartDirToVideoLatent] preprocess fallback: %s", e)
+
+        samples = latent["samples"].clone()
+        scale_factors = getattr(vae, "downscale_index_formula", (8, 32, 32))
+        time_scale_factor, height_scale_factor, width_scale_factor = scale_factors
+        batch, _, latent_frames, latent_height, latent_width = samples.shape
+        width = latent_width * width_scale_factor
+        height = latent_height * height_scale_factor
+
+        if images.shape[1] != height or images.shape[2] != width:
+            try:
+                import comfy.utils  # type: ignore
+            except Exception as e:
+                raise ImportError("comfy.utils is required for IAMCCS_StartDirToVideoLatent") from e
+
+            pixels = comfy.utils.common_upscale(images.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+        else:
+            pixels = images
+
+        encoded = vae.encode(pixels[:, :, :, :3])
+        if isinstance(encoded, dict):
+            encoded = encoded.get("samples", encoded)
+        if encoded.ndim == 4:
+            encoded = encoded.unsqueeze(2)
+        if encoded.ndim != 5:
+            raise ValueError(f"Unexpected encoded latent shape: {tuple(encoded.shape)}")
+
+        if encoded.shape[0] != batch:
+            if encoded.shape[0] == 1 and batch == 1:
+                pass
+            elif batch == 1:
+                encoded = encoded[:1]
+            else:
+                raise ValueError("Encoded batch does not match target latent batch")
+
+        if "noise_mask" in latent:
+            conditioning_latent_frames_mask = latent["noise_mask"].clone()
+        else:
+            conditioning_latent_frames_mask = torch.ones((batch, 1, latent_frames, 1, 1), dtype=torch.float32, device=samples.device)
+
+        latent_idx = max(0, min(int(insert_at_pixel_frame) // max(1, int(time_scale_factor)), latent_frames - 1))
+        end_index = min(latent_idx + int(encoded.shape[2]), latent_frames)
+        samples[:, :, latent_idx:end_index] = encoded[:, :, :end_index - latent_idx]
+        conditioning_latent_frames_mask[:, :, latent_idx:end_index] = 1.0 - float(max(0.0, min(1.0, strength)))
+
+        report = (
+            f"Loaded {int(images.shape[0])} start frames from {start_dir} | "
+            f"insert_pixel={int(insert_at_pixel_frame)} -> latent_idx={latent_idx} | "
+            f"encoded_t={int(encoded.shape[2])} | replaced={int(end_index - latent_idx)} latent slots"
+        )
+        return ({"samples": samples, "noise_mask": conditioning_latent_frames_mask}, int(images.shape[0]), report)
+
+
+class IAMCCS_VideoCombineFromDir:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "frames_dir": ("STRING", {"default": "iamccs_extension_disk/final_extended", "tooltip": "Directory containing sequential frame files."}),
+                "frame_rate": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 0.01}),
+                "filename_prefix": ("STRING", {"default": "IAMCCS/LTX23_LOW_RAM", "tooltip": "Relative output prefix inside ComfyUI output, or absolute output path without extension."}),
+                "crf": ("INT", {"default": 19, "min": 0, "max": 51, "step": 1}),
+                "pix_fmt": (["yuv420p", "yuv444p"], {"default": "yuv420p"}),
+                "trim_to_audio": ("BOOLEAN", {"default": True}),
+            },
+            "optional": {
+                "audio": ("AUDIO", {}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("video_path", "report")
+    FUNCTION = "combine"
+    CATEGORY = "IAMCCS/LTX-2"
+    OUTPUT_NODE = True
+
+    def _coerce_frames_dir(self, frames_dir: Any) -> str:
+        current = frames_dir
+        for _ in range(6):
+            if current is None:
+                break
+            if isinstance(current, str):
+                value = current.strip()
+                if value:
+                    return value
+                break
+            if isinstance(current, Mapping):
+                if "frames_dir" in current:
+                    current = current.get("frames_dir")
+                    continue
+                if "value1" in current:
+                    current = current.get("value1")
+                    continue
+                if len(current) == 1:
+                    current = next(iter(current.values()))
+                    continue
+                break
+            if isinstance(current, (list, tuple)):
+                if not current:
+                    break
+                current = current[0]
+                continue
+            break
+        raise ValueError(f"frames_dir must resolve to a non-empty path string, got {type(frames_dir).__name__}")
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # Output nodes that read frame folders should not be satisfied from cache,
+        # otherwise ComfyUI can mux an old on-disk sequence without rerunning the graph.
+        return float("nan")
+
+    def _find_ffmpeg(self) -> str:
+        exe = shutil.which("ffmpeg")
+        if exe:
+            return exe
+        try:
+            import imageio_ffmpeg  # type: ignore
+
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception as e:
+            raise RuntimeError("ffmpeg not found in PATH and imageio_ffmpeg unavailable") from e
+
+    def _build_output_path(self, filename_prefix: str) -> str:
+        prefix = str(filename_prefix or "IAMCCS/LTX23_LOW_RAM").strip()
+        if prefix.lower().endswith(".mp4"):
+            prefix = prefix[:-4]
+        if os.path.isabs(prefix):
+            out_path = prefix + ".mp4"
+        else:
+            try:
+                from folder_paths import get_output_directory  # type: ignore
+
+                out_dir = get_output_directory()
+            except Exception:
+                out_dir = os.getcwd()
+            out_path = os.path.join(out_dir, prefix + ".mp4")
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        if not os.path.exists(out_path):
+            return out_path
+
+        stem, ext = os.path.splitext(out_path)
+        index = 1
+        while True:
+            candidate = f"{stem}_{index:05d}{ext}"
+            if not os.path.exists(candidate):
+                return candidate
+            index += 1
+
+    def _sequence_pattern(self, files: list[str]) -> tuple[str, int] | None:
+        if not files:
+            return None
+        m = re.match(r"^(.*?)(\d+)(\.[^.]+)$", os.path.basename(files[0]))
+        if not m:
+            return None
+        prefix, digits, ext = m.groups()
+        width = len(digits)
+        for idx, path in enumerate(files):
+            name = os.path.basename(path)
+            m2 = re.match(r"^(.*?)(\d+)(\.[^.]+)$", name)
+            if not m2:
+                return None
+            p2, d2, e2 = m2.groups()
+            if p2 != prefix or e2 != ext or len(d2) != width:
+                return None
+        return (os.path.join(os.path.dirname(files[0]), f"{prefix}%0{width}d{ext}"), int(digits))
+
+    def _unwrap_audio(self, audio: Any) -> Any:
+        current = audio
+        for _ in range(6):
+            if current is None:
+                return None
+            if isinstance(current, Mapping):
+                if "waveform" in current and "sample_rate" in current:
+                    return {
+                        "waveform": current["waveform"],
+                        "sample_rate": current["sample_rate"],
+                    }
+                if "audio" in current:
+                    current = current.get("audio")
+                    continue
+                if len(current) == 1:
+                    current = next(iter(current.values()))
+                    continue
+                return current
+            if isinstance(current, dict):
+                if "waveform" in current and "sample_rate" in current:
+                    return current
+                if "audio" in current:
+                    current = current.get("audio")
+                    continue
+                if len(current) == 1:
+                    current = next(iter(current.values()))
+                    continue
+                return current
+            if isinstance(current, (list, tuple)):
+                if not current:
+                    return None
+                current = current[0]
+                continue
+            if hasattr(current, "waveform") and hasattr(current, "sample_rate"):
+                return {
+                    "waveform": getattr(current, "waveform"),
+                    "sample_rate": getattr(current, "sample_rate"),
+                }
+            return current
+        return current
+
+    def _write_audio_wav(self, audio: Any, temp_dir: str) -> str | None:
+        audio = self._unwrap_audio(audio)
+        if audio is None:
+            return None
+        if not isinstance(audio, dict):
+            _log.warning("[IAMCCS_VideoCombineFromDir] unsupported audio payload type: %s", type(audio).__name__)
+            return None
+        waveform = audio.get("waveform")
+        sample_rate = int(audio.get("sample_rate", 0) or 0)
+        if waveform is None or sample_rate <= 0:
+            _log.warning("[IAMCCS_VideoCombineFromDir] audio payload missing waveform/sample_rate")
+            return None
+
+        if not isinstance(waveform, torch.Tensor):
+            waveform = torch.tensor(waveform)
+        wf = waveform.detach().to("cpu")
+        if wf.ndim == 3:
+            wf = wf[0]
+        if wf.ndim == 1:
+            wf = wf.unsqueeze(0)
+        if wf.ndim != 2:
+            raise ValueError(f"Unsupported audio waveform shape: {tuple(wf.shape)}")
+
+        wf = wf.clamp(-1.0, 1.0)
+        pcm = (wf.numpy().T * 32767.0).astype(np.int16)
+        wav_path = os.path.join(temp_dir, "audio.wav")
+        with wave.open(wav_path, "wb") as wav_file:
+            wav_file.setnchannels(int(pcm.shape[1]))
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(sample_rate)
+            wav_file.writeframes(pcm.tobytes())
+        return wav_path
+
+    def combine(self, frames_dir: Any, frame_rate: float, filename_prefix: str, crf: int, pix_fmt: str, trim_to_audio: bool, audio: Optional[Any] = None):
+        frames_dir = _resolve_output_path(self._coerce_frames_dir(frames_dir))
+        files = _list_frame_files(frames_dir)
+        if not files:
+            raise ValueError(f"No frames found in directory: {frames_dir}")
+
+        ffmpeg = self._find_ffmpeg()
+        out_path = self._build_output_path(filename_prefix)
+        frame_rate = max(1.0, float(frame_rate))
+        crf = max(0, min(51, int(crf)))
+        pix_fmt = str(pix_fmt or "yuv420p")
+
+        with tempfile.TemporaryDirectory(prefix="iamccs_ffmpeg_") as temp_dir:
+            wav_path = self._write_audio_wav(audio, temp_dir)
+            seq = self._sequence_pattern(files)
+            if seq is not None:
+                pattern, start_number = seq
+                cmd = [ffmpeg, "-y", "-framerate", f"{frame_rate:.6f}", "-start_number", str(start_number), "-i", pattern]
+            else:
+                list_path = os.path.join(temp_dir, "frames.txt")
+                with open(list_path, "w", encoding="utf-8") as f:
+                    for path in files:
+                        escaped = path.replace("'", "'\\''")
+                        f.write(f"file '{escaped}'\n")
+                        f.write(f"duration {1.0 / frame_rate:.12f}\n")
+                    escaped = files[-1].replace("'", "'\\''")
+                    f.write(f"file '{escaped}'\n")
+                cmd = [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", list_path]
+
+            if wav_path:
+                cmd += ["-i", wav_path]
+
+            cmd += ["-c:v", "libx264", "-pix_fmt", pix_fmt, "-crf", str(crf)]
+            if wav_path:
+                cmd += ["-c:a", "aac", "-b:a", "192k"]
+                if trim_to_audio:
+                    cmd += ["-shortest"]
+            cmd += [out_path]
+
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode != 0:
+                raise RuntimeError(f"ffmpeg failed: {result.stderr.strip() or result.stdout.strip()}")
+
+        mux_mode = "with_audio" if wav_path else "no_audio"
+        report = f"Combined {len(files)} frames from {frames_dir} -> {out_path} @ {frame_rate:.3f}fps | {mux_mode}"
+        _log.info("[IAMCCS_VideoCombineFromDir] %s", report)
+        return (out_path, report)
 
 
 class IAMCCS_LTX2_GetImageFromBatch:

@@ -1511,6 +1511,20 @@ class IAMCCS_VAEDecodeToDisk:
                 "tiling_mode": (["auto", "manual"], {"default": "auto"}),
                 "tile_size": ("INT", {"default": 512, "min": 64, "max": 4096, "step": 32}),
                 "overlap": ("INT", {"default": 64, "min": 0, "max": 4096, "step": 32}),
+                "seam_debug_export": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "Export discarded seam-prefix frames and the first kept frames per chunk for debug inspection.",
+                    },
+                ),
+                "seam_debug_dir": (
+                    "STRING",
+                    {
+                        "default": "iamccs_seam_debug",
+                        "tooltip": "Folder for seam-debug exports (relative to ComfyUI output if relative).",
+                    },
+                ),
                 "cleanup_between_frames": (
                     "BOOLEAN",
                     {
@@ -1526,6 +1540,12 @@ class IAMCCS_VAEDecodeToDisk:
     FUNCTION = "decode_to_disk"
     CATEGORY = "IAMCCS/HW"
 
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # This node writes frames to disk as a side effect. Reusing cached outputs can
+        # skip the actual decode and make downstream workflows operate on stale frames.
+        return float("nan")
+
     def decode_to_disk(
         self,
         samples,
@@ -1538,6 +1558,8 @@ class IAMCCS_VAEDecodeToDisk:
         tiling_mode: str,
         tile_size: int,
         overlap: int,
+        seam_debug_export: bool,
+        seam_debug_dir: str,
         cleanup_between_frames: bool,
     ):
         try:
@@ -1561,6 +1583,13 @@ class IAMCCS_VAEDecodeToDisk:
         if not os.path.isabs(out_dir):
             out_dir = os.path.join(base_out, out_dir)
         os.makedirs(out_dir, exist_ok=True)
+
+        seam_debug_root = str(seam_debug_dir or "iamccs_seam_debug").strip() or "iamccs_seam_debug"
+        if not os.path.isabs(seam_debug_root):
+            seam_debug_root = os.path.join(base_out, seam_debug_root)
+        seam_run_dir = os.path.join(seam_debug_root, os.path.basename(os.path.normpath(out_dir)))
+        if bool(seam_debug_export):
+            os.makedirs(seam_run_dir, exist_ok=True)
 
         # IMPORTANT: ensure a clean frame sequence per run.
         # If previous runs left extra frames (e.g. a prior 10-minute decode), loaders
@@ -1637,6 +1666,20 @@ class IAMCCS_VAEDecodeToDisk:
                     im.save(os.path.join(out_dir, filename), format="PNG")
             return n
 
+        def _save_debug_frames(img_4d, folder: str, prefix_name: str) -> int:
+            n = int(img_4d.shape[0])
+            os.makedirs(folder, exist_ok=True)
+            img_cpu = torch.clamp(img_4d.detach().to("cpu"), 0.0, 1.0)
+            for fi in range(n):
+                filename = f"{prefix_name}_{fi:05d}.{image_format}"
+                arr = (img_cpu[fi].numpy() * 255.0).round().astype("uint8")
+                im = Image.fromarray(arr)
+                if image_format == "jpg":
+                    im.save(os.path.join(folder, filename), format="JPEG", quality=int(jpg_quality))
+                else:
+                    im.save(os.path.join(folder, filename), format="PNG")
+            return n
+
         frames_saved = 0
 
         # Video latent: [B, C, T_lat, H, W]
@@ -1710,6 +1753,25 @@ class IAMCCS_VAEDecodeToDisk:
                 discard_img = 0
                 if ctx_frames_prepended > 0:
                     discard_img = 1 + max(0, int(ctx_frames_prepended) - 1) * tc
+                if bool(seam_debug_export) and discard_img > 0 and int(chunk_img.shape[0]) > discard_img:
+                    seam_chunk_dir = os.path.join(seam_run_dir, f"chunk_{t_start:05d}")
+                    discarded = chunk_img[:discard_img]
+                    kept_head = chunk_img[discard_img:min(int(chunk_img.shape[0]), discard_img + max(8, tc))]
+                    try:
+                        _save_debug_frames(discarded.float(), os.path.join(seam_chunk_dir, "discarded"), "discarded")
+                        _save_debug_frames(kept_head.float(), os.path.join(seam_chunk_dir, "kept_head"), "kept")
+                        with open(os.path.join(seam_chunk_dir, "report.txt"), "w", encoding="utf-8") as f:
+                            f.write(
+                                f"out_dir={out_dir}\n"
+                                f"t_start={t_start}\n"
+                                f"t_end={t_end}\n"
+                                f"t_ctx_start={t_ctx_start}\n"
+                                f"ctx_frames_prepended={ctx_frames_prepended}\n"
+                                f"discard_img={discard_img}\n"
+                                f"chunk_img_total={int(chunk_img.shape[0])}\n"
+                            )
+                    except Exception as _dbg_e:
+                        log.warning("[IAMCCS_VAEDecodeToDisk] seam debug export failed at t=%d: %s", t_start, _dbg_e)
                 if discard_img > 0 and int(chunk_img.shape[0]) > discard_img:
                     chunk_img = chunk_img[discard_img:]
 

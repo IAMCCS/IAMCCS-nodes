@@ -120,9 +120,42 @@ function isValidAutolinkKey(value) {
     return !!s && s !== "*";
 }
 
+function getAutolinkTitlePrefix(node) {
+    if (node?.type === SET_TYPE) return "Set_";
+    if (node?.type === GET_TYPE) return "Get_";
+    return "";
+}
+
+function getAutolinkDefaultTitle(node) {
+    if (node?.type === SET_TYPE) return "Set";
+    if (node?.type === GET_TYPE) return "Get";
+    return "AutoLink";
+}
+
+function getAutolinkTitleKey(node) {
+    const title = String(node?.title ?? "").trim();
+    if (!title) return "";
+
+    const prefix = getAutolinkTitlePrefix(node);
+    if (prefix && title.startsWith(prefix)) {
+        const stripped = title.slice(prefix.length).trim();
+        return isValidAutolinkKey(stripped) ? stripped : "";
+    }
+
+    if (title === getAutolinkDefaultTitle(node) || title === "Set AutoLink" || title === "Get AutoLink") {
+        return "";
+    }
+
+    return isValidAutolinkKey(title) ? title : "";
+}
+
 function getAutolinkKey(node) {
     const v = getWidgetValue(node, "name");
     if (isValidAutolinkKey(v)) return String(v).trim();
+    const mdName = node?.properties?.metadata?.output_name;
+    if (isValidAutolinkKey(mdName)) return String(mdName).trim();
+    const titleKey = getAutolinkTitleKey(node);
+    if (isValidAutolinkKey(titleKey)) return titleKey;
     const outName = node?.outputs?.[0]?.name;
     if (isValidAutolinkKey(outName)) return String(outName).trim();
     const inName = node?.inputs?.[0]?.name;
@@ -130,20 +163,70 @@ function getAutolinkKey(node) {
     return "";
 }
 
+function getAutolinkDisplayTitle(node, key = getAutolinkKey(node)) {
+    const safeKey = String(key ?? "").trim();
+    if (isValidAutolinkKey(safeKey)) return `${getAutolinkTitlePrefix(node)}${safeKey}`;
+    return getAutolinkDefaultTitle(node);
+}
+
 function setAutolinkKeyAndTitle(node, key) {
     const safeKey = String(key ?? "").trim();
-    if (!node || !isValidAutolinkKey(safeKey)) return;
+    if (!node) return;
 
-    setWidgetValue(node, "name", safeKey);
-    node.title = safeKey;
-
-    if (node.type === SET_TYPE) {
-        if (node.inputs?.[0]) node.inputs[0].name = safeKey;
-        if (node.outputs?.[0]) node.outputs[0].name = safeKey;
-    }
+    if (isValidAutolinkKey(safeKey)) setWidgetValue(node, "name", safeKey);
+    node.title = getAutolinkDisplayTitle(node, safeKey);
 
     const nameWidget = getWidget(node, "name");
     if (nameWidget) nameWidget.lastValue = safeKey;
+}
+
+function syncSetAutolinkType(node, type) {
+    const safeType = isValidAutolinkKey(type) ? String(type).trim() : "*";
+    if (node?.inputs?.[0]) {
+        node.inputs[0].type = safeType;
+        node.inputs[0].name = safeType;
+    }
+    if (node?.outputs?.[0]) {
+        node.outputs[0].type = safeType;
+        node.outputs[0].name = safeType;
+    }
+}
+
+function syncGetAutolinkType(node, type) {
+    const safeType = isValidAutolinkKey(type) ? String(type).trim() : "*";
+    if (node?.outputs?.[0]) {
+        node.outputs[0].type = safeType;
+        node.outputs[0].name = safeType;
+    }
+}
+
+function findAutolinkSetter(graph, key) {
+    if (!graph || !isValidAutolinkKey(key)) return null;
+    const matches = _iamccsGraphNodes(graph).filter(
+        n => n?.type === SET_TYPE && getAutolinkKey(n) === key
+    );
+    if (matches.length === 0) return null;
+    const withInput = matches.find(n => {
+        const linkId = n?.inputs?.[0]?.link;
+        return _iamccsGetLink(graph, linkId);
+    });
+    return withInput || matches[0];
+}
+
+function findAutolinkGetters(graph, key) {
+    if (!graph || !isValidAutolinkKey(key)) return [];
+    return _iamccsGraphNodes(graph).filter(
+        n => n?.type === GET_TYPE && getAutolinkKey(n) === key
+    );
+}
+
+function scheduleAutolinkRefresh(node, callback) {
+    setTimeout(() => {
+        try { callback?.(); } catch (e) {
+            console.warn("[IAMCCS AutoLink] Deferred node refresh failed", e);
+        }
+        try { node?.graph?.setDirtyCanvas?.(true, true); } catch {}
+    }, 0);
 }
 
 function normalizeAutolinkIOSlots(graph, node, { wantInputs = 0, wantOutputs = 0 } = {}) {
@@ -827,6 +910,91 @@ function _iamccsRemoveOtherLinksToTarget(graph, targetId, targetSlot, keepLinkId
     } catch {}
 }
 
+function _iamccsNodeHasAnyGraphLink(graph, nodeId) {
+    if (!graph || nodeId == null) return false;
+    try {
+        for (const [, link] of _iamccsGraphLinksEntries(graph)) {
+            if (!link) continue;
+            if (_iamccsIdEq(link.origin_id, nodeId) || _iamccsIdEq(link.target_id, nodeId)) return true;
+        }
+    } catch {}
+    return false;
+}
+
+function pruneDanglingAutolinkNodes(graph) {
+    if (!graph) return 0;
+
+    const setNodes = _iamccsGraphNodes(graph).filter(n => n?.type === SET_TYPE);
+    const getNodes = _iamccsGraphNodes(graph).filter(n => n?.type === GET_TYPE);
+    const nodesToRemove = new Set();
+    const primarySetByKey = new Map();
+    const liveGetCounts = new Map();
+
+    for (const setNode of setNodes) {
+        const key = getAutolinkKey(setNode);
+        if (!isValidAutolinkKey(key)) {
+            nodesToRemove.add(setNode);
+            continue;
+        }
+        const hasInputLink = !!_iamccsGetLink(graph, setNode?.inputs?.[0]?.link);
+        if (!hasInputLink || !_iamccsNodeHasAnyGraphLink(graph, setNode.id)) {
+            nodesToRemove.add(setNode);
+            continue;
+        }
+        if (!primarySetByKey.has(key)) primarySetByKey.set(key, setNode);
+        else nodesToRemove.add(setNode);
+    }
+
+    for (const getNode of getNodes) {
+        const key = getAutolinkKey(getNode);
+        const setter = findAutolinkSetter(graph, key);
+        const hasOutputLinks = !!getNode?.outputs?.some(out => Array.isArray(out?.links) && out.links.length > 0);
+        const targetId = getNode?.properties?.metadata?.target?.id;
+        const targetExists = targetId == null ? hasOutputLinks : !!getNodeById(graph, targetId);
+
+        if (!isValidAutolinkKey(key) || !setter || !hasOutputLinks || !targetExists || !_iamccsNodeHasAnyGraphLink(graph, getNode.id)) {
+            nodesToRemove.add(getNode);
+            continue;
+        }
+
+        liveGetCounts.set(key, (liveGetCounts.get(key) || 0) + 1);
+    }
+
+    for (const setNode of setNodes) {
+        if (nodesToRemove.has(setNode)) continue;
+        const key = getAutolinkKey(setNode);
+        const primary = primarySetByKey.get(key);
+        if (primary !== setNode || !liveGetCounts.get(key)) {
+            nodesToRemove.add(setNode);
+        }
+    }
+
+    let removed = 0;
+    for (const node of nodesToRemove) {
+        try {
+            if (node.inputs) {
+                for (let i = node.inputs.length - 1; i >= 0; i--) {
+                    try { node.disconnectInput?.(i); } catch {}
+                }
+            }
+            if (node.outputs) {
+                for (let i = node.outputs.length - 1; i >= 0; i--) {
+                    try { node.disconnectOutput?.(i); } catch {}
+                }
+            }
+            graph.remove(node);
+            removed++;
+        } catch {}
+    }
+
+    if (removed > 0) {
+        try { _iamccsFixLinkIntegrity(graph); } catch {}
+        try { graph.setDirtyCanvas(true, true); } catch {}
+    }
+
+    return removed;
+}
+
 // === CSS FIXES ===
 // Fix per titoli che escono dai nodi contratti
 const style = document.createElement('style');
@@ -874,7 +1042,7 @@ app.registerExtension({
                 });
                 
                 this.addWidget("button", "↩️ Restore Direct Links", null, () => {
-                    restoreDirectLinks(app.graph);
+                    restoreDirectLinks(app.graph, { asyncRemove: false });
                 });
                 
                 return result;
@@ -1363,6 +1531,7 @@ app.registerExtension({
         // Set node - come KJ SetNode
         if (nodeData?.name === SET_TYPE) {
             const onNodeCreated = nodeType.prototype.onNodeCreated;
+            const onConfigure = nodeType.prototype.onConfigure;
             nodeType.prototype.onNodeCreated = function() {
                 // --- MUST be set BEFORE anything else so ComfyUI skips this node
                 //     during graphToPrompt serialization and uses getInputLink chain ---
@@ -1371,8 +1540,15 @@ app.registerExtension({
                 const result = onNodeCreated?.apply(this, arguments);
                 const node = this;
 
+                this.serialize_widgets = true;
+                this.drawConnection = false;
+                this.currentGetters = null;
+                this.slotColor = "#FFF";
+                this.canvas = app.canvas;
+
                 // Dropdown colore (se cambi un Set, cambia anche i Get corrispondenti)
                 node.properties = node.properties || {};
+                if (node.properties.previousName === undefined) node.properties.previousName = "";
                 if (!node.properties.autolink_color_name) node.properties.autolink_color_name = "Gray";
                 this.addWidget(
                     "combo",
@@ -1398,28 +1574,17 @@ app.registerExtension({
                 
                 // Aggiungi widget per il nome
                 const nameWidget = this.addWidget("text", "name", "", (value) => {
-                    if (isValidAutolinkKey(value)) {
-                        const safe = String(value).trim();
-                        node.title = safe;
-
-                        // Mantieni i port name coerenti con la chiave
-                        if (node.inputs && node.inputs[0]) node.inputs[0].name = safe;
-                        if (node.outputs && node.outputs[0]) node.outputs[0].name = safe;
-
-                        // Salva il valore corrente per il prossimo cambiamento (tracking locale)
-                        nameWidget.lastValue = safe;
-
-                        // Applica colore testo titolo (se configurato)
-                        applyNodeTitleTextColor(node, getCurrentColorTitlesMode());
-                    } else {
-                        // evita titoli '*' o vuoti
-                        if (String(value ?? "").trim() === "*") {
-                            try { setWidgetValue(node, "name", ""); } catch {}
-                        }
-                        if (String(node.title ?? "").trim() === "*" || !String(node.title ?? "").trim()) {
-                            node.title = "Set AutoLink";
-                        }
+                    if (String(value ?? "").trim() === "*") {
+                        try { setWidgetValue(node, "name", ""); } catch {}
                     }
+
+                    node.validateName?.(node.graph || app.graph);
+                    const safeKey = getAutolinkKey(node);
+                    setAutolinkKeyAndTitle(node, safeKey);
+                    node.update?.();
+                    node.properties.previousName = safeKey;
+                    nameWidget.lastValue = safeKey;
+                    applyNodeTitleTextColor(node, getCurrentColorTitlesMode());
                 });
                 
                 // Inizializza lastValue quando il nodo viene caricato
@@ -1430,24 +1595,58 @@ app.registerExtension({
                 // Input/output: normalizza workflow vecchi (che possono avere input duplicati)
                 normalizeAutolinkIOSlots(app.graph, node, { wantInputs: 1, wantOutputs: 1 });
 
-                // --- KJ-style update: propagate type changes to all matching Get nodes ---
-                this._iamccsUpdateGetters = function() {
-                    try {
-                        const key = getAutolinkKey(node);
-                        if (!key) return;
-                        const curType = node.inputs?.[0]?.type || "*";
-                        const gets = _iamccsGraphNodes(app.graph).filter(
-                            n => n?.type === GET_TYPE && getAutolinkKey(n) === key
-                        );
-                        for (const g of gets) {
-                            if (g.outputs?.[0]) {
-                                g.outputs[0].type = curType;
-                                g.outputs[0].name = curType;
-                            }
-                            // Validate and remove type-incompatible links from each Get
-                            try { g.validateLinks?.(); } catch {}
+                this.findGetters = function(graph, checkForPreviousName = false) {
+                    const key = checkForPreviousName ? this.properties.previousName : getAutolinkKey(node);
+                    return findAutolinkGetters(graph, key);
+                };
+
+                this.validateName = function(graph) {
+                    if (!graph) return;
+                    const original = getAutolinkKey(node);
+                    if (!original) return;
+
+                    let widgetValue = original;
+                    let tries = 0;
+                    const existingValues = new Set();
+
+                    _iamccsGraphNodes(graph).forEach(otherNode => {
+                        if (otherNode !== node && otherNode?.type === SET_TYPE) {
+                            const otherValue = getAutolinkKey(otherNode);
+                            if (otherValue) existingValues.add(otherValue);
                         }
-                    } catch {}
+                    });
+
+                    while (existingValues.has(widgetValue)) {
+                        widgetValue = `${original}_${tries}`;
+                        tries++;
+                    }
+
+                    setWidgetValue(node, "name", widgetValue);
+                    setAutolinkKeyAndTitle(node, widgetValue);
+                };
+
+                this.update = function() {
+                    if (!node.graph) return;
+
+                    const key = getAutolinkKey(node);
+                    const curType = node.inputs?.[0]?.type || "*";
+                    const getters = this.findGetters(node.graph, false);
+                    getters.forEach(getter => {
+                        getter.setType?.(curType);
+                    });
+
+                    if (key) {
+                        const gettersWithPreviousName = this.findGetters(node.graph, true);
+                        gettersWithPreviousName.forEach(getter => {
+                            getter.setName?.(key);
+                        });
+                    }
+
+                    const argNode = getCurrentArgumentsNode();
+                    const separateCol = !!argNode?.properties?.separate_col;
+                    const colorGetName = argNode?.properties?.autolink_color_get || "Gray";
+                    const colorTitles = argNode?.properties?.color_titles || "White";
+                    applyColorToAutolinkKey(node.graph, key, node.properties.autolink_color_name || "Gray", separateCol, colorGetName, colorTitles);
                 };
 
                 // Callback quando si collega / scollega
@@ -1469,9 +1668,7 @@ app.registerExtension({
                                         suggestedBase = `output_${link_info.origin_slot}`;
                                 }
 
-                                // Update type on both slots
-                                if (node.inputs?.[0])  node.inputs[0].type  = outputType;
-                                if (node.outputs?.[0]) node.outputs[0].type = outputType;
+                                syncSetAutolinkType(node, outputType);
 
                                 // Auto-fill name only when the widget is still empty
                                 const currentKey = getAutolinkKey(node);
@@ -1481,15 +1678,13 @@ app.registerExtension({
 
                                 setAutolinkKeyAndTitle(node, desiredKey);
                                 applyNodeTitleTextColor(node, getCurrentColorTitlesMode());
-
-                                // Propagate new type to all Get nodes sharing our key
-                                node._iamccsUpdateGetters?.();
+                                node.update?.();
+                                node.properties.previousName = desiredKey;
                             }
                         } else if (!isConnect) {
-                            // On disconnect: reset type to wildcard
-                            if (node.inputs?.[0])  { node.inputs[0].type  = "*"; node.inputs[0].name  = "*"; }
-                            if (node.outputs?.[0]) { node.outputs[0].type = "*"; node.outputs[0].name = "*"; }
-                            node._iamccsUpdateGetters?.();
+                            syncSetAutolinkType(node, "*");
+                            setAutolinkKeyAndTitle(node, getAutolinkKey(node));
+                            node.update?.();
                         }
                     }
                 };
@@ -1514,12 +1709,33 @@ app.registerExtension({
                 try {
                     const rawName = getWidgetValue(node, "name");
                     if (String(rawName ?? "").trim() === "*") setWidgetValue(node, "name", "");
-                    if (String(node.title ?? "").trim() === "*") node.title = "Set AutoLink";
+                    if (String(node.title ?? "").trim() === "*") node.title = getAutolinkDefaultTitle(node);
                 } catch {}
+
+                setAutolinkKeyAndTitle(node, getAutolinkKey(node));
+                syncSetAutolinkType(node, node.inputs?.[0]?.type || node.outputs?.[0]?.type || "*");
+                node.properties.previousName = getAutolinkKey(node);
+                applyNodeTitleTextColor(node, getCurrentColorTitlesMode());
 
                 // isVirtualNode already set at top – keep here for safety (serialization guard)
                 this.isVirtualNode = true;
 
+                return result;
+            };
+
+            nodeType.prototype.onConfigure = function() {
+                const result = onConfigure?.apply(this, arguments);
+                this.isVirtualNode = true;
+                scheduleAutolinkRefresh(this, () => {
+                    normalizeAutolinkIOSlots(this.graph || app.graph, this, { wantInputs: 1, wantOutputs: 1 });
+                    this.validateName?.(this.graph || app.graph);
+                    syncSetAutolinkType(this, this.inputs?.[0]?.type || this.outputs?.[0]?.type || "*");
+                    setAutolinkKeyAndTitle(this, getAutolinkKey(this));
+                    this.properties = this.properties || {};
+                    this.properties.previousName = getAutolinkKey(this);
+                    applyNodeTitleTextColor(this, getCurrentColorTitlesMode());
+                    this.update?.();
+                });
                 return result;
             };
         }
@@ -1527,12 +1743,21 @@ app.registerExtension({
         // Get node - 1:1 KJ GetNode pattern with IAMCCS styling
         if (nodeData?.name === GET_TYPE) {
             const onNodeCreated = nodeType.prototype.onNodeCreated;
+            const onConfigure = nodeType.prototype.onConfigure;
             nodeType.prototype.onNodeCreated = function() {
                 // --- MUST be set BEFORE anything else ---
                 this.isVirtualNode = true;
 
                 const result = onNodeCreated?.apply(this, arguments);
                 const node = this;
+
+                this.serialize_widgets = true;
+                this.drawConnection = false;
+                this.slotColor = "#FFF";
+                this.currentSetter = null;
+                this.canvas = app.canvas;
+
+                node.properties = node.properties || {};
 
                 // Combo dinamico con lista Set disponibili (identical to KJ "Constant" combo)
                 this.addWidget("combo", "name", "", () => {
@@ -1571,8 +1796,7 @@ app.registerExtension({
 
                 this.setType = function(type) {
                     if (!node.outputs?.[0]) return;
-                    node.outputs[0].name = type;
-                    node.outputs[0].type = type;
+                    syncGetAutolinkType(node, type);
                     node.validateLinks();
                 };
 
@@ -1584,17 +1808,16 @@ app.registerExtension({
 
                 this.onRename = function() {
                     const setterName = getAutolinkKey(node);
-                    const setter = _iamccsGraphNodes(app.graph).find(n =>
-                        n.type === SET_TYPE && getAutolinkKey(n) === setterName
-                    );
+                    const setter = findAutolinkSetter(node.graph || app.graph, setterName);
 
                     if (setter) {
                         const linkType = setter.inputs?.[0]?.type || "*";
                         node.setType(linkType);
-                        node.title = setterName;
+                        node.title = getAutolinkDisplayTitle(node, setterName);
                         applyNodeTitleTextColor(node, getCurrentColorTitlesMode());
                     } else {
                         node.setType("*");
+                        node.title = getAutolinkDisplayTitle(node, setterName);
                     }
                 };
 
@@ -1607,7 +1830,7 @@ app.registerExtension({
 
                 // Fix workflow vecchi: titolo a '*'
                 try {
-                    if (String(node.title ?? "").trim() === "*") node.title = "Get AutoLink";
+                    if (String(node.title ?? "").trim() === "*") node.title = getAutolinkDefaultTitle(node);
                 } catch {}
 
                 // getInputLink: called by ComfyUI graphToPrompt to resolve the real source link.
@@ -1618,25 +1841,36 @@ app.registerExtension({
                     try {
                         const setterName = getAutolinkKey(node);
                         if (!setterName) return null;
-                        const setter = _iamccsGraphNodes(app.graph).find(n =>
-                            n.type === SET_TYPE && getAutolinkKey(n) === setterName
-                        );
+                        const setter = findAutolinkSetter(node.graph || app.graph, setterName);
                         if (!setter?.inputs?.length) return null;
-                        // slot index maps to the Set's input (both nodes use slot 0)
-                        const slotInfo = setter.inputs[0];
+                        const slotInfo = setter.inputs[slot] || setter.inputs[0];
                         if (!slotInfo) return null;
                         const linkId = slotInfo.link != null
                             ? slotInfo.link
                             : (Array.isArray(slotInfo.links) ? slotInfo.links[0] : null);
-                        return _iamccsGetLink(app.graph, linkId) || null;
+                        return _iamccsGetLink(node.graph || app.graph, linkId) || null;
                     } catch {
                         return null;
                     }
                 };
 
+                setAutolinkKeyAndTitle(node, getAutolinkKey(node));
+                node.onRename?.();
+
                 // isVirtualNode redundant here (set at top) but kept as an insurance belt
                 this.isVirtualNode = true;
 
+                return result;
+            };
+
+            nodeType.prototype.onConfigure = function() {
+                const result = onConfigure?.apply(this, arguments);
+                this.isVirtualNode = true;
+                scheduleAutolinkRefresh(this, () => {
+                    normalizeAutolinkIOSlots(this.graph || app.graph, this, { wantInputs: 0, wantOutputs: 1 });
+                    setAutolinkKeyAndTitle(this, getAutolinkKey(this));
+                    this.onRename?.();
+                });
                 return result;
             };
         }
@@ -2250,73 +2484,10 @@ function convertAllLinks(
     console.log("[IAMCCS AutoLink] SeparateCol:", separateCol);
     console.log("[IAMCCS AutoLink] ColorTitles:", colorTitles);
 
-    // Safety cleanup: if previous Restore left some AutoLink nodes behind (due to older bugs
-    // or partial restores), they can cause repeated Convert/Restore cycles to spawn new
-    // Set/Get nodes with suffixed names (model_0 -> model_1 -> model_2 ...).
-    // We only prune nodes that are clearly dangling (no links / Set has no Gets).
     try {
-        const NEVER = (window?.LiteGraph?.NEVER != null) ? window.LiteGraph.NEVER : 2;
-        const isInactive = (n) => !!(n?.flags?.hidden || n?.hidden || n?.is_hidden || Number(n?.mode) === Number(NEVER));
-
-        const nodes = _iamccsGraphNodes(graph);
-        const sets = nodes.filter(n => n?.type === SET_TYPE);
-        const gets = nodes.filter(n => n?.type === GET_TYPE);
-
-        const links = _iamccsGraphLinksEntries(graph).map(([, l]) => l).filter(Boolean);
-        const linkCountById = new Map();
-        const incomingCountById = new Map();
-        const outgoingCountById = new Map();
-
-        for (const l of links) {
-            const oid = l.origin_id;
-            const tid = l.target_id;
-            const ok = (id) => id != null;
-            if (ok(oid)) {
-                const k = String(oid);
-                outgoingCountById.set(k, (outgoingCountById.get(k) || 0) + 1);
-                linkCountById.set(k, (linkCountById.get(k) || 0) + 1);
-            }
-            if (ok(tid)) {
-                const k = String(tid);
-                incomingCountById.set(k, (incomingCountById.get(k) || 0) + 1);
-                linkCountById.set(k, (linkCountById.get(k) || 0) + 1);
-            }
-        }
-
-        const keyHasGet = new Set(gets.map(g => getAutolinkKey(g)).filter(Boolean));
-
-        let pruned = 0;
-        // Remove Get nodes with no outgoing links in the graph.
-        for (const g of gets) {
-            const id = g?.id;
-            if (id == null) continue;
-            const out = outgoingCountById.get(String(id)) || 0;
-            const any = linkCountById.get(String(id)) || 0;
-            if (any === 0 || out === 0) {
-                try { graph.remove(g); pruned++; } catch {}
-            }
-        }
-
-        // Remove Set nodes that have no Gets using their key and are not inactive-hidden placeholders.
-        for (const s of sets) {
-            const id = s?.id;
-            if (id == null) continue;
-            const key = getAutolinkKey(s);
-            if (key && keyHasGet.has(key)) continue;
-            if (isInactive(s)) continue;
-
-            const out = outgoingCountById.get(String(id)) || 0;
-            const any = linkCountById.get(String(id)) || 0;
-            // Typical Set has exactly one incoming link (source -> set) and no outgoing.
-            if (any <= 1 && out === 0) {
-                try { graph.remove(s); pruned++; } catch {}
-            }
-        }
-
+        const pruned = pruneDanglingAutolinkNodes(graph);
         if (pruned > 0) {
             console.log(`[IAMCCS AutoLink] Pruned ${pruned} dangling AutoLink nodes before converting`);
-            try { _iamccsFixLinkIntegrity(graph); } catch {}
-            try { graph.setDirtyCanvas(true, true); } catch {}
         }
     } catch {}
     
@@ -2720,8 +2891,8 @@ function convertAllLinks(
             uniqueName = getAutolinkKey(reuseSet) || makeUniqueSetName(outputSlotName);
             console.log(`[IAMCCS AutoLink] ↺ Reusing existing Set node: "${uniqueName}" for ${srcNode.title || srcNode.type}[${originSlot}]`);
             // Make sure the type name widget is still consistent
-            if (setNode.inputs?.[0])  setNode.inputs[0].type  = outputType;
-            if (setNode.outputs?.[0]) setNode.outputs[0].type = outputType;
+            syncSetAutolinkType(setNode, outputType);
+            setAutolinkKeyAndTitle(setNode, uniqueName);
         } else {
             // Create a brand-new Set node
             const setPos = findFreePosition(
@@ -2752,11 +2923,10 @@ function convertAllLinks(
             // Genera nome unico — NON ridurre mai "model_0" a "model"
             uniqueName = makeUniqueSetName(outputSlotName);
 
-            if (setNode.inputs?.[0])  { setNode.inputs[0].type  = outputType; setNode.inputs[0].name  = uniqueName; }
-            if (setNode.outputs?.[0]) { setNode.outputs[0].type = outputType; setNode.outputs[0].name = uniqueName; }
+            syncSetAutolinkType(setNode, outputType);
 
             setWidgetValue(setNode, "name", uniqueName);
-            setNode.title = uniqueName;
+            setAutolinkKeyAndTitle(setNode, uniqueName);
 
             console.log(`[IAMCCS AutoLink] ✓ Created Set node: "${uniqueName}" (from ${srcNode.title || srcNode.type})`);
 
@@ -2839,13 +3009,11 @@ function convertAllLinks(
             applyNodeTitleTextColor(getNode, colorTitles);
             
             // Imposta tipo e nome correttamente
-            if (getNode.outputs && getNode.outputs[0]) {
-                getNode.outputs[0].type = outputType;
-                getNode.outputs[0].name = outputName;
-            }
+            syncGetAutolinkType(getNode, outputType);
             
             setWidgetValue(getNode, "name", outputName);
-            getNode.title = `${outputName}`;
+            setAutolinkKeyAndTitle(getNode, outputName);
+            getNode.onRename?.();
             
             // Collassa
             setTimeout(() => {
@@ -2989,13 +3157,15 @@ function convertAllLinks(
             );
 
             setWidgetValue(newNode, "name", kijName);
-            newNode.title = `${kijName}`;
+            setAutolinkKeyAndTitle(newNode, kijName);
 
             // Ensure expected slots exist.
             if (newType === SET_TYPE) {
                 normalizeAutolinkIOSlots(graph, newNode, { wantInputs: 1, wantOutputs: 1 });
+                syncSetAutolinkType(newNode, newNode.inputs?.[0]?.type || newNode.outputs?.[0]?.type || "*");
             } else {
                 normalizeAutolinkIOSlots(graph, newNode, { wantInputs: 0, wantOutputs: 1 });
+                syncGetAutolinkType(newNode, newNode.outputs?.[0]?.type || "*");
             }
 
             const oldId = oldNode.id;
@@ -3106,17 +3276,6 @@ function restoreDirectLinks(graph, options = {}) {
         return false;
     };
 
-    const hasAnyGraphLink = (nodeId) => {
-        if (nodeId == null) return false;
-        try {
-            for (const [, l] of _iamccsGraphLinksEntries(graph)) {
-                if (!l) continue;
-                if (_iamccsIdEq(l.origin_id, nodeId) || _iamccsIdEq(l.target_id, nodeId)) return true;
-            }
-        } catch {}
-        return false;
-    };
-    
     // Raccogli tutti i nodi Set e Get
     for (const node of nodes) {
         if (node.type === SET_TYPE) {
@@ -3257,6 +3416,7 @@ function restoreDirectLinks(graph, options = {}) {
 
     let restored = 0;
     let failed = 0;
+    const staleGetIds = new Set();
 
     const keyToSet = new Map();
     for (const setNode of setNodes) {
@@ -3290,14 +3450,12 @@ function restoreDirectLinks(graph, options = {}) {
         const ts = resolveTargetSlot(dstNode, md);
 
         if (!srcNode || !dstNode) {
-            failed++;
-            if (key) keysWithFailures.add(key);
+            staleGetIds.add(getNode.id);
             continue;
         }
 
         if (ts == null) {
-            failed++;
-            if (key) keysWithFailures.add(key);
+            staleGetIds.add(getNode.id);
             continue;
         }
 
@@ -3311,6 +3469,7 @@ function restoreDirectLinks(graph, options = {}) {
                 if (existing && _iamccsIdEq(existing.origin_id, srcNode.id) && Number(existing.origin_slot) === Number(originSlot)) {
                     restored++;
                     restoredGetIds.add(getNode.id);
+                    staleGetIds.add(getNode.id);
                     continue;
                 }
             }
@@ -3393,6 +3552,7 @@ function restoreDirectLinks(graph, options = {}) {
                             if (existing && _iamccsIdEq(existing.origin_id, srcNode.id) && Number(existing.origin_slot) === Number(originSlot)) {
                                 restored++;
                                 restoredGetIds.add(getNode.id);
+                                staleGetIds.add(getNode.id);
                                 continue;
                             }
                         }
@@ -3443,12 +3603,12 @@ function restoreDirectLinks(graph, options = {}) {
         // Remove restored Gets + any dangling Gets (prevents Convert/Restore duplication loops).
         for (const getNode of getNodes) {
             if (!getNode) continue;
-            if (restoredGetIds.has(getNode.id)) {
+            if (restoredGetIds.has(getNode.id) || staleGetIds.has(getNode.id)) {
                 nodesToRemove.add(getNode);
                 continue;
             }
             // If a Get is no longer connected to anything, it is safe to remove.
-            if (!hasAnyGraphLink(getNode.id)) {
+            if (!_iamccsNodeHasAnyGraphLink(graph, getNode.id)) {
                 nodesToRemove.add(getNode);
             }
         }
@@ -3465,12 +3625,13 @@ function restoreDirectLinks(graph, options = {}) {
             if (keysWithFailures.has(key)) continue;
 
             // If the Set isn't linked to anything, remove it unconditionally.
-            if (!hasAnyGraphLink(setNode.id)) {
+            if (!_iamccsNodeHasAnyGraphLink(graph, setNode.id)) {
                 nodesToRemove.add(setNode);
                 continue;
             }
 
-            if (allGetsRestored || noGetsExist) {
+            const remainingGets = gets.filter(g => !nodesToRemove.has(g) && _iamccsNodeHasAnyGraphLink(graph, g.id));
+            if (allGetsRestored || noGetsExist || remainingGets.length === 0) {
                 nodesToRemove.add(setNode);
             }
         }
@@ -3502,6 +3663,12 @@ function restoreDirectLinks(graph, options = {}) {
             }
         }
         try { _iamccsFixLinkIntegrity(graph); } catch {}
+        try {
+            const pruned = pruneDanglingAutolinkNodes(graph);
+            if (pruned > 0) {
+                console.log(`[IAMCCS AutoLink] Pruned ${pruned} residual AutoLink nodes after restore`);
+            }
+        } catch {}
         try { graph.setDirtyCanvas(true, true); } catch {}
     };
 

@@ -1,5 +1,19 @@
 # IAMCCS Nodes - Changelog
 
+## 🆕 2026-03-27 - version 1.4.0 — Audio extension ltx-2.3
+
+Changes:
+- Added new nodes audio extension for LTX-2.3
+- ADDED NEW NODES FOR LOW RAM USERS
+
+Changes:
+- Added new video utility node: `IAMCCS_WanJunctionBridge`
+  - Adapts latent junctions between `SVI -> FLF` and `FLF -> SVI`
+  - Cleans `prev_samples` tails via trim + tail extraction
+  - Builds `anchor_samples` from decoded last frame, target anchor image, or latent fallback
+  - Applies optional DC drift correction to preserve motion continuity across generations
+  - Outputs both adapted `prev_samples` and `anchor_samples` for downstream Wan nodes
+
 ## 🆕 2026-02-24 — 🆕 Version 1.3.6  WanImageMotionPro + Motion Safety Preset + Bug Fixed
 
 Changes:

@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 
-const IAMCCS_LTX2_EXTENSION_PRESETS_VERSION = "2026-03-01-1";
+const IAMCCS_LTX2_EXTENSION_PRESETS_VERSION = "2026-03-17-1";
 
 console.log(
     `[IAMCCS LTX2] Loading ExtensionModule presets... v=${IAMCCS_LTX2_EXTENSION_PRESETS_VERSION}`
@@ -32,6 +32,49 @@ const PRESETS = {
         color_reference_window: 8,
 
         // Keep defaults explicit for stability
+        metric_weight_color: 1.0,
+        metric_weight_edges: 0.5,
+    },
+
+    // Recommended current settings for concert / videoclip audio-sync workflows.
+    videoclip_audio_24fps: {
+        overlap_frames: 9,
+        overlap_mode: "cut",
+        overlap_side: "source",
+
+        enable_math: true,
+        math_operation: "none",
+        math_value_b: 1,
+        safe_mode: "none",
+        start_frames_rule: "none",
+
+        seam_search_mode: "best_of_k",
+        k_search: 16,
+        color_match_mode: "luma_only",
+        color_match_strength: 0.25,
+        color_reference_window: 8,
+
+        metric_weight_color: 1.0,
+        metric_weight_edges: 0.5,
+    },
+
+    monologue_audio_24fps: {
+        overlap_frames: 13,
+        overlap_mode: "cut",
+        overlap_side: "source",
+
+        enable_math: true,
+        math_operation: "none",
+        math_value_b: 1,
+        safe_mode: "none",
+        start_frames_rule: "none",
+
+        seam_search_mode: "best_of_k",
+        k_search: 16,
+        color_match_mode: "luma_only",
+        color_match_strength: 0.15,
+        color_reference_window: 8,
+
         metric_weight_color: 1.0,
         metric_weight_edges: 0.5,
     },
@@ -150,6 +193,8 @@ const PRESET_UI_WIDGET = "preset_ui";
 const ALLOWED_PRESET_KEYS = [
     "custom",
     "target_extension_ltx2",
+    "videoclip_audio_24fps",
+    "monologue_audio_24fps",
     "cut_bestofk_16",
     "cut_bestofk_16_luma",
     "cut_bestofk_32",
@@ -251,6 +296,8 @@ function _createPresetUiWidgetAtEnd(node) {
     const values = [
         "custom",
         "target_extension_ltx2",
+        "videoclip_audio_24fps",
+        "monologue_audio_24fps",
         "cut_bestofk_16",
         "cut_bestofk_16_luma",
         "cut_bestofk_32",
