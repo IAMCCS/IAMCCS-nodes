@@ -129,8 +129,72 @@ const PRESETS_MOTION = {
 const PRESETS_MOTION_PRO = {
     "[custom]": null,
 
+    "svi continuity": {
+        continuity_profile: "SVI_CONTINUITY",
+        raw_mode: false,
+        motion_latent_count: 1,
+        motion: 1.0,
+        motion_mode: "motion_only (prev_samples)",
+        add_reference_latents: false,
+        latent_precision: "fp32",
+        vram_profile: "normal",
+        include_padding_in_motion: false,
+        safety_preset: "base",
+        use_end_frame: true,
+        end_transition_frames: 0,
+        end_lock_slots: 1,
+        lock_start_slots: 1,
+        use_prev_samples: true,
+        end_overshoot_slots: 1,
+        prev_skip_last_slots: 0,
+        clip_vision_mode: "auto",
+    },
+
+    "svi continuity prev safe": {
+        continuity_profile: "SVI_CONTINUITY_PREV_SAFE",
+        raw_mode: false,
+        motion_latent_count: 1,
+        motion: 1.0,
+        motion_mode: "motion_only (prev_samples)",
+        add_reference_latents: false,
+        latent_precision: "fp32",
+        vram_profile: "normal",
+        include_padding_in_motion: false,
+        safety_preset: "base",
+        use_end_frame: true,
+        end_transition_frames: 0,
+        end_lock_slots: 1,
+        lock_start_slots: 1,
+        use_prev_samples: true,
+        end_overshoot_slots: 1,
+        prev_skip_last_slots: 1,
+        clip_vision_mode: "auto",
+    },
+
+    "svi continuity end only": {
+        continuity_profile: "SVI_CONTINUITY_END_ONLY",
+        raw_mode: false,
+        motion_latent_count: 1,
+        motion: 1.0,
+        motion_mode: "motion_only (prev_samples)",
+        add_reference_latents: false,
+        latent_precision: "fp32",
+        vram_profile: "normal",
+        include_padding_in_motion: false,
+        safety_preset: "base",
+        use_end_frame: true,
+        end_transition_frames: 0,
+        end_lock_slots: 1,
+        lock_start_slots: 1,
+        use_prev_samples: true,
+        end_overshoot_slots: 1,
+        prev_skip_last_slots: 0,
+        clip_vision_mode: "end_only",
+    },
+
     // ── 1:1 con WanImageToVideoSVIProFLF ───────────────────
     "parity 1:1": {
+        continuity_profile: "off",
         motion_latent_count: 1,
         motion: 1.0,
         motion_mode: "motion_only (prev_samples)",
@@ -153,6 +217,7 @@ const PRESETS_MOTION_PRO = {
     // ── Diagnostic (no-op + extra logs) ────────────────────
     // Same as parity, but enables backend diagnostic_log.
     "diagnostic (no-op logs)": {
+        continuity_profile: "off",
         motion_latent_count: 1,
         motion: 1.0,
         motion_mode: "motion_only (prev_samples)",
@@ -173,6 +238,7 @@ const PRESETS_MOTION_PRO = {
     // ── First segment helper ──────────────────────────────
     // For workflows where prev_samples is always connected by autolink.
     "first segment (ignore prev)": {
+        continuity_profile: "off",
         motion_latent_count: 1,
         motion: 1.15,
         motion_mode: "motion_only (prev_samples)",
@@ -192,6 +258,7 @@ const PRESETS_MOTION_PRO = {
 
     // ── Start frame only (no end lock) ────────────────────
     "start only": {
+        continuity_profile: "off",
         motion_latent_count: 1,
         motion: 1.15,
         motion_mode: "motion_only (prev_samples)",
@@ -210,6 +277,7 @@ const PRESETS_MOTION_PRO = {
 
     // ── Standard FLF (start + end, 1 locked slot) ─────────
     "flf standard": {
+        continuity_profile: "off",
         motion_latent_count: 1,
         motion: 1.15,
         motion_mode: "motion_only (prev_samples)",
@@ -230,6 +298,7 @@ const PRESETS_MOTION_PRO = {
     // end_overshoot_slots=1: adds 4 hidden frames so the end-lock zone is trimmed
     // away after sampling. Wire trim_slots → Cut Latent Frames.
     "flf overshoot": {
+        continuity_profile: "off",
         motion_latent_count: 1,
         motion: 1.15,
         motion_mode: "motion_only (prev_samples)",
@@ -248,6 +317,7 @@ const PRESETS_MOTION_PRO = {
 
     // ── Multi-chunk chain (no end lock) ───────────────────
     "smooth chain": {
+        continuity_profile: "off",
         motion_latent_count: 1,
         motion: 1.3,
         motion_mode: "motion_only (prev_samples)",
@@ -266,6 +336,7 @@ const PRESETS_MOTION_PRO = {
 
     // ── Smooth FLF chain ───────────────────────────────────
     "smooth flf": {
+        continuity_profile: "off",
         motion_latent_count: 1,
         motion: 1.3,
         motion_mode: "motion_only (prev_samples)",
@@ -284,6 +355,7 @@ const PRESETS_MOTION_PRO = {
 
     // ── High motion FLF ────────────────────────────────────
     "high motion flf": {
+        continuity_profile: "off",
         motion_latent_count: 1,
         motion: 1.6,
         motion_mode: "all_nonfirst (anchor+motion)",
@@ -302,6 +374,7 @@ const PRESETS_MOTION_PRO = {
 
     // ── Low VRAM + FLF ─────────────────────────────────────
     "low vram flf": {
+        continuity_profile: "off",
         motion_latent_count: 1,
         motion: 1.15,
         motion_mode: "motion_only (prev_samples)",
@@ -328,6 +401,17 @@ function getWidget(node, name) {
 function getWidgetIndex(node, name) {
     if (!node?.widgets?.length) return -1;
     return node.widgets.findIndex((w) => w?.name === name);
+}
+
+function hideWidget(widget) {
+    if (!widget) return;
+    try {
+        widget.hidden = true;
+        widget.disabled = true;
+        widget.computeSize = () => [0, -4];
+    } catch {
+        // ignore
+    }
 }
 
 function setWidgetValue(node, name, value) {
@@ -522,6 +606,61 @@ function _installPresetHooks(nodeType, presetMap) {
     };
 }
 
+function _installBackendPresetHooks(nodeType, presetMap, hiddenWidgetNames = []) {
+    if (nodeType?.prototype?._iamccs_backend_preset_hooks_installed) return;
+    nodeType.prototype._iamccs_backend_preset_hooks_installed = true;
+
+    const wireNode = (node) => {
+        if (!node) return;
+
+        _removePresetWidget(node);
+
+        const backendPreset = getWidget(node, "preset");
+        if (backendPreset) {
+            const presetIdx = getWidgetIndex(node, "preset");
+            if (presetIdx > 0) {
+                const [item] = node.widgets.splice(presetIdx, 1);
+                node.widgets.unshift(item);
+            }
+
+            if (!backendPreset._iamccsPresetWrapped) {
+                const previous = backendPreset.callback;
+                backendPreset.callback = function () {
+                    const result = previous?.apply(this, arguments);
+                    applyPreset(node, backendPreset.value, presetMap);
+                    try {
+                        node.setDirtyCanvas(true, true);
+                    } catch {
+                        // ignore
+                    }
+                    return result;
+                };
+                backendPreset._iamccsPresetWrapped = true;
+            }
+
+            applyPreset(node, backendPreset.value, presetMap);
+        }
+
+        for (const widgetName of hiddenWidgetNames) {
+            hideWidget(getWidget(node, widgetName));
+        }
+    };
+
+    const onNodeCreated = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+        const result = onNodeCreated?.apply(this, arguments);
+        wireNode(this);
+        return result;
+    };
+
+    const onConfigure = nodeType.prototype.onConfigure;
+    nodeType.prototype.onConfigure = function () {
+        const result = onConfigure?.apply(this, arguments);
+        wireNode(this);
+        return result;
+    };
+}
+
 // Legacy alias — kept for any call sites that may still reference it.
 function ensureTopPresetWidget(node, presetMap) {
     if (getWidget(node, "_iamccs_preset_ui")) return;
@@ -542,9 +681,21 @@ app.registerExtension({
             return;
         }
 
-        // WanImageMotionPro — extended FLF node
-        if (nodeName === "WanImageMotionPro") {
-            _installPresetHooks(nodeType, PRESETS_MOTION_PRO);
+        // WanImageMotionPro family — use the backend preset widget as the single visible control.
+        if (
+            nodeName === "WanImageMotionPro" ||
+            nodeName === "IAMCCS_WanImageMotionPro_AdaIN" ||
+            nodeName === "IAMCCS_WanImageMotionPro" ||
+            nodeName === "IAMCCS_WanImageMotionPro_Simple" ||
+            nodeName === "WanImageMotionProPlus" ||
+            nodeName === "IAMCCS_WanImageMotionProPlus" ||
+            nodeName === "IAMCCS_WanImageMotionProPlus_Simple" ||
+            nodeName === "IAMCCS_WanSVIToFLFBridgePro" ||
+            nodeName === "IAMCCS_WanSVIToFLFBridgeProPlus" ||
+            nodeName === "IAMCCS_WanSVIToFLFBridgePro_Simple" ||
+            nodeName === "IAMCCS_WanSVIToFLFBridgeProPlus_Simple"
+        ) {
+            _installBackendPresetHooks(nodeType, PRESETS_MOTION_PRO, ["continuity_profile", "raw_mode"]);
         }
     },
 });

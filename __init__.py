@@ -38,6 +38,7 @@ from .iamccs_ltx2_tools import (
     IAMCCS_LTX2_Validator,
     IAMCCS_LTX2_TimeFrameCount,
     IAMCCS_LTX2_EnsureFrames8nPlus1,
+    IAMCCS_LTX2_EnsureMinFrames,
     IAMCCS_LTX2_ControlPreprocess,
     IAMCCS_LTX2_ImageBatchPadReflect,
     IAMCCS_LTX2_ImageBatchCropByPad,
@@ -70,7 +71,9 @@ from .iamccs_ltx2_extension_module import (
 
 from .iamccs_ltx2_temporal_overlap_samplers import (
     IAMCCS_LTX2_ConditionNextLatentWithPrevOverlap,
+    IAMCCS_LTX2_InitLatentSampler,
     IAMCCS_LTX2_LoopingSampler,
+    IAMCCS_LTX2_OneShotLowRAMLooper,
     IAMCCS_LTX2_ExtendSampler,
 )
 
@@ -78,9 +81,11 @@ from .iamccs_wan_svipro_motion import (
     IAMCCS_WanImageMotion,
     WanImageMotionPro as WanImageMotionProPlus,
     IAMCCS_WanImageMotionPro_Simple as IAMCCS_WanImageMotionProPlus_Simple,
+    IAMCCS_WanImageMotionInductive,
     IAMCCS_WanSVIToFLFBridgePro as IAMCCS_WanSVIToFLFBridgeProPlus,
     IAMCCS_WanSVIToFLFBridgePro_Simple as IAMCCS_WanSVIToFLFBridgeProPlus_Simple,
     WanMotionProTrimmer,
+    IAMCCS_WanPrevTailPrep,
 )
 
 from .iamccs_wan_svipro_motion_legacy import (
@@ -113,6 +118,7 @@ from .iamccs_multiswitch import (
 from .iamccs_hw_supporter import (
     IAMCCS_HwSupporter,
     IAMCCS_HwSupporterAny,
+    IAMCCS_HardMemoryPurge,
     IAMCCS_VRAMCleanup,
     IAMCCS_VRAMFlushLatent,
     IAMCCS_VAEDecodeTiledSafe,
@@ -148,8 +154,34 @@ from .iamccs_audio_extender import (
     IAMCCS_AudioTimelineGate,
 )
 
+from .iamccs_ltx2_segment_queue import (
+    IAMCCS_LTX2_BlendLatentBridge,
+    IAMCCS_LTX2_LastFrameBridgeLoad,
+    IAMCCS_LTX2_LastFrameBridgeSave,
+    IAMCCS_LTX2_LoadLatentBridge,
+    IAMCCS_LTX2_LongVideoWrapperPrep,
+    IAMCCS_LTX2_SaveLatentBridge,
+    IAMCCS_LTX2_SegmentQueueLoop,
+)
+
 from .iamccs_image_resize import (
     IAMCCS_ImageResizeBatchSafe,
+)
+
+from .iamccs_value_monitor import (
+    IAMCCS_IntValueMonitor,
+)
+
+from .iamccs_flux_klein_multigen import (
+    IAMCCS_FluxKleinMultiGen,
+)
+
+from .iamccs_qwen_multigen import (
+    IAMCCS_QwenMultiGen,
+)
+
+from .iamccs_multiline_prompt_splitter import (
+    IAMCCS_MultilinePromptSplitter8,
 )
 
 # Nodi principali
@@ -172,6 +204,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_Validator": IAMCCS_LTX2_Validator,
     "IAMCCS_LTX2_TimeFrameCount": IAMCCS_LTX2_TimeFrameCount,
     "IAMCCS_LTX2_EnsureFrames8nPlus1": IAMCCS_LTX2_EnsureFrames8nPlus1,
+    "IAMCCS_LTX2_EnsureMinFrames": IAMCCS_LTX2_EnsureMinFrames,
     "IAMCCS_LTX2_ControlPreprocess": IAMCCS_LTX2_ControlPreprocess,
     "IAMCCS_LTX2_ImageBatchPadReflect": IAMCCS_LTX2_ImageBatchPadReflect,
     "IAMCCS_LTX2_ImageBatchCropByPad": IAMCCS_LTX2_ImageBatchCropByPad,
@@ -197,23 +230,30 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_MiddleFrames": IAMCCS_LTX2_MiddleFrames,
     "IAMCCS_LTX2_FirstLastLatentControl": IAMCCS_LTX2_FirstLastLatentControl,
     "IAMCCS_LTX2_FirstLastLatentControl_Pro": IAMCCS_LTX2_FirstLastLatentControl_Pro,
+    "IAMCCS_LTX2_InitLatentSampler": IAMCCS_LTX2_InitLatentSampler,
     "IAMCCS_LTX2_LoopingSampler": IAMCCS_LTX2_LoopingSampler,
+    "IAMCCS_LTX2_OneShotLowRAMLooper": IAMCCS_LTX2_OneShotLowRAMLooper,
     "IAMCCS_LTX2_ExtendSampler": IAMCCS_LTX2_ExtendSampler,
     "IAMCCS_LTX2_ConditionNextLatentWithPrevOverlap": IAMCCS_LTX2_ConditionNextLatentWithPrevOverlap,
     "IAMCCS_WanImageMotion": IAMCCS_WanImageMotion,
     # Backward-compat alias: workflow JSONs saved with the _AdaIN name still load.
     "IAMCCS_WanImageMotion_AdaIN": IAMCCS_WanImageMotion,
-    "WanImageMotionPro": WanImageMotionProLegacy,
-    "IAMCCS_WanImageMotionPro_AdaIN": WanImageMotionProLegacy,
-    # Hidden alias: loads saved workflows that used the old key, but NOT listed in NODE_DISPLAY_NAME_MAPPINGS
-    # so it never appears in the ComfyUI Add Node menu.
-    "IAMCCS_WanImageMotionPro": WanImageMotionProLegacy,
+    "WanImageMotionPro": WanImageMotionProPlus,
+    "IAMCCS_WanImageMotionPro_AdaIN": WanImageMotionProPlus,
+    # Keep the historic key on the current implementation so existing workflows
+    # load the new Plus node with continuity profiles and presets.
+    "IAMCCS_WanImageMotionPro": WanImageMotionProPlus,
+    # Explicit legacy entrypoint for older raw-only behavior.
+    "WanImageMotionProLegacy": WanImageMotionProLegacy,
+    "IAMCCS_WanImageMotionProLegacy": WanImageMotionProLegacy,
     "WanImageMotionProPlus": WanImageMotionProPlus,
     "IAMCCS_WanImageMotionProPlus": WanImageMotionProPlus,
     "IAMCCS_WanImageMotionProPlus_Simple": IAMCCS_WanImageMotionProPlus_Simple,
+    "IAMCCS_WanImageMotionInductive": IAMCCS_WanImageMotionInductive,
     "IAMCCS_WanSVIToFLFBridgeProPlus": IAMCCS_WanSVIToFLFBridgeProPlus,
     "IAMCCS_WanSVIToFLFBridgeProPlus_Simple": IAMCCS_WanSVIToFLFBridgeProPlus_Simple,
     "WanMotionProTrimmer": WanMotionProTrimmer,
+    "IAMCCS_WanPrevTailPrep": IAMCCS_WanPrevTailPrep,
     
     "IAMCCS_SetAutoLink": IAMCCS_SetAutoLink,
     "IAMCCS_GetAutoLink": IAMCCS_GetAutoLink,
@@ -230,6 +270,7 @@ NODE_CLASS_MAPPINGS = {
 
     "IAMCCS_HwSupporter": IAMCCS_HwSupporter,
     "IAMCCS_HwSupporterAny": IAMCCS_HwSupporterAny,
+    "IAMCCS_HardMemoryPurge": IAMCCS_HardMemoryPurge,
     "IAMCCS_VRAMCleanup": IAMCCS_VRAMCleanup,
     "IAMCCS_VRAMFlushLatent": IAMCCS_VRAMFlushLatent,
     "IAMCCS_VAEDecodeTiledSafe": IAMCCS_VAEDecodeTiledSafe,
@@ -248,7 +289,18 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_AudioExtender": IAMCCS_AudioExtender,
     "IAMCCS_AudioTimelineAssembler": IAMCCS_AudioTimelineAssembler,
     "IAMCCS_AudioTimelineGate": IAMCCS_AudioTimelineGate,
+    "IAMCCS_LTX2_LastFrameBridgeSave": IAMCCS_LTX2_LastFrameBridgeSave,
+    "IAMCCS_LTX2_BlendLatentBridge": IAMCCS_LTX2_BlendLatentBridge,
+    "IAMCCS_LTX2_LastFrameBridgeLoad": IAMCCS_LTX2_LastFrameBridgeLoad,
+    "IAMCCS_LTX2_LoadLatentBridge": IAMCCS_LTX2_LoadLatentBridge,
+    "IAMCCS_LTX2_LongVideoWrapperPrep": IAMCCS_LTX2_LongVideoWrapperPrep,
+    "IAMCCS_LTX2_SaveLatentBridge": IAMCCS_LTX2_SaveLatentBridge,
+    "IAMCCS_LTX2_SegmentQueueLoop": IAMCCS_LTX2_SegmentQueueLoop,
     "IAMCCS_ImageResizeBatchSafe": IAMCCS_ImageResizeBatchSafe,
+    "IAMCCS_IntValueMonitor": IAMCCS_IntValueMonitor,
+    "IAMCCS_QwenMultiGen": IAMCCS_QwenMultiGen,
+    "IAMCCS_FluxKleinMultiGen": IAMCCS_FluxKleinMultiGen,
+    "IAMCCS_MultilinePromptSplitter8": IAMCCS_MultilinePromptSplitter8,
 
     # QwenVL First/Last Frame (registered only if QwenVL is installed)
     **({"IAMCCS_QWEN_VL_FLF": IAMCCS_QWEN_VL_FLF,
@@ -274,6 +326,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_Validator": "LTX-2 Validator",
     "IAMCCS_LTX2_TimeFrameCount": "LTX-2 TimeFrameCount",
     "IAMCCS_LTX2_EnsureFrames8nPlus1": "LTX-2 Ensure Frames (8n + 1)",
+    "IAMCCS_LTX2_EnsureMinFrames": "LTX-2 Ensure Minimum Frames",
     "IAMCCS_LTX2_ControlPreprocess": "LTX-2 Control Preprocess (aux)",
     "IAMCCS_LTX2_ImageBatchPadReflect": "LTX-2 Pad Reflect (IMAGE batch)",
     "IAMCCS_LTX2_ImageBatchCropByPad": "LTX-2 Crop By Pad (IMAGE batch)",
@@ -299,19 +352,25 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_MiddleFrames": "LTX-2 Middle Frames (accumulator) 🧷",
     "IAMCCS_LTX2_FirstLastLatentControl": "LTX-2 First/Last → Latent (noise_mask) 🎯",
     "IAMCCS_LTX2_FirstLastLatentControl_Pro": "LTX-2 First/Last → Latent (Pro, slot caps) 🎯",
+    "IAMCCS_LTX2_InitLatentSampler": "LTX-2 Init Latent Sampler 🧱",
     "IAMCCS_LTX2_LoopingSampler": "LTX-2 Looping Sampler (temporal overlap) 🧷",
+    "IAMCCS_LTX2_OneShotLowRAMLooper": "LTX-2 One-Shot Low-RAM Looper 🪶",
     "IAMCCS_LTX2_ExtendSampler": "LTX-2 Extend Sampler (temporal overlap) 🧷",
     "IAMCCS_LTX2_ConditionNextLatentWithPrevOverlap": "LTX-2 Condition Next Latent (prev overlap) 🧷",
     "IAMCCS_WanImageMotion": "WanImageMotion",
     "IAMCCS_WanImageMotion_AdaIN": "WanImageMotion",
-    "WanImageMotionPro": "WanImageMotionPro (Motion + FLF End Lock)",
-    "IAMCCS_WanImageMotionPro_AdaIN": "WanImageMotionPro (Motion + FLF End Lock)",
+    "WanImageMotionPro": "WanImageMotionPro Plus",
+    "IAMCCS_WanImageMotionPro_AdaIN": "WanImageMotionPro Plus",
+    "WanImageMotionProLegacy": "WanImageMotionPro Legacy",
+    "IAMCCS_WanImageMotionProLegacy": "WanImageMotionPro Legacy",
     "WanImageMotionProPlus": "WanImageMotionPro Plus",
     "IAMCCS_WanImageMotionProPlus": "WanImageMotionPro Plus",
     "IAMCCS_WanImageMotionProPlus_Simple": "WanImageMotionPro Plus Simple",
+    "IAMCCS_WanImageMotionInductive": "WanImageMotion Inductive",
     "IAMCCS_WanSVIToFLFBridgeProPlus": "Wan SVI→FLF Bridge Pro Plus",
     "IAMCCS_WanSVIToFLFBridgeProPlus_Simple": "Wan SVI→FLF Bridge Pro Plus",
     "WanMotionProTrimmer": "WanMotionProTrimmer (trim overshoot tail)",
+    "IAMCCS_WanPrevTailPrep": "Wan Prev Tail Prep",
     
     "IAMCCS_SetAutoLink": "Set AutoLink",
     "IAMCCS_GetAutoLink": "Get AutoLink",
@@ -320,14 +379,23 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
     "IAMCCS_GGUF_accelerator": "GGUF Accelerator (patch_on_device)",
 
+    "IAMCCS_IntValueMonitor": "INT Value Monitor",
+    "IAMCCS_QwenMultiGen": "IAMCCS Qwen Multi-Gen",
+    "IAMCCS_FluxKleinMultiGen": "Flux Klein Multi-Gen",
+    "IAMCCS_MultilinePromptSplitter8": "Multiline Prompt Splitter (8 outputs)",
+
     "IAMCCS_SamplerAdvancedVersion1": "Sampler Advanced v1",
 
     "IAMCCS_bus_group": "Bus Group (Mute + Solo) (frontend-only)",
 
     "IAMCCS_MultiSwitch": "MultiSwitch (dynamic inputs)",
+    "IAMCCS_WanSviArgs": "Wan SVI Args",
+    "IAMCCS_WanSviChainRunner": "Wan SVI Chain Runner",
+    "IAMCCS_WanSviSegmentPick": "Wan SVI Segment Pick",
 
     "IAMCCS_HwSupporter": "HW Supporter (auto VRAM/attention/torch knobs)",
     "IAMCCS_HwSupporterAny": "HW Supporter (ANY passthrough)",
+    "IAMCCS_HardMemoryPurge": "Hard RAM/VRAM Purge (trim working set)",
     "IAMCCS_VRAMCleanup": "VRAM Cleanup (unload + empty cache)",
     "IAMCCS_VRAMFlushLatent": "VRAM Flush → Latent passthrough (empty cache)",
     "IAMCCS_VAEDecodeTiledSafe": "VAE Decode Tiled (safe, optional cleanup)",
@@ -346,6 +414,13 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_AudioExtender": "Audio Extender (segment + overlap)",
     "IAMCCS_AudioTimelineAssembler": "Audio Timeline Assembler (full track)",
     "IAMCCS_AudioTimelineGate": "Audio Timeline Gate (continue/stop)",
+    "IAMCCS_LTX2_LastFrameBridgeSave": "LTX-2 Last Frame Bridge Save 🖼️💾",
+    "IAMCCS_LTX2_BlendLatentBridge": "LTX-2 Blend Latent Bridge 🎚️",
+    "IAMCCS_LTX2_LastFrameBridgeLoad": "LTX-2 Last Frame Bridge Load 🖼️",
+    "IAMCCS_LTX2_LoadLatentBridge": "LTX-2 Load Latent Bridge 🧬",
+    "IAMCCS_LTX2_LongVideoWrapperPrep": "LTX-2 Long Video Wrapper Prep 🧰",
+    "IAMCCS_LTX2_SaveLatentBridge": "LTX-2 Save Latent Bridge 💾",
+    "IAMCCS_LTX2_SegmentQueueLoop": "LTX-2 Segment Queue Loop 🔁",
     "IAMCCS_ImageResizeBatchSafe": "Image Resize Batch Safe (IAMCCS)",
 
     # QwenVL FLF

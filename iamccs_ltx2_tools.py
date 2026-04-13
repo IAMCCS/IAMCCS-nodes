@@ -472,6 +472,67 @@ class IAMCCS_LTX2_EnsureFrames8nPlus1:
         return (out, frames_fixed, f"EnsureFrames8n+1: pad_repeat_last {frames_in} -> {frames_fixed} (pad={pad}, fix={fix})")
 
 
+class IAMCCS_LTX2_EnsureMinFrames:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {}),
+                "min_frames": ("INT", {"default": 25, "min": 1, "max": 1000000, "step": 1}),
+                "mode": (["repeat_last", "error"], {"default": "repeat_last"}),
+                "ltx_frames_fix": (["none", "up", "down", "nearest"], {"default": "up"}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "INT", "STRING")
+    RETURN_NAMES = ("images", "frames", "report")
+    FUNCTION = "ensure"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    def _fix_ltx_frames(self, frames: int, mode: str) -> int:
+        frames = max(1, int(frames))
+        rem = (frames - 1) % 8
+        if rem == 0:
+            return frames
+
+        down = max(1, frames - rem)
+        up = frames + (8 - rem)
+
+        if mode == "down":
+            return down
+        if mode == "nearest":
+            return up if (up - frames) <= (frames - down) else down
+        return up
+
+    def ensure(self, images: torch.Tensor, min_frames: int, mode: str, ltx_frames_fix: str):
+        if images is None:
+            raise ValueError("images is required")
+
+        if not isinstance(images, torch.Tensor) or images.ndim != 4:
+            raise ValueError("images must be a ComfyUI IMAGE tensor with shape [frames,H,W,C]")
+
+        frames_in = int(images.shape[0])
+        min_frames = max(1, int(min_frames))
+        target_frames = max(frames_in, min_frames)
+
+        ltx_mode = str(ltx_frames_fix or "none")
+        if ltx_mode != "none":
+            target_frames = self._fix_ltx_frames(target_frames, ltx_mode)
+
+        if frames_in >= target_frames:
+            return (images, frames_in, f"EnsureMinFrames: ok ({frames_in}) | min={min_frames} | ltx_fix={ltx_mode}")
+
+        mode = str(mode or "repeat_last")
+        if mode == "error":
+            raise ValueError(f"EnsureMinFrames: got {frames_in} frames, required at least {target_frames}")
+
+        pad = target_frames - frames_in
+        tail = images[-1:, ...].repeat((pad, 1, 1, 1))
+        out = torch.cat([images, tail], dim=0)
+        report = f"EnsureMinFrames: repeat_last {frames_in} -> {target_frames} | min={min_frames} | ltx_fix={ltx_mode}"
+        return (out, int(target_frames), report)
+
+
 class IAMCCS_LTX2_ControlPreprocess:
     @classmethod
     def INPUT_TYPES(cls):

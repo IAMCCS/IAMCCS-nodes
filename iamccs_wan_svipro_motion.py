@@ -189,6 +189,423 @@ def _resolve_prev_tail_profile(
     return str(tail_pick_mode or "latest"), max(0, int(skip_last_slots)), float(anchor_blend)
 
 
+def _build_inductive_motion_tail(
+    prev_samples,
+    motion_latent_count: int,
+    *,
+    anchor_reference: torch.Tensor,
+    trim_locked_slots: int = 1,
+    mode: str = "inductive_hybrid",
+    induction_strength: float = 1.0,
+    induction_blend: float = 0.85,
+    delta_limit: float = 0.0,
+    mean_align: bool = True,
+) -> tuple[torch.Tensor | None, dict]:
+    """Build a motion tail by transferring residual motion, not raw image content."""
+
+    stats = {
+        "strategy": "none",
+        "trimmed_slots": max(0, int(trim_locked_slots)),
+        "t_prev": 0,
+        "usable_t": 0,
+        "motion_count": 0,
+    }
+
+    if prev_samples is None or motion_latent_count <= 0 or anchor_reference is None:
+        return None, stats
+
+    prev_latent = prev_samples["samples"].clone()
+    stats["t_prev"] = int(prev_latent.shape[2])
+
+    if prev_latent.shape[0] == 1 and anchor_reference.shape[0] > 1:
+        prev_latent = prev_latent.repeat(anchor_reference.shape[0], 1, 1, 1, 1)
+
+    if (
+        prev_latent.shape[1] != anchor_reference.shape[1]
+        or prev_latent.shape[3] != anchor_reference.shape[3]
+        or prev_latent.shape[4] != anchor_reference.shape[4]
+    ):
+        stats["strategy"] = "shape_mismatch"
+        return None, stats
+
+    usable_t = max(0, int(prev_latent.shape[2]) - stats["trimmed_slots"])
+    stats["usable_t"] = usable_t
+    if usable_t <= 0:
+        stats["strategy"] = "empty_after_trim"
+        return None, stats
+
+    prev_usable = prev_latent[:, :, :usable_t]
+    motion_count = min(int(motion_latent_count), int(prev_usable.shape[2]))
+    stats["motion_count"] = motion_count
+    if motion_count <= 0:
+        stats["strategy"] = "empty_motion"
+        return None, stats
+
+    raw_tail = prev_usable[:, :, -motion_count:].clone()
+    mode = str(mode or "inductive_hybrid")
+    if mode == "raw_tail" or usable_t < 2:
+        stats["strategy"] = "raw_tail"
+        return raw_tail, stats
+
+    source_count = min(int(prev_usable.shape[2]), motion_count + 1)
+    source = prev_usable[:, :, -source_count:]
+    deltas = source[:, :, 1:] - source[:, :, :-1]
+    if deltas.shape[2] <= 0:
+        stats["strategy"] = "raw_tail_fallback"
+        return raw_tail, stats
+
+    if deltas.shape[2] < motion_count:
+        pad = deltas[:, :, -1:].repeat(1, 1, motion_count - deltas.shape[2], 1, 1)
+        deltas = torch.cat([deltas, pad], dim=2)
+    elif deltas.shape[2] > motion_count:
+        deltas = deltas[:, :, -motion_count:]
+
+    gain = float(induction_strength)
+    limit = float(delta_limit)
+    anchor_seed = anchor_reference[:, :, -1:].clone().to(device=raw_tail.device, dtype=raw_tail.dtype)
+    state = anchor_seed
+    induced_slots = []
+    for index in range(deltas.shape[2]):
+        delta = deltas[:, :, index:index + 1].clone()
+        if limit > 0.0:
+            delta = _apply_soft_limiter(delta, mode="tanh", limit=limit)
+        state = state + (delta * gain)
+        induced_slots.append(state)
+
+    induced_tail = torch.cat(induced_slots, dim=2)
+    if mean_align and induced_tail.shape[2] > 0:
+        anchor_mean = anchor_seed.mean(dim=(2, 3, 4), keepdim=True)
+        induced_mean = induced_tail.mean(dim=(2, 3, 4), keepdim=True)
+        induced_tail = induced_tail - (induced_mean - anchor_mean)
+
+    if mode == "inductive_only":
+        stats["strategy"] = "inductive_only"
+        return induced_tail, stats
+
+    blend = max(0.0, min(1.0, float(induction_blend)))
+    stats["strategy"] = "inductive_hybrid"
+    return torch.lerp(raw_tail, induced_tail, blend), stats
+
+
+CONTINUITY_PROFILE_OPTIONS = [
+    "off",
+    "SVI_CONTINUITY",
+    "SVI_CONTINUITY_PREV_SAFE",
+    "SVI_CONTINUITY_PREV_AGGRESSIVE",
+    "SVI_CONTINUITY_END_ONLY",
+    "SVI_CONTINUITY_MOTION_SAFE",
+    "SVI_CONTINUITY_MOTION_SAFE_PREV_SAFE",
+    "SVI_CONTINUITY_MOTION_SAFE_END_ONLY",
+]
+
+MOTION_PRO_PRESET_OPTIONS = [
+    "[custom]",
+    "raw",
+    "raw overshoot",
+    "svi continuity",
+    "svi continuity prev safe",
+    "svi continuity prev aggressive",
+    "svi continuity end only",
+    "svi continuity motion safe",
+    "svi continuity motion safe prev safe",
+    "svi continuity motion safe end only",
+    "parity 1:1",
+    "flf overshoot",
+    "smooth chain",
+]
+
+
+def _resolve_motion_pro_preset(preset: str) -> dict:
+    key = str(preset or "[custom]")
+    if key == "raw":
+        return {
+            "continuity_profile": "off",
+            "raw_mode": True,
+            "motion": 1.0,
+            "motion_mode": "motion_only (prev_samples)",
+            "safety_preset": "base",
+            "use_end_frame": True,
+            "end_transition_frames": 0,
+            "end_lock_slots": 1,
+            "lock_start_slots": 1,
+            "end_overshoot_slots": 0,
+            "prev_skip_last_slots": 0,
+            "clip_vision_mode": "none",
+        }
+    if key == "raw overshoot":
+        return {
+            "continuity_profile": "off",
+            "raw_mode": True,
+            "motion": 1.0,
+            "motion_mode": "motion_only (prev_samples)",
+            "safety_preset": "base",
+            "use_end_frame": True,
+            "end_transition_frames": 0,
+            "end_lock_slots": 1,
+            "lock_start_slots": 1,
+            "end_overshoot_slots": 1,
+            "prev_skip_last_slots": 0,
+            "clip_vision_mode": "none",
+        }
+    if key == "svi continuity":
+        return {
+            "continuity_profile": "SVI_CONTINUITY",
+            "raw_mode": False,
+            "motion": 1.0,
+            "motion_mode": "motion_only (prev_samples)",
+            "safety_preset": "base",
+            "use_end_frame": True,
+            "end_transition_frames": 0,
+            "end_lock_slots": 1,
+            "lock_start_slots": 1,
+            "end_overshoot_slots": 1,
+            "prev_skip_last_slots": 0,
+            "clip_vision_mode": "auto",
+        }
+    if key == "svi continuity prev safe":
+        return {
+            "continuity_profile": "SVI_CONTINUITY_PREV_SAFE",
+            "raw_mode": False,
+            "motion": 1.0,
+            "motion_mode": "motion_only (prev_samples)",
+            "safety_preset": "base",
+            "use_end_frame": True,
+            "end_transition_frames": 0,
+            "end_lock_slots": 1,
+            "lock_start_slots": 1,
+            "end_overshoot_slots": 1,
+            "prev_skip_last_slots": 1,
+            "clip_vision_mode": "auto",
+        }
+    if key == "svi continuity prev aggressive":
+        return {
+            "continuity_profile": "SVI_CONTINUITY_PREV_AGGRESSIVE",
+            "raw_mode": False,
+            "motion": 1.0,
+            "motion_mode": "motion_only (prev_samples)",
+            "safety_preset": "base",
+            "use_end_frame": True,
+            "end_transition_frames": 0,
+            "end_lock_slots": 1,
+            "lock_start_slots": 1,
+            "end_overshoot_slots": 1,
+            "prev_skip_last_slots": 1,
+            "clip_vision_mode": "auto",
+        }
+    if key == "svi continuity end only":
+        return {
+            "continuity_profile": "SVI_CONTINUITY_END_ONLY",
+            "raw_mode": False,
+            "motion": 1.0,
+            "motion_mode": "motion_only (prev_samples)",
+            "safety_preset": "base",
+            "use_end_frame": True,
+            "end_transition_frames": 0,
+            "end_lock_slots": 1,
+            "lock_start_slots": 1,
+            "end_overshoot_slots": 1,
+            "prev_skip_last_slots": 0,
+            "clip_vision_mode": "end_only",
+        }
+    if key == "svi continuity motion safe":
+        return {
+            "continuity_profile": "SVI_CONTINUITY_MOTION_SAFE",
+            "raw_mode": False,
+            "motion": 1.25,
+            "motion_mode": "motion_only (prev_samples)",
+            "safety_preset": "safe",
+            "use_end_frame": True,
+            "end_transition_frames": 0,
+            "end_lock_slots": 1,
+            "lock_start_slots": 1,
+            "end_overshoot_slots": 1,
+            "prev_skip_last_slots": 0,
+            "clip_vision_mode": "auto",
+        }
+    if key == "svi continuity motion safe prev safe":
+        return {
+            "continuity_profile": "SVI_CONTINUITY_MOTION_SAFE_PREV_SAFE",
+            "raw_mode": False,
+            "motion": 1.25,
+            "motion_mode": "motion_only (prev_samples)",
+            "safety_preset": "safe",
+            "use_end_frame": True,
+            "end_transition_frames": 0,
+            "end_lock_slots": 1,
+            "lock_start_slots": 1,
+            "end_overshoot_slots": 1,
+            "prev_skip_last_slots": 1,
+            "clip_vision_mode": "auto",
+        }
+    if key == "svi continuity motion safe end only":
+        return {
+            "continuity_profile": "SVI_CONTINUITY_MOTION_SAFE_END_ONLY",
+            "raw_mode": False,
+            "motion": 1.25,
+            "motion_mode": "motion_only (prev_samples)",
+            "safety_preset": "safe",
+            "use_end_frame": True,
+            "end_transition_frames": 0,
+            "end_lock_slots": 1,
+            "lock_start_slots": 1,
+            "end_overshoot_slots": 1,
+            "prev_skip_last_slots": 0,
+            "clip_vision_mode": "end_only",
+        }
+    if key == "parity 1:1":
+        return {
+            "continuity_profile": "off",
+            "raw_mode": False,
+            "motion": 1.0,
+            "motion_mode": "motion_only (prev_samples)",
+            "safety_preset": "base",
+            "use_end_frame": True,
+            "end_transition_frames": 0,
+            "end_lock_slots": 16,
+            "lock_start_slots": 1,
+            "end_overshoot_slots": 0,
+        }
+    if key == "flf overshoot":
+        return {
+            "continuity_profile": "off",
+            "raw_mode": False,
+            "motion": 1.15,
+            "motion_mode": "motion_only (prev_samples)",
+            "safety_preset": "safe",
+            "use_end_frame": True,
+            "end_transition_frames": 0,
+            "end_lock_slots": 1,
+            "lock_start_slots": 1,
+            "end_overshoot_slots": 1,
+        }
+    if key == "smooth chain":
+        return {
+            "continuity_profile": "off",
+            "raw_mode": False,
+            "motion": 1.3,
+            "motion_mode": "motion_only (prev_samples)",
+            "safety_preset": "safer",
+            "use_end_frame": True,
+            "end_transition_frames": 0,
+            "end_lock_slots": 1,
+            "lock_start_slots": 1,
+            "end_overshoot_slots": 0,
+        }
+    return {}
+
+
+def _apply_motion_amplitude_to_raw_tail(
+    motion_tail: torch.Tensor | None,
+    *,
+    anchor_reference: torch.Tensor,
+    motion_amplitude: float,
+    vram_profile: str,
+    safety_preset: str = "safe",
+) -> torch.Tensor | None:
+    if motion_tail is None:
+        return None
+
+    preset = _preset_params(safety_preset, motion_amplitude)
+    if not preset.get("enabled", True):
+        return motion_tail
+
+    if motion_amplitude is None or float(motion_amplitude) <= 1.0 or motion_tail.shape[2] <= 0:
+        return motion_tail
+
+    base_latent = anchor_reference[:, :, :1].to(device=motion_tail.device, dtype=motion_tail.dtype)
+    if base_latent.shape[0] == 1 and motion_tail.shape[0] > 1:
+        base_latent = base_latent.repeat(motion_tail.shape[0], 1, 1, 1, 1)
+
+    out = motion_tail.clone()
+
+    def _gain_weights(start: int, end: int) -> torch.Tensor | float:
+        ramp_frames = int(preset["ramp_frames"])
+        if ramp_frames <= 0:
+            return float(motion_amplitude)
+        tcount = max(0, end - start)
+        if tcount <= 0:
+            return float(motion_amplitude)
+        ramp = min(ramp_frames, tcount)
+        w = torch.ones((tcount,), device=out.device, dtype=out.dtype)
+        if ramp > 0:
+            x = torch.linspace(0.0, 1.0, steps=ramp, device=w.device, dtype=w.dtype)
+            w[:ramp] = _smoothstep(x)
+        gain = 1.0 + (float(motion_amplitude) - 1.0) * w
+        return gain.view(1, 1, tcount, 1, 1)
+
+    def _scale_slice(view_slice: torch.Tensor, *, gain: torch.Tensor | float) -> torch.Tensor:
+        diff = view_slice - base_latent
+        diff_centered, diff_mean = _center_diff(diff, mean_mode=preset["mean_mode"])
+        diff_centered.mul_(gain)
+        out_local = diff_centered.add_(diff_mean).add_(base_latent)
+        _apply_soft_limiter(out_local, mode=preset["limiter_mode"], limit=float(preset["limiter_limit"]))
+        return out_local
+
+    def _apply_range(start: int, end: int) -> None:
+        if end <= start:
+            return
+        if vram_profile == "normal":
+            out[:, :, start:end] = _scale_slice(out[:, :, start:end], gain=_gain_weights(start, end))
+            return
+        if vram_profile in ("chunked_blocks_2", "chunked_blocks_4"):
+            block = 2 if vram_profile == "chunked_blocks_2" else 4
+            t = start
+            while t < end:
+                t2 = min(end, t + block)
+                out[:, :, t:t2] = _scale_slice(out[:, :, t:t2], gain=_gain_weights(t, t2))
+                t = t2
+            return
+        if vram_profile == "loop_per_frame (lowest_vram)":
+            for t in range(start, end):
+                out[:, :, t:t + 1] = _scale_slice(out[:, :, t:t + 1], gain=_gain_weights(t, t + 1))
+            return
+        if vram_profile == "cpu_offload (slowest)":
+            device = out.device
+            base_cpu = base_latent.detach().to("cpu")
+            slice_cpu = out[:, :, start:end].detach().to("cpu")
+            diff = slice_cpu - base_cpu
+            diff_centered, diff_mean = _center_diff(diff, mean_mode=preset["mean_mode"])
+            gain = _gain_weights(start, end)
+            if isinstance(gain, torch.Tensor):
+                gain = gain.to(device=diff_centered.device, dtype=diff_centered.dtype)
+            diff_centered.mul_(gain)
+            out_cpu = diff_centered.add_(diff_mean).add_(base_cpu)
+            _apply_soft_limiter(out_cpu, mode=preset["limiter_mode"], limit=float(preset["limiter_limit"]))
+            out[:, :, start:end] = out_cpu.to(device)
+            return
+        out[:, :, start:end] = _scale_slice(out[:, :, start:end], gain=_gain_weights(start, end))
+
+    _apply_range(0, out.shape[2])
+    return out
+
+
+def _anchor_matches_end_samples(anchor_samples, end_samples) -> bool:
+    if anchor_samples is None or end_samples is None:
+        return False
+    try:
+        anchor_cmp = anchor_samples["samples"]
+        end_cmp = end_samples["samples"]
+    except Exception:
+        return False
+    if anchor_cmp is None or end_cmp is None or anchor_cmp.dim() != 5 or end_cmp.dim() != 5:
+        return False
+    if (
+        anchor_cmp.shape[1] != end_cmp.shape[1]
+        or anchor_cmp.shape[3] != end_cmp.shape[3]
+        or anchor_cmp.shape[4] != end_cmp.shape[4]
+    ):
+        return False
+    compare_slots = min(anchor_cmp.shape[2], end_cmp.shape[2])
+    if compare_slots <= 0:
+        return False
+    return torch.allclose(
+        anchor_cmp[:, :, :compare_slots].float(),
+        end_cmp[:, :, :compare_slots].float(),
+        rtol=1e-4,
+        atol=1e-5,
+    )
+
+
 def _common_upscale_nhwc_to(images: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
     if int(images.shape[1]) == int(target_h) and int(images.shape[2]) == int(target_w):
         return images
@@ -1154,6 +1571,29 @@ class WanImageMotionPro:
                         ),
                     },
                 ),
+                "continuity_profile": (
+                    CONTINUITY_PROFILE_OPTIONS,
+                    {
+                        "default": "off",
+                        "tooltip": (
+                            "Raw-like continuity path for SVI chains. "
+                            "SVI_CONTINUITY keeps FLF+SVI raw semantics while still enabling overshoot and trim_slots. "
+                            "The other continuity profiles stay raw-like and selectively add only safe options: prev tail handling or end_only clip vision when anchor=end. "
+                            "These profiles intentionally bypass motion shaping, DC drift correction, start-slot normalization, and the 4-channel mask."
+                        ),
+                    },
+                ),
+                "preset": (
+                    MOTION_PRO_PRESET_OPTIONS,
+                    {
+                        "default": "[custom]",
+                        "tooltip": (
+                            "Server-side preset for WanImageMotionPro Plus. "
+                            "Visible even if the frontend preset widget is not loaded. "
+                            "Use [custom] to keep manual widget values unchanged."
+                        ),
+                    },
+                ),
             },
             "optional": {
                 # prev_samples is optional – mirrors original FLF node and IAMCCS_WanImageMotion.
@@ -1168,7 +1608,7 @@ class WanImageMotionPro:
     RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT", "INT")
     RETURN_NAMES = ("positive", "negative", "latent", "trim_slots")
     FUNCTION = "apply"
-    CATEGORY = "IAMCCS/Wan/_Legacy"
+    CATEGORY = "IAMCCS/Wan"
 
     _log = logging.getLogger("IAMCCS.WanImageMotionPro")
 
@@ -1182,16 +1622,23 @@ class WanImageMotionPro:
         motion_latent_count,
         prev_samples,
         end_samples,
+        end_overshoot_slots=0,
         prev_samples_profile="direct",
         prev_tail_pick_mode="latest",
         prev_skip_last_slots=0,
         prev_anchor_blend=0.0,
+        apply_motion_to_tail=False,
+        motion_amplitude=1.0,
+        motion_safety_preset="safe",
+        vram_profile="normal",
     ):
         # Intentional copy of the original WanImageToVideoSVIProFLF semantics.
         anchor_latent = anchor_samples["samples"].clone()
         B, C, T_anchor, H, W = anchor_latent.shape
 
         total_latents = (length - 1) // 4 + 1
+        _overshoot = int(end_overshoot_slots) if (end_samples is not None and int(end_overshoot_slots) > 0) else 0
+        total_latents_gen = total_latents + _overshoot
         device = anchor_latent.device
         dtype = anchor_latent.dtype
 
@@ -1211,23 +1658,32 @@ class WanImageMotionPro:
             anchor_blend=resolved_anchor_blend,
         )
 
+        if apply_motion_to_tail and motion_latent is not None:
+            motion_latent = _apply_motion_amplitude_to_raw_tail(
+                motion_latent,
+                anchor_reference=anchor_latent,
+                motion_amplitude=motion_amplitude,
+                vram_profile=vram_profile,
+                safety_preset=motion_safety_preset,
+            )
+
         if motion_latent is None:
             base_latent = anchor_latent
         else:
             base_latent = torch.cat([anchor_latent, motion_latent], dim=2)
 
         T_base = base_latent.shape[2]
-        padding_size = max(total_latents - T_base, 0)
+        padding_size = max(total_latents_gen - T_base, 0)
 
         if padding_size > 0:
             padding = torch.zeros(B, C, padding_size, H, W, dtype=dtype, device=device)
             padding = comfy.latent_formats.Wan21().process_out(padding)
             image_cond_latent = torch.cat([base_latent, padding], dim=2)
         else:
-            image_cond_latent = base_latent[:, :, :total_latents]
+            image_cond_latent = base_latent[:, :, :total_latents_gen]
 
-        if image_cond_latent.shape[2] != total_latents:
-            image_cond_latent = image_cond_latent[:, :, :total_latents]
+        if image_cond_latent.shape[2] != total_latents_gen:
+            image_cond_latent = image_cond_latent[:, :, :total_latents_gen]
 
         end_t_fix = 0
         if end_samples is not None:
@@ -1242,7 +1698,7 @@ class WanImageMotionPro:
                 and end_latent.shape[4] == W
             ):
                 T_end = end_latent.shape[2]
-                end_t_fix = min(T_end, total_latents)
+                end_t_fix = min(T_end, total_latents_gen)
 
                 if end_t_fix > 0:
                     image_cond_latent[:, :, -end_t_fix:] = end_latent[:, :, -end_t_fix:]
@@ -1250,11 +1706,11 @@ class WanImageMotionPro:
                 end_t_fix = 0
 
         empty_latent = torch.zeros(
-            [B, 16, total_latents, H, W],
+            [B, 16, total_latents_gen, H, W],
             device=comfy.model_management.intermediate_device(),
         )
 
-        mask = torch.ones((1, 1, total_latents, H, W), device=device, dtype=dtype)
+        mask = torch.ones((1, 1, total_latents_gen, H, W), device=device, dtype=dtype)
         mask[:, :, :1] = 0.0
 
         if end_t_fix > 0:
@@ -1268,8 +1724,10 @@ class WanImageMotionPro:
         )
 
         self._log.info(
-            "[WanImageMotionPro][raw_mode] active: original FLF+SVI semantics | total_latents=%s end_t_fix=%s motion_latent_count=%s prev=%s prev_T=%s usable_prev_T=%s prev_samples_profile=%s prev_tail_pick_mode=%s prev_skip_last_slots=%s prev_anchor_blend=%.2f",
+            "[WanImageMotionPro][raw_mode] active: original FLF+SVI semantics | total_latents=%s (+overshoot=%s -> gen=%s) end_t_fix=%s motion_latent_count=%s prev=%s prev_T=%s usable_prev_T=%s prev_samples_profile=%s prev_tail_pick_mode=%s prev_skip_last_slots=%s prev_anchor_blend=%.2f",
             total_latents,
+            _overshoot,
+            total_latents_gen,
             end_t_fix,
             motion_latent_count,
             prev_samples is not None,
@@ -1281,7 +1739,7 @@ class WanImageMotionPro:
             float(resolved_anchor_blend),
         )
         out_latent = {"samples": empty_latent}
-        return (positive, negative, out_latent, 0)
+        return (positive, negative, out_latent, _overshoot)
 
     def _pick_empty_latent_dtype(self, anchor_dtype: torch.dtype, latent_precision: str) -> torch.dtype:
         # Keep 1:1 behavior with IAMCCS_WanImageMotion.
@@ -1294,6 +1752,123 @@ class WanImageMotionPro:
         if latent_precision == "fp16":
             return torch.float16
         return anchor_dtype
+
+    def _resolve_continuity_profile(
+        self,
+        continuity_profile: str,
+        *,
+        prev_samples_profile: str,
+        prev_tail_pick_mode: str,
+        prev_skip_last_slots: int,
+        prev_anchor_blend: float,
+    ) -> dict:
+        profile = str(continuity_profile or "off")
+        resolved = {
+            "enabled": profile in CONTINUITY_PROFILE_OPTIONS and profile != "off",
+            "profile": profile,
+            "prev_samples_profile": str(prev_samples_profile),
+            "prev_tail_pick_mode": str(prev_tail_pick_mode),
+            "prev_skip_last_slots": int(prev_skip_last_slots),
+            "prev_anchor_blend": float(prev_anchor_blend),
+            "use_safe_end_only_clip_vision": False,
+            "apply_motion_to_tail": False,
+            "motion_safety_preset": "safe",
+            "motion_max": 1.30,
+        }
+        if profile == "SVI_CONTINUITY_PREV_SAFE":
+            resolved["prev_samples_profile"] = "mixed_svi_safe"
+            resolved["prev_skip_last_slots"] = max(1, int(prev_skip_last_slots))
+        elif profile == "SVI_CONTINUITY_PREV_AGGRESSIVE":
+            resolved["prev_samples_profile"] = "mixed_svi_aggressive"
+            resolved["prev_skip_last_slots"] = max(1, int(prev_skip_last_slots))
+        elif profile == "SVI_CONTINUITY_END_ONLY":
+            resolved["use_safe_end_only_clip_vision"] = True
+        elif profile == "SVI_CONTINUITY_MOTION_SAFE":
+            resolved["apply_motion_to_tail"] = True
+        elif profile == "SVI_CONTINUITY_MOTION_SAFE_PREV_SAFE":
+            resolved["apply_motion_to_tail"] = True
+            resolved["prev_samples_profile"] = "mixed_svi_safe"
+            resolved["prev_skip_last_slots"] = max(1, int(prev_skip_last_slots))
+        elif profile == "SVI_CONTINUITY_MOTION_SAFE_END_ONLY":
+            resolved["apply_motion_to_tail"] = True
+            resolved["use_safe_end_only_clip_vision"] = True
+        return resolved
+
+    def _apply_continuity_profile(
+        self,
+        *,
+        continuity_profile: str,
+        positive,
+        negative,
+        length,
+        anchor_samples,
+        motion_latent_count,
+        prev_samples,
+        end_samples,
+        end_overshoot_slots,
+        use_prev_samples,
+        use_end_frame,
+        prev_samples_profile,
+        prev_tail_pick_mode,
+        prev_skip_last_slots,
+        prev_anchor_blend,
+        motion,
+        motion_mode,
+        vram_profile,
+        clip_vision_mode,
+        clip_vision_start_image,
+        clip_vision_end_image,
+    ):
+        resolved = self._resolve_continuity_profile(
+            continuity_profile,
+            prev_samples_profile=prev_samples_profile,
+            prev_tail_pick_mode=prev_tail_pick_mode,
+            prev_skip_last_slots=prev_skip_last_slots,
+            prev_anchor_blend=prev_anchor_blend,
+        )
+        positive, negative, out_latent, trim_slots = self._build_raw_mode_conditioning(
+            positive=positive,
+            negative=negative,
+            length=length,
+            anchor_samples=anchor_samples,
+            motion_latent_count=motion_latent_count,
+            prev_samples=prev_samples if use_prev_samples else None,
+            end_samples=end_samples if use_end_frame else None,
+            end_overshoot_slots=end_overshoot_slots,
+            prev_samples_profile=resolved["prev_samples_profile"],
+            prev_tail_pick_mode=resolved["prev_tail_pick_mode"],
+            prev_skip_last_slots=resolved["prev_skip_last_slots"],
+            prev_anchor_blend=resolved["prev_anchor_blend"],
+            apply_motion_to_tail=resolved["apply_motion_to_tail"],
+            motion_amplitude=max(1.0, min(float(motion), float(resolved["motion_max"]))),
+            motion_safety_preset=resolved["motion_safety_preset"],
+            vram_profile=vram_profile,
+        )
+
+        if (
+            resolved["use_safe_end_only_clip_vision"]
+            and str(clip_vision_mode or "auto") != "none"
+            and use_end_frame
+            and _anchor_matches_end_samples(anchor_samples, end_samples)
+        ):
+            clip_out = clip_vision_end_image if clip_vision_end_image is not None else clip_vision_start_image
+            if clip_out is not None:
+                positive = node_helpers.conditioning_set_values(positive, {"clip_vision_output": clip_out})
+                negative = node_helpers.conditioning_set_values(negative, {"clip_vision_output": clip_out})
+                self._log.info(
+                    "[WanImageMotionPro] continuity_profile=%s enabled safe clip_vision end_only because anchor_samples and end_samples match.",
+                    resolved["profile"],
+                )
+
+        self._log.info(
+            "[WanImageMotionPro] continuity_profile=%s active: raw-like conditioning path with overshoot/trim enabled. Raw tail motion amplification=%s (requested_motion=%.2f effective_motion=%.2f mode=%s). Motion shaping on the full latent block, DC drift correction, FLF start normalization, 4-channel mask, and reference latents are bypassed by design.",
+            resolved["profile"],
+            resolved["apply_motion_to_tail"],
+            float(motion),
+            max(1.0, min(float(motion), float(resolved["motion_max"]))),
+            str(motion_mode),
+        )
+        return (positive, negative, out_latent, trim_slots)
 
     def _apply_motion_amplitude(
         self,
@@ -1429,9 +2004,9 @@ class WanImageMotionPro:
         motion,
         motion_mode,
         add_reference_latents,
-        latent_precision,
         vram_profile,
         include_padding_in_motion,
+        preset="[custom]",
         safety_preset="safe",
         use_end_frame=True,
         end_transition_frames=4,
@@ -1448,6 +2023,8 @@ class WanImageMotionPro:
         prev_tail_pick_mode="latest",
         prev_skip_last_slots=0,
         prev_anchor_blend=0.0,
+        continuity_profile="off",
+        latent_precision="fp32",
         prev_samples=None,
         end_samples=None,
         clip_vision_start_image=None,
@@ -1455,6 +2032,21 @@ class WanImageMotionPro:
         **_kwargs,
     ):
         with torch.no_grad():
+            preset_values = _resolve_motion_pro_preset(preset)
+            if preset_values:
+                motion = preset_values.get("motion", motion)
+                motion_mode = preset_values.get("motion_mode", motion_mode)
+                safety_preset = preset_values.get("safety_preset", safety_preset)
+                use_end_frame = preset_values.get("use_end_frame", use_end_frame)
+                end_transition_frames = preset_values.get("end_transition_frames", end_transition_frames)
+                end_lock_slots = preset_values.get("end_lock_slots", end_lock_slots)
+                lock_start_slots = preset_values.get("lock_start_slots", lock_start_slots)
+                end_overshoot_slots = preset_values.get("end_overshoot_slots", end_overshoot_slots)
+                clip_vision_mode = preset_values.get("clip_vision_mode", clip_vision_mode)
+                raw_mode = preset_values.get("raw_mode", raw_mode)
+                continuity_profile = preset_values.get("continuity_profile", continuity_profile)
+                prev_skip_last_slots = preset_values.get("prev_skip_last_slots", prev_skip_last_slots)
+
             if raw_mode:
                 return self._build_raw_mode_conditioning(
                     positive=positive,
@@ -1464,10 +2056,36 @@ class WanImageMotionPro:
                     motion_latent_count=motion_latent_count,
                     prev_samples=prev_samples if use_prev_samples else None,
                     end_samples=end_samples if use_end_frame else None,
+                    end_overshoot_slots=end_overshoot_slots,
                     prev_samples_profile=prev_samples_profile,
                     prev_tail_pick_mode=prev_tail_pick_mode,
                     prev_skip_last_slots=prev_skip_last_slots,
                     prev_anchor_blend=prev_anchor_blend,
+                )
+
+            if str(continuity_profile or "off") != "off":
+                return self._apply_continuity_profile(
+                    continuity_profile=continuity_profile,
+                    positive=positive,
+                    negative=negative,
+                    length=length,
+                    anchor_samples=anchor_samples,
+                    motion_latent_count=motion_latent_count,
+                    prev_samples=prev_samples,
+                    end_samples=end_samples,
+                    end_overshoot_slots=end_overshoot_slots,
+                    use_prev_samples=use_prev_samples,
+                    use_end_frame=use_end_frame,
+                    prev_samples_profile=prev_samples_profile,
+                    prev_tail_pick_mode=prev_tail_pick_mode,
+                    prev_skip_last_slots=prev_skip_last_slots,
+                    prev_anchor_blend=prev_anchor_blend,
+                    motion=motion,
+                    motion_mode=motion_mode,
+                    vram_profile=vram_profile,
+                    clip_vision_mode=clip_vision_mode,
+                    clip_vision_start_image=clip_vision_start_image,
+                    clip_vision_end_image=clip_vision_end_image,
                 )
 
             # Clone to prevent in-place motion amplitude writes from corrupting the caller's tensor.
@@ -2057,1016 +2675,86 @@ class WanMotionProTrimmer:
         return (out, video_frames)
 
 
-WanImageMotionProAdvanced = WanImageMotionPro
+class IAMCCS_WanPrevTailPrep:
+    """Prepare a sampler output latent for reuse as prev_samples.
 
-
-class WanImageMotionPro:
-    """WanImageMotionPro
-
-    Combines IAMCCS_WanImageMotion motion amplitude control with FLF-style
-    (First/Last Frame) hard lock via optional end_samples.
-
-    Behavior:
-    - Start: anchor_samples + optional motion tail from prev_samples.
-    - Motion: apply motion amplitude scaling (VRAM-aware) as in IAMCCS_WanImageMotion.
-    - End: overwrite last temporal latent slots with end_samples, then lock them
-      via concat_mask (FLF-style control).
+    This utility removes overshoot slots and the tail slots most likely polluted
+    by a hard FLF end lock before the latent is fed into the next segment.
     """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "positive": ("CONDITIONING",),
-                "negative": ("CONDITIONING",),
-                "length": ("INT", {"default": 81, "min": 1, "max": 16384, "step": 4}),
-                "anchor_samples": ("LATENT",),
-                "motion_latent_count": ("INT", {"default": 1, "min": 0, "max": 16, "step": 1}),
-                "motion": ("FLOAT", {"default": 1.15, "min": 1.0, "max": 2.0, "step": 0.05}),
-                "motion_mode": (
-                    [
-                        "motion_only (prev_samples)",
-                        "all_nonfirst (anchor+motion)",
-                    ],
-                    {"default": "motion_only (prev_samples)"},
-                ),
-                "add_reference_latents": ("BOOLEAN", {"default": False}),
-                "latent_precision": (
-                    [
-                        "auto",
-                        "fp16",
-                        "fp32",
-                        "normal",
-                    ],
-                    {"default": "fp32"},
-                ),
-                "vram_profile": (
-                    [
-                        "normal",
-                        "chunked_blocks_2",
-                        "chunked_blocks_4",
-                        "loop_per_frame (lowest_vram)",
-                        "cpu_offload (slowest)",
-                    ],
-                    {"default": "normal"},
-                ),
-                "include_padding_in_motion": ("BOOLEAN", {"default": False}),
-                "safety_preset": (
-                    [
-                        "base",
-                        "safe",
-                        "safer",
-                        "legacy",
-                    ],
-                    {
-                        "default": "safe",
-                        "tooltip": (
-                            "base   : 1:1 with WanImageToVideoSVIProFLF — no amplitude processing at all. "
-                            "safe   : per-channel stabilisation + tanh limiter + 2-frame ramp (active at any motion value, recommended default). "
-                            "safer  : same as safe but tighter limiter + longer ramp (best above motion=1.5). "
-                            "legacy : hard clamp ±6 + frame-scalar diff centering, mirrors PainterI2V algorithm."
-                        ),
-                    },
-                ),
-                # --- End-frame controls (keep at end to preserve widgets_values ordering) ---
-                "use_end_frame": (
-                    "BOOLEAN",
-                    {
-                        "default": True,
-                        "tooltip": (
-                            "When False, end_samples is ignored even if the wire is connected. "
-                            "Use this to safely bypass the end-frame encoder without disconnecting the node, "
-                            "preventing ping-pong artifacts."
-                        ),
-                    },
-                ),
-                "end_transition_frames": (
-                    "INT",
-                    {
-                        "default": 0,
-                        "min": 0,
-                        "max": 32,
-                        "step": 1,
-                        "tooltip": (
-                            "⚠️ DEPRECATED — keep at 0. "
-                            "Values > 0 blend padding latents toward the end frame in latent space, "
-                            "which produces static/frozen output because VAE latent interpolation is not linear. "
-                            "0 = hard cut, identical to the original FLF node behavior."
-                        ),
-                    },
-                ),
-                "end_lock_slots": (
-                    "INT",
-                    {
-                        "default": 1,
-                        "min": 1,
-                        "max": 16,
-                        "step": 1,
-                        "tooltip": (
-                            "How many final latent slots to hard-lock to end_samples. "
-                            "Default 1 = only the very last slot (~last 4 video frames) is locked, "
-                            "so the end frame appears exactly at the last frame defined by 'length'. "
-                            "Increase only if a single locked slot is not enough for convergence. "
-                            "Set 16 for 1:1 parity with the original FLF node (locks min(T_end, total_latents))."
-                        ),
-                    },
-                ),
-                # Append-only widget for backward compatibility.
-                "lock_start_slots": (
+                "latent_in": ("LATENT",),
+                "locked_tail_slots": (
                     "INT",
                     {
                         "default": 1,
                         "min": 0,
                         "max": 16,
                         "step": 1,
-                        "tooltip": (
-                            "How many initial latent slots to hard-lock to the start image via concat_mask. "
-                            "Default 1 (≈ first 4 video frames) matches FLF-style start anchoring. "
-                            "Set 0 to allow motion immediately from the first video frame."
-                        ),
+                        "tooltip": "How many final latent slots to remove because they were hard-locked by the end frame.",
                     },
                 ),
-                # Append-only: diagnostic logging toggle (does not change outputs).
-                "diagnostic_log": (
-                    "BOOLEAN",
-                    {
-                        "default": False,
-                        "tooltip": (
-                            "When enabled, prints compact diagnostics about concat_latent_image/mask and motion/end-lock ranges. "
-                            "Useful to debug 'static clip' or segment discontinuities."
-                        ),
-                    },
-                ),
-                # Append-only: allow keeping prev_samples wired (autolink) but ignoring it.
-                "use_prev_samples": (
-                    "BOOLEAN",
-                    {
-                        "default": True,
-                        "tooltip": (
-                            "When False, prev_samples is ignored even if the wire is connected. "
-                            "Use this on the first segment when autolink forces prev_samples to be connected."
-                        ),
-                    },
-                ),
-                # Append-only: end-frame overshoot — extends the internal generation window so the
-                # hard-locked end frame lands beyond the visible output range, letting motion converge
-                # toward the end image without freezing on it. Connect trim_slots output to a downstream
-                # Cut Latent Frames or Get Latent Range node to remove the extra slots after sampling.
-                # 0 = disabled (original behavior). 1 recommended when end-frame freeze breaks continuity.
-                "end_overshoot_slots": (
+                "overshoot_trim_slots": (
                     "INT",
                     {
                         "default": 0,
                         "min": 0,
-                        "max": 8,
+                        "max": 16,
                         "step": 1,
-                        "tooltip": (
-                            "Extends the internal generation window by this many latent slots when the end lock "
-                            "is active (use_end_frame=True + end_samples connected). "
-                            "The end image is locked at the tail of the EXTENDED range, so the visible clip "
-                            "converges toward the end frame without hard-freezing on it. "
-                            "Use the trim_slots output to cut the overshoot frames after sampling. "
-                            "0 = disabled, original behavior. 1 = +4 video frames (recommended). "
-                            "2 = +8 video frames (looser convergence). "
-                            "NOTE: If you have KJNodes WAN attention optimizations (FETA / wrapped_attention) enabled, "
-                            "some versions may crash with an einops shape mismatch when overshoot > 0. "
-                            "Workaround: set end_overshoot_slots=0 or disable/update that KJNodes optimization."
-                        ),
+                        "tooltip": "Overshoot slots to remove from the tail after sampling. Wire from trim_slots when using end overshoot.",
                     },
                 ),
-                # DC Drift Correction: corrects per-channel mean shift accumulated
-                # across chained segments. Does NOT touch spatial structure or motion.
-                # Algorithm:  drift = mean(motion_tail, dims=T,H,W) − mean(anchor, dims=T,H,W)
-                #             motion_tail -= drift * latent_refresh
-                "latent_refresh": (
-                    "FLOAT",
-                    {
-                        "default": 0.0,
-                        "min": 0.0,
-                        "max": 1.0,
-                        "step": 0.05,
-                        "tooltip": (
-                            "DC drift correction strength (0=disabled, 1=full correction). "
-                            "Corrects the per-channel mean shift between motion tail and anchor latent. "
-                            "Does not touch spatial structure or motion. "
-                            "Start with 0.5 for chains of 3+ segments. Enable diagnostic_log to verify."
-                        ),
-                    },
-                ),
-                # Soft-clamp on the DC drift itself.
-                # 0 = disabled. Use 0.5–1.0 to prevent over-correction on large motion segments.
-                "delta_max": (
-                    "FLOAT",
-                    {
-                        "default": 0.0,
-                        "min": 0.0,
-                        "max": 5.0,
-                        "step": 0.1,
-                        "tooltip": (
-                            "Soft-clamp on DC drift magnitude (0=disabled). "
-                            "Caps how much drift correction can be applied per channel. "
-                            "Use 0.5–1.0 to prevent over-correction on large motion segments."
-                        ),
-                    },
-                ),
-                "clip_vision_mode": (
-                    [
-                        "auto",
-                        "end_only",
-                        "start_only",
-                        "none",
-                    ],
-                    {
-                        "default": "auto",
-                        "tooltip": (
-                            "Controls how clip_vision_start_image / clip_vision_end_image are merged.\n"
-                            "auto       : concatenate start+end tokens (original FLF behavior). "
-                            "Correct ONLY when anchor=A and end=B (true A→B transition). "
-                            "end_only   : use only clip_vision_end embedding. "
-                            "RECOMMENDED for SVI Pro continuation where anchor=end=same image "
-                            "but prev_samples comes from a different scene — prevents crossfade bleed. "
-                            "start_only : use only clip_vision_start embedding. "
-                            "none       : skip clip_vision injection entirely (bypass)."
-                        ),
-                    },
-                ),
-                # Append-only strict compatibility path for the original FLF+SVI behavior.
-                # This bypasses MotionPro enhancements and builds conditioning like
-                # WanImageToVideoSVIProFLF: full anchor latent + optional motion tail,
-                # plain 1-channel slot mask, no clip vision, no overshoot, no motion scaling.
-                "raw_mode": (
-                    "BOOLEAN",
-                    {
-                        "default": False,
-                        "tooltip": (
-                            "Strict compatibility mode for the original WanImageToVideoSVIProFLF behavior. "
-                            "When enabled, WanImageMotionPro bypasses advanced features (motion amplitude, "
-                            "DC drift correction, overshoot, clip vision routing, reference latents, slot caps) "
-                            "and builds conditioning 1:1 like the original FLF+SVI node. "
-                            "Use this to benchmark or to get the baseline first/last frame behavior back."
-                        ),
-                    },
-                ),
-            },
-            "optional": {
-                "prev_samples": ("LATENT",),
-                "end_samples": ("LATENT",),
-                "clip_vision_start_image": ("CLIP_VISION_OUTPUT",),
-                "clip_vision_end_image": ("CLIP_VISION_OUTPUT",),
-            },
+            }
         }
 
-    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT", "INT")
-    RETURN_NAMES = ("positive", "negative", "latent", "trim_slots")
-    FUNCTION = "apply"
+    RETURN_TYPES = ("LATENT", "INT", "INT")
+    RETURN_NAMES = ("prev_samples", "slots_trimmed", "video_frames")
+    FUNCTION = "prepare"
     CATEGORY = "IAMCCS/Wan"
 
-    _log = logging.getLogger("IAMCCS.WanImageMotionPro")
+    _log = logging.getLogger("IAMCCS.WanPrevTailPrep")
 
-    def _build_raw_mode_conditioning(
-        self,
-        *,
-        positive,
-        negative,
-        length,
-        anchor_samples,
-        motion_latent_count,
-        prev_samples,
-        end_samples,
-    ):
-        # Intentional copy of the original WanImageToVideoSVIProFLF semantics.
-        anchor_latent = anchor_samples["samples"].clone()
-        B, C, T_anchor, H, W = anchor_latent.shape
+    def prepare(self, latent_in: dict, locked_tail_slots: int, overshoot_trim_slots: int):
+        samples = latent_in["samples"]
+        t_in = int(samples.shape[2])
+        total_trim = max(0, int(locked_tail_slots)) + max(0, int(overshoot_trim_slots))
 
-        total_latents = (length - 1) // 4 + 1
-        device = anchor_latent.device
-        dtype = anchor_latent.dtype
+        if total_trim <= 0:
+            video_frames = (t_in - 1) * 4 + 1
+            self._log.info(
+                "[WanPrevTailPrep] no trim requested. T=%s -> video_frames=%s",
+                t_in,
+                video_frames,
+            )
+            return (latent_in, 0, video_frames)
 
-        if prev_samples is None or motion_latent_count == 0:
-            base_latent = anchor_latent
-        else:
-            prev_latent = prev_samples["samples"].clone()
-            T_prev = prev_latent.shape[2]
-            motion_count = min(motion_latent_count, T_prev)
-
-            if motion_count > 0:
-                motion_latent = prev_latent[:, :, -motion_count:]
-                base_latent = torch.cat([anchor_latent, motion_latent], dim=2)
-            else:
-                base_latent = anchor_latent
-
-        T_base = base_latent.shape[2]
-        padding_size = max(total_latents - T_base, 0)
-
-        if padding_size > 0:
-            padding = torch.zeros(B, C, padding_size, H, W, dtype=dtype, device=device)
-            padding = comfy.latent_formats.Wan21().process_out(padding)
-            image_cond_latent = torch.cat([base_latent, padding], dim=2)
-        else:
-            image_cond_latent = base_latent[:, :, :total_latents]
-
-        if image_cond_latent.shape[2] != total_latents:
-            image_cond_latent = image_cond_latent[:, :, :total_latents]
-
-        end_t_fix = 0
-        if end_samples is not None:
-            end_latent = end_samples["samples"].clone()
-
-            if end_latent.shape[0] == 1 and B > 1:
-                end_latent = end_latent.repeat(B, 1, 1, 1, 1)
-
-            if (
-                end_latent.shape[1] == C
-                and end_latent.shape[3] == H
-                and end_latent.shape[4] == W
-            ):
-                T_end = end_latent.shape[2]
-                end_t_fix = min(T_end, total_latents)
-
-                if end_t_fix > 0:
-                    image_cond_latent[:, :, -end_t_fix:] = end_latent[:, :, -end_t_fix:]
-            else:
-                end_t_fix = 0
-
-        empty_latent = torch.zeros(
-            [B, 16, total_latents, H, W],
-            device=comfy.model_management.intermediate_device(),
-        )
-
-        mask = torch.ones((1, 1, total_latents, H, W), device=device, dtype=dtype)
-        mask[:, :, :1] = 0.0
-
-        if end_t_fix > 0:
-            mask[:, :, -end_t_fix:] = 0.0
-
-        positive = node_helpers.conditioning_set_values(
-            positive, {"concat_latent_image": image_cond_latent, "concat_mask": mask}
-        )
-        negative = node_helpers.conditioning_set_values(
-            negative, {"concat_latent_image": image_cond_latent, "concat_mask": mask}
-        )
-
+        t_out = max(1, t_in - total_trim)
+        prepared = samples[:, :, :t_out].clone()
+        video_frames = (t_out - 1) * 4 + 1
         self._log.info(
-            "[WanImageMotionPro][raw_mode] active: original FLF+SVI semantics | total_latents=%s end_t_fix=%s motion_latent_count=%s prev=%s",
-            total_latents,
-            end_t_fix,
-            motion_latent_count,
-            prev_samples is not None,
+            "[WanPrevTailPrep] T_in=%s locked_tail_slots=%s overshoot_trim_slots=%s -> T_out=%s video_frames=%s",
+            t_in,
+            int(locked_tail_slots),
+            int(overshoot_trim_slots),
+            t_out,
+            video_frames,
         )
-        out_latent = {"samples": empty_latent}
-        return (positive, negative, out_latent, 0)
 
-    def _pick_empty_latent_dtype(self, anchor_dtype: torch.dtype, latent_precision: str) -> torch.dtype:
-        # Keep 1:1 behavior with IAMCCS_WanImageMotion.
-        if latent_precision == "normal":
-            return anchor_dtype
-        if latent_precision == "auto":
-            return torch.float32
-        if latent_precision == "fp32":
-            return torch.float32
-        if latent_precision == "fp16":
-            return torch.float16
-        return anchor_dtype
+        out = dict(latent_in)
+        out["samples"] = prepared
+        return (out, total_trim, video_frames)
 
-    def _apply_motion_amplitude(
-        self,
-        image_cond_latent: torch.Tensor,
-        *,
-        real_latents: int,
-        anchor_latents: int,
-        motion_latents: int,
-        motion_amplitude: float,
-        motion_mode: str,
-        vram_profile: str,
-        safety_preset: str = "safe",
-    ) -> torch.Tensor:
-        # Reuse the exact logic from IAMCCS_WanImageMotion (copy to keep node self-contained).
-        preset = _preset_params(safety_preset, motion_amplitude)
 
-        # "base" preset: 1:1 with reference nodes — no processing at all.
-        if not preset.get("enabled", True):
-            return image_cond_latent
+WanImageMotionProAdvanced = WanImageMotionPro
 
-        if motion_amplitude is None or motion_amplitude <= 1.0:
-            return image_cond_latent
 
-        if image_cond_latent.shape[2] <= 1:
-            return image_cond_latent
+class WanImageMotionPro(WanImageMotionProAdvanced):
+    """Compatibility shim kept so the exported symbol remains the node entrypoint."""
 
-        base_latent = image_cond_latent[:, :, 0:1]
-
-        def _scale_slice_gpu(view_slice: torch.Tensor, *, gain: torch.Tensor | float) -> torch.Tensor:
-            with torch.no_grad():
-                diff = view_slice - base_latent
-                diff_centered, diff_mean = _center_diff(diff, mean_mode=preset["mean_mode"])
-                diff_centered.mul_(gain)
-                out_local = diff_centered.add_(diff_mean).add_(base_latent)
-                _apply_soft_limiter(out_local, mode=preset["limiter_mode"], limit=float(preset["limiter_limit"]))
-                return out_local
-
-        def _gain_weights(start: int, end: int) -> torch.Tensor | float:
-            ramp_frames = int(preset["ramp_frames"])
-            if ramp_frames <= 0:
-                return float(motion_amplitude)
-            tcount = max(0, end - start)
-            if tcount <= 0:
-                return float(motion_amplitude)
-            ramp = min(ramp_frames, tcount)
-            w = torch.ones((tcount,), device=image_cond_latent.device, dtype=image_cond_latent.dtype)
-            if ramp > 0:
-                x = torch.linspace(0.0, 1.0, steps=ramp, device=w.device, dtype=w.dtype)
-                w[:ramp] = _smoothstep(x)
-            gain = 1.0 + (motion_amplitude - 1.0) * w
-            return gain.view(1, 1, tcount, 1, 1)
-
-        def _apply_to_range(start: int, end: int) -> torch.Tensor:
-            if end <= start:
-                return out
-
-            if vram_profile == "normal":
-                gain = _gain_weights(start, end)
-                out[:, :, start:end] = _scale_slice_gpu(out[:, :, start:end], gain=gain)
-                return out
-
-            if vram_profile in ("chunked_blocks_2", "chunked_blocks_4"):
-                block = 2 if vram_profile == "chunked_blocks_2" else 4
-                t = start
-                while t < end:
-                    t2 = min(end, t + block)
-                    gain = _gain_weights(t, t2)
-                    out[:, :, t:t2] = _scale_slice_gpu(out[:, :, t:t2], gain=gain)
-                    t = t2
-                return out
-
-            if vram_profile == "loop_per_frame (lowest_vram)":
-                for t in range(start, end):
-                    gain = _gain_weights(t, t + 1)
-                    out[:, :, t:t + 1] = _scale_slice_gpu(out[:, :, t:t + 1], gain=gain)
-                return out
-
-            if vram_profile == "cpu_offload (slowest)":
-                with torch.no_grad():
-                    device = out.device
-                    base_cpu = base_latent.detach().to("cpu")
-                    slice_cpu = out[:, :, start:end].detach().to("cpu")
-                    diff = slice_cpu - base_cpu
-                    diff_centered, diff_mean = _center_diff(diff, mean_mode=preset["mean_mode"])
-                    ramp_frames = int(preset["ramp_frames"])
-                    tcount = max(0, end - start)
-                    if ramp_frames > 0 and tcount > 0:
-                        ramp = min(ramp_frames, tcount)
-                        w = torch.ones((tcount,), device=diff_centered.device, dtype=diff_centered.dtype)
-                        x = torch.linspace(0.0, 1.0, steps=ramp, device=w.device, dtype=w.dtype)
-                        w[:ramp] = _smoothstep(x)
-                        gain = (1.0 + (motion_amplitude - 1.0) * w).view(1, 1, tcount, 1, 1)
-                    else:
-                        gain = float(motion_amplitude)
-                    diff_centered.mul_(gain)
-                    out_cpu = diff_centered.add_(diff_mean).add_(base_cpu)
-                    _apply_soft_limiter(out_cpu, mode=preset["limiter_mode"], limit=float(preset["limiter_limit"]))
-                    out[:, :, start:end] = out_cpu.to(device)
-                return out
-
-            gain = _gain_weights(start, end)
-            out[:, :, start:end] = _scale_slice_gpu(out[:, :, start:end], gain=gain)
-            return out
-
-        real_latents = max(0, min(real_latents, image_cond_latent.shape[2]))
-        if real_latents <= 1:
-            return image_cond_latent
-
-        out = image_cond_latent
-
-        if motion_mode == "motion_only (prev_samples)":
-            if motion_latents <= 0:
-                return out
-
-            start = anchor_latents
-            end = min(anchor_latents + motion_latents, real_latents)
-            if end <= start:
-                return out
-
-            return _apply_to_range(start, end)
-
-        start = 1
-        end = real_latents
-        return _apply_to_range(start, end)
-
-    def apply(
-        self,
-        positive,
-        negative,
-        length,
-        anchor_samples,
-        motion_latent_count,
-        motion,
-        motion_mode,
-        add_reference_latents,
-        latent_precision,
-        vram_profile,
-        include_padding_in_motion,
-        safety_preset="safe",
-        use_end_frame=True,
-        end_transition_frames=4,
-        end_lock_slots=1,
-        lock_start_slots=1,
-        diagnostic_log=False,
-        use_prev_samples=True,
-        end_overshoot_slots=0,
-        latent_refresh=0.0,
-        delta_max=0.0,
-        clip_vision_mode="auto",
-        raw_mode=False,
-        prev_samples=None,
-        end_samples=None,
-        clip_vision_start_image=None,
-        clip_vision_end_image=None,
-        **_kwargs,
-    ):
-        with torch.no_grad():
-            if raw_mode:
-                return self._build_raw_mode_conditioning(
-                    positive=positive,
-                    negative=negative,
-                    length=length,
-                    anchor_samples=anchor_samples,
-                    motion_latent_count=motion_latent_count,
-                    prev_samples=prev_samples if use_prev_samples else None,
-                    end_samples=end_samples if use_end_frame else None,
-                )
-
-            # Clone to prevent in-place motion amplitude writes from corrupting the caller's tensor.
-            anchor_latent = anchor_samples["samples"].clone()
-
-            B, C, T_anchor, H, W = anchor_latent.shape
-
-            lock_start_slots_i = int(max(0, min(16, lock_start_slots)))
-
-            # FLF core parity: when using a single-image start anchor, the core node constrains
-            # only the actual start frame. A Wan VAEEncode of a still image often expands to more
-            # than one temporal latent slot; keeping the full block here makes the bridge hold on
-            # to A for too long and often degenerates into a dissolve. When FLF end control is
-            # active, cap the start conditioning block to the number of locked start slots.
-            anchor_slots_for_cond = T_anchor
-            if use_end_frame and end_samples is not None and T_anchor > 1 and lock_start_slots_i <= 1:
-                anchor_slots_for_cond = 1
-                self._log.info(
-                    "[WanImageMotionPro] FLF start normalization: T_anchor=%s -> using first %s slot for conditioning.",
-                    T_anchor,
-                    anchor_slots_for_cond,
-                )
-
-            anchor_cond_latent = anchor_latent[:, :, :anchor_slots_for_cond]
-
-            total_latents = (length - 1) // 4 + 1
-
-            # Overshoot: when end lock is active and end_overshoot_slots > 0, extend the internal
-            # generation window so the end-locked zone lands beyond what the sampler actually produces
-            # as "visible" output. trim_slots (4th output) tells the downstream crop node how many
-            # latent slots to remove from the tail after sampling.
-            _overshoot = (
-                int(end_overshoot_slots)
-                if (use_end_frame and end_samples is not None and int(end_overshoot_slots) > 0)
-                else 0
-            )
-            total_latents_gen = total_latents + _overshoot
-
-            if _overshoot > 0:
-                self._log.warning(
-                    "[WanImageMotionPro] end_overshoot_slots=%s enabled (total_latents=%s -> gen=%s). "
-                    "If you use KJNodes WAN attention optimizations (FETA / wrapped_attention) and hit an einops shape mismatch, "
-                    "set end_overshoot_slots=0 or disable/update that optimization.",
-                    int(end_overshoot_slots),
-                    total_latents,
-                    total_latents_gen,
-                )
-
-            device = anchor_latent.device
-            dtype = anchor_latent.dtype
-
-            empty_latent_dtype = self._pick_empty_latent_dtype(dtype, latent_precision)
-            empty_latent = torch.zeros(
-                [B, 16, total_latents_gen, H, W],
-                device=comfy.model_management.intermediate_device(),
-                dtype=empty_latent_dtype,
-            )
-
-            # --- 1. Estrazione motion tail da prev_samples ---
-            motion_latent = None
-            T_motion = 0
-            has_prev = bool(use_prev_samples) and prev_samples is not None and motion_latent_count != 0
-
-            if has_prev:
-                motion_latent = prev_samples["samples"][:, :, -motion_latent_count:]
-                T_motion = motion_latent.shape[2]
-
-            # --- 2. DC Drift Correction ---
-            # Same algorithm as IAMCCS_WanImageMotion: corrects per-channel mean shift.
-            # drift = mean(motion_tail, T,H,W) − mean(anchor, T,H,W)  → [B,C,1,1,1]
-            # motion_tail -= drift * latent_refresh  (spatial structure untouched)
-            _lr = float(latent_refresh)
-            _dm = float(delta_max)
-            if motion_latent is not None and _lr > 0:
-                with torch.no_grad():
-                    motion_mean = motion_latent.mean(dim=(2, 3, 4), keepdim=True)
-                    anchor_mean = anchor_latent.mean(dim=(2, 3, 4), keepdim=True)
-                    dc_drift = motion_mean - anchor_mean
-
-                    if diagnostic_log:
-                        drift_vals = dc_drift[0, :, 0, 0, 0]
-                        drift_abs = drift_vals.abs()
-                        self._log.info(
-                            "[WanImageMotionPro][dc_drift] BEFORE correction — "
-                            "per-channel drift: max=%.4f mean=%.4f rms=%.4f "
-                            "| motion_mean=[%.3f..%.3f] anchor_mean=[%.3f..%.3f]",
-                            float(drift_abs.max()),
-                            float(drift_vals.mean()),
-                            float((drift_vals ** 2).mean().sqrt()),
-                            float(motion_mean.min()),
-                            float(motion_mean.max()),
-                            float(anchor_mean.min()),
-                            float(anchor_mean.max()),
-                        )
-                        for ci in range(min(16, int(drift_vals.shape[0]))):
-                            self._log.info(
-                                "[WanImageMotionPro][dc_drift]   ch%02d: drift=% .4f  motion_mean=% .4f  anchor_mean=% .4f",
-                                ci,
-                                float(drift_vals[ci]),
-                                float(motion_mean[0, ci, 0, 0, 0]),
-                                float(anchor_mean[0, ci, 0, 0, 0]),
-                            )
-
-                    if _dm > 0:
-                        dc_drift = _dm * torch.tanh(dc_drift / _dm)
-
-                    correction = dc_drift * _lr
-                    motion_latent = motion_latent - correction
-
-                    if diagnostic_log:
-                        new_mean = motion_latent.mean(dim=(2, 3, 4), keepdim=True)
-                        residual = (new_mean - anchor_mean)[0, :, 0, 0, 0]
-                        self._log.info(
-                            "[WanImageMotionPro][dc_drift] AFTER  correction — residual drift: max=%.4f mean=%.4f | correction_strength=%.2f delta_max=%.2f",
-                            float(residual.abs().max()),
-                            float(residual.mean()),
-                            _lr,
-                            _dm,
-                        )
-                    else:
-                        self._log.info(
-                            "[WanImageMotionPro] DC drift correction active: strength=%.2f delta_max=%.2f | drift_max=%.4f drift_mean=%.4f",
-                            _lr,
-                            _dm,
-                            float(dc_drift.abs().max()),
-                            float(dc_drift.mean()),
-                        )
-
-            # --- 3. Costruzione del condizionamento ---
-            if motion_latent is None:
-                padding_size = total_latents_gen - anchor_slots_for_cond
-                image_cond_latent = anchor_cond_latent
-            else:
-                padding_size = total_latents_gen - anchor_slots_for_cond - T_motion
-                image_cond_latent = torch.cat([anchor_cond_latent, motion_latent], dim=2)
-
-            padding_size = max(0, padding_size)
-            if padding_size > 0:
-                padding = torch.zeros(B, C, padding_size, H, W, dtype=dtype, device=device)
-                padding = comfy.latent_formats.Wan21().process_out(padding)
-                image_cond_latent = torch.cat([image_cond_latent, padding], dim=2)
-
-            # FLF/SVI reference behavior: enforce exact temporal length (extended by overshoot).
-            if image_cond_latent.shape[2] > total_latents_gen:
-                image_cond_latent = image_cond_latent[:, :, :total_latents_gen]
-            elif image_cond_latent.shape[2] < total_latents_gen:
-                image_cond_latent = image_cond_latent[:, :, :total_latents_gen]
-
-            # Pre-compute end_t_fix so we can exclude the end-locked zone from motion amplitude.
-            # Motion should NOT touch slots that will be hard-locked to end_samples: scaling those
-            # intermediate latents would generate noise that hurts the model's first→last interpolation.
-            # Respect use_end_frame: if disabled, never cap the motion range.
-            end_t_fix_early = 0
-            if end_samples is not None and use_end_frame:
-                _e = end_samples["samples"]
-                if (
-                    _e.shape[1] == C
-                    and _e.shape[3] == H
-                    and _e.shape[4] == W
-                ):
-                    # Cap to end_lock_slots so the motion range is not incorrectly
-                    # shortened by the full VAE temporal size (which can be T>1 for a single image).
-                    end_t_fix_early = min(_e.shape[2], total_latents_gen, end_lock_slots)
-
-            # Motion boost applied before FLF overwrite.
-            # Cap effective_latents so motion never reaches into the end-locked zone.
-            # IMPORTANT: do not apply motion scaling to *pure padding*.
-            # Padding slots are zeros and should remain sampler-driven.
-            if include_padding_in_motion and not has_prev:
-                self._log.info(
-                    "[WanImageMotionPro] include_padding_in_motion=True but prev_samples is not connected; "
-                    "skipping padding boost to avoid static/locked-looking clips."
-                )
-
-            if include_padding_in_motion and has_prev and (T_anchor + T_motion) > 1:
-                effective_latents_base = total_latents_gen
-            else:
-                effective_latents_base = min(total_latents_gen, anchor_slots_for_cond + T_motion)
-            effective_latents = max(1, min(effective_latents_base, total_latents_gen - end_t_fix_early))
-
-            motion_mode_effective = motion_mode
-            # NOTE: we intentionally do NOT auto-switch to all_nonfirst here.
-            # Auto-switching would end up modifying padding slots on the first segment.
-
-            try:
-                free_vram, total_vram = comfy.model_management.get_free_memory(device)
-            except Exception:
-                free_vram, total_vram = None, None
-
-            self._log.info(
-                "[WanImageMotionPro] length=%s -> total_latents=%s (+overshoot=%s -> gen=%s) | motion=%s | mode=%s | vram_profile=%s | latent_precision=%s | add_reference_latents=%s | include_padding_in_motion=%s | use_end_frame=%s | end_transition_frames=%s | end_lock_slots=%s | lock_start_slots=%s",
-                length,
-                total_latents,
-                _overshoot,
-                total_latents_gen,
-                motion,
-                motion_mode,
-                vram_profile,
-                latent_precision,
-                add_reference_latents,
-                include_padding_in_motion,
-                use_end_frame,
-                end_transition_frames,
-                end_lock_slots,
-                lock_start_slots,
-            )
-            self._log.info(
-                "[WanImageMotionPro] anchor: B=%s C=%s T=%s H=%s W=%s dtype=%s device=%s | prev=%s motion_latent_count=%s T_motion=%s | padding_size=%s | end_samples=%s",
-                B,
-                C,
-                T_anchor,
-                H,
-                W,
-                str(dtype).replace("torch.", ""),
-                str(device),
-                has_prev,
-                motion_latent_count,
-                T_motion,
-                padding_size,
-                end_samples is not None,
-            )
-            if anchor_slots_for_cond != T_anchor:
-                self._log.info(
-                    "[WanImageMotionPro] start conditioning uses %s/%s anchor slots to match FLF first-frame behavior.",
-                    anchor_slots_for_cond,
-                    T_anchor,
-                )
-            if prev_samples is not None and not use_prev_samples:
-                self._log.info("[WanImageMotionPro] prev_samples connected but use_prev_samples=False — prev ignored.")
-            if free_vram is not None:
-                self._log.info("[WanImageMotionPro] free_vram=%s total_vram=%s", free_vram, total_vram)
-
-            if motion_mode_effective == "motion_only (prev_samples)":
-                motion_start = anchor_slots_for_cond
-                motion_end = min(anchor_slots_for_cond + T_motion, effective_latents)
-            else:
-                motion_start = 1
-                motion_end = effective_latents
-
-            motion_frames_count = max(0, motion_end - motion_start)
-            self._log.info(
-                "[WanImageMotionPro] motion_range=[%s:%s] (effective_latents=%s) padding_included=%s",
-                motion_start,
-                motion_end,
-                effective_latents,
-                include_padding_in_motion,
-            )
-            if motion_frames_count == 0:
-                self._log.warning(
-                    "[WanImageMotionPro] WARNING: motion_range is EMPTY (no frames will be modified). "
-                    "Enable include_padding_in_motion or provide prev_samples with motion_latent_count > 0."
-                )
-            else:
-                self._log.info(
-                    "[WanImageMotionPro] Motion boost applies to %s frame(s) amplitude=%.2f",
-                    motion_frames_count,
-                    motion,
-                )
-
-            image_cond_latent = self._apply_motion_amplitude(
-                image_cond_latent,
-                real_latents=effective_latents,
-                anchor_latents=anchor_slots_for_cond,
-                motion_latents=T_motion,
-                motion_amplitude=motion,
-                motion_mode=motion_mode_effective,
-                vram_profile=vram_profile,
-                safety_preset=safety_preset,
-            )
-
-            if diagnostic_log:
-                try:
-                    x = image_cond_latent
-                    x_f = x.float()
-                    t = int(x.shape[2])
-                    x_min = float(x_f.min().item())
-                    x_max = float(x_f.max().item())
-                    x_mean = float(x_f.mean().item())
-                    x_std = float(x_f.std(unbiased=False).item())
-                    self._log.info(
-                        "[WanImageMotionPro][diag] concat_latent_image stats: T=%s min=%.4f max=%.4f mean=%.4f std=%.4f",
-                        t,
-                        x_min,
-                        x_max,
-                        x_mean,
-                        x_std,
-                    )
-
-                    base = x_f[:, :, 0:1]
-                    diffs = (x_f - base).abs().mean(dim=(0, 1, 3, 4))  # [T]
-                    head_n = min(6, t)
-                    tail_n = min(6, t)
-                    head = [float(v) for v in diffs[:head_n].tolist()]
-                    tail = [float(v) for v in diffs[-tail_n:].tolist()]
-                    self._log.info(
-                        "[WanImageMotionPro][diag] mean|Δ| vs t0: head=%s tail=%s",
-                        head,
-                        tail,
-                    )
-                    self._log.info(
-                        "[WanImageMotionPro][diag] end_t_fix_early=%s (motion cap) use_end_frame=%s end_lock_slots=%s | overshoot=%s total_latents_gen=%s",
-                        end_t_fix_early,
-                        use_end_frame,
-                        end_lock_slots,
-                        _overshoot,
-                        total_latents_gen,
-                    )
-                except Exception as e:
-                    self._log.warning("[WanImageMotionPro][diag] failed to compute diagnostics: %s", e)
-
-            # FLF end lock: overwrite last slots with end_samples (if provided).
-            # use_end_frame=False lets the user keep the wire connected without activating the lock,
-            # prevents ping-pong artifacts when the end-frame encoder node is bypassed.
-            end_t_fix = 0
-            if end_samples is not None and use_end_frame:
-                # Clone to prevent mutations from affecting the caller's tensor.
-                end_latent = end_samples["samples"].clone()
-
-                if end_latent.shape[0] == 1 and B > 1:
-                    end_latent = end_latent.repeat(B, 1, 1, 1, 1)
-
-                if (
-                    end_latent.shape[1] == C
-                    and end_latent.shape[3] == H
-                    and end_latent.shape[4] == W
-                ):
-                    T_end = end_latent.shape[2]
-                    # end_lock_slots caps the lock to the intended number of slots.
-                    # The Wan VAE always encodes an image to T≥2 latent slots, so without
-                    # this cap end_t_fix would be 2 even for a single frame, locking the
-                    # last 8 video frames instead of only the last ~4 (= 1 latent slot).
-                    end_t_fix = min(T_end, total_latents_gen, end_lock_slots)
-                    if end_t_fix > 0:
-                        self._log.info(
-                            "[WanImageMotionPro] end lock: T_end=%s end_lock_slots=%s -> end_t_fix=%s (locking latent slots [%s:%s] = last ~%s video frames) | overshoot=%s trim_slots=%s",
-                            T_end,
-                            end_lock_slots,
-                            end_t_fix,
-                            total_latents_gen - end_t_fix,
-                            total_latents_gen,
-                            end_t_fix * 4,
-                            _overshoot,
-                            _overshoot,
-                        )
-                        image_cond_latent[:, :, -end_t_fix:] = end_latent[:, :, -end_t_fix:]
-
-                        # end_transition_frames is DEPRECATED and intentionally disabled.
-                        # Linear interpolation between padding latents and end_latent in VAE
-                        # latent space does not produce meaningful intermediate frames —
-                        # it generates static/corrupted conditioning that freezes the clip.
-                        # The original FLF node uses a plain hard-lock (no blending).
-                        if end_transition_frames > 0:
-                            self._log.warning(
-                                "[WanImageMotionPro] ⚠️  end_transition_frames=%s is DEPRECATED and has been DISABLED. "
-                                "Linear latent interpolation before the end-lock produces static/frozen output. "
-                                "Set end_transition_frames=0 to match original FLF behavior.",
-                                end_transition_frames,
-                            )
-                else:
-                    end_t_fix = 0
-                    self._log.warning(
-                        "[WanImageMotionPro] end_samples shape mismatch, skipping end lock. end=%s anchor=%s",
-                        tuple(end_latent.shape),
-                        tuple(anchor_latent.shape),
-                    )
-            elif end_samples is not None and not use_end_frame:
-                self._log.info(
-                    "[WanImageMotionPro] end_samples connected but use_end_frame=False — end lock skipped."
-                )
-
-            # Build a 4-channel temporal mask like the core WanFirstLastFrameToVideo node.
-            # This matches Wan's native temporal conditioning layout better than a flat 1-channel
-            # per-slot mask and avoids reducing FLF semantics to coarse whole-slot averaging.
-            frame_mask = torch.ones((1, 1, total_latents_gen * 4, H, W), device=device, dtype=torch.float32)
-            if lock_start_slots_i > 0:
-                frame_mask[:, :, :lock_start_slots_i * 4] = 0.0
-            if end_t_fix > 0:
-                frame_mask[:, :, -(end_t_fix * 4):] = 0.0
-            mask = frame_mask.view(1, frame_mask.shape[2] // 4, 4, H, W).transpose(1, 2).contiguous()
-
-            # Ensure image_cond_latent is fp32 for model accuracy.
-            if image_cond_latent.dtype != torch.float32:
-                image_cond_latent = image_cond_latent.float()
-
-            # Device safety: keep conditioning tensors on the same device as the sampler latent.
-            cond_device = empty_latent.device
-            if image_cond_latent.device != cond_device:
-                if diagnostic_log:
-                    self._log.info(
-                        "[WanImageMotionPro][diag] moving conditioning tensors %s -> %s",
-                        str(image_cond_latent.device),
-                        str(cond_device),
-                    )
-                image_cond_latent = image_cond_latent.to(cond_device)
-                mask = mask.to(cond_device)
-
-            positive = node_helpers.conditioning_set_values(
-                positive, {"concat_latent_image": image_cond_latent, "concat_mask": mask}
-            )
-            negative = node_helpers.conditioning_set_values(
-                negative, {"concat_latent_image": image_cond_latent, "concat_mask": mask}
-            )
-
-            if add_reference_latents:
-                ref_latent = anchor_latent[:, :, 0:1]
-                positive = node_helpers.conditioning_set_values(
-                    positive, {"reference_latents": [ref_latent]}, append=True
-                )
-                negative = node_helpers.conditioning_set_values(
-                    negative, {"reference_latents": [torch.zeros_like(ref_latent)]}, append=True
-                )
-
-            # Apply CLIPVision semantic conditioning if provided.
-            # Merges start+end embeddings (same logic as WanFirstLastFrameToVideo).
-            # Anchors cross-attention to subject/scene visual identity → reduces drift across segments.
-            #
-            # ⚠️  clip_vision_mode CRITICAL NOTE:
-            # "auto" (concatenate) is CORRECT only for true A→B FLF (anchor=A, end=B).
-            # If anchor=end=same image but clip_vision_start is a DIFFERENT image, use
-            # "end_only" — otherwise the concatenated [start, end] tokens bias ALL free
-            # temporal slots toward the start image via global clip_fea cross-attention.
-            _cv_out = None
-            _mode = str(clip_vision_mode) if clip_vision_mode else "auto"
-
-            if _mode != "none":
-                if _mode == "end_only":
-                    # Use only end image embedding. Best for SVI Pro continuation where
-                    # prev_samples drives motion but anchor/end are the same scene.
-                    if clip_vision_end_image is not None:
-                        _cv_out = clip_vision_end_image
-                    elif clip_vision_start_image is not None:
-                        # Fallback: only start is connected → use it with a clear note.
-                        _cv_out = clip_vision_start_image
-                        self._log.info(
-                            "[WanImageMotionPro] clip_vision_mode=end_only but only start image is connected → using start."
-                        )
-
-                elif _mode == "start_only":
-                    # Use only start image embedding.
-                    if clip_vision_start_image is not None:
-                        _cv_out = clip_vision_start_image
-                    elif clip_vision_end_image is not None:
-                        _cv_out = clip_vision_end_image
-                        self._log.info(
-                            "[WanImageMotionPro] clip_vision_mode=start_only but only end image is connected → using end."
-                        )
-
-                else:
-                    if clip_vision_start_image is not None and clip_vision_end_image is not None:
-                        # ⚠️  CROSSFADE WARNING: concatenated tokens bias ALL free slots.
-                        # Only use this when anchor image == clip_vision_start and end image == clip_vision_end.
-                        self._log.warning(
-                            "[WanImageMotionPro] ⚠️  clip_vision_mode=auto: concatenating start+end CLIP tokens. "
-                            "This creates crossfade artifacts if clip_vision_start image ≠ anchor_samples image. "
-                            "If anchor and end_samples are the SAME image (SVI Pro continuation), "
-                            "set clip_vision_mode=end_only to prevent crossfade bleed from clip_vision_start."
-                        )
-                        _states = torch.cat(
-                            [clip_vision_start_image.penultimate_hidden_states, clip_vision_end_image.penultimate_hidden_states],
-                            dim=-2,
-                        )
-                        _cv_out = comfy.clip_vision.Output()
-                        _cv_out.penultimate_hidden_states = _states
-                    elif clip_vision_start_image is not None:
-                        _cv_out = clip_vision_start_image
-                    elif clip_vision_end_image is not None:
-                        _cv_out = clip_vision_end_image
-
-            if _cv_out is not None:
-                positive = node_helpers.conditioning_set_values(positive, {"clip_vision_output": _cv_out})
-                negative = node_helpers.conditioning_set_values(negative, {"clip_vision_output": _cv_out})
-
-            out_latent = {"samples": empty_latent}
-            return (positive, negative, out_latent, _overshoot)
+    pass
 
 
 class IAMCCS_WanImageMotionPro_Simple(WanImageMotionProAdvanced):
@@ -3115,7 +2803,7 @@ class IAMCCS_WanImageMotionPro_Simple(WanImageMotionProAdvanced):
                     {"default": "safe"},
                 ),
                 "use_end_frame": ("BOOLEAN", {"default": True}),
-                "end_lock_slots": ("INT", {"default": 1, "min": 1, "max": 16, "step": 1}),
+                "end_lock_slots": ("INT", {"default": 1, "min": 0, "max": 16, "step": 1}),
                 "lock_start_slots": ("INT", {"default": 1, "min": 0, "max": 16, "step": 1}),
                 "end_overshoot_slots": ("INT", {"default": 0, "min": 0, "max": 8, "step": 1}),
                 "latent_refresh": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05}),
@@ -3141,6 +2829,14 @@ class IAMCCS_WanImageMotionPro_Simple(WanImageMotionProAdvanced):
                             "Useful when the last part of a carried SVI tail is too rigid, frozen, or over-constrained."
                         ),
                     },
+                ),
+                "continuity_profile": (
+                    CONTINUITY_PROFILE_OPTIONS,
+                    {"default": "off"},
+                ),
+                "preset": (
+                    MOTION_PRO_PRESET_OPTIONS,
+                    {"default": "[custom]"},
                 ),
             },
             "optional": {
@@ -3170,6 +2866,7 @@ class IAMCCS_WanImageMotionPro_Simple(WanImageMotionProAdvanced):
         add_reference_latents,
         vram_profile,
         include_padding_in_motion,
+        preset="[custom]",
         safety_preset="safe",
         use_end_frame=True,
         end_lock_slots=1,
@@ -3179,6 +2876,7 @@ class IAMCCS_WanImageMotionPro_Simple(WanImageMotionProAdvanced):
         delta_max=0.0,
         clip_vision_mode="auto",
         prev_skip_last_slots=0,
+        continuity_profile="off",
         prev_samples=None,
         end_samples=None,
         clip_vision_start_image=None,
@@ -3186,6 +2884,7 @@ class IAMCCS_WanImageMotionPro_Simple(WanImageMotionProAdvanced):
         **_kwargs,
     ):
         return super().apply(
+            preset=preset,
             positive=positive,
             negative=negative,
             length=length,
@@ -3213,11 +2912,188 @@ class IAMCCS_WanImageMotionPro_Simple(WanImageMotionProAdvanced):
             prev_tail_pick_mode="latest",
             prev_skip_last_slots=prev_skip_last_slots,
             prev_anchor_blend=0.0,
+            continuity_profile=continuity_profile,
             prev_samples=prev_samples,
             end_samples=end_samples,
             clip_vision_start_image=clip_vision_start_image,
             clip_vision_end_image=clip_vision_end_image,
         )
+
+
+class IAMCCS_WanImageMotionInductive(WanImageMotionProAdvanced):
+    """Identity-first continuity node using residual motion induction."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "length": ("INT", {"default": 81, "min": 1, "max": 16384, "step": 4}),
+                "anchor_samples": ("LATENT",),
+                "motion_latent_count": ("INT", {"default": 1, "min": 0, "max": 16, "step": 1}),
+                "induction_mode": (
+                    ["inductive_hybrid", "inductive_only", "raw_tail"],
+                    {
+                        "default": "inductive_hybrid",
+                        "tooltip": (
+                            "inductive_hybrid = anchor image + motion residuals from prev_samples, mixed with a small raw tail carry-over. "
+                            "inductive_only = anchor image + motion residuals only. raw_tail = classic SVI carry-over."
+                        ),
+                    },
+                ),
+                "induction_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "induction_blend": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "prev_trim_locked_slots": ("INT", {"default": 1, "min": 0, "max": 16, "step": 1}),
+                "auto_trim_prev": ("BOOLEAN", {"default": True}),
+                "delta_limit": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 10.0, "step": 0.1}),
+                "use_end_frame": ("BOOLEAN", {"default": True}),
+                "end_lock_slots": ("INT", {"default": 1, "min": 0, "max": 16, "step": 1}),
+                "end_overshoot_slots": ("INT", {"default": 0, "min": 0, "max": 8, "step": 1}),
+                "lock_start_slots": ("INT", {"default": 1, "min": 0, "max": 16, "step": 1}),
+                "diagnostic_log": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "prev_samples": ("LATENT",),
+                "end_samples": ("LATENT",),
+            },
+        }
+
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT", "INT", "INT")
+    RETURN_NAMES = ("positive", "negative", "latent", "trim_slots", "prev_trimmed_slots")
+    FUNCTION = "apply"
+    CATEGORY = "IAMCCS/Wan"
+
+    _log = logging.getLogger("IAMCCS.WanImageMotionInductive")
+
+    def apply(
+        self,
+        positive,
+        negative,
+        length,
+        anchor_samples,
+        motion_latent_count,
+        induction_mode,
+        induction_strength,
+        induction_blend,
+        prev_trim_locked_slots,
+        auto_trim_prev,
+        delta_limit,
+        use_end_frame,
+        end_lock_slots,
+        end_overshoot_slots,
+        lock_start_slots,
+        diagnostic_log=False,
+        prev_samples=None,
+        end_samples=None,
+        **_kwargs,
+    ):
+        with torch.no_grad():
+            anchor_latent = anchor_samples["samples"].clone()
+            B, C, T_anchor, H, W = anchor_latent.shape
+
+            total_latents = (length - 1) // 4 + 1
+            _overshoot = (
+                int(end_overshoot_slots)
+                if (use_end_frame and end_samples is not None and int(end_overshoot_slots) > 0)
+                else 0
+            )
+            total_latents_gen = total_latents + _overshoot
+            device = anchor_latent.device
+            dtype = anchor_latent.dtype
+
+            empty_latent = torch.zeros(
+                [B, 16, total_latents_gen, H, W],
+                device=comfy.model_management.intermediate_device(),
+            )
+
+            prev_trim_effective = max(0, int(prev_trim_locked_slots))
+            if auto_trim_prev and use_end_frame:
+                prev_trim_effective = max(prev_trim_effective, int(end_lock_slots))
+
+            motion_tail, motion_stats = _build_inductive_motion_tail(
+                prev_samples,
+                motion_latent_count,
+                anchor_reference=anchor_latent,
+                trim_locked_slots=prev_trim_effective,
+                mode=induction_mode,
+                induction_strength=induction_strength,
+                induction_blend=induction_blend,
+                delta_limit=delta_limit,
+                mean_align=True,
+            )
+
+            if motion_tail is None:
+                image_cond_latent = anchor_latent
+                t_motion = 0
+            else:
+                image_cond_latent = torch.cat([anchor_latent, motion_tail], dim=2)
+                t_motion = int(motion_tail.shape[2])
+
+            padding_size = max(total_latents_gen - int(image_cond_latent.shape[2]), 0)
+            if padding_size > 0:
+                padding = torch.zeros(B, C, padding_size, H, W, dtype=dtype, device=device)
+                padding = comfy.latent_formats.Wan21().process_out(padding)
+                image_cond_latent = torch.cat([image_cond_latent, padding], dim=2)
+            else:
+                image_cond_latent = image_cond_latent[:, :, :total_latents_gen]
+
+            if image_cond_latent.shape[2] != total_latents_gen:
+                image_cond_latent = image_cond_latent[:, :, :total_latents_gen]
+
+            end_t_fix = 0
+            if use_end_frame and end_samples is not None:
+                end_latent = end_samples["samples"].clone()
+                if end_latent.shape[0] == 1 and B > 1:
+                    end_latent = end_latent.repeat(B, 1, 1, 1, 1)
+                if (
+                    end_latent.shape[1] == C
+                    and end_latent.shape[3] == H
+                    and end_latent.shape[4] == W
+                ):
+                    end_t_fix = min(int(end_latent.shape[2]), total_latents_gen, max(0, int(end_lock_slots)))
+                    if end_t_fix > 0:
+                        image_cond_latent[:, :, -end_t_fix:] = end_latent[:, :, -end_t_fix:]
+
+            mask = torch.ones((1, 1, total_latents_gen, H, W), device=device, dtype=torch.float32)
+            lock_start_slots_i = int(max(0, min(16, lock_start_slots)))
+            if lock_start_slots_i > 0:
+                mask[:, :, :lock_start_slots_i] = 0.0
+            if end_t_fix > 0:
+                mask[:, :, -end_t_fix:] = 0.0
+
+            if image_cond_latent.dtype != torch.float32:
+                image_cond_latent = image_cond_latent.float()
+
+            cond_device = empty_latent.device
+            if image_cond_latent.device != cond_device:
+                image_cond_latent = image_cond_latent.to(cond_device)
+                mask = mask.to(cond_device)
+
+            positive = node_helpers.conditioning_set_values(
+                positive, {"concat_latent_image": image_cond_latent, "concat_mask": mask}
+            )
+            negative = node_helpers.conditioning_set_values(
+                negative, {"concat_latent_image": image_cond_latent, "concat_mask": mask}
+            )
+
+            if diagnostic_log:
+                self._log.info(
+                    "[WanImageMotionInductive] length=%s total_latents=%s anchor_T=%s motion_T=%s mode=%s induction_strength=%.2f induction_blend=%.2f prev_trim=%s strategy=%s usable_prev_T=%s",
+                    length,
+                    total_latents_gen,
+                    T_anchor,
+                    t_motion,
+                    induction_mode,
+                    float(induction_strength),
+                    float(induction_blend),
+                    prev_trim_effective,
+                    motion_stats.get("strategy"),
+                    motion_stats.get("usable_t"),
+                )
+
+            out_latent = {"samples": empty_latent}
+            return (positive, negative, out_latent, _overshoot, prev_trim_effective)
 
 
 class IAMCCS_WanSVIToFLFBridgePro(WanImageMotionProAdvanced):
@@ -3272,11 +3148,6 @@ class IAMCCS_WanSVIToFLFBridgePro(WanImageMotionProAdvanced):
                     ],
                     {
                         "default": "blend_middle",
-                        "tooltip": (
-                            "disabled: ignore bridge image. "
-                            "blend_middle: blend the bridge latent into middle slots. "
-                            "hard_middle: lock the middle slots to the bridge latent."
-                        ),
                     },
                 ),
             }
@@ -3310,6 +3181,7 @@ class IAMCCS_WanSVIToFLFBridgePro(WanImageMotionProAdvanced):
         latent_precision,
         vram_profile,
         include_padding_in_motion,
+        preset="[custom]",
         safety_preset="safe",
         use_end_frame=True,
         end_transition_frames=0,
@@ -3323,6 +3195,7 @@ class IAMCCS_WanSVIToFLFBridgePro(WanImageMotionProAdvanced):
         clip_vision_mode="auto",
         raw_mode=False,
         prev_samples_profile="direct",
+        continuity_profile="off",
         prev_skip_last_slots=0,
         prev_tail_pick_mode="latest",
         prev_anchor_blend=0.0,
@@ -3345,6 +3218,7 @@ class IAMCCS_WanSVIToFLFBridgePro(WanImageMotionProAdvanced):
             and float(bridge_strength) > 0.0
             and int(bridge_slots) > 0
             and not bool(raw_mode)
+            and str(continuity_profile or "off") == "off"
         )
 
         if not bridge_enabled:
@@ -3356,18 +3230,24 @@ class IAMCCS_WanSVIToFLFBridgePro(WanImageMotionProAdvanced):
                 self._log.info(
                     "[WanSVIToFLFBridgePro] raw_mode=True — bridge injection is skipped to preserve strict FLF compatibility."
                 )
+            if str(continuity_profile or "off") != "off" and str(bridge_mode) != "disabled":
+                self._log.info(
+                    "[WanSVIToFLFBridgePro] continuity_profile=%s active — bridge injection is skipped to preserve raw-like continuity semantics.",
+                    str(continuity_profile),
+                )
             return super().apply(
-                positive,
-                negative,
-                length,
-                anchor_samples,
-                motion_latent_count,
-                motion,
-                motion_mode,
-                add_reference_latents,
-                latent_precision,
-                vram_profile,
-                include_padding_in_motion,
+                preset=preset,
+                positive=positive,
+                negative=negative,
+                length=length,
+                anchor_samples=anchor_samples,
+                motion_latent_count=motion_latent_count,
+                motion=motion,
+                motion_mode=motion_mode,
+                add_reference_latents=add_reference_latents,
+                latent_precision=latent_precision,
+                vram_profile=vram_profile,
+                include_padding_in_motion=include_padding_in_motion,
                 safety_preset=safety_preset,
                 use_end_frame=use_end_frame,
                 end_transition_frames=end_transition_frames,
@@ -3381,6 +3261,7 @@ class IAMCCS_WanSVIToFLFBridgePro(WanImageMotionProAdvanced):
                 clip_vision_mode=clip_vision_mode,
                 raw_mode=raw_mode,
                 prev_samples_profile=prev_samples_profile,
+                continuity_profile=continuity_profile,
                 prev_skip_last_slots=prev_skip_last_slots,
                 prev_tail_pick_mode=prev_tail_pick_mode,
                 prev_anchor_blend=prev_anchor_blend,
@@ -3693,7 +3574,7 @@ class IAMCCS_WanSVIToFLFBridgePro_Simple(IAMCCS_WanSVIToFLFBridgePro):
                     {"default": "safe"},
                 ),
                 "use_end_frame": ("BOOLEAN", {"default": True}),
-                "end_lock_slots": ("INT", {"default": 1, "min": 1, "max": 16, "step": 1}),
+                "end_lock_slots": ("INT", {"default": 1, "min": 0, "max": 16, "step": 1}),
                 "lock_start_slots": ("INT", {"default": 1, "min": 0, "max": 16, "step": 1}),
                 "end_overshoot_slots": ("INT", {"default": 0, "min": 0, "max": 8, "step": 1}),
                 "latent_refresh": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.05}),
@@ -3755,6 +3636,14 @@ class IAMCCS_WanSVIToFLFBridgePro_Simple(IAMCCS_WanSVIToFLFBridgePro):
                     ],
                     {"default": "hard_middle"},
                 ),
+                "continuity_profile": (
+                    CONTINUITY_PROFILE_OPTIONS,
+                    {"default": "off"},
+                ),
+                "preset": (
+                    MOTION_PRO_PRESET_OPTIONS,
+                    {"default": "[custom]"},
+                ),
             },
             "optional": {
                 "prev_samples": ("LATENT",),
@@ -3785,6 +3674,7 @@ class IAMCCS_WanSVIToFLFBridgePro_Simple(IAMCCS_WanSVIToFLFBridgePro):
         add_reference_latents,
         vram_profile,
         include_padding_in_motion,
+        preset="[custom]",
         safety_preset="safe",
         use_end_frame=True,
         end_lock_slots=1,
@@ -3798,6 +3688,7 @@ class IAMCCS_WanSVIToFLFBridgePro_Simple(IAMCCS_WanSVIToFLFBridgePro):
         bridge_strength=1.0,
         bridge_slots=2,
         bridge_mode="hard_middle",
+        continuity_profile="off",
         prev_samples=None,
         end_samples=None,
         clip_vision_start_image=None,
@@ -3807,6 +3698,7 @@ class IAMCCS_WanSVIToFLFBridgePro_Simple(IAMCCS_WanSVIToFLFBridgePro):
         **_kwargs,
     ):
         return super().apply(
+            preset=preset,
             positive=positive,
             negative=negative,
             length=length,
@@ -3831,6 +3723,7 @@ class IAMCCS_WanSVIToFLFBridgePro_Simple(IAMCCS_WanSVIToFLFBridgePro):
             clip_vision_mode=clip_vision_mode,
             raw_mode=False,
             prev_samples_profile="direct",
+            continuity_profile=continuity_profile,
             prev_skip_last_slots=prev_skip_last_slots,
             prev_tail_pick_mode="latest",
             prev_anchor_blend=0.0,
@@ -3857,9 +3750,11 @@ NODE_CLASS_MAPPINGS = {
     # but intentionally absent from NODE_DISPLAY_NAME_MAPPINGS → never shows in the menu.
     "IAMCCS_WanImageMotionPro": WanImageMotionPro,
     "IAMCCS_WanImageMotionPro_Simple": IAMCCS_WanImageMotionPro_Simple,
+    "IAMCCS_WanImageMotionInductive": IAMCCS_WanImageMotionInductive,
     "IAMCCS_WanSVIToFLFBridgePro": IAMCCS_WanSVIToFLFBridgePro,
     "IAMCCS_WanSVIToFLFBridgePro_Simple": IAMCCS_WanSVIToFLFBridgePro_Simple,
     "WanMotionProTrimmer": WanMotionProTrimmer,
+    "IAMCCS_WanPrevTailPrep": IAMCCS_WanPrevTailPrep,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -3868,6 +3763,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "WanImageMotionPro": "WanImageMotionPro",
     "IAMCCS_WanImageMotionPro_AdaIN": "WanImageMotionPro",
     "IAMCCS_WanImageMotionPro_Simple": "WanImageMotionPro Simple",
+    "IAMCCS_WanImageMotionInductive": "WanImageMotion Inductive",
     "IAMCCS_WanSVIToFLFBridgePro_Simple": "WanSVIToFLFBridgePro",
     "WanMotionProTrimmer": "WanMotionProTrimmer",
+    "IAMCCS_WanPrevTailPrep": "Wan Prev Tail Prep",
 }

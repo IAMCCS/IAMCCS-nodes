@@ -3125,6 +3125,22 @@ function convertAllLinks(
             return inc;
         };
 
+        const kijSourceInfoByName = new Map();
+        for (const kijNode of kijNodes) {
+            if (!kijNode || kijNode.type !== KJ_SET_TYPE) continue;
+            const kijName = getKijName(kijNode);
+            if (!kijName || kijSourceInfoByName.has(kijName)) continue;
+
+            const inLinks = incomingFor(kijNode.id);
+            const first = inLinks.find(l => Number(l.target_slot) === 0) || inLinks[0];
+            if (!first) continue;
+
+            kijSourceInfoByName.set(kijName, {
+                origin_id: first.origin_id,
+                origin_slot: first.origin_slot,
+            });
+        }
+
         // Convert nodes in a stable order (left-to-right, top-to-bottom) to minimize visual jitter.
         kijNodes.sort((a, b) => {
             const ax = Array.isArray(a?.pos) ? a.pos[0] : 0;
@@ -3210,6 +3226,38 @@ function convertAllLinks(
                         if (ok !== null) rewiredIncoming++;
                     }
                 }
+            }
+
+            newNode.properties = newNode.properties || {};
+            if (newType === SET_TYPE) {
+                const first = inLinks.find(l => Number(l.target_slot) === 0) || inLinks[0];
+                if (first) {
+                    newNode.properties.metadata = {
+                        iamccs_autolink: true,
+                        output_name: kijName,
+                        origin: { id: first.origin_id, slot: first.origin_slot },
+                    };
+                }
+                newNode.update?.();
+            } else {
+                const srcInfo = kijSourceInfoByName.get(kijName);
+                const targetLink = outLinks.length === 1 ? outLinks[0] : null;
+                const targetNode = targetLink ? getNodeById(graph, targetLink.target_id) : null;
+                const targetSlot = Number(targetLink?.target_slot);
+                const targetInputName = Number.isFinite(targetSlot)
+                    ? (targetNode?.inputs?.[targetSlot]?.name ?? null)
+                    : null;
+
+                if (srcInfo && targetLink) {
+                    newNode.properties.metadata = {
+                        iamccs_autolink: true,
+                        output_name: kijName,
+                        origin: { id: srcInfo.origin_id, slot: srcInfo.origin_slot },
+                        target: { id: targetLink.target_id, slot: targetLink.target_slot },
+                        target_input_name: targetInputName,
+                    };
+                }
+                newNode.onRename?.();
             }
 
             // Decide whether to remove the original node.
@@ -3434,6 +3482,67 @@ function restoreDirectLinks(graph, options = {}) {
     const restoredGetIds = new Set();
     const keysWithFailures = new Set();
 
+    const legacyRestoreGet = (getNode, key, setNode) => {
+        if (!getNode || !setNode) return;
+
+        const setInputLink = setNode.inputs?.[0]?.link;
+        if (!setInputLink) return;
+        const setLink = _iamccsGetLink(graph, setInputLink);
+        if (!setLink) return;
+
+        const srcNode = getNodeById(graph, setLink.origin_id);
+        if (!srcNode) return;
+        const originSlot = setLink.origin_slot;
+
+        const getOutput = getNode.outputs?.[0];
+        if (!getOutput?.links?.length) return;
+
+        const outLinks = [...getOutput.links];
+        for (const linkId of outLinks) {
+            const outLink = _iamccsGetLink(graph, linkId);
+            if (!outLink) continue;
+
+            const dstNode = getNodeById(graph, outLink.target_id);
+            if (!dstNode) continue;
+            const ts = resolveTargetSlot(dstNode, { target: { slot: outLink.target_slot } });
+            if (ts == null) continue;
+
+            try {
+                const existingId = dstNode?.inputs?.[ts]?.link;
+                if (existingId != null) {
+                    const existing = _iamccsGetLink(graph, existingId);
+                    if (existing && _iamccsIdEq(existing.origin_id, srcNode.id) && Number(existing.origin_slot) === Number(originSlot)) {
+                        restored++;
+                        restoredGetIds.add(getNode.id);
+                        staleGetIds.add(getNode.id);
+                        continue;
+                    }
+                }
+            } catch {}
+
+            let ok = null;
+            const shouldReplace = isTargetCurrentlyFromGetNode(dstNode, ts, getNode.id);
+            if (shouldReplace) {
+                _iamccsDisconnectTargetInput(graph, dstNode, ts);
+                ok = safeConnect(srcNode, originSlot, dstNode, ts);
+            } else {
+                ok = safeConnect(srcNode, originSlot, dstNode, ts);
+            }
+            if (ok === null) {
+                failed++;
+                if (key) keysWithFailures.add(key);
+                continue;
+            }
+
+            if (opts.pruneTargetDuplicates) {
+                _iamccsRemoveOtherLinksToTarget(graph, dstNode.id, ts, ok);
+            }
+
+            restored++;
+            restoredGetIds.add(getNode.id);
+        }
+    };
+
     for (const getNode of getNodes) {
         const key = getAutolinkKey(getNode) || "";
         const md = getNode?.properties?.metadata;
@@ -3515,72 +3624,20 @@ function restoreDirectLinks(graph, options = {}) {
         restoredGetIds.add(getNode.id);
     }
 
-    if (restored === 0) {
-        console.warn("[IAMCCS AutoLink] No metadata restores performed; falling back to legacy restore");
+    const unresolvedGets = getNodes.filter(
+        getNode => !restoredGetIds.has(getNode.id) && !staleGetIds.has(getNode.id)
+    );
 
-        for (const [name, { set, gets }] of byName) {
-            if (!set || !gets.length) continue;
+    if (unresolvedGets.length > 0) {
+        console.warn(
+            `[IAMCCS AutoLink] ${unresolvedGets.length} Get nodes unresolved after metadata restore; trying legacy per-node fallback`
+        );
 
-            const setInputLink = set.inputs?.[0]?.link;
-            if (!setInputLink) continue;
-            const link = _iamccsGetLink(graph, setInputLink);
-            if (!link) continue;
-
-            const srcNode = getNodeById(graph, link.origin_id);
-            if (!srcNode) continue;
-            const originSlot = link.origin_slot;
-
-            for (const getNode of gets) {
-                const getOutput = getNode.outputs?.[0];
-                if (!getOutput?.links?.length) continue;
-
-                const outLinks = [...getOutput.links];
-                for (const linkId of outLinks) {
-                    const outLink = _iamccsGetLink(graph, linkId);
-                    if (!outLink) continue;
-
-                    const dstNode = getNodeById(graph, outLink.target_id);
-                    if (!dstNode) continue;
-                    const ts = resolveTargetSlot(dstNode, { target: { slot: outLink.target_slot } });
-                    if (ts == null) continue;
-
-                    // Already correct? Mark restored so we can remove the AutoLink nodes.
-                    try {
-                        const existingId = dstNode?.inputs?.[ts]?.link;
-                        if (existingId != null) {
-                            const existing = _iamccsGetLink(graph, existingId);
-                            if (existing && _iamccsIdEq(existing.origin_id, srcNode.id) && Number(existing.origin_slot) === Number(originSlot)) {
-                                restored++;
-                                restoredGetIds.add(getNode.id);
-                                staleGetIds.add(getNode.id);
-                                continue;
-                            }
-                        }
-                    } catch {}
-
-                    // Same non-destructive semantics as metadata restore.
-                    let ok = null;
-                    const shouldReplace = isTargetCurrentlyFromGetNode(dstNode, ts, getNode.id);
-                    if (shouldReplace) {
-                        _iamccsDisconnectTargetInput(graph, dstNode, ts);
-                        ok = safeConnect(srcNode, originSlot, dstNode, ts);
-                    } else {
-                        ok = safeConnect(srcNode, originSlot, dstNode, ts);
-                    }
-                    if (ok === null) {
-                        failed++;
-                        keysWithFailures.add(name);
-                        continue;
-                    }
-
-                    if (opts.pruneTargetDuplicates) {
-                        _iamccsRemoveOtherLinksToTarget(graph, dstNode.id, ts, ok);
-                    }
-
-                    restored++;
-                    restoredGetIds.add(getNode.id);
-                }
-            }
+        for (const getNode of unresolvedGets) {
+            const key = getAutolinkKey(getNode) || "";
+            const setNode = key ? keyToSet.get(key) : null;
+            if (!setNode) continue;
+            legacyRestoreGet(getNode, key, setNode);
         }
     }
 

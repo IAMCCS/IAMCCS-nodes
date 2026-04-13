@@ -11,6 +11,27 @@
 
 Versuin: 1.4.0
 
+## 🆕 Dataset Creation Workflow Companions
+
+The newer dataset creation workflows around `IAMCCS QE Prompt Enhancer` also now benefit from dedicated IAMCCS-nodes helpers on the generation side.
+
+Relevant nodes to include in workflow documentation:
+
+- `IAMCCS Qwen Multi-Gen` (`IAMCCS_QwenMultiGen`)
+  - Runs newline-separated prompt variants in a single Qwen image-edit execution loop.
+  - Keeps the same workflow-facing node type name used by earlier dataset creation graphs, so existing workflows can keep loading without JSON edits.
+
+- `Flux Klein Multi-Gen` (`IAMCCS_FluxKleinMultiGen`)
+  - Runs newline-separated prompt variants in a single Flux.2 Klein execution loop.
+  - Useful when one QE dataset slot needs to become a structured multi-view Flux batch without manually duplicating the whole sampling chain.
+
+- `Multiline Prompt Splitter (8 outputs)` (`IAMCCS_MultilinePromptSplitter8`)
+  - Splits one multiline STRING into `prompt_1` through `prompt_8` plus `count`.
+  - Supports optional fill modes such as `empty`, `repeat_last`, and `wrap`.
+  - Useful when a workflow needs explicit per-line routing into multiple text encoders or generation branches.
+
+These nodes are especially relevant if you want to present the full dataset creation ecosystem and not only the QE node itself.
+
 ## 🆕 LTX-2.3 audio extension modules + VAE RAM safers
 
 Version: 1.3.6

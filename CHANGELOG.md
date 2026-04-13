@@ -1,5 +1,7 @@
 # IAMCCS Nodes - Changelog
 
+## 🆕 2026-04-13 - version 1.4.1 — Multigen wrappers added
+
 ## 🆕 2026-03-27 - version 1.4.0 — Audio extension ltx-2.3
 
 Changes:

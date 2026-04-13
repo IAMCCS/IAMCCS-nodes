@@ -7,12 +7,17 @@
 
 from __future__ import annotations
 
+import gc
+import copy
+import inspect
+import importlib
 import logging
 import math
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import wave
 from collections.abc import Mapping
@@ -24,6 +29,34 @@ import torch.nn.functional as F
 
 
 _log = logging.getLogger("IAMCCS.LTX2.ExtensionModule")
+
+
+_SamplerCustomAdvanced = None
+try:
+    _SamplerCustomAdvanced = importlib.import_module(
+        "comfy_extras.nodes_custom_sampler"
+    ).SamplerCustomAdvanced
+except Exception:
+    _SamplerCustomAdvanced = None
+
+
+def _find_ltx_sampler_classes():
+    for module in list(sys.modules.values()):
+        if module is None:
+            continue
+        base_cls = getattr(module, "LTXVBaseSampler", None)
+        extend_cls = getattr(module, "LTXVExtendSampler", None)
+        if not inspect.isclass(base_cls) or not inspect.isclass(extend_cls):
+            continue
+        if not callable(base_cls) or not callable(extend_cls):
+            continue
+        if getattr(base_cls, "__module__", None) == "torch._ops":
+            continue
+        if getattr(extend_cls, "__module__", None) == "torch._ops":
+            continue
+        if base_cls is not None and extend_cls is not None:
+            return base_cls, extend_cls
+    return None, None
 
 
 def _resolve_output_path(path_value: str) -> str:
@@ -1765,9 +1798,39 @@ class IAMCCS_LTX2_GetImageFromBatch:
             report = f"Extracted last {effective_count} frames from batch of {total}"
         
         else:  # range
-            start_index = max(0, min(start_index, total))
-            end_index = max(start_index, min(end_index, total))
+            start_index = int(max(0, start_index))
+            end_index = int(max(0, end_index))
+
+            if total <= 0:
+                raise ValueError("IAMCCS_LTX2_GetImageFromBatch received an empty input batch")
+
+            if start_index >= int(total):
+                fallback_index = int(total) - 1
+                result = images[fallback_index:fallback_index + 1]
+                used_start = fallback_index
+                used_end = fallback_index + 1
+                report = (
+                    f"Requested range [{start_index}:{end_index}] exceeds batch of {total}; "
+                    f"falling back to last available frame [{used_start}:{used_end}]"
+                )
+                return (result, result.shape[0], report, used_start, used_end)
+
+            end_index = min(end_index, int(total))
+            if end_index <= start_index:
+                end_index = min(int(total), start_index + 1)
+
             result = images[start_index:end_index]
+            if int(result.shape[0]) <= 0:
+                fallback_index = min(start_index, int(total) - 1)
+                result = images[fallback_index:fallback_index + 1]
+                used_start = fallback_index
+                used_end = fallback_index + 1
+                report = (
+                    f"Requested range [{start_index}:{end_index}] produced no frames from batch of {total}; "
+                    f"falling back to nearest available frame [{used_start}:{used_end}]"
+                )
+                return (result, result.shape[0], report, used_start, used_end)
+
             actual_count = result.shape[0]
             used_start = int(start_index)
             used_end = int(end_index)

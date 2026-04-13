@@ -191,6 +191,104 @@ def _gpu_cleanup(unload_all: bool = True, soft_empty_cache: bool = True) -> None
         pass
 
 
+def _safe_get_process_memory_stats() -> dict[str, float | None]:
+    stats: dict[str, float | None] = {
+        "rss_gb": None,
+        "vms_gb": None,
+        "system_available_gb": None,
+    }
+    try:
+        import psutil  # type: ignore
+
+        process = psutil.Process(os.getpid())
+        mem = process.memory_info()
+        stats["rss_gb"] = _bytes_to_gb(getattr(mem, "rss", None))
+        stats["vms_gb"] = _bytes_to_gb(getattr(mem, "vms", None))
+        stats["system_available_gb"] = _bytes_to_gb(psutil.virtual_memory().available)
+    except Exception:
+        pass
+    return stats
+
+
+def _trim_process_working_set() -> tuple[bool, str]:
+    system_name = platform.system().lower()
+    if system_name == "windows":
+        try:
+            import ctypes
+
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            ok = False
+            try:
+                ok = bool(ctypes.windll.psapi.EmptyWorkingSet(handle))
+            except Exception:
+                ok = False
+            try:
+                ctypes.windll.kernel32.SetProcessWorkingSetSize(handle, -1, -1)
+                ok = True or ok
+            except Exception:
+                pass
+            return bool(ok), "windows_working_set_trim"
+        except Exception as exc:
+            return False, f"windows_trim_failed: {exc!r}"
+
+    if system_name == "linux":
+        try:
+            import ctypes
+
+            libc = ctypes.CDLL("libc.so.6")
+            if hasattr(libc, "malloc_trim"):
+                ok = bool(libc.malloc_trim(0))
+                return ok, "linux_malloc_trim"
+            return False, "linux_malloc_trim_unavailable"
+        except Exception as exc:
+            return False, f"linux_trim_failed: {exc!r}"
+
+    return False, f"trim_not_supported_on_{system_name or 'unknown'}"
+
+
+def _hard_memory_cleanup(
+    unload_all_models: bool = True,
+    soft_empty_cache: bool = True,
+    ipc_collect: bool = True,
+    trim_working_set: bool = True,
+    gc_passes: int = 3,
+) -> dict[str, Any]:
+    before = _safe_get_process_memory_stats()
+    trim_ok = False
+    trim_note = "not_requested"
+    gc_runs = max(1, int(gc_passes))
+
+    _gpu_cleanup(unload_all=bool(unload_all_models), soft_empty_cache=bool(soft_empty_cache))
+
+    if bool(ipc_collect) and torch.cuda.is_available():
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+
+    for _ in range(max(0, gc_runs - 1)):
+        gc.collect()
+
+    if bool(trim_working_set):
+        trim_ok, trim_note = _trim_process_working_set()
+        gc.collect()
+
+    after = _safe_get_process_memory_stats()
+    return {
+        "before": before,
+        "after": after,
+        "options": {
+            "unload_all_models": bool(unload_all_models),
+            "soft_empty_cache": bool(soft_empty_cache),
+            "ipc_collect": bool(ipc_collect),
+            "trim_working_set": bool(trim_working_set),
+            "gc_passes": gc_runs,
+        },
+        "trim_working_set_applied": bool(trim_ok),
+        "trim_note": trim_note,
+    }
+
+
 def _apply_fp16_accumulation(setting: str) -> tuple[bool | None, str | None]:
     """Returns (value_set, warning)."""
     if not hasattr(torch.backends, "cuda"):
@@ -1087,6 +1185,62 @@ class IAMCCS_VRAMCleanup:
     def run(self, unload_all_models, soft_empty_cache, model=None, clip=None, vae=None):
         _gpu_cleanup(unload_all=bool(unload_all_models), soft_empty_cache=bool(soft_empty_cache))
         return model, clip, vae
+
+
+class IAMCCS_HardMemoryPurge:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "unload_all_models": ("BOOLEAN", {"default": True}),
+                "soft_empty_cache": ("BOOLEAN", {"default": True}),
+                "ipc_collect": ("BOOLEAN", {"default": True}),
+                "trim_working_set": ("BOOLEAN", {"default": True}),
+                "gc_passes": ("INT", {"default": 3, "min": 1, "max": 10, "step": 1}),
+                "console_log": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "FLOAT", "FLOAT", "BOOLEAN")
+    RETURN_NAMES = ("report", "rss_before_gb", "rss_after_gb", "trim_applied")
+    FUNCTION = "run"
+    CATEGORY = "IAMCCS/HW"
+    OUTPUT_NODE = True
+
+    def run(self, unload_all_models, soft_empty_cache, ipc_collect, trim_working_set, gc_passes, console_log):
+        report = _hard_memory_cleanup(
+            unload_all_models=bool(unload_all_models),
+            soft_empty_cache=bool(soft_empty_cache),
+            ipc_collect=bool(ipc_collect),
+            trim_working_set=bool(trim_working_set),
+            gc_passes=int(gc_passes),
+        )
+
+        before_rss = report.get("before", {}).get("rss_gb")
+        after_rss = report.get("after", {}).get("rss_gb")
+        before_rss = float(before_rss) if before_rss is not None else -1.0
+        after_rss = float(after_rss) if after_rss is not None else -1.0
+
+        report_json = json.dumps(report, ensure_ascii=False, indent=2)
+        if console_log:
+            try:
+                log.info(
+                    "[IAMCCS_HardMemoryPurge] rss_before=%.3fGB rss_after=%.3fGB trim=%s note=%s",
+                    before_rss,
+                    after_rss,
+                    report.get("trim_working_set_applied"),
+                    report.get("trim_note"),
+                )
+                print(report_json, flush=True)
+            except Exception:
+                pass
+
+        return (
+            report_json,
+            before_rss,
+            after_rss,
+            bool(report.get("trim_working_set_applied")),
+        )
 
 
 class IAMCCS_VRAMFlushLatent:
