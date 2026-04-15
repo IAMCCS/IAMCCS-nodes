@@ -336,3 +336,88 @@ class IAMCCS_ImageResizeBatchSafe:
         if out_image is None:
             raise RuntimeError("Resize produced no output")
         return out_image, int(out_w), int(out_h), out_mask
+
+
+class IAMCCS_LoadResizeSegmentFromDir:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "directory": ("STRING", {"default": "iamccs_source_frames/source_video"}),
+                "mode": (["all", "from_start", "from_end", "range"], {"default": "range"}),
+                "count": ("INT", {"default": 9, "min": 1, "max": 100000, "step": 1}),
+                "start_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+                "end_index": ("INT", {"default": 9, "min": 0, "max": 100000, "step": 1}),
+                "width": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
+                "height": ("INT", {"default": 512, "min": 0, "max": MAX_RESOLUTION, "step": 1}),
+                "upscale_method": (IAMCCS_ImageResizeBatchSafe.upscale_methods, {"default": "lanczos"}),
+                "keep_proportion": (IAMCCS_ImageResizeBatchSafe.keep_proportion_modes, {"default": "crop"}),
+                "pad_color": ("STRING", {"default": "0, 0, 0"}),
+                "crop_position": (IAMCCS_ImageResizeBatchSafe.crop_positions, {"default": "center"}),
+                "divisible_by": ("INT", {"default": 2, "min": 0, "max": 512, "step": 1}),
+            },
+            "optional": {
+                "count_in": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+                "start_index_in": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+                "end_index_in": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+                "device": (["cpu", "gpu"], {"default": "cpu"}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "INT", "INT", "INT", "STRING")
+    RETURN_NAMES = ("images", "width", "height", "batch_size", "report")
+    FUNCTION = "load_resize"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    def load_resize(
+        self,
+        directory,
+        mode,
+        count,
+        start_index,
+        end_index,
+        width,
+        height,
+        upscale_method,
+        keep_proportion,
+        pad_color,
+        crop_position,
+        divisible_by,
+        count_in=None,
+        start_index_in=None,
+        end_index_in=None,
+        device="cpu",
+    ):
+        from .iamccs_ltx2_extension_module import IAMCCS_LoadImagesFromDirLite
+
+        images, _, load_report = IAMCCS_LoadImagesFromDirLite().load(
+            directory=directory,
+            mode=mode,
+            count=count,
+            start_index=start_index,
+            end_index=end_index,
+            count_in=count_in,
+            start_index_in=start_index_in,
+            end_index_in=end_index_in,
+        )
+
+        resized, out_width, out_height, _ = IAMCCS_ImageResizeBatchSafe().resize(
+            image=images,
+            width=width,
+            height=height,
+            upscale_method=upscale_method,
+            keep_proportion=keep_proportion,
+            pad_color=pad_color,
+            crop_position=crop_position,
+            divisible_by=divisible_by,
+            unique_id="iamccs_load_resize_segment_from_dir",
+            mask=None,
+            device=device,
+        )
+
+        batch_size = int(resized.shape[0]) if torch.is_tensor(resized) and resized.ndim >= 1 else 0
+        report = (
+            f"{load_report} | resized={batch_size} frames "
+            f"to {int(out_width)}x{int(out_height)} via {upscale_method}/{keep_proportion}"
+        )
+        return resized, int(out_width), int(out_height), int(batch_size), report

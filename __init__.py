@@ -88,6 +88,15 @@ from .iamccs_wan_svipro_motion import (
     IAMCCS_WanPrevTailPrep,
 )
 
+from .iamccs_wan_long_length import (
+    IAMCCS_WanLongPlanner,
+    IAMCCS_WanContinuityGuide,
+    IAMCCS_WanPromptPhasePlanner,
+    IAMCCS_WanPromptLoopInfo,
+    IAMCCS_WanIndexedPromptEncode,
+    IAMCCS_WanImageBatchFrameSelect,
+)
+
 from .iamccs_wan_svipro_motion_legacy import (
     WanImageMotionProLegacy,
 )
@@ -109,6 +118,11 @@ from .iamccs_sampler_advanced_v1 import (
 
 from .iamccs_bus_group import (
     IAMCCS_bus_group,
+)
+
+from .iamccs_image_resize import (
+    IAMCCS_ImageResizeBatchSafe,
+    IAMCCS_LoadResizeSegmentFromDir,
 )
 
 from .iamccs_multiswitch import (
@@ -160,6 +174,7 @@ from .iamccs_ltx2_segment_queue import (
     IAMCCS_LTX2_LastFrameBridgeSave,
     IAMCCS_LTX2_LoadLatentBridge,
     IAMCCS_LTX2_LongVideoWrapperPrep,
+    IAMCCS_LTX2_LongVideoWrapperPrepDisk,
     IAMCCS_LTX2_SaveLatentBridge,
     IAMCCS_LTX2_SegmentQueueLoop,
 )
@@ -254,6 +269,12 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_WanSVIToFLFBridgeProPlus_Simple": IAMCCS_WanSVIToFLFBridgeProPlus_Simple,
     "WanMotionProTrimmer": WanMotionProTrimmer,
     "IAMCCS_WanPrevTailPrep": IAMCCS_WanPrevTailPrep,
+    "IAMCCS_WanLongPlanner": IAMCCS_WanLongPlanner,
+    "IAMCCS_WanContinuityGuide": IAMCCS_WanContinuityGuide,
+    "IAMCCS_WanPromptPhasePlanner": IAMCCS_WanPromptPhasePlanner,
+    "IAMCCS_WanPromptLoopInfo": IAMCCS_WanPromptLoopInfo,
+    "IAMCCS_WanIndexedPromptEncode": IAMCCS_WanIndexedPromptEncode,
+    "IAMCCS_WanImageBatchFrameSelect": IAMCCS_WanImageBatchFrameSelect,
     
     "IAMCCS_SetAutoLink": IAMCCS_SetAutoLink,
     "IAMCCS_GetAutoLink": IAMCCS_GetAutoLink,
@@ -294,9 +315,11 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_LastFrameBridgeLoad": IAMCCS_LTX2_LastFrameBridgeLoad,
     "IAMCCS_LTX2_LoadLatentBridge": IAMCCS_LTX2_LoadLatentBridge,
     "IAMCCS_LTX2_LongVideoWrapperPrep": IAMCCS_LTX2_LongVideoWrapperPrep,
+    "IAMCCS_LTX2_LongVideoWrapperPrepDisk": IAMCCS_LTX2_LongVideoWrapperPrepDisk,
     "IAMCCS_LTX2_SaveLatentBridge": IAMCCS_LTX2_SaveLatentBridge,
     "IAMCCS_LTX2_SegmentQueueLoop": IAMCCS_LTX2_SegmentQueueLoop,
     "IAMCCS_ImageResizeBatchSafe": IAMCCS_ImageResizeBatchSafe,
+    "IAMCCS_LoadResizeSegmentFromDir": IAMCCS_LoadResizeSegmentFromDir,
     "IAMCCS_IntValueMonitor": IAMCCS_IntValueMonitor,
     "IAMCCS_QwenMultiGen": IAMCCS_QwenMultiGen,
     "IAMCCS_FluxKleinMultiGen": IAMCCS_FluxKleinMultiGen,
@@ -371,6 +394,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_WanSVIToFLFBridgeProPlus_Simple": "Wan SVI→FLF Bridge Pro Plus",
     "WanMotionProTrimmer": "WanMotionProTrimmer (trim overshoot tail)",
     "IAMCCS_WanPrevTailPrep": "Wan Prev Tail Prep",
+    "IAMCCS_WanLongPlanner": "Wan Long Planner",
+    "IAMCCS_WanContinuityGuide": "Wan Continuity Guide",
+    "IAMCCS_WanPromptPhasePlanner": "Wan Prompt Phase Planner",
+    "IAMCCS_WanPromptLoopInfo": "Wan Prompt Loop Info",
+    "IAMCCS_WanIndexedPromptEncode": "Wan Indexed Prompt Encode",
+    "IAMCCS_WanImageBatchFrameSelect": "Wan Image Batch Frame Select",
     
     "IAMCCS_SetAutoLink": "Set AutoLink",
     "IAMCCS_GetAutoLink": "Get AutoLink",
@@ -419,9 +448,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_LastFrameBridgeLoad": "LTX-2 Last Frame Bridge Load 🖼️",
     "IAMCCS_LTX2_LoadLatentBridge": "LTX-2 Load Latent Bridge 🧬",
     "IAMCCS_LTX2_LongVideoWrapperPrep": "LTX-2 Long Video Wrapper Prep 🧰",
+    "IAMCCS_LTX2_LongVideoWrapperPrepDisk": "LTX-2 Long Video Wrapper Prep (Disk) 💾🧰",
     "IAMCCS_LTX2_SaveLatentBridge": "LTX-2 Save Latent Bridge 💾",
     "IAMCCS_LTX2_SegmentQueueLoop": "LTX-2 Segment Queue Loop 🔁",
     "IAMCCS_ImageResizeBatchSafe": "Image Resize Batch Safe (IAMCCS)",
+    "IAMCCS_LoadResizeSegmentFromDir": "Load + Resize Segment From Dir 🧰",
 
     # QwenVL FLF
     **({"IAMCCS_QWEN_VL_FLF":          "QwenVL FLF — First/Last Frame Prompt 🎬",

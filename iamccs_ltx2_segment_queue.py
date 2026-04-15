@@ -812,6 +812,148 @@ class IAMCCS_LTX2_LongVideoWrapperPrep:
         )
 
 
+class IAMCCS_LTX2_LongVideoWrapperPrepDisk(IAMCCS_LTX2_LongVideoWrapperPrep):
+    # Carmine Cristallo Scalzi AI reasearch (IAMCCS) - patreon.com/IAMCCS
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "frames_dir": ("STRING", {"default": "iamccs_source_frames/source_video"}),
+                "song_duration_s": ("FLOAT", {"default": 180.0, "min": 0.01, "max": 36000.0, "step": 0.01}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 0.001, "max": 240.0, "step": 0.01}),
+                "segment_duration_s": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 3600.0, "step": 0.01}),
+                "segment_index": ("INT", {"default": 0, "min": 0, "max": 1000000, "step": 1}),
+            },
+            "optional": {
+                "render_id": ("STRING", {"default": ""}),
+                "bridge_name": ("STRING", {"default": "ltx2_detailer_bridge"}),
+                "use_bridge_anchor": ("BOOLEAN", {"default": False}),
+                "planning_mode": (["manual_segment_seconds", "auto_profile"], {"default": "manual_segment_seconds"}),
+                "content_profile": (["videoclip", "monologue"], {"default": "videoclip"}),
+                "overlap_frames": ("INT", {"default": 9, "min": 0, "max": 4096, "step": 1}),
+                "ltx_round_mode": (["up", "nearest", "down"], {"default": "up"}),
+                "head_k_frames": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1}),
+                "head_mode": (["hard_lock", "linear_blend", "ramp"], {"default": "hard_lock"}),
+                "head_blend_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.05}),
+                "min_frames": ("INT", {"default": 25, "min": 1, "max": 1000000, "step": 1}),
+                "min_frames_mode": (["repeat_last", "error"], {"default": "repeat_last"}),
+                "min_frames_ltx_fix": (["none", "up", "down", "nearest"], {"default": "up"}),
+            },
+        }
+
+    FUNCTION = "prepare_disk"
+
+    def prepare_disk(
+        self,
+        frames_dir,
+        song_duration_s,
+        fps,
+        segment_duration_s,
+        segment_index,
+        render_id="",
+        bridge_name="ltx2_detailer_bridge",
+        use_bridge_anchor=False,
+        planning_mode="manual_segment_seconds",
+        content_profile="videoclip",
+        overlap_frames=0,
+        ltx_round_mode="up",
+        head_k_frames=1,
+        head_mode="hard_lock",
+        head_blend_strength=1.0,
+        min_frames=25,
+        min_frames_mode="repeat_last",
+        min_frames_ltx_fix="up",
+    ):
+        from .iamccs_ltx2_extension_module import IAMCCS_LoadImagesFromDirLite
+        from .iamccs_ltx2_tools import IAMCCS_SegmentPlanner, IAMCCS_SourceRangeFromSegmentPlan
+
+        plan = IAMCCS_SegmentPlanner().plan(
+            song_duration_s=float(song_duration_s),
+            fps=float(fps),
+            segment_duration_s=float(segment_duration_s),
+            planning_mode=str(planning_mode),
+            content_profile=str(content_profile),
+            overlap_frames=int(overlap_frames),
+            ltx_round_mode=str(ltx_round_mode),
+            segment_index=int(segment_index),
+        )
+
+        total_segments = int(plan[4])
+        continuation_raw_frames = int(plan[3])
+        current_segment = int(plan[8])
+        current_segment_raw_frames = int(plan[9])
+        current_segment_unique_frames = int(plan[10])
+        current_segment_start_frames = int(plan[11])
+        trim_head_frames = max(0, current_segment_raw_frames - current_segment_unique_frames)
+        continuation_trim_head_frames = max(0, continuation_raw_frames - current_segment_unique_frames)
+        plan_report = str(plan[7])
+        plan_segment_report = str(plan[16])
+
+        range_info = IAMCCS_SourceRangeFromSegmentPlan().derive(
+            segment_index=current_segment,
+            current_segment_raw_frames=current_segment_raw_frames,
+            current_segment_unique_frames=current_segment_unique_frames,
+            current_segment_start_frames=current_segment_start_frames,
+        )
+        range_start_index = int(range_info[0])
+        range_end_index = int(range_info[1])
+
+        load_result = IAMCCS_LoadImagesFromDirLite().load(
+            directory=str(frames_dir),
+            mode="range",
+            count=int(current_segment_raw_frames),
+            start_index=int(range_start_index),
+            end_index=int(range_end_index),
+        )
+        segment_images = self._ensure_image_batch(load_result[0])
+        load_report = str(load_result[2])
+        fallback_image = self._first_frame(segment_images)
+        bridge_report = "bridge=disabled"
+        active_render_id = str(render_id or "").strip() or uuid.uuid4().hex[:10]
+        use_bridge_anchor = bool(use_bridge_anchor)
+        if use_bridge_anchor and current_segment > 0 and active_render_id:
+            bridge_path = _bridge_path(str(bridge_name), active_render_id)
+            if bridge_path.exists():
+                fallback_image = _load_png(bridge_path)
+                bridge_report = f"bridge=loaded:{bridge_path.name}"
+            else:
+                bridge_report = f"bridge=missing:{bridge_path.name},fallback"
+        elif current_segment <= 0:
+            bridge_report = "bridge=initial_segment"
+
+        anchored_images = segment_images
+        if use_bridge_anchor:
+            anchored_images = self._apply_head_anchor(
+                segment_images,
+                fallback_image,
+                k_frames=int(head_k_frames),
+                mode=str(head_mode),
+                blend_strength=float(head_blend_strength),
+            )
+        final_images, final_frames, min_report = self._ensure_min_frames(
+            anchored_images,
+            min_frames=int(min_frames),
+            mode=str(min_frames_mode),
+            ltx_fix=str(min_frames_ltx_fix),
+        )
+
+        segment_report = (
+            f"{plan_segment_report} | range=[{range_start_index}..{range_end_index}) | "
+            f"load={load_report} | bridge={bridge_report} | trim_head={trim_head_frames}f | "
+            f"prepared_frames={final_frames} | {min_report}"
+        )
+        return (
+            final_images,
+            current_segment,
+            total_segments,
+            segment_report,
+            plan_report,
+            int(trim_head_frames),
+            active_render_id,
+            int(continuation_trim_head_frames),
+        )
+
+
 class IAMCCS_LTX2_SegmentQueueLoop:
     # Carmine Cristallo Scalzi AI reasearch (IAMCCS) - patreon.com/IAMCCS
     @classmethod

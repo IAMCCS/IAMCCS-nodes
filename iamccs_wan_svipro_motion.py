@@ -120,7 +120,14 @@ def _extract_prev_motion_tail(
     trimmed/aligned before being reused as SVI motion continuity.
     """
 
+    _log = logging.getLogger("IAMCCS.WanPrevTail")
+
     if prev_samples is None or motion_latent_count == 0:
+        _log.info(
+            "[WanPrevTail] skipped: prev_connected=%s motion_latent_count=%s",
+            prev_samples is not None,
+            int(motion_latent_count),
+        )
         return None, 0, 0, 0
 
     prev_latent = prev_samples["samples"].clone()
@@ -129,11 +136,22 @@ def _extract_prev_motion_tail(
     usable_t = max(0, t_prev - skip_last_slots)
 
     if usable_t <= 0:
+        _log.warning(
+            "[WanPrevTail] unusable prev tail: t_prev=%s skip_last_slots=%s -> usable_t=%s",
+            t_prev,
+            skip_last_slots,
+            usable_t,
+        )
         return None, 0, t_prev, 0
 
     prev_usable = prev_latent[:, :, :usable_t]
     motion_count = min(int(motion_latent_count), int(prev_usable.shape[2]))
     if motion_count <= 0:
+        _log.warning(
+            "[WanPrevTail] motion_count resolved to zero: requested=%s usable_t=%s",
+            int(motion_latent_count),
+            int(prev_usable.shape[2]),
+        )
         return None, 0, t_prev, usable_t
 
     if tail_pick_mode == "first_usable":
@@ -157,6 +175,16 @@ def _extract_prev_motion_tail(
         except Exception:
             pass
 
+    _log.info(
+        "[WanPrevTail] extracted tail_pick_mode=%s skip_last_slots=%s requested=%s -> motion_count=%s | prev_T=%s usable_prev_T=%s | out_shape=%s",
+        str(tail_pick_mode),
+        int(skip_last_slots),
+        int(motion_latent_count),
+        int(motion_count),
+        int(t_prev),
+        int(usable_t),
+        tuple(motion_tail.shape),
+    )
     return motion_tail, motion_count, t_prev, usable_t
 
 

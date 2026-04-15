@@ -639,14 +639,6 @@ class IAMCCS_HwSupporter:
                         "tooltip": "Reserved VRAM in GB (manual mode). If profile=auto and this is 0, the node chooses a conservative value.",
                     },
                 ),
-                "reserved_vram_auto_headroom_gb": (
-                    "FLOAT",
-                    {"default": 1.0, "min": -2.0, "max": 24.0, "step": 0.25, "tooltip": "(auto_used_plus) headroom added on top of currently used VRAM"},
-                ),
-                "reserved_vram_auto_max_gb": (
-                    "FLOAT",
-                    {"default": 0.0, "min": 0.0, "max": 48.0, "step": 0.25, "tooltip": "(auto_used_plus) max reserved cap, 0 = no cap"},
-                ),
                 "sage_attention": (_SAGE_ATTN_MODES, {"default": "auto"}),
                 "allow_sageattention_torch_compile": ("BOOLEAN", {"default": False}),
                 "torch_compile_mode": (
@@ -1686,11 +1678,28 @@ class IAMCCS_VAEDecodeToDisk:
                         "tooltip": "If enabled, runs a light cache cleanup after each frame decode (slower, lower peak VRAM).",
                     },
                 ),
+                "clear_existing": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "If enabled, clears older files with the same prefix in output_dir before writing. Default True preserves the legacy behavior used by older workflows; disable only for append/loop workflows.",
+                    },
+                ),
+                "start_number": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 100000000,
+                        "step": 1,
+                        "tooltip": "Starting frame number used when naming written files. Leave at 0 for legacy behavior; increase or wire it only for append/loop workflows.",
+                    },
+                ),
             }
         }
 
-    RETURN_TYPES = ("STRING", "INT")
-    RETURN_NAMES = ("frames_dir", "frames_saved")
+    RETURN_TYPES = ("STRING", "INT", "INT")
+    RETURN_NAMES = ("frames_dir", "frames_saved", "next_start_number")
     FUNCTION = "decode_to_disk"
     CATEGORY = "IAMCCS/HW"
 
@@ -1715,6 +1724,8 @@ class IAMCCS_VAEDecodeToDisk:
         seam_debug_export: bool,
         seam_debug_dir: str,
         cleanup_between_frames: bool,
+        clear_existing: bool,
+        start_number: int,
     ):
         try:
             from PIL import Image  # type: ignore
@@ -1745,24 +1756,24 @@ class IAMCCS_VAEDecodeToDisk:
         if bool(seam_debug_export):
             os.makedirs(seam_run_dir, exist_ok=True)
 
-        # IMPORTANT: ensure a clean frame sequence per run.
-        # If previous runs left extra frames (e.g. a prior 10-minute decode), loaders
-        # that read the whole directory will concatenate stale tail frames, producing
-        # "pieces attached" / wrong duration results.
-        try:
-            pfx = f"{prefix}_"
-            for name in os.listdir(out_dir):
-                name_l = name.lower()
-                if not name.startswith(pfx):
-                    continue
-                if not (name_l.endswith(".png") or name_l.endswith(".jpg") or name_l.endswith(".jpeg")):
-                    continue
-                try:
-                    os.remove(os.path.join(out_dir, name))
-                except Exception:
-                    pass
-        except Exception as _e:
-            log.warning("[IAMCCS_VAEDecodeToDisk] failed to cleanup old frames in %s: %s", out_dir, _e)
+        start_number = max(0, int(start_number))
+
+        # IMPORTANT: optionally ensure a clean frame sequence per run.
+        if bool(clear_existing):
+            try:
+                pfx = f"{prefix}_"
+                for name in os.listdir(out_dir):
+                    name_l = name.lower()
+                    if not name.startswith(pfx):
+                        continue
+                    if not (name_l.endswith(".png") or name_l.endswith(".jpg") or name_l.endswith(".jpeg")):
+                        continue
+                    try:
+                        os.remove(os.path.join(out_dir, name))
+                    except Exception:
+                        pass
+            except Exception as _e:
+                log.warning("[IAMCCS_VAEDecodeToDisk] failed to cleanup old frames in %s: %s", out_dir, _e)
 
         # Detect video VAE compression if supported.
         compression = 8
@@ -1882,7 +1893,7 @@ class IAMCCS_VAEDecodeToDisk:
                 chunk_lat, overlap_lat, chunk_lat * tc, overlap_img,
             )
 
-            frame_idx = 0
+            frame_idx = int(start_number)
             for t_start in range(0, t_lat, chunk_lat):
                 t_end = min(t_lat, t_start + chunk_lat)
                 is_first = (t_start == 0)
@@ -1938,6 +1949,6 @@ class IAMCCS_VAEDecodeToDisk:
             # Image latent: [B, C, H, W]
             img = _decode_full(latents)
             img = _flatten_to_4d(img)
-            frames_saved += _save_frames(img.float(), 0)
+            frames_saved += _save_frames(img.float(), int(start_number))
 
-        return (out_dir, int(frames_saved))
+        return (out_dir, int(frames_saved), int(start_number + frames_saved))
