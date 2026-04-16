@@ -215,6 +215,7 @@ Outputs:
 
 Highlights:
 - Added `LoRA Stack (Model In→Out) WAN` node: directly applies up to 4 WAN / Flow / Standard LoRAs to an incoming MODEL and outputs a patched MODEL (ideal for WAN 2.2 workflows where a single node step is preferred).
+- Added `LoRA Schedule (WAN, ranged)` node: activates extra LoRA stacks by generation index, with optional open-ended ranges for long loop workflows.
 - Extended internal WAN key remapping for seamless WAN 2.2 (Flow) + WAN 2.1 cross-compatibility.
 - Version bump across project files.
 
@@ -240,6 +241,37 @@ Recommended Use (WAN 2.2 workflows):
 4. Connect output to KSampler / Animate nodes.
 
 Why this node: Eliminates one extra node hop, reduces graph complexity and clarifies model lineage in large animation workflows.
+
+### Additional Node: LoRA Schedule (WAN, ranged)
+
+Use this node when a WAN loop needs always-on LoRAs plus extra LoRAs that only apply on specific generations or generation ranges.
+
+Typical setup:
+1. Keep your main always-on LoRAs in `IAMCCS_WanLoRAStack` or `IAMCCS_WanLoRAStackModelIO`.
+2. Build extra LoRA stacks for alternate phases.
+3. Feed the loop `index` into `generation_index`.
+4. Set `slot_01_start/end`, `slot_02_start/end`, etc. to define which extra stack is active on which generations.
+5. Send the scheduler `lora` output into the optional `lora` input of your main WAN LoRA stack node.
+
+Notes:
+- `default_lora` stays active on every generation.
+- `end = -1` means "from this generation onward".
+- Multiple active slots stack together, so you can layer phase LoRAs if ranges overlap.
+
+Preset behavior:
+- `manual_range`: uses `start/end`; if `end = -1`, the slot stays active from `start` onward.
+- `all_generations`: always active.
+- `only_first`: active only on generation `0`.
+- `all_nonfirst`: active from generation `1` onward.
+- `even_generations`: active on `0, 2, 4, ...`.
+- `odd_generations`: active on `1, 3, 5, ...`.
+- `every_2_from_start`: active on `start, start+2, start+4, ...`.
+- `every_3_from_start`: active on `start, start+3, start+6, ...`.
+
+Logging:
+- Each execution logs the current `generation_index`.
+- Logs show the always-on `default_lora` entries.
+- Logs show each active slot, the preset that matched, and the actual LoRA names/strengths injected on that generation.
 
 ## Previous Versions
 

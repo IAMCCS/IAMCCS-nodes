@@ -5,9 +5,86 @@
 # ===============================================================
 
 import logging
+from collections import OrderedDict
+
 import comfy.utils
 import comfy.sd
 import folder_paths
+
+
+_STATE_DICT_CACHE: OrderedDict[tuple[str, str], dict] = OrderedDict()
+_PATCHED_MODEL_CACHE: OrderedDict[tuple[int, tuple[tuple[str, float], ...]], object] = OrderedDict()
+_MAX_STATE_DICT_CACHE = 16
+_MAX_PATCHED_MODEL_CACHE = 8
+
+
+def _lora_stack_debug_summary(lora) -> str:
+    if not lora:
+        return "empty"
+
+    parts = []
+    for entry in lora:
+        name = str(entry.get("name") or "unnamed")
+        strength = float(entry.get("strength", 0.0) or 0.0)
+        origin = str(entry.get("_iamccs_lora_origin") or "manual")
+        generation_index = entry.get("_iamccs_generation_index")
+        slot = entry.get("_iamccs_schedule_slot")
+        rule = str(entry.get("_iamccs_schedule_rule") or "")
+
+        extras = [origin]
+        if generation_index is not None:
+            extras.append(f"gen={generation_index}")
+        if slot is not None:
+            extras.append(f"slot={int(slot):02d}")
+        if rule:
+            extras.append(rule)
+
+        parts.append(f"{name}({strength}) [{' | '.join(extras)}]")
+
+    return "; ".join(parts)
+
+
+def _lora_stack_debug_context(lora) -> str:
+    if not lora:
+        return ""
+
+    prompt_ids = sorted({str(entry.get("_iamccs_prompt_id") or "") for entry in lora if entry.get("_iamccs_prompt_id")})
+    schedule_nodes = sorted({str(entry.get("_iamccs_schedule_node_id") or "") for entry in lora if entry.get("_iamccs_schedule_node_id")})
+    schedule_names = sorted({str(entry.get("_iamccs_schedule_log_prefix") or "") for entry in lora if entry.get("_iamccs_schedule_log_prefix")})
+    generation_indexes = sorted({int(entry.get("_iamccs_generation_index")) for entry in lora if entry.get("_iamccs_generation_index") is not None})
+
+    parts = []
+    if prompt_ids:
+        parts.append(f"prompt={','.join(prompt_ids)}")
+    if schedule_nodes:
+        parts.append(f"schedule_node={','.join(schedule_nodes)}")
+    if schedule_names:
+        parts.append(f"schedule={','.join(schedule_names)}")
+    if generation_indexes:
+        parts.append(f"generation={','.join(str(value) for value in generation_indexes)}")
+    return " | ".join(parts)
+
+
+def _cache_put(cache: OrderedDict, key, value, max_size: int):
+    cache[key] = value
+    cache.move_to_end(key)
+    while len(cache) > max_size:
+        cache.popitem(last=False)
+
+
+def _state_dict_for_lora(name: str, model_type: str) -> dict:
+    cache_key = (str(name), str(model_type or "flow"))
+    cached = _STATE_DICT_CACHE.get(cache_key)
+    if cached is not None:
+        _STATE_DICT_CACHE.move_to_end(cache_key)
+        return cached
+
+    path = folder_paths.get_full_path_or_raise("loras", name)
+    sd = comfy.utils.load_torch_file(path, safe_load=True)
+    if model_type != "standard":
+        sd = standardize_wan_lora_keys(sd)
+    _cache_put(_STATE_DICT_CACHE, cache_key, sd, _MAX_STATE_DICT_CACHE)
+    return sd
 
 
 # --- Log Filter per sopprimere spam img_* e diff_m keys ---
@@ -139,10 +216,7 @@ class IAMCCS_WanLoRAStack:
             # Skip if "no" selected or strength is 0
             if not name or name == "no" or strength == 0.0:
                 continue
-            path = folder_paths.get_full_path_or_raise("loras", name)
-            sd = comfy.utils.load_torch_file(path, safe_load=True)
-            if model_type != "standard":
-                sd = standardize_wan_lora_keys(sd)
+            sd = _state_dict_for_lora(name, model_type)
             loras.append({"name": name, "strength": strength, "state_dict": sd})
 
         # Concatena la stack LORA opzionale se fornita
@@ -182,7 +256,25 @@ class IAMCCS_ModelWithLoRA:
         if not lora:
             return (model,)
 
+        stack_context = _lora_stack_debug_context(lora)
+        stack_summary = _lora_stack_debug_summary(lora)
+        signature = tuple((str(entry.get("name") or ""), float(entry.get("strength", 0.0) or 0.0)) for entry in lora)
+        cache_key = (id(model), signature)
+        cached_model = _PATCHED_MODEL_CACHE.get(cache_key)
+        if cached_model is not None:
+            _PATCHED_MODEL_CACHE.move_to_end(cache_key)
+            if stack_context:
+                logging.info(f"[IAMCCS_ModelWithLoRA] ♻ cache hit: {len(signature)} LoRA(s) reused | {stack_context}")
+            else:
+                logging.info(f"[IAMCCS_ModelWithLoRA] ♻ cache hit: {len(signature)} LoRA(s) reused")
+            logging.info(f"[IAMCCS_ModelWithLoRA] active_stack={stack_summary}")
+            return (cached_model,)
+
         model_out = model
+
+        if stack_context:
+            logging.info(f"[IAMCCS_ModelWithLoRA] apply request | {stack_context}")
+        logging.info(f"[IAMCCS_ModelWithLoRA] active_stack={stack_summary}")
 
         # Installa filtro per sopprimere spam di chiavi opzionali (img_*, diff_m, ecc.)
         logger = logging.getLogger()
@@ -200,6 +292,8 @@ class IAMCCS_ModelWithLoRA:
             if optional_filter.suppressed_count > 0:
                 keys_types = ", ".join(sorted(optional_filter.suppressed_keys))
                 logging.info(f"[IAMCCS_ModelWithLoRA] ℹ {optional_filter.suppressed_count} optional keys not present in LORA ({keys_types})")
+
+            _cache_put(_PATCHED_MODEL_CACHE, cache_key, model_out, _MAX_PATCHED_MODEL_CACHE)
 
         finally:
             # Rimuovi filtro

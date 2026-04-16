@@ -19,6 +19,9 @@ from .iamccs_wan_lora_stack import (
 from .iamccs_wan_lora_stack_simple import (
     IAMCCS_WanLoRAStackModelIO,
 )
+from .iamccs_wan_lora_schedule import (
+    IAMCCS_WanLoRASchedule,
+)
 
 from .iamccs_ltx2_lora_stack import (
     IAMCCS_LTX2_LoRAStack,
@@ -204,6 +207,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_WanLoRAStack": IAMCCS_WanLoRAStack,
     "IAMCCS_ModelWithLoRA": IAMCCS_ModelWithLoRA,
     "IAMCCS_WanLoRAStackModelIO": IAMCCS_WanLoRAStackModelIO,
+    "IAMCCS_WanLoRASchedule": IAMCCS_WanLoRASchedule,
     # Backward-compatible key (kept as-is for existing workflows)
     "iamccs_ltx2_lora_stack": IAMCCS_LTX2_LoRAStack,
     # Preferred explicit names
@@ -336,6 +340,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_WanLoRAStack": "LoRA Stack (WAN-style remap)",
     "IAMCCS_ModelWithLoRA": "Apply LoRA to MODEL (Native)",
     "IAMCCS_WanLoRAStackModelIO": "LoRA Stack (Model In→Out) WAN",
+    "IAMCCS_WanLoRASchedule": "LoRA Schedule (WAN, ranged)",
     "iamccs_ltx2_lora_stack": "iamccs_ltx2_lora_stack (3 slots)",
     "IAMCCS_LTX2_LoRAStack": "LoRA Stack (LTX-2, 3 slots)",
     "IAMCCS_LTX2_LoRAStackStaged": "LoRA Stack (LTX-2, staged: stage1+stage2) (BETA)",

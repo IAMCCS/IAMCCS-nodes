@@ -3,7 +3,7 @@ import { app } from "../../scripts/app.js";
 const SEED_MODES = new Set(["fixed", "randomize", "increment", "decrement"]);
 const NODE_DEFAULTS = {
     IAMCCS_QwenMultiGen: [0, "randomize", 4, 1, "euler", "simple", 1, "\\n", "index_timestep_zero", "qwen_multi", true],
-    IAMCCS_FluxKleinMultiGen: [0, "randomize", 8, 1, "euler", "\\n", "index_timestep_zero", 1, "lanczos", "", "flux_klein_multi", false],
+    IAMCCS_FluxKleinMultiGen: [0, "randomize", 8, 1, "euler", "\\n", "workflow_default", 1, "nearest-exact", "", "flux_klein_multi", false, 1, 720, 1024, false, "flux_klein_debug"],
 };
 
 function isFiniteNumber(value) {
