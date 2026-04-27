@@ -13,7 +13,6 @@ import wave
 from pathlib import Path
 
 import numpy as np
-import server
 import torch
 from comfy.cli_args import args
 from comfy_api.latest import Types
@@ -248,11 +247,17 @@ def _infer_output_nodes(prompt):
     return outputs
 
 
-def _get_current_queue_item():
+def _get_prompt_server_instance():
+    import server  # type: ignore[import]
+
     prompt_server = getattr(server.PromptServer, "instance", None)
     if prompt_server is None or getattr(prompt_server, "prompt_queue", None) is None:
         raise RuntimeError("PromptServer prompt queue is unavailable")
+    return prompt_server
 
+
+def _get_current_queue_item():
+    prompt_server = _get_prompt_server_instance()
     currently_running = getattr(prompt_server.prompt_queue, "currently_running", {})
     if not currently_running:
         raise RuntimeError("No currently running prompt was found")
@@ -267,10 +272,7 @@ def _get_current_queue_item():
 
 
 def _enqueue_prompt(prompt, extra_data=None, outputs_to_execute=None, sensitive=None):
-    prompt_server = getattr(server.PromptServer, "instance", None)
-    if prompt_server is None or getattr(prompt_server, "prompt_queue", None) is None:
-        raise RuntimeError("PromptServer prompt queue is unavailable")
-
+    prompt_server = _get_prompt_server_instance()
     prompt_queue = prompt_server.prompt_queue
     prompt = _normalize_prompt_keys(prompt)
 
@@ -296,7 +298,7 @@ def _enqueue_prompt(prompt, extra_data=None, outputs_to_execute=None, sensitive=
 
     number = -prompt_server.number
     prompt_server.number += 1
-    prompt_id = str(server.uuid.uuid4())
+    prompt_id = str(uuid.uuid4())
     log.info("[IAMCCS LTX2] Queueing next segment prompt %s with outputs %s", prompt_id, outputs_to_execute)
     prompt_queue.put((number, prompt_id, prompt, extra_data, outputs_to_execute, sensitive))
 
