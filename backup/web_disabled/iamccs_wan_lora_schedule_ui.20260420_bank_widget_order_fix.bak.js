@@ -1,4 +1,4 @@
-﻿import { app } from "../../scripts/app.js";
+import { app } from "../../scripts/app.js";
 
 const NODE_NAME = "IAMCCS_WanLoRASchedule";
 const NODE_NAMES = new Set([
@@ -34,45 +34,6 @@ const EXTRA_HEIGHT = 30;
 const SLOT_BLOCK = 5;
 const SLOTS_START_IDX = 3;
 const VISIBLE_PRESET_OPTIONS = ["custom range", "all generations", "gen 0 only", "gen 1 onwards"];
-
-function getSerializedHeadWidgetNames(node) {
-    const names = [];
-    if (getWidget(node, "generation_count")) {
-        names.push("generation_count");
-    } else if (getWidget(node, "generation_index")) {
-        names.push("generation_index");
-    }
-    names.push("log_prefix", "model_type");
-    return names;
-}
-
-function expectedSerializedValueCount(node, slotCount = MAX_SLOTS) {
-    return getSerializedHeadWidgetNames(node).length + (slotCount * SLOT_BLOCK);
-}
-
-function getSerializedWidgetNames(node, slotCount = MAX_SLOTS) {
-    const names = [...getSerializedHeadWidgetNames(node)];
-    for (let slot = 1; slot <= slotCount; slot += 1) {
-        const prefix = `slot_${String(slot).padStart(2, "0")}`;
-        names.push(`${prefix}_lora_name`);
-        names.push(`${prefix}_strength`);
-        names.push(`${prefix}_preset`);
-        names.push(`${prefix}_start`);
-        names.push(`${prefix}_end`);
-    }
-    return names;
-}
-
-function reapplySerializedWidgetValues(node, values) {
-    if (!Array.isArray(values) || !node) return;
-    let index = 0;
-    for (const name of getSerializedWidgetNames(node)) {
-        if (index >= values.length) break;
-        const widget = getWidget(node, name);
-        if (!widget) continue;
-        widget.value = values[index++];
-    }
-}
 
 const SLOT_META = [
     { slot: 1, label: "Gen 0", preset: "gen 0 only", start: 0, end: 0 },
@@ -199,9 +160,9 @@ function isModelTypeValue(value) {
     return value === "wan2x" || value === "flow" || value === "standard";
 }
 
-// Correct serialized count: generation_index(1) + log_prefix(1) + model_type(1) + 6 slots Ã— 5 = 33
+// Correct serialized count: generation_index(1) + log_prefix(1) + model_type(1) + 6 slots × 5 = 33
 // (generation_index stays as a widget even when wired, in ComfyUI's serialization model)
-const EXPECTED_SERIALIZED_VALUES_CONNECTED = EXPECTED_SERIALIZED_VALUES; // 33 â€“ gen_idx present as wired widget
+const EXPECTED_SERIALIZED_VALUES_CONNECTED = EXPECTED_SERIALIZED_VALUES; // 33 – gen_idx present as wired widget
 
 function slotCountFromSerializedLength(length) {
     if (typeof length !== "number" || length < 3) return 0;
@@ -224,7 +185,7 @@ function sanitizePresetValue(value) {
     return aliases[raw] || raw;
 }
 
-function normalizeLegacyWidgetValues(config, node = null) {
+function normalizeLegacyWidgetValues(config) {
     const values = config?.widgets_values;
     if (!Array.isArray(values)) return;
 
@@ -262,67 +223,13 @@ function normalizeLegacyWidgetValues(config, node = null) {
         normalized = [generationIndex, logPrefix, modelType, ...slotValues];
     }
 
-    const hasGenerationCount = Boolean(node && getWidget(node, "generation_count"));
-    const genericExpected = node ? expectedSerializedValueCount(node) : EXPECTED_SERIALIZED_VALUES;
-    const maxSlotValuesLength = MAX_SLOTS * SLOT_BLOCK;
-
-    // Pattern C (bank nodes): generation_count is serialized last, while log_prefix/model_type
-    // stay at the front and UI-only widgets are inserted before the slot payload.
-    // Example observed on disk:
-    //   log_prefix, model_type, mode, null..., slot_01..., ..., slot_64..., generation_count
-    if (
-        !normalized
-        && hasGenerationCount
-        && values.length > genericExpected
-        && maxSlotValuesLength > 0
-        && typeof values[0] === "string"
-        && isModelTypeValue(values[1])
-    ) {
-        const slotStart = values.length - maxSlotValuesLength - 1;
-        if (slotStart > 2) {
-            const generationCount = values[values.length - 1] ?? 1;
-            const logPrefix = values[0] ?? "WAN LoRA schedule";
-            const modelType = values[1] ?? "flow";
-            const slotValues = values.slice(slotStart, values.length - 1);
-            const inferredMode = values.slice(2, slotStart).find((value) => isModeValue(value));
-            if (slotValues.length === maxSlotValuesLength) {
-                modeValue = isModeValue(inferredMode) ? inferredMode : modeValue;
-                normalized = [generationCount, logPrefix, modelType, ...slotValues];
-            }
-        }
-    }
-
-    // Pattern D (bank nodes): current head widgets are already first, but UI-only widgets
-    // were serialized before the slot payload. Example:
-    //   generation_count, log_prefix, model_type, <ui widgets...>, slot_01..., ..., slot_64...
-    if (
-        !normalized
-        && hasGenerationCount
-        && values.length > genericExpected
-        && typeof values[0] === "number"
-        && typeof values[1] === "string"
-        && isModelTypeValue(values[2])
-    ) {
-        const extraCount = values.length - genericExpected;
-        const slotStart = 3 + extraCount;
-        const generationCount = values[0] ?? 1;
-        const logPrefix = values[1] ?? "WAN LoRA schedule";
-        const modelType = values[2] ?? "flow";
-        const uiValues = values.slice(3, slotStart);
-        const slotValues = values.slice(slotStart);
-        const inferredMode = uiValues.find((value) => isModeValue(value));
-        if (slotValues.length === maxSlotValuesLength) {
-            modeValue = isModeValue(inferredMode) ? inferredMode : modeValue;
-            normalized = [generationCount, logPrefix, modelType, ...slotValues];
-        }
-    }
     // Determine what to work on: use normalized if we reordered, else work on original (in-place)
     // for preset-migration-only case (already-correct 33-value arrays with legacy preset names).
     const inferredSlots = slotCountFromSerializedLength(values.length);
     const target = normalized ?? (inferredSlots > 0 ? values : null);
     if (!target) return;
 
-    // Migrate legacy internal preset names â†’ current _PRESET_OPTIONS names.
+    // Migrate legacy internal preset names → current _PRESET_OPTIONS names.
     // "manual_range" was an internal alias for "custom range" in early builds.
     // ComfyUI server REJECTS it as an invalid combo value because it is not in _PRESET_OPTIONS.
     let presetPatched = false;
@@ -598,26 +505,6 @@ async function applySchedulePreset(node, payload) {
         }
     }
 
-    if (hasConnectedInput(node, "linx")) {
-        const optionSet = getOptionSetForNode(node) ?? await getLoraSet();
-        for (const [slot, record] of slotMap.entries()) {
-            const sourceName = String(record?.lora_name || "no");
-            if (!sourceName || sourceName === "no") continue;
-
-            const candidates = candidateLowNames(sourceName);
-            let resolvedName = sourceName;
-            if (optionSet && optionSet.size > 0) {
-                resolvedName = candidates.find((candidate) => optionSet.has(candidate)) || sourceName;
-            } else {
-                resolvedName = candidates.find((candidate) => candidate !== sourceName) || sourceName;
-            }
-
-            if (resolvedName !== sourceName) {
-                slotMap.set(slot, { ...record, lora_name: resolvedName });
-            }
-        }
-    }
-
     const nextMode = isModeValue(payload.mode) ? payload.mode : "simple";
     const nextVisibleSlots = Math.max(3, Math.min(MAX_SLOTS, Math.trunc(Number(payload.visible_slots ?? payload.visibleSlots) || 3)));
     const nextModelType = isModelTypeValue(payload.model_type || payload.modelType) ? String(payload.model_type || payload.modelType) : "flow";
@@ -890,12 +777,6 @@ function getInputIndexByName(node, name) {
     return (node?.inputs || []).findIndex((input) => input?.name === name);
 }
 
-function hasConnectedInput(node, name) {
-    const inputIndex = getInputIndexByName(node, name);
-    if (inputIndex < 0) return false;
-    return node?.inputs?.[inputIndex]?.link != null;
-}
-
 function getLinkedLinxTargets(node) {
     const graph = getGraph();
     if (!graph) return [];
@@ -1068,7 +949,7 @@ function hasDroppedLoraCandidate(event) {
 // The canvas is translated to node.pos before drawNode/onDrawForeground, so the coordinate
 // system for drawing starts at (0,0) = top-left of node (including title).
 // widget.y is set by _arrangeWidgets and starts at NODE_TITLE_HEIGHT (approximately),
-// so no extra correction is needed â€” just subtract node.pos to get node-local coords.
+// so no extra correction is needed — just subtract node.pos to get node-local coords.
 function resolveLocalDropPoint(node, event) {
     try {
         const canvas = app?.canvas?.canvas;
@@ -1130,7 +1011,7 @@ function getWidgetHeight(widget, nodeWidth) {
 // widget.y is set by _arrangeWidgets(), widget.last_y is set during drawWidgets().
 // Both are relative to the node body (not including the title bar).
 function getWidgetBodyY(widget) {
-    // widget.y is set by _arrangeWidgets() â€” always > 0 for arranged widgets (title adds ~30px offset).
+    // widget.y is set by _arrangeWidgets() — always > 0 for arranged widgets (title adds ~30px offset).
     // A value of 0 means the widget hasn't been arranged yet (default from addWidget), treat as unknown.
     const y = widget?.y;
     if (typeof y === "number" && Number.isFinite(y) && y > 0) return y;
@@ -1433,7 +1314,7 @@ function wrapSlotCallbacks(node) {
     if (node._iamccsScheduleWrappedCallbacks) return;
     for (let slot = 1; slot <= MAX_SLOTS; slot += 1) {
         const prefix = `slot_${String(slot).padStart(2, "0")}`;
-        // Wrap lora_name â†’ triggers linx sync
+        // Wrap lora_name → triggers linx sync
         const loraWidget = getWidget(node, `${prefix}_lora_name`);
         if (loraWidget && !loraWidget._iamccsWrapped) {
             const origLora = loraWidget.callback;
@@ -1444,7 +1325,7 @@ function wrapSlotCallbacks(node) {
             };
             loraWidget._iamccsWrapped = true;
         }
-        // Wrap preset â†’ refreshes start/end visibility
+        // Wrap preset → refreshes start/end visibility
         const presetWidget = getWidget(node, `${prefix}_preset`);
         if (presetWidget && !presetWidget._iamccsWrapped) {
             const origPreset = presetWidget.callback;
@@ -1515,7 +1396,9 @@ function setSlotVisibility(node, slot, visible, advanced) {
 
 function reorderWidgets(node) {
     const orderedNames = [
-        ...getSerializedHeadWidgetNames(node),
+        "generation_index",
+        "log_prefix",
+        "model_type",
         MODE_WIDGET,
         LOAD_WIDGET,
         SAVE_WIDGET,
@@ -1657,15 +1540,20 @@ app.registerExtension({
         nodeType.prototype.onConfigure = function (config) {
             this._iamccsRestoringState = true;
             // 1. Normalize legacy corrupt widget-value arrays (modifies config in place)
-            normalizeLegacyWidgetValues(config, this);
-            const restoredValues = Array.isArray(config?.widgets_values) ? [...config.widgets_values] : null;
+            normalizeLegacyWidgetValues(config);
 
             // 2. Re-apply normalized values to widgets explicitly.
-            //    LiteGraph assigns widgets_values â†’ widget.value BEFORE calling onConfigure,
+            //    LiteGraph assigns widgets_values → widget.value BEFORE calling onConfigure,
             //    so if the values were corrupt, they are already set wrong.  Re-assigning here
-            //    by explicit serialized-widget name order avoids bank-node slot shifts.
-            if (restoredValues && this.widgets) {
-                reapplySerializedWidgetValues(this, restoredValues);
+            //    (in the same iteration order, skipping non-serializable UI widgets) corrects them.
+            if (Array.isArray(config.widgets_values) && this.widgets) {
+                let j = 0;
+                for (const widget of this.widgets) {
+                    if (!widget || widget.options?.serialize === false || widget._iamccsUiOnly) continue;
+                    if (j < config.widgets_values.length) {
+                        widget.value = config.widgets_values[j++];
+                    }
+                }
             }
 
             const result = onConfigure?.apply(this, arguments);
@@ -1674,9 +1562,6 @@ app.registerExtension({
             if (!this.properties[SLOTS_PROP]) this.properties[SLOTS_PROP] = 3;
             ensureModeWidget(this);
             ensureActionWidgets(this);
-            if (restoredValues && this.widgets) {
-                reapplySerializedWidgetValues(this, restoredValues);
-            }
             setTimeout(() => {
                 // Mark ALL slots as already-initialized so ensureSlotDefaults won't clobber
                 // values that were restored from the saved workflow.
@@ -1684,15 +1569,9 @@ app.registerExtension({
                 for (let s = 1; s <= MAX_SLOTS; s++) {
                     this.properties[INIT_PROP][s] = true;
                 }
-                if (restoredValues && this.widgets) {
-                    reapplySerializedWidgetValues(this, restoredValues);
-                }
                 applyLayout(this);
                 this._iamccsRestoringState = false;
-                if (this._iamccsPendingSyncLowNodes) {
-                    this._iamccsPendingSyncLowNodes = false;
-                    requestSyncAllLinkedLowNodes(this);
-                }
+                this._iamccsPendingSyncLowNodes = false;
                 this.setDirtyCanvas(true, true);
             }, 0);
             return result;

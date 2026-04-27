@@ -717,6 +717,7 @@ class IAMCCS_AudioExtender:
 
         segment_start_s = float(start_frames) / float(fps)
         segment_end_s = float(start_frames + unique_frames) / float(fps)
+        track_duration_s = float(total_samples) / float(sample_rate)
 
         conditioning_start_s = segment_start_s
         conditioning_end_s = segment_end_s

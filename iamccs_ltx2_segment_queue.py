@@ -108,6 +108,14 @@ def _save_latent_bridge(
         if torch.is_tensor(latent_reference)
         else None
     )
+    if full_cpu is not None and reference_cpu is not None:
+        same_storage = False
+        try:
+            same_storage = full_cpu.untyped_storage().data_ptr() == reference_cpu.untyped_storage().data_ptr()
+        except Exception:
+            same_storage = full_cpu.data_ptr() == reference_cpu.data_ptr()
+        if same_storage:
+            reference_cpu = reference_cpu.clone()
     seed_offset_cpu = torch.tensor([int(seed_offset_latent_frames or 0)], dtype=torch.int64)
     overlap_latent_cpu = torch.tensor([int(overlap_latent_frames or 0)], dtype=torch.int64)
     if _safetensors_save_file is not None:
@@ -355,6 +363,7 @@ def _concat_segments(segment_paths, output_path):
 
     cmd = [
         ffmpeg_path,
+        "-nostdin",
         "-y",
         "-f",
         "concat",
@@ -378,7 +387,7 @@ def _concat_segments(segment_paths, output_path):
         "+faststart",
         output_path,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
     try:
         os.remove(list_path)
     except Exception:
@@ -486,6 +495,7 @@ def _save_segment_from_images(images, audio, frame_rate, output_path):
 
         cmd = [
             ffmpeg_path,
+            "-nostdin",
             "-y",
             "-framerate",
             f"{frame_rate:.6f}",
@@ -508,7 +518,7 @@ def _save_segment_from_images(images, audio, frame_rate, output_path):
             cmd += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-shortest"]
         cmd += ["-movflags", "+faststart", output_path]
 
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
         if result.returncode != 0:
             stderr = result.stderr.strip() or result.stdout.strip()
             raise RuntimeError(f"ffmpeg segment encode failed: {stderr}")

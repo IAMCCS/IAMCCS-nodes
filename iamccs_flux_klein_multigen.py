@@ -215,6 +215,7 @@ class IAMCCS_FluxKleinMultiGen:
                 "output_height":            ("INT",     {"default": 1024, "min": 16, "max": 8192, "step": 16}),
                 "debug_enabled":            ("BOOLEAN", {"default": False}),
                 "debug_prefix":             ("STRING",  {"default": "flux_klein_debug"}),
+                "defer_cpu_transfer":       ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -241,6 +242,7 @@ class IAMCCS_FluxKleinMultiGen:
         output_height=1024,
         debug_enabled=False,
         debug_prefix="flux_klein_debug",
+        defer_cpu_transfer=False,
     ):
         sep = separator.replace("\\n", "\n")
         prompts = [p.strip() for p in (multi_prompt or "").split(sep) if p.strip()]
@@ -339,25 +341,38 @@ class IAMCCS_FluxKleinMultiGen:
                 decoded = decoded[0]
             if decoded.ndim == 3:
                 decoded = decoded.unsqueeze(0)
-            decoded = decoded.cpu()
+
+            # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+            # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+            # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+            # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+            # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+            if defer_cpu_transfer:
+                stored_decoded = decoded
+            else:
+                stored_decoded = decoded.cpu()
 
             if dbg:
                 _write_debug(dbg, {
                     "event": "iteration_result",
                     "idx": idx, "seed": current_seed,
                     "prompt": prompt,
-                    "decoded_shape": _shape(decoded),
+                    "decoded_shape": _shape(stored_decoded),
                 })
 
-            results.append(decoded)
+            results.append(stored_decoded)
 
             if save_images and save_dir:
                 slug = _prompt_slug(prompt)
                 path = _unique_path(save_dir, f"{output_prefix}_{slug}", "png")
-                arr  = (decoded[0].numpy() * 255).clip(0, 255).astype(np.uint8)
+                save_decoded = stored_decoded if not defer_cpu_transfer else decoded.detach().cpu()
+                arr  = (save_decoded[0].numpy() * 255).clip(0, 255).astype(np.uint8)
                 _PILImage.fromarray(arr).save(path)
 
         if dbg:
             _write_debug(dbg, {"event": "run_end", "count": len(results)})
 
-        return (torch.cat(results, dim=0), len(prompts))
+        batched = torch.cat(results, dim=0)
+        if defer_cpu_transfer:
+            batched = batched.cpu()
+        return (batched, len(prompts))

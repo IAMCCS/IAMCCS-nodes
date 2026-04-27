@@ -2,6 +2,8 @@ import logging
 import math
 import re
 
+import node_helpers
+
 
 log = logging.getLogger("IAMCCS.WanLongLength")
 
@@ -376,7 +378,7 @@ class IAMCCS_WanIndexedPromptEncode:
             "required": {
                 "clip": ("CLIP",),
                 "text": ("STRING", {"multiline": True, "default": ""}),
-                "segment_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+                "segment_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1, "lazy": True}),
                 "index_offset": ("INT", {"default": 0, "min": -100000, "max": 100000, "step": 1}),
                 "selection_mode": (["direct_index", "three_phase", "cyclic_3", "single"], {"default": "direct_index"}),
                 "phase1_last_segment": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
@@ -404,6 +406,13 @@ class IAMCCS_WanIndexedPromptEncode:
     )
     FUNCTION = "encode"
     CATEGORY = "IAMCCS/Wan"
+
+    def check_lazy_status(self, segment_index=None, **kwargs):
+        # Break static validation cycles when segment_index is wired to an easy-use
+        # loop index, but force the executor to resolve it before encode() runs.
+        if segment_index is None:
+            return ["segment_index"]
+        return []
 
     def _pick_index(self, prompts: list[str], segment_index: int, selection_mode: str, phase1_last_segment: int, phase2_last_segment: int, fallback_mode: str) -> int:
         count = len(prompts)
@@ -467,6 +476,8 @@ class IAMCCS_WanIndexedPromptEncode:
         fps=16.0,
         bootstrap_outside_loop=True,
     ):
+        if segment_index is None:
+            segment_index = 0
         effective_index = int(segment_index) + int(index_offset)
         prompts = _split_prompt_bank(text, separator_mode)
         selected_index = self._pick_index(prompts, effective_index, selection_mode, int(phase1_last_segment), int(phase2_last_segment), str(fallback_mode))
@@ -484,6 +495,17 @@ class IAMCCS_WanIndexedPromptEncode:
             continuation_visible_frames,
             fps,
             bool(bootstrap_outside_loop),
+        )
+        conditioning = node_helpers.conditioning_set_values(
+            conditioning,
+            {
+                "_iamccs_generation_index": int(effective_index),
+                "_iamccs_prompt_index": int(max(selected_index, 0)),
+                "_iamccs_prompt_count": int(len(prompts)),
+                "_iamccs_total_generations": int(total_generations),
+                "_iamccs_continuation_generations": int(continuation_generations),
+                "_iamccs_prompt_selection_mode": str(selection_mode or "direct_index"),
+            },
         )
         report = (
             f"segment={int(segment_index)} | effective_index={effective_index} | mode={selection_mode} | prompt_index={selected_index} | "

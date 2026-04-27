@@ -217,6 +217,49 @@ def _resolve_prev_tail_profile(
     return str(tail_pick_mode or "latest"), max(0, int(skip_last_slots)), float(anchor_blend)
 
 
+def _ensure_motion_tail_matches_anchor(
+    motion_tail: torch.Tensor | None,
+    *,
+    anchor_reference: torch.Tensor,
+    logger: logging.Logger,
+    context: str,
+) -> tuple[torch.Tensor | None, bool]:
+    if motion_tail is None:
+        return None, True
+
+    anchor_shape = tuple(anchor_reference.shape)
+    motion_shape = tuple(motion_tail.shape)
+
+    if motion_tail.dim() != 5 or anchor_reference.dim() != 5:
+        logger.warning(
+            "[%s] prev_samples tail rank mismatch, disabling continuity tail. prev=%s anchor=%s",
+            context,
+            motion_shape,
+            anchor_shape,
+        )
+        return None, False
+
+    if motion_tail.shape[1] != anchor_reference.shape[1]:
+        logger.warning(
+            "[%s] prev_samples channel mismatch, disabling continuity tail. prev=%s anchor=%s",
+            context,
+            motion_shape,
+            anchor_shape,
+        )
+        return None, False
+
+    if motion_tail.shape[3] != anchor_reference.shape[3] or motion_tail.shape[4] != anchor_reference.shape[4]:
+        logger.warning(
+            "[%s] prev_samples spatial mismatch, disabling continuity tail. prev=%s anchor=%s",
+            context,
+            motion_shape,
+            anchor_shape,
+        )
+        return None, False
+
+    return motion_tail, True
+
+
 def _build_inductive_motion_tail(
     prev_samples,
     motion_latent_count: int,
@@ -821,7 +864,7 @@ class IAMCCS_WanImageMotion:
                 ),
             },
             "optional": {
-                "prev_samples": ("LATENT",),
+                "prev_samples": ("LATENT", {"lazy": True}),
                 "clip_vision_output": ("CLIP_VISION_OUTPUT",),
             },
         }
@@ -832,6 +875,14 @@ class IAMCCS_WanImageMotion:
     CATEGORY = "IAMCCS/Wan"
 
     _log = logging.getLogger("IAMCCS.WanImageMotion")
+
+    def check_lazy_status(self, prev_samples=None, use_prev_samples=True, **kwargs):
+        # Allow prev_samples to participate in loop feedback without tripping
+        # static prompt validation. If the wire exists but the upstream latent is
+        # not ready yet, request a second pass after that dependency is executed.
+        if use_prev_samples and prev_samples is None:
+            return ["prev_samples"]
+        return []
 
     def _pick_empty_latent_dtype(self, anchor_dtype: torch.dtype, latent_precision: str) -> torch.dtype:
         if latent_precision == "normal":
@@ -1146,6 +1197,13 @@ class IAMCCS_WanImageMotion:
                 motion_latent_count,
                 T_motion,
                 padding_size,
+            )
+            self._log.info(
+                "[WanImageMotion] conditioning flags | clip_vision=%s add_reference_latents=%s use_prev_samples=%s prev_connected=%s",
+                "YES" if clip_vision_output is not None else "NO",
+                "YES" if add_reference_latents else "NO",
+                "YES" if use_prev_samples else "NO",
+                "YES" if prev_samples is not None else "NO",
             )
             if prev_samples is not None and not use_prev_samples:
                 self._log.info("[WanImageMotion] prev_samples connected but use_prev_samples=False — prev ignored.")
@@ -1685,6 +1743,14 @@ class WanImageMotionPro:
             anchor_reference=anchor_latent,
             anchor_blend=resolved_anchor_blend,
         )
+        motion_latent, motion_tail_ok = _ensure_motion_tail_matches_anchor(
+            motion_latent,
+            anchor_reference=anchor_latent,
+            logger=self._log,
+            context="WanImageMotionPro/raw_mode",
+        )
+        if not motion_tail_ok:
+            motion_count = 0
 
         if apply_motion_to_tail and motion_latent is not None:
             motion_latent = _apply_motion_amplitude_to_raw_tail(
@@ -2196,6 +2262,14 @@ class WanImageMotionPro:
                     anchor_reference=anchor_latent,
                     anchor_blend=resolved_anchor_blend,
                 )
+                motion_latent, motion_tail_ok = _ensure_motion_tail_matches_anchor(
+                    motion_latent,
+                    anchor_reference=anchor_latent,
+                    logger=self._log,
+                    context="WanImageMotionPro",
+                )
+                if not motion_tail_ok:
+                    T_motion = 0
                 has_prev = motion_latent is not None and T_motion > 0
 
             # --- 2. DC Drift Correction ---

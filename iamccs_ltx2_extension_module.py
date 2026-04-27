@@ -107,8 +107,35 @@ def _promote_staged_directory(staged_dir: str, target_dir: str):
     shutil.rmtree(staged_dir, ignore_errors=True)
 
 
+def _canonical_image_ext(path: str) -> str:
+    ext = os.path.splitext(path)[1].lower()
+    if ext == ".jpeg":
+        return ".jpg"
+    return ext
+
+
+def _save_pil_image(image, out_path: str):
+    ext = _canonical_image_ext(out_path)
+    if ext == ".jpg":
+        image.convert("RGB").save(out_path, format="JPEG", quality=95)
+        return
+    if ext == ".webp":
+        image.convert("RGB").save(out_path, format="WEBP", quality=95)
+        return
+    image.save(out_path, format="PNG")
+
+
 def _copy_frame(src_path: str, dst_path: str):
-    shutil.copy2(src_path, dst_path)
+    src_ext = _canonical_image_ext(src_path)
+    dst_ext = _canonical_image_ext(dst_path)
+    if src_ext == dst_ext:
+        shutil.copy2(src_path, dst_path)
+        return
+
+    from PIL import Image  # type: ignore
+
+    with Image.open(src_path) as image:
+        _save_pil_image(image, dst_path)
 
 
 def _blend_frame_pair(src_path: str, dst_path: str, out_path: str, mode: str, alpha: float):
@@ -135,12 +162,12 @@ def _blend_frame_pair(src_path: str, dst_path: str, out_path: str, mode: str, al
         blended = (1.0 - a) * src_np + a * dst_np
 
     out = (np.clip(blended, 0.0, 1.0) * 255.0).round().astype(np.uint8)
-    Image.fromarray(out).save(out_path)
+    _save_pil_image(Image.fromarray(out), out_path)
 
 
 def _build_ext(path_a: str, path_b: str) -> str:
     ext = os.path.splitext(path_a)[1] or os.path.splitext(path_b)[1]
-    ext = ext.lower()
+    ext = _canonical_image_ext(ext)
     if ext not in (".png", ".jpg", ".jpeg", ".webp"):
         ext = ".png"
     return ext
@@ -1599,7 +1626,7 @@ class IAMCCS_VideoCombineFromDir:
             seq = self._sequence_pattern(files)
             if seq is not None:
                 pattern, start_number = seq
-                cmd = [ffmpeg, "-y", "-framerate", f"{frame_rate:.6f}", "-start_number", str(start_number), "-i", pattern]
+                cmd = [ffmpeg, "-nostdin", "-y", "-framerate", f"{frame_rate:.6f}", "-start_number", str(start_number), "-i", pattern]
             else:
                 list_path = os.path.join(temp_dir, "frames.txt")
                 with open(list_path, "w", encoding="utf-8") as f:
@@ -1609,7 +1636,7 @@ class IAMCCS_VideoCombineFromDir:
                         f.write(f"duration {1.0 / frame_rate:.12f}\n")
                     escaped = files[-1].replace("'", "'\\''")
                     f.write(f"file '{escaped}'\n")
-                cmd = [ffmpeg, "-y", "-f", "concat", "-safe", "0", "-i", list_path]
+                cmd = [ffmpeg, "-nostdin", "-y", "-f", "concat", "-safe", "0", "-i", list_path]
 
             if wav_path:
                 cmd += ["-i", wav_path]
@@ -1621,7 +1648,7 @@ class IAMCCS_VideoCombineFromDir:
                     cmd += ["-shortest"]
             cmd += [out_path]
 
-            result = subprocess.run(cmd, capture_output=True, text=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, stdin=subprocess.DEVNULL)
             if result.returncode != 0:
                 raise RuntimeError(f"ffmpeg failed: {result.stderr.strip() or result.stdout.strip()}")
 

@@ -21,7 +21,6 @@ const V2_PREFIX = {
 const MAX_DRAFTS_PER_WORKSPACE = 4;
 const MAX_DRAFT_CHARS_PER_WORKSPACE = 2_500_000;
 const STORAGE_PATCH_FLAG = "__iamccsWorkflowDraftQuotaPatchApplied";
-const STORAGE_PROTOTYPE_PATCH_FLAG = "__iamccsWorkflowDraftQuotaPrototypePatchApplied";
 
 function safeParseJson(json) {
     if (!json) return null;
@@ -279,143 +278,73 @@ function aggressiveRecoverDraftStorage(localStorageRef) {
     return { removed, rewritten: 0 };
 }
 
-function isStorageLike(storageRef) {
-    return storageRef != null
-        && typeof storageRef.getItem === "function"
-        && typeof storageRef.setItem === "function"
-        && typeof storageRef.removeItem === "function";
-}
-
-function isLocalStorageRef(storageRef) {
-    try {
-        return storageRef === window.localStorage;
-    } catch {
-        return false;
-    }
-}
-
-function shouldSuppressDraftQuotaFailure(key) {
-    if (!isDraftStorageKey(key)) return false;
-    return typeof key === "string" && (
-        key.startsWith(V2_PREFIX.draftPayload)
-        || key.startsWith(V2_PREFIX.draftIndex)
-        || key.startsWith(V2_PREFIX.lastActivePath)
-        || key.startsWith(V2_PREFIX.lastOpenPaths)
-        || LEGACY_LOCAL_KEYS.includes(key)
-        || LEGACY_PREFIXES.some((prefix) => key.startsWith(prefix))
-    );
-}
-
-function handleDraftQuotaSetItem(originalSetItem, storageRef, key, value, error) {
-    if (!isDraftStorageKey(key) || !isQuotaExceededError(error) || !isStorageLike(storageRef)) {
-        throw error;
-    }
-
-    const canRecover = isLocalStorageRef(storageRef);
-    const recovery = canRecover ? recoverDraftStorage(storageRef, key) : { removed: 0, rewritten: 0 };
-    console.warn("[IAMCCS] Workflow draft quota reached, attempting recovery", {
-        key,
-        removedKeys: recovery.removed,
-        rewrittenIndexes: recovery.rewritten,
-        storage: canRecover ? "localStorage" : "other",
-    });
-
-    try {
-        const result = Reflect.apply(originalSetItem, storageRef, [key, value]);
-        console.info("[IAMCCS] Workflow draft save recovered after storage cleanup", {
-            key,
-            removedKeys: recovery.removed,
-            rewrittenIndexes: recovery.rewritten,
-            storage: canRecover ? "localStorage" : "other",
-        });
-        return result;
-    } catch (retryError) {
-        if (!isQuotaExceededError(retryError)) {
-            console.error("[IAMCCS] Workflow draft save failed after cleanup with non-quota error", {
-                key,
-                removedKeys: recovery.removed,
-                rewrittenIndexes: recovery.rewritten,
-                retryError,
-            });
-            throw retryError;
-        }
-
-        const aggressiveRecovery = canRecover
-            ? aggressiveRecoverDraftStorage(storageRef)
-            : { removed: 0, rewritten: 0 };
-
-        if (aggressiveRecovery.removed) {
-            console.warn("[IAMCCS] Workflow draft quota still exceeded, applying aggressive recovery", {
-                key,
-                removedKeys: aggressiveRecovery.removed,
-                storage: canRecover ? "localStorage" : "other",
-            });
-        }
-
-        try {
-            const result = Reflect.apply(originalSetItem, storageRef, [key, value]);
-            console.info("[IAMCCS] Workflow draft save recovered after aggressive cleanup", {
-                key,
-                removedKeys: recovery.removed + aggressiveRecovery.removed,
-                rewrittenIndexes: recovery.rewritten,
-                storage: canRecover ? "localStorage" : "other",
-            });
-            return result;
-        } catch (finalRetryError) {
-            if (!isQuotaExceededError(finalRetryError) || !shouldSuppressDraftQuotaFailure(key)) {
-                console.error("[IAMCCS] Workflow draft save still exceeds storage quota after aggressive cleanup", {
-                    key,
-                    removedKeys: recovery.removed + aggressiveRecovery.removed,
-                    rewrittenIndexes: recovery.rewritten,
-                    retryError: finalRetryError,
-                });
-                throw finalRetryError;
-            }
-
-            console.warn("[IAMCCS] Workflow draft save skipped after quota recovery failed", {
-                key,
-                removedKeys: recovery.removed + aggressiveRecovery.removed,
-                rewrittenIndexes: recovery.rewritten,
-                storage: canRecover ? "localStorage" : "other",
-            });
-            return undefined;
-        }
-    }
-}
-
 function installDraftStorageQuotaGuard() {
     try {
         const localStorageRef = window.localStorage;
         if (!localStorageRef || localStorageRef[STORAGE_PATCH_FLAG]) return;
 
-        const storagePrototype = Object.getPrototypeOf(localStorageRef);
-        if (!storagePrototype || storagePrototype[STORAGE_PROTOTYPE_PATCH_FLAG]) {
-            Object.defineProperty(localStorageRef, STORAGE_PATCH_FLAG, {
-                value: true,
-                configurable: false,
-                enumerable: false,
-                writable: false,
-            });
-            return;
-        }
+        const originalSetItem = localStorageRef.setItem.bind(localStorageRef);
 
-        const originalSetItem = storagePrototype.setItem;
-        if (typeof originalSetItem !== "function") return;
-
-        storagePrototype.setItem = function patchedSetItem(key, value) {
+        localStorageRef.setItem = function patchedSetItem(key, value) {
             try {
-                return Reflect.apply(originalSetItem, this, [key, value]);
+                return originalSetItem(key, value);
             } catch (error) {
-                return handleDraftQuotaSetItem(originalSetItem, this, key, value, error);
+                if (!isDraftStorageKey(key) || !isQuotaExceededError(error)) {
+                    throw error;
+                }
+
+                const recovery = recoverDraftStorage(localStorageRef, key);
+                console.warn("[IAMCCS] Workflow draft quota reached, attempting recovery", {
+                    key,
+                    removedKeys: recovery.removed,
+                    rewrittenIndexes: recovery.rewritten,
+                });
+
+                try {
+                    const result = originalSetItem(key, value);
+                    console.info("[IAMCCS] Workflow draft save recovered after storage cleanup", {
+                        key,
+                        removedKeys: recovery.removed,
+                        rewrittenIndexes: recovery.rewritten,
+                    });
+                    return result;
+                } catch (retryError) {
+                    if (isQuotaExceededError(retryError)) {
+                        const aggressiveRecovery = aggressiveRecoverDraftStorage(localStorageRef);
+                        console.warn("[IAMCCS] Workflow draft quota still exceeded, applying aggressive recovery", {
+                            key,
+                            removedKeys: aggressiveRecovery.removed,
+                        });
+
+                        try {
+                            const result = originalSetItem(key, value);
+                            console.info("[IAMCCS] Workflow draft save recovered after aggressive cleanup", {
+                                key,
+                                removedKeys: recovery.removed + aggressiveRecovery.removed,
+                                rewrittenIndexes: recovery.rewritten,
+                            });
+                            return result;
+                        } catch (finalRetryError) {
+                            console.error("[IAMCCS] Workflow draft save still exceeds storage quota after aggressive cleanup", {
+                                key,
+                                removedKeys: recovery.removed + aggressiveRecovery.removed,
+                                rewrittenIndexes: recovery.rewritten,
+                                retryError: finalRetryError,
+                            });
+                            throw finalRetryError;
+                        }
+                    }
+
+                    console.error("[IAMCCS] Workflow draft save still exceeds storage quota after cleanup", {
+                        key,
+                        removedKeys: recovery.removed,
+                        rewrittenIndexes: recovery.rewritten,
+                        retryError,
+                    });
+                    throw retryError;
+                }
             }
         };
-
-        Object.defineProperty(storagePrototype, STORAGE_PROTOTYPE_PATCH_FLAG, {
-            value: true,
-            configurable: false,
-            enumerable: false,
-            writable: false,
-        });
 
         Object.defineProperty(localStorageRef, STORAGE_PATCH_FLAG, {
             value: true,

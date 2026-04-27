@@ -9,7 +9,11 @@
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows + general nodes 4 ComfyUI
 
-Versuin: 1.4.0
+Version: 1.4.2
+
+## 🆕 Sdded new LTX-2.3 nodes for v2v, au+img2vid (instructions: patreon.com/IAMCCS)
+
+Version: 1.4.0
 
 ## 🆕 Dataset Creation Workflow Companions
 

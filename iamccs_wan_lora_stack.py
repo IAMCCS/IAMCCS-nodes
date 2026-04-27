@@ -65,6 +65,35 @@ def _lora_stack_debug_context(lora) -> str:
     return " | ".join(parts)
 
 
+def _lora_stack_origin_names(lora, origin: str) -> str:
+    if not lora:
+        return "none"
+
+    names = []
+    for entry in lora:
+        entry_origin = str(entry.get("_iamccs_lora_origin") or "manual")
+        if entry_origin != origin:
+            continue
+        name = str(entry.get("name") or "unnamed")
+        strength = float(entry.get("strength", 0.0) or 0.0)
+        slot = entry.get("_iamccs_schedule_slot")
+        rule = str(entry.get("_iamccs_schedule_rule") or "")
+        if slot is not None:
+            names.append(f"slot={int(slot):02d}:{name}({strength}) [{rule or origin}]")
+        else:
+            names.append(f"{name}({strength})")
+    return "; ".join(names) if names else "none"
+
+
+def _lora_stack_has_origin(lora, origin: str) -> bool:
+    if not lora:
+        return False
+    for entry in lora:
+        if str(entry.get("_iamccs_lora_origin") or "manual") == origin:
+            return True
+    return False
+
+
 def _cache_put(cache: OrderedDict, key, value, max_size: int):
     cache[key] = value
     cache.move_to_end(key)
@@ -248,6 +277,14 @@ class IAMCCS_ModelWithLoRA:
             }
         }
 
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # The upstream schedule node may resolve a different per-generation stack
+        # while the graph wiring itself remains unchanged inside Easy-Use loops.
+        # Force re-evaluation so the current loop iteration can request fresh LORA
+        # metadata instead of reusing the first patched MODEL forever.
+        return float("nan")
+
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "apply"
     CATEGORY = "IAMCCS/LoRA"
@@ -258,6 +295,9 @@ class IAMCCS_ModelWithLoRA:
 
         stack_context = _lora_stack_debug_context(lora)
         stack_summary = _lora_stack_debug_summary(lora)
+        default_summary = _lora_stack_origin_names(lora, "default")
+        scheduled_summary = _lora_stack_origin_names(lora, "scheduled")
+        scheduled_active = "YES" if _lora_stack_has_origin(lora, "scheduled") else "NO"
         signature = tuple((str(entry.get("name") or ""), float(entry.get("strength", 0.0) or 0.0)) for entry in lora)
         cache_key = (id(model), signature)
         cached_model = _PATCHED_MODEL_CACHE.get(cache_key)
@@ -268,6 +308,9 @@ class IAMCCS_ModelWithLoRA:
             else:
                 logging.info(f"[IAMCCS_ModelWithLoRA] ♻ cache hit: {len(signature)} LoRA(s) reused")
             logging.info(f"[IAMCCS_ModelWithLoRA] active_stack={stack_summary}")
+            logging.info(f"[IAMCCS_ModelWithLoRA] scheduled_active={scheduled_active}")
+            logging.info(f"[IAMCCS_ModelWithLoRA] applied_default={default_summary}")
+            logging.info(f"[IAMCCS_ModelWithLoRA] applied_scheduled={scheduled_summary}")
             return (cached_model,)
 
         model_out = model
@@ -275,6 +318,9 @@ class IAMCCS_ModelWithLoRA:
         if stack_context:
             logging.info(f"[IAMCCS_ModelWithLoRA] apply request | {stack_context}")
         logging.info(f"[IAMCCS_ModelWithLoRA] active_stack={stack_summary}")
+        logging.info(f"[IAMCCS_ModelWithLoRA] scheduled_active={scheduled_active}")
+        logging.info(f"[IAMCCS_ModelWithLoRA] applied_default={default_summary}")
+        logging.info(f"[IAMCCS_ModelWithLoRA] applied_scheduled={scheduled_summary}")
 
         # Installa filtro per sopprimere spam di chiavi opzionali (img_*, diff_m, ecc.)
         logger = logging.getLogger()

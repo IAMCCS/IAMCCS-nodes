@@ -58,8 +58,6 @@ from .iamccs_ltx2_tools import (
     IAMCCS_LTX2_ImageBatchPadReflect,
     IAMCCS_LTX2_ImageBatchCropByPad,
     IAMCCS_SegmentPlanner,
-    IAMCCS_SegmentPlannerSettings,
-    IAMCCS_SegmentPlannerLinked,
     IAMCCS_SegmentPlanFromPlanner,
     IAMCCS_SourceRangeFromSegmentPlan,
     IAMCCS_TwoSegmentPlanner,
@@ -84,21 +82,6 @@ from .iamccs_ltx2_extension_module import (
     IAMCCS_LTX2_MiddleFrames,
     IAMCCS_LTX2_FirstLastLatentControl,
     IAMCCS_LTX2_FirstLastLatentControl_Pro,
-)
-
-from .iamccs_ltx2_cinematic_flf import (
-    IAMCCS_LTX2_CinematicShotPlanner,
-    IAMCCS_LTX2_CinematicRefLatentControl,
-    IAMCCS_LTX2_AudioPromptDirector,
-    IAMCCS_LTX2_CinematicPromptRelayAdapter,
-    IAMCCS_LTX2_CinematicPromptComposer,
-    IAMCCS_LTX2_CinematicShotLineBuilder,
-    IAMCCS_LTX2_CinematicV2VTimelineLineBuilder,
-    IAMCCS_LTX2_CinematicLineStacker,
-    IAMCCS_LTX2_CinematicMultiGenPlanner,
-    IAMCCS_LTX2_CinematicShotAudioSelector,
-    IAMCCS_LTX2_CinematicV2VTimelinePlanner,
-    IAMCCS_LTX2_CinematicV2VAssetSelector,
 )
 
 from .iamccs_ltx2_temporal_overlap_samplers import (
@@ -159,10 +142,6 @@ from .iamccs_image_resize import (
 
 from .iamccs_multiswitch import (
     IAMCCS_MultiSwitch,
-)
-
-from .iamccs_lazy_switch import (
-    IAMCCS_LazyAnySwitch,
 )
 
 from .iamccs_hw_supporter import (
@@ -240,38 +219,6 @@ from .iamccs_supernode_modular import (
     IAMCCS_SupernodeModule,
 )
 
-from .iamccs_auimg2vid_goal1 import (
-    IAMCCS_ProjectTimelinePlanner,
-    IAMCCS_Ltx2HelperModules_ProjectTimelinePlanner,
-    IAMCCS_Ltx2HelperModules_Planner,
-    IAMCCS_Ltx2HelperModules_AudioTimeline,
-    IAMCCS_Ltx2HelperModules_KeyframeTimeline,
-    IAMCCS_Ltx2HelperModules_RefreshPolicy,
-    IAMCCS_Ltx2HelperModules_ReanchorLatent,
-    IAMCCS_Ltx2HelperModules_DiskExtension,
-    IAMCCS_Ltx2HelperModules_RuntimeBridge,
-    IAMCCS_Ltx2HelperModules_Continuity,
-    IAMCCS_Ltx2HelperModules_Finalize,
-    IAMCCS_AUIMG2VID_ProjectTimelinePlanner,
-    IAMCCS_AUIMG2VID_Planner,
-    IAMCCS_AUIMG2VID_AudioTimeline,
-    IAMCCS_AUIMG2VID_KeyframeTimeline,
-    IAMCCS_AUIMG2VID_RefreshPolicy,
-    IAMCCS_AUIMG2VID_ReanchorLatent,
-    IAMCCS_AUIMG2VID_DiskExtension,
-    IAMCCS_AUIMG2VID_RuntimeBridge,
-    IAMCCS_AUIMG2VID_Continuity,
-    IAMCCS_AUIMG2VID_Finalize,
-)
-
-from .iamccs_supernodes_exec import (
-    IAMCCS_SuperNodes_AUIMG2VIDExecutablePlanner,
-    IAMCCS_SuperNodes_AUIMG2VIDExecutableRender,
-    IAMCCS_SuperNodes_AUIMG2VIDExecutableVAE,
-    IAMCCS_SuperNodes_AUIMG2VIDExecutableFinalize,
-)
-from .iamccs_supernodes_second_stage import IAMCCS_SuperNodes_SecondStage
-
 # Nodi principali
 NODE_CLASS_MAPPINGS = {
     "IAMCCS_WanLoRAStack": IAMCCS_WanLoRAStack,
@@ -306,8 +253,6 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_ImageBatchPadReflect": IAMCCS_LTX2_ImageBatchPadReflect,
     "IAMCCS_LTX2_ImageBatchCropByPad": IAMCCS_LTX2_ImageBatchCropByPad,
     "IAMCCS_SegmentPlanner": IAMCCS_SegmentPlanner,
-    "IAMCCS_SegmentPlannerSettings": IAMCCS_SegmentPlannerSettings,
-    "IAMCCS_SegmentPlannerLinked": IAMCCS_SegmentPlannerLinked,
     "IAMCCS_SegmentPlanFromPlanner": IAMCCS_SegmentPlanFromPlanner,
     "IAMCCS_SourceRangeFromSegmentPlan": IAMCCS_SourceRangeFromSegmentPlan,
     "IAMCCS_TwoSegmentPlanner": IAMCCS_TwoSegmentPlanner,
@@ -329,18 +274,6 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_MiddleFrames": IAMCCS_LTX2_MiddleFrames,
     "IAMCCS_LTX2_FirstLastLatentControl": IAMCCS_LTX2_FirstLastLatentControl,
     "IAMCCS_LTX2_FirstLastLatentControl_Pro": IAMCCS_LTX2_FirstLastLatentControl_Pro,
-    "IAMCCS_LTX2_CinematicShotPlanner": IAMCCS_LTX2_CinematicShotPlanner,
-    "IAMCCS_LTX2_CinematicRefLatentControl": IAMCCS_LTX2_CinematicRefLatentControl,
-    "IAMCCS_LTX2_AudioPromptDirector": IAMCCS_LTX2_AudioPromptDirector,
-    "IAMCCS_LTX2_CinematicPromptRelayAdapter": IAMCCS_LTX2_CinematicPromptRelayAdapter,
-    "IAMCCS_LTX2_CinematicPromptComposer": IAMCCS_LTX2_CinematicPromptComposer,
-    "IAMCCS_LTX2_CinematicShotLineBuilder": IAMCCS_LTX2_CinematicShotLineBuilder,
-    "IAMCCS_LTX2_CinematicV2VTimelineLineBuilder": IAMCCS_LTX2_CinematicV2VTimelineLineBuilder,
-    "IAMCCS_LTX2_CinematicLineStacker": IAMCCS_LTX2_CinematicLineStacker,
-    "IAMCCS_LTX2_CinematicMultiGenPlanner": IAMCCS_LTX2_CinematicMultiGenPlanner,
-    "IAMCCS_LTX2_CinematicShotAudioSelector": IAMCCS_LTX2_CinematicShotAudioSelector,
-    "IAMCCS_LTX2_CinematicV2VTimelinePlanner": IAMCCS_LTX2_CinematicV2VTimelinePlanner,
-    "IAMCCS_LTX2_CinematicV2VAssetSelector": IAMCCS_LTX2_CinematicV2VAssetSelector,
     "IAMCCS_LTX2_InitLatentSampler": IAMCCS_LTX2_InitLatentSampler,
     "IAMCCS_LTX2_LoopingSampler": IAMCCS_LTX2_LoopingSampler,
     "IAMCCS_LTX2_OneShotLowRAMLooper": IAMCCS_LTX2_OneShotLowRAMLooper,
@@ -384,7 +317,6 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_bus_group": IAMCCS_bus_group,
 
     "IAMCCS_MultiSwitch": IAMCCS_MultiSwitch,
-    "IAMCCS_LazyAnySwitch": IAMCCS_LazyAnySwitch,
 
     "IAMCCS_HwSupporter": IAMCCS_HwSupporter,
     "IAMCCS_HwSupporterAny": IAMCCS_HwSupporterAny,
@@ -423,32 +355,6 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_MultilinePromptSplitter8": IAMCCS_MultilinePromptSplitter8,
     "IAMCCS_SupernodeBase": IAMCCS_SupernodeBase,
     "IAMCCS_SupernodeModule": IAMCCS_SupernodeModule,
-    "IAMCCS_ProjectTimelinePlanner": IAMCCS_ProjectTimelinePlanner,
-    "IAMCCS_Ltx2HelperModules_ProjectTimelinePlanner": IAMCCS_Ltx2HelperModules_ProjectTimelinePlanner,
-    "IAMCCS_Ltx2HelperModules_Planner": IAMCCS_Ltx2HelperModules_Planner,
-    "IAMCCS_Ltx2HelperModules_AudioTimeline": IAMCCS_Ltx2HelperModules_AudioTimeline,
-    "IAMCCS_Ltx2HelperModules_KeyframeTimeline": IAMCCS_Ltx2HelperModules_KeyframeTimeline,
-    "IAMCCS_Ltx2HelperModules_RefreshPolicy": IAMCCS_Ltx2HelperModules_RefreshPolicy,
-    "IAMCCS_Ltx2HelperModules_ReanchorLatent": IAMCCS_Ltx2HelperModules_ReanchorLatent,
-    "IAMCCS_Ltx2HelperModules_DiskExtension": IAMCCS_Ltx2HelperModules_DiskExtension,
-    "IAMCCS_Ltx2HelperModules_RuntimeBridge": IAMCCS_Ltx2HelperModules_RuntimeBridge,
-    "IAMCCS_Ltx2HelperModules_Continuity": IAMCCS_Ltx2HelperModules_Continuity,
-    "IAMCCS_Ltx2HelperModules_Finalize": IAMCCS_Ltx2HelperModules_Finalize,
-    "IAMCCS_AUIMG2VID_ProjectTimelinePlanner": IAMCCS_AUIMG2VID_ProjectTimelinePlanner,
-    "IAMCCS_AUIMG2VID_Planner": IAMCCS_AUIMG2VID_Planner,
-    "IAMCCS_AUIMG2VID_AudioTimeline": IAMCCS_AUIMG2VID_AudioTimeline,
-    "IAMCCS_AUIMG2VID_KeyframeTimeline": IAMCCS_AUIMG2VID_KeyframeTimeline,
-    "IAMCCS_AUIMG2VID_RefreshPolicy": IAMCCS_AUIMG2VID_RefreshPolicy,
-    "IAMCCS_AUIMG2VID_ReanchorLatent": IAMCCS_AUIMG2VID_ReanchorLatent,
-    "IAMCCS_AUIMG2VID_DiskExtension": IAMCCS_AUIMG2VID_DiskExtension,
-    "IAMCCS_AUIMG2VID_RuntimeBridge": IAMCCS_AUIMG2VID_RuntimeBridge,
-    "IAMCCS_AUIMG2VID_Continuity": IAMCCS_AUIMG2VID_Continuity,
-    "IAMCCS_AUIMG2VID_Finalize": IAMCCS_AUIMG2VID_Finalize,
-    "IAMCCS-SuperNodes AU+IMG2VID Exec Planner": IAMCCS_SuperNodes_AUIMG2VIDExecutablePlanner,
-    "IAMCCS-SuperNodes AU+IMG2VID Exec Render": IAMCCS_SuperNodes_AUIMG2VIDExecutableRender,
-    "IAMCCS-SuperNodes AU+IMG2VID Exec VAE": IAMCCS_SuperNodes_AUIMG2VIDExecutableVAE,
-    "IAMCCS-SuperNodes Second Stage": IAMCCS_SuperNodes_SecondStage,
-    **({"IAMCCS-SuperNodes AU+IMG2VID Exec Finalize": IAMCCS_SuperNodes_AUIMG2VIDExecutableFinalize} if IAMCCS_SuperNodes_AUIMG2VIDExecutableFinalize is not None else {}),
 
     # QwenVL First/Last Frame (registered only if QwenVL is installed)
     **({"IAMCCS_QWEN_VL_FLF": IAMCCS_QWEN_VL_FLF,
@@ -488,8 +394,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_ImageBatchPadReflect": "LTX-2 Pad Reflect (IMAGE batch)",
     "IAMCCS_LTX2_ImageBatchCropByPad": "LTX-2 Crop By Pad (IMAGE batch)",
     "IAMCCS_SegmentPlanner": "Segment Planner (song -> LTX frames)",
-    "IAMCCS_SegmentPlannerSettings": "Segment Planner Settings (shared)",
-    "IAMCCS_SegmentPlannerLinked": "Segment Planner Linked (shared inputs)",
     "IAMCCS_SegmentPlanFromPlanner": "Segment Plan From Planner (per index)",
     "IAMCCS_SourceRangeFromSegmentPlan": "Source Range From Segment Plan",
     "IAMCCS_TwoSegmentPlanner": "Two Segment Planner (stable 2SEG)",
@@ -511,18 +415,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_MiddleFrames": "LTX-2 Middle Frames (accumulator) 🧷",
     "IAMCCS_LTX2_FirstLastLatentControl": "LTX-2 First/Last → Latent (noise_mask) 🎯",
     "IAMCCS_LTX2_FirstLastLatentControl_Pro": "LTX-2 First/Last → Latent (Pro, slot caps) 🎯",
-    "IAMCCS_LTX2_CinematicShotPlanner": "LTX-2 Cinematic Shot Planner",
-    "IAMCCS_LTX2_CinematicRefLatentControl": "LTX-2 Cinematic Ref -> Latent",
-    "IAMCCS_LTX2_AudioPromptDirector": "LTX-2 Audio Prompt Director",
-    "IAMCCS_LTX2_CinematicPromptRelayAdapter": "LTX-2 Cinematic PromptRelay Adapter",
-    "IAMCCS_LTX2_CinematicPromptComposer": "LTX-2 Cinematic Prompt Composer",
-    "IAMCCS_LTX2_CinematicShotLineBuilder": "LTX-2 Cinematic Shot Line Builder",
-    "IAMCCS_LTX2_CinematicV2VTimelineLineBuilder": "LTX-2 Cinematic V2V Line Builder",
-    "IAMCCS_LTX2_CinematicLineStacker": "LTX-2 Cinematic Line Stacker",
-    "IAMCCS_LTX2_CinematicMultiGenPlanner": "LTX-2 Cinematic MultiGen Planner",
-    "IAMCCS_LTX2_CinematicShotAudioSelector": "LTX-2 Cinematic Shot Audio Selector",
-    "IAMCCS_LTX2_CinematicV2VTimelinePlanner": "LTX-2 Cinematic V2V Timeline Planner",
-    "IAMCCS_LTX2_CinematicV2VAssetSelector": "LTX-2 Cinematic V2V Asset Selector",
     "IAMCCS_LTX2_InitLatentSampler": "LTX-2 Init Latent Sampler 🧱",
     "IAMCCS_LTX2_LoopingSampler": "LTX-2 Looping Sampler (temporal overlap) 🧷",
     "IAMCCS_LTX2_OneShotLowRAMLooper": "LTX-2 One-Shot Low-RAM Looper 🪶",
@@ -562,39 +454,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_MultilinePromptSplitter8": "Multiline Prompt Splitter (8 outputs)",
     "IAMCCS_SupernodeBase": "Supernode Base (contract + linx)",
     "IAMCCS_SupernodeModule": "Supernode Module (cascade contract + linx)",
-    "IAMCCS_ProjectTimelinePlanner": "IAMCCS Project Timeline Planner",
-    "IAMCCS_Ltx2HelperModules_ProjectTimelinePlanner": "IAMCCS_Ltx2HelperModules Project Timeline Planner",
-    "IAMCCS_Ltx2HelperModules_Planner": "IAMCCS_Ltx2HelperModules Planner",
-    "IAMCCS_Ltx2HelperModules_AudioTimeline": "IAMCCS_Ltx2HelperModules Audio Timeline",
-    "IAMCCS_Ltx2HelperModules_KeyframeTimeline": "IAMCCS_Ltx2HelperModules Keyframe Timeline",
-    "IAMCCS_Ltx2HelperModules_RefreshPolicy": "IAMCCS_Ltx2HelperModules Refresh Policy",
-    "IAMCCS_Ltx2HelperModules_ReanchorLatent": "IAMCCS_Ltx2HelperModules Reanchor Latent",
-    "IAMCCS_Ltx2HelperModules_DiskExtension": "IAMCCS_Ltx2HelperModules Disk Extension",
-    "IAMCCS_Ltx2HelperModules_RuntimeBridge": "IAMCCS_Ltx2HelperModules Runtime Bridge",
-    "IAMCCS_Ltx2HelperModules_Continuity": "IAMCCS_Ltx2HelperModules Continuity",
-    "IAMCCS_Ltx2HelperModules_Finalize": "IAMCCS_Ltx2HelperModules Finalize",
-    "IAMCCS_AUIMG2VID_ProjectTimelinePlanner": "AU+IMG2VID Project Timeline Planner (legacy alias)",
-    "IAMCCS_AUIMG2VID_Planner": "AU+IMG2VID Planner (legacy alias)",
-    "IAMCCS_AUIMG2VID_AudioTimeline": "AU+IMG2VID Audio Timeline (legacy alias)",
-    "IAMCCS_AUIMG2VID_KeyframeTimeline": "AU+IMG2VID Keyframe Timeline (legacy alias)",
-    "IAMCCS_AUIMG2VID_RefreshPolicy": "AU+IMG2VID Refresh Policy (legacy alias)",
-    "IAMCCS_AUIMG2VID_ReanchorLatent": "AU+IMG2VID Reanchor Latent (legacy alias)",
-    "IAMCCS_AUIMG2VID_DiskExtension": "AU+IMG2VID Disk Extension (legacy alias)",
-    "IAMCCS_AUIMG2VID_RuntimeBridge": "AU+IMG2VID Runtime Bridge (legacy alias)",
-    "IAMCCS_AUIMG2VID_Continuity": "AU+IMG2VID Continuity (legacy alias)",
-    "IAMCCS_AUIMG2VID_Finalize": "AU+IMG2VID Finalize (legacy alias)",
-    "IAMCCS-SuperNodes AU+IMG2VID Exec Planner": "IAMCCS-SuperNodes AU+IMG2VID Exec Planner",
-    "IAMCCS-SuperNodes AU+IMG2VID Exec Render": "IAMCCS-SuperNodes AU+IMG2VID Exec Render",
-    "IAMCCS-SuperNodes AU+IMG2VID Exec VAE": "IAMCCS-SuperNodes AU+IMG2VID Exec VAE",
-    "IAMCCS-SuperNodes Second Stage": "IAMCCS-SuperNodes Second Stage",
-    "IAMCCS-SuperNodes AU+IMG2VID Exec Finalize": "IAMCCS-SuperNodes AU+IMG2VID Exec Finalize",
 
     "IAMCCS_SamplerAdvancedVersion1": "Sampler Advanced v1",
 
     "IAMCCS_bus_group": "Bus Group (Mute + Solo) (frontend-only)",
 
     "IAMCCS_MultiSwitch": "MultiSwitch (dynamic inputs)",
-    "IAMCCS_LazyAnySwitch": "Lazy MultiGen Switch (Qwen / Flux)",
     "IAMCCS_WanSviArgs": "Wan SVI Args",
     "IAMCCS_WanSviChainRunner": "Wan SVI Chain Runner",
     "IAMCCS_WanSviSegmentPick": "Wan SVI Segment Pick",

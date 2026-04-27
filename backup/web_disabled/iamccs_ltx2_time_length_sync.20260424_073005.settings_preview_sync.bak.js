@@ -93,10 +93,6 @@ function clampNumber(v, min, max) {
     return Math.max(min, Math.min(max, n));
 }
 
-function numbersClose(a, b, epsilon = 0.0001) {
-    return Math.abs(Number(a) - Number(b)) <= epsilon;
-}
-
 function getGraphFpsOrDefault(defaultFps = 25) {
     try {
         const nodes = app?.graph?._nodes || [];
@@ -188,12 +184,9 @@ function ensurePlannerCopyButton(node) {
 
 function ensurePlannerSettingsReportWidget(node) {
     let widget = getWidget(node, SEGMENT_PLANNER_SETTINGS_REPORT_WIDGET);
-    if (widget) {
-        widget.label = "Live Preview";
-        return widget;
-    }
+    if (widget) return widget;
 
-    widget = node.addWidget("text", "Live Preview", "", () => {}, { multiline: true });
+    widget = node.addWidget("text", "Live Settings", "", () => {}, { multiline: true });
     widget.name = SEGMENT_PLANNER_SETTINGS_REPORT_WIDGET;
     widget.serialize = false;
     try {
@@ -244,29 +237,21 @@ function updateSegmentPlannerSettingsReport(node) {
     const explicitPresetMode = planningMode === "explicit_preset_seconds" || planningMode === "auto_profile";
     const autoDurationProfile = !explicitPresetMode ? getAutoOverlapProfileForDuration(segmentDuration) : null;
     const effectiveSegmentDuration = explicitPresetMode ? rec.segmentSeconds : segmentDuration;
-    const effectiveOverlapFrames = clampNumber(wOverlap.value, 0, 4096);
+    const effectiveOverlapFrames = explicitPresetMode
+        ? rec.overlap
+        : (autoSyncOverlap ? (autoDurationProfile?.overlap ?? clampNumber(wOverlap.value, 0, 4096)) : clampNumber(wOverlap.value, 0, 4096));
 
-    if (explicitPresetMode && !numbersClose(wSeg.value, effectiveSegmentDuration)) {
-        wSeg.value = effectiveSegmentDuration;
+    if (autoSyncOverlap && Number(wOverlap.value) !== effectiveOverlapFrames) {
+        wOverlap.value = effectiveOverlapFrames;
     }
-
-    const previewFps = getGraphFpsOrDefault(24);
-    const uniqueFrames = Math.max(1, Math.round(effectiveSegmentDuration * previewFps));
-    const firstRawFrames = snapLengthToLtx2Rule(uniqueFrames, "up");
-    const continuationRawFrames = snapLengthToLtx2Rule(uniqueFrames + effectiveOverlapFrames, "up");
 
     const report = [
         `segment_duration_s = ${effectiveSegmentDuration.toFixed(3)}`,
         `planning_mode = ${planningMode}`,
         `segment_preset = ${segmentPreset}`,
         `overlap_frames = ${effectiveOverlapFrames}`,
-        `preview_fps = ${previewFps}`,
-        `unique_segment_frames = ${uniqueFrames}`,
-        `first_segment_raw_frames = ${firstRawFrames}`,
-        `continuation_raw_frames = ${continuationRawFrames}`,
         `auto_sync_overlap = ${autoSyncOverlap}`,
         `auto_duration_profile = ${autoDurationProfile?.profileLabel || "none"}`,
-        `overlap_policy = manual/default_9`,
         `recommended_extension_preset = ${rec.preset}`,
     ].join("\n");
 
@@ -285,13 +270,13 @@ function updateSegmentPlannerSettingsReport(node) {
 function getPlannerProfile(presetOrLegacyProfile) {
     const value = String(presetOrLegacyProfile || "15sec");
     if (value === "20sec") {
-        return { segmentSeconds: 20.0, overlap: 9, leftContext: 1.0, preset: "monologue_audio_24fps", profileLabel: "20sec" };
+        return { segmentSeconds: 20.0, overlap: 17, leftContext: 1.0, preset: "monologue_audio_24fps", profileLabel: "20sec" };
     }
     if (value === "15sec" || value === "monologue") {
-        return { segmentSeconds: 15.0, overlap: 9, leftContext: 0.75, preset: "monologue_audio_24fps", profileLabel: "15sec" };
+        return { segmentSeconds: 15.0, overlap: 13, leftContext: 0.75, preset: "monologue_audio_24fps", profileLabel: "15sec" };
     }
     if (value === "5sec") {
-        return { segmentSeconds: 5.0, overlap: 9, leftContext: 0.25, preset: "videoclip_audio_24fps", profileLabel: "5sec" };
+        return { segmentSeconds: 5.0, overlap: 5, leftContext: 0.25, preset: "videoclip_audio_24fps", profileLabel: "5sec" };
     }
     return { segmentSeconds: 10.0, overlap: 9, leftContext: 0.5, preset: "videoclip_audio_24fps", profileLabel: "10sec" };
 }
@@ -337,10 +322,12 @@ function updateSegmentPlannerPreview(node) {
     const explicitPresetMode = planningMode === "explicit_preset_seconds" || planningMode === "auto_profile";
     const autoDurationProfile = !explicitPresetMode ? getAutoOverlapProfileForDuration(segmentDuration) : null;
     const effectiveSegmentDuration = explicitPresetMode ? rec.segmentSeconds : segmentDuration;
-    const effectiveOverlapFrames = inputOverlapFrames;
+    const effectiveOverlapFrames = explicitPresetMode
+        ? rec.overlap
+        : (autoDurationProfile?.overlap ?? inputOverlapFrames);
 
-    if (explicitPresetMode && node?.type !== SEGMENT_PLANNER_LINKED_TYPE && !numbersClose(wSeg.value, effectiveSegmentDuration)) {
-        wSeg.value = effectiveSegmentDuration;
+    if (Number(wOverlap.value) !== effectiveOverlapFrames) {
+        wOverlap.value = effectiveOverlapFrames;
     }
     const overlapFrames = clampNumber(wOverlap.value, 0, 4096);
 
@@ -387,7 +374,6 @@ function updateSegmentPlannerPreview(node) {
         `segment_preset = ${segmentPreset}`,
         `overlap_frames = ${overlapFrames}`,
         `effective_overlap_frames = ${effectiveOverlapFrames}`,
-        `overlap_policy = manual/default_9`,
         `ltx_round_mode = ${roundMode}`,
         `segment_index = ${clampedIndex}`,
         `total_frames = ${totalFrames}`,

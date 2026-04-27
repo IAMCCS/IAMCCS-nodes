@@ -634,8 +634,8 @@ class IAMCCS_SegmentPlanner:
                 "song_duration_s": ("FLOAT", {"default": 180.0, "min": 0.01, "max": 36000.0, "step": 0.01}),
                 "fps": ("FLOAT", {"default": 24.0, "min": 0.001, "max": 240.0, "step": 0.01}),
                 "segment_duration_s": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 3600.0, "step": 0.01}),
-                "planning_mode": (["manual_segment_seconds", "auto_profile"], {"default": "manual_segment_seconds"}),
-                "content_profile": (["videoclip", "monologue"], {"default": "videoclip"}),
+                "planning_mode": (["manual_segment_seconds", "explicit_preset_seconds"], {"default": "manual_segment_seconds"}),
+                "segment_preset": (["5sec", "10sec", "15sec", "20sec", "videoclip", "monologue"], {"default": "15sec"}),
                 "overlap_frames": ("INT", {"default": 9, "min": 0, "max": 4096, "step": 1}),
                 "ltx_round_mode": (["up", "nearest", "down"], {"default": "up"}),
                 "segment_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
@@ -690,44 +690,79 @@ class IAMCCS_SegmentPlanner:
             return up if (up - frames) <= (frames - down) else down
         return up
 
-    def _recommend_profile(self, content_profile: str):
-        profile = str(content_profile or "videoclip")
-        if profile == "monologue":
+    def _normalize_segment_preset(self, segment_preset: str) -> str:
+        value = str(segment_preset or "15sec")
+        if value == "videoclip":
+            return "10sec"
+        if value == "monologue":
+            return "15sec"
+        if value in {"5sec", "10sec", "15sec", "20sec"}:
+            return value
+        return "15sec"
+
+    def _normalize_planning_mode(self, planning_mode: str) -> str:
+        value = str(planning_mode or "manual_segment_seconds")
+        if value == "auto_profile":
+            return "explicit_preset_seconds"
+        if value in {"manual_segment_seconds", "explicit_preset_seconds"}:
+            return value
+        return "manual_segment_seconds"
+
+    def _recommend_profile(self, segment_preset: str):
+        preset = self._normalize_segment_preset(segment_preset)
+        if preset == "5sec":
             return {
-                "base_target_s": 15.0,
-                "min_segment_s": 8.0,
-                "max_segment_s": 15.0,
-                "overlap_frames": 13,
+                "segment_seconds": 5.0,
+                "overlap_frames": 9,
+                "audio_left_context_s": 0.25,
+                "extension_preset": "videoclip_audio_24fps",
+            }
+        if preset == "20sec":
+            return {
+                "segment_seconds": 20.0,
+                "overlap_frames": 9,
+                "audio_left_context_s": 1.0,
+                "extension_preset": "monologue_audio_24fps",
+            }
+        if preset == "15sec":
+            return {
+                "segment_seconds": 15.0,
+                "overlap_frames": 9,
                 "audio_left_context_s": 0.75,
                 "extension_preset": "monologue_audio_24fps",
             }
         return {
-            "base_target_s": 10.0,
-            "min_segment_s": 5.0,
-            "max_segment_s": 10.0,
+            "segment_seconds": 10.0,
             "overlap_frames": 9,
             "audio_left_context_s": 0.5,
             "extension_preset": "videoclip_audio_24fps",
         }
 
-    def plan(self, song_duration_s: float, fps: float, segment_duration_s: float, planning_mode: str, content_profile: str, overlap_frames: int, ltx_round_mode: str, segment_index: int):
+    def _recommend_profile_for_segment_seconds(self, segment_duration_s: float):
+        duration = float(segment_duration_s)
+        for preset, target_seconds in (("5sec", 5.0), ("10sec", 10.0), ("15sec", 15.0), ("20sec", 20.0)):
+            if abs(duration - target_seconds) <= 0.1:
+                return preset, self._recommend_profile(preset)
+        return None, None
+
+    def plan(self, song_duration_s: float, fps: float, segment_duration_s: float, planning_mode: str, segment_preset: str, overlap_frames: int, ltx_round_mode: str, segment_index: int):
         song_duration_s = max(0.01, float(song_duration_s))
         fps = max(0.001, float(fps))
         segment_duration_s = max(0.01, float(segment_duration_s))
         overlap_frames = max(0, int(overlap_frames))
         segment_index = max(0, int(segment_index))
-        planning_mode = str(planning_mode or "manual_segment_seconds")
-        content_profile = str(content_profile or "videoclip")
+        planning_mode = self._normalize_planning_mode(planning_mode)
+        segment_preset = self._normalize_segment_preset(segment_preset)
 
-        rec = self._recommend_profile(content_profile)
+        rec = self._recommend_profile(segment_preset)
+        auto_duration_profile = None
         effective_planning_mode = planning_mode
-        if planning_mode == "auto_profile":
-            target_s = float(rec["base_target_s"])
-            estimated_segments_auto = max(1, int(math.ceil(song_duration_s / max(0.01, target_s))))
-            auto_segment_s = song_duration_s / float(estimated_segments_auto)
-            auto_segment_s = max(float(rec["min_segment_s"]), min(float(rec["max_segment_s"]), auto_segment_s))
-            segment_duration_s = max(0.01, float(auto_segment_s))
-            overlap_frames = int(rec["overlap_frames"])
+        if planning_mode == "explicit_preset_seconds":
+            segment_duration_s = max(0.01, float(rec["segment_seconds"]))
+        else:
+            auto_duration_profile, auto_rec = self._recommend_profile_for_segment_seconds(segment_duration_s)
+            if auto_rec is not None:
+                rec = auto_rec
 
         total_frames = max(1, int(round(song_duration_s * fps)))
         unique_segment_frames = max(1, int(round(segment_duration_s * fps)))
@@ -761,7 +796,7 @@ class IAMCCS_SegmentPlanner:
             f"overlap={overlap_frames}f | first_raw={first_segment_raw_frames}f | "
             f"continuation_raw={continuation_raw_frames}f | segments={estimated_segments} | "
             f"loops={continuation_loops} | last_unique={last_segment_unique_frames}f | ltx_round={ltx_round_mode} | "
-            f"planning={effective_planning_mode} | profile={content_profile}"
+            f"planning={effective_planning_mode} | segment_preset={segment_preset}"
         )
 
         current_segment_report = (
@@ -771,9 +806,9 @@ class IAMCCS_SegmentPlanner:
         )
 
         planning_profile_report = (
-            f"profile={content_profile} | planning_mode={effective_planning_mode} | segment_duration_s={segment_duration_s:.3f} | "
+            f"segment_preset={segment_preset} | planning_mode={effective_planning_mode} | segment_duration_s={segment_duration_s:.3f} | "
             f"recommended_overlap={recommended_overlap_frames}f | recommended_left_context={recommended_audio_left_context_s:.2f}s | "
-            f"recommended_extension_preset={recommended_extension_preset}"
+            f"recommended_extension_preset={recommended_extension_preset} | auto_duration_profile={auto_duration_profile or 'none'}"
         )
 
         return (
@@ -800,6 +835,99 @@ class IAMCCS_SegmentPlanner:
             recommended_extension_preset,
             effective_planning_mode,
             planning_profile_report,
+        )
+
+
+class IAMCCS_SegmentPlannerSettings(IAMCCS_SegmentPlanner):
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "segment_duration_s": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 3600.0, "step": 0.01}),
+                "planning_mode": (["manual_segment_seconds", "explicit_preset_seconds"], {"default": "manual_segment_seconds"}),
+                "segment_preset": (["5sec", "10sec", "15sec", "20sec", "videoclip", "monologue"], {"default": "10sec"}),
+                "overlap_frames": ("INT", {"default": 9, "min": 0, "max": 4096, "step": 1}),
+                "auto_sync_overlap": ("BOOLEAN", {"default": False}),
+            }
+        }
+
+    RETURN_TYPES = ("FLOAT", "STRING", "STRING", "INT", "STRING")
+    RETURN_NAMES = ("segment_duration_s", "planning_mode", "segment_preset", "overlap_frames", "report")
+    FUNCTION = "build"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    def build(self, segment_duration_s: float, planning_mode: str, segment_preset: str, overlap_frames: int, auto_sync_overlap: bool):
+        segment_duration_s = max(0.01, float(segment_duration_s))
+        overlap_frames = max(0, int(overlap_frames))
+        planning_mode = self._normalize_planning_mode(planning_mode)
+        segment_preset = self._normalize_segment_preset(segment_preset)
+
+        rec = self._recommend_profile(segment_preset)
+        auto_duration_profile = None
+        if planning_mode == "explicit_preset_seconds":
+            segment_duration_s = max(0.01, float(rec["segment_seconds"]))
+        elif auto_sync_overlap:
+            auto_duration_profile, auto_rec = self._recommend_profile_for_segment_seconds(segment_duration_s)
+            if auto_rec is not None:
+                rec = auto_rec
+
+        report = (
+            f"segment_duration_s={segment_duration_s:.3f} | planning_mode={planning_mode} | "
+            f"segment_preset={segment_preset} | overlap_frames={overlap_frames} | "
+            f"auto_sync_overlap={bool(auto_sync_overlap)} | auto_duration_profile={auto_duration_profile or 'none'} | "
+            "overlap_policy=manual/default_9"
+        )
+
+        return (
+            float(segment_duration_s),
+            str(planning_mode),
+            str(segment_preset),
+            int(overlap_frames),
+            report,
+        )
+
+
+class IAMCCS_SegmentPlannerLinked(IAMCCS_SegmentPlanner):
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "song_duration_s": ("FLOAT", {"default": 180.0, "min": 0.01, "max": 36000.0, "step": 0.01}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 0.001, "max": 240.0, "step": 0.01}),
+                "segment_duration_s": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 3600.0, "step": 0.01, "forceInput": True}),
+                "planning_mode_in": ("STRING", {"default": "manual_segment_seconds", "forceInput": True}),
+                "segment_preset_in": ("STRING", {"default": "10sec", "forceInput": True}),
+                "overlap_frames_in": ("INT", {"default": 9, "min": 0, "max": 4096, "step": 1, "forceInput": True}),
+                "ltx_round_mode": (["up", "nearest", "down"], {"default": "up"}),
+                "segment_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = IAMCCS_SegmentPlanner.RETURN_TYPES
+    RETURN_NAMES = IAMCCS_SegmentPlanner.RETURN_NAMES
+    FUNCTION = "plan_linked"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    def plan_linked(
+        self,
+        song_duration_s: float,
+        fps: float,
+        segment_duration_s: float,
+        planning_mode_in: str,
+        segment_preset_in: str,
+        overlap_frames_in: int,
+        ltx_round_mode: str,
+        segment_index: int,
+    ):
+        return self.plan(
+            song_duration_s,
+            fps,
+            segment_duration_s,
+            str(planning_mode_in or "manual_segment_seconds"),
+            str(segment_preset_in or "10sec"),
+            int(overlap_frames_in),
+            ltx_round_mode,
+            segment_index,
         )
 
 
