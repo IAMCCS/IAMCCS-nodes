@@ -204,6 +204,48 @@ function ensurePlannerSettingsReportWidget(node) {
     return widget;
 }
 
+function setWidgetVisibility(widget, visible) {
+    if (!widget || widget.type === "converted-widget") return;
+
+    widget.hidden = !visible;
+    widget.disabled = !visible;
+
+    if (widget.element) {
+        widget.element.style.display = visible ? "" : "none";
+    }
+    if (widget.inputEl) {
+        widget.inputEl.style.display = visible ? "" : "none";
+    }
+
+    if (visible) {
+        if (Object.prototype.hasOwnProperty.call(widget, "__iamccsOrigComputeSize")) {
+            widget.computeSize = widget.__iamccsOrigComputeSize;
+        } else {
+            delete widget.computeSize;
+        }
+    } else {
+        if (!Object.prototype.hasOwnProperty.call(widget, "__iamccsOrigComputeSize")) {
+            widget.__iamccsOrigComputeSize = widget.computeSize;
+        }
+        widget.computeSize = () => [0, -4];
+        widget.y = undefined;
+        widget.last_y = undefined;
+    }
+}
+
+function applySegmentPlannerSettingsVisibility(node) {
+    const wPlanning = getWidget(node, "planning_mode");
+    const wSeg = getWidget(node, "segment_duration_s");
+    const wPreset = getWidget(node, "segment_preset") || getWidget(node, "content_profile");
+    if (!wPlanning || !wSeg || !wPreset) return;
+
+    const planningMode = String(wPlanning.value || "manual_segment_seconds");
+    const explicitPresetMode = planningMode === "explicit_preset_seconds" || planningMode === "auto_profile";
+
+    setWidgetVisibility(wSeg, !explicitPresetMode);
+    setWidgetVisibility(wPreset, explicitPresetMode);
+}
+
 function ensurePlannerNodeSize(node) {
     try {
         const width = Math.max(460, Number(node.size?.[0] || 0));
@@ -234,6 +276,8 @@ function updateSegmentPlannerSettingsReport(node) {
     const wOverlap = getWidget(node, "overlap_frames");
     const wAutoSync = getWidget(node, "auto_sync_overlap");
     if (!wSeg || !wPlanning || !wProfile || !wOverlap || !wAutoSync) return;
+
+    applySegmentPlannerSettingsVisibility(node);
 
     const segmentDuration = clampNumber(wSeg.value, 0.01, 3600.0);
     const planningMode = String(wPlanning.value || "manual_segment_seconds");
@@ -357,7 +401,8 @@ function updateSegmentPlannerPreview(node) {
     const currentUnique = Math.max(1, Math.min(uniqueFrames, totalFrames - currentStart));
     const currentEnd = Math.min(totalFrames, currentStart + currentUnique);
     const currentRemaining = Math.max(0, totalFrames - currentEnd);
-    const currentRaw = clampedIndex === 0 ? firstRaw : nextRaw;
+    const lastRaw = segments <= 1 ? firstRaw : snapLengthToLtx2Rule(lastUnique + effectiveOverlapFrames, roundMode);
+    const currentRaw = clampedIndex === 0 ? firstRaw : (clampedIndex >= segments - 1 ? lastRaw : nextRaw);
     const currentStartS = currentStart / fps;
     const currentEndS = currentEnd / fps;
 
@@ -394,6 +439,7 @@ function updateSegmentPlannerPreview(node) {
         `unique_segment_frames = ${uniqueFrames}`,
         `first_segment_raw_frames = ${firstRaw}`,
         `continuation_raw_frames = ${nextRaw}`,
+        `last_segment_raw_frames = ${lastRaw}`,
         `estimated_segments = ${segments}`,
         `continuation_loops = ${loops}`,
         `last_segment_unique_frames = ${lastUnique}`,
@@ -470,6 +516,7 @@ function installSegmentPlannerSettingsSync(node) {
     ].filter(Boolean);
 
     if (!widgets.length || node._iamccsSegmentPlannerSettingsSyncInstalled) {
+        applySegmentPlannerSettingsVisibility(node);
         updateSegmentPlannerSettingsReport(node);
         return;
     }

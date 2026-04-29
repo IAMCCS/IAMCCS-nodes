@@ -1422,6 +1422,98 @@ class IAMCCS_StartDirToVideoLatent:
         return ({"samples": samples, "noise_mask": conditioning_latent_frames_mask}, int(images.shape[0]), report)
 
 
+class IAMCCS_StartImagesToVideoLatent:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "start_images": ("IMAGE",),
+                "vae": ("VAE",),
+                "latent": ("LATENT",),
+                "mode": (["all", "from_start", "from_end"], {"default": "all"}),
+                "count": ("INT", {"default": 9, "min": 1, "max": 512, "step": 1}),
+                "insert_at_pixel_frame": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+                "strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "preprocess": ("BOOLEAN", {"default": True}),
+                "preprocess_crf": ("INT", {"default": 33, "min": 0, "max": 100, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT", "INT", "STRING")
+    RETURN_NAMES = ("latent", "frames_loaded", "report")
+    FUNCTION = "inject"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    def inject(self, start_images, vae, latent, mode: str, count: int, insert_at_pixel_frame: int, strength: float, preprocess: bool, preprocess_crf: int):
+        images = start_images
+        if images is None or getattr(images, "shape", None) is None or int(images.shape[0]) == 0:
+            raise ValueError("No start images provided")
+
+        count = max(1, int(count))
+        if mode == "from_start":
+            images = images[:count]
+        elif mode == "from_end":
+            images = images[-count:]
+
+        if preprocess:
+            try:
+                import comfy_extras.nodes_lt as nodes_lt  # type: ignore
+
+                images = nodes_lt.LTXVPreprocess().execute(images, int(preprocess_crf))[0]
+            except Exception as e:
+                _log.warning("[IAMCCS_StartImagesToVideoLatent] preprocess fallback: %s", e)
+
+        samples = latent["samples"].clone()
+        scale_factors = getattr(vae, "downscale_index_formula", (8, 32, 32))
+        time_scale_factor, height_scale_factor, width_scale_factor = scale_factors
+        batch, _, latent_frames, latent_height, latent_width = samples.shape
+        width = latent_width * width_scale_factor
+        height = latent_height * height_scale_factor
+
+        if images.shape[1] != height or images.shape[2] != width:
+            try:
+                import comfy.utils  # type: ignore
+            except Exception as e:
+                raise ImportError("comfy.utils is required for IAMCCS_StartImagesToVideoLatent") from e
+
+            pixels = comfy.utils.common_upscale(images.movedim(-1, 1), width, height, "bilinear", "center").movedim(1, -1)
+        else:
+            pixels = images
+
+        encoded = vae.encode(pixels[:, :, :, :3])
+        if isinstance(encoded, dict):
+            encoded = encoded.get("samples", encoded)
+        if encoded.ndim == 4:
+            encoded = encoded.unsqueeze(2)
+        if encoded.ndim != 5:
+            raise ValueError(f"Unexpected encoded latent shape: {tuple(encoded.shape)}")
+
+        if encoded.shape[0] != batch:
+            if encoded.shape[0] == 1 and batch == 1:
+                pass
+            elif batch == 1:
+                encoded = encoded[:1]
+            else:
+                raise ValueError("Encoded batch does not match target latent batch")
+
+        if "noise_mask" in latent:
+            conditioning_latent_frames_mask = latent["noise_mask"].clone()
+        else:
+            conditioning_latent_frames_mask = torch.ones((batch, 1, latent_frames, 1, 1), dtype=torch.float32, device=samples.device)
+
+        latent_idx = max(0, min(int(insert_at_pixel_frame) // max(1, int(time_scale_factor)), latent_frames - 1))
+        end_index = min(latent_idx + int(encoded.shape[2]), latent_frames)
+        samples[:, :, latent_idx:end_index] = encoded[:, :, :end_index - latent_idx]
+        conditioning_latent_frames_mask[:, :, latent_idx:end_index] = 1.0 - float(max(0.0, min(1.0, strength)))
+
+        report = (
+            f"Loaded {int(images.shape[0])} start images from input | "
+            f"insert_pixel={int(insert_at_pixel_frame)} -> latent_idx={latent_idx} | "
+            f"encoded_t={int(encoded.shape[2])} | replaced={int(end_index - latent_idx)} latent slots"
+        )
+        return ({"samples": samples, "noise_mask": conditioning_latent_frames_mask}, int(images.shape[0]), report)
+
+
 class IAMCCS_VideoCombineFromDir:
     @classmethod
     def INPUT_TYPES(cls):

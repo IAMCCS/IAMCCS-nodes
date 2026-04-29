@@ -5,10 +5,10 @@ const PRESET_CONFIGS = {
         presetWidget: "ui_preset",
         defaultPreset: "balanced",
         values: {
-            low_ram_safe: { modular_decode: "low_ram", steps: 16, image_compression: 40, continuity_anchor_mode: "off", anchor_refresh_interval: 2, anti_drift_mode: "off", anti_drift_strength: 0.0, identity_persistence_strength: 0.0 },
-            balanced: { modular_decode: "normal", steps: 20, image_compression: 33, continuity_anchor_mode: "off", anchor_refresh_interval: 3, anti_drift_mode: "off", anti_drift_strength: 0.0, identity_persistence_strength: 0.0 },
-            high_quality: { modular_decode: "high", steps: 24, image_compression: 28, continuity_anchor_mode: "off", anchor_refresh_interval: 1, anti_drift_mode: "off", anti_drift_strength: 0.0, identity_persistence_strength: 0.0 },
-            fast_preview: { modular_decode: "low_ram", steps: 12, image_compression: 45, continuity_anchor_mode: "off", anchor_refresh_interval: 2, anti_drift_mode: "off", anti_drift_strength: 0.0, identity_persistence_strength: 0.0 },
+            low_ram_safe: { modular_decode: "low_ram", steps: 16, image_compression: 40, continuity_anchor_mode: "off", anchor_refresh_interval: 2, anti_drift_mode: "off", anti_drift_strength: 0.0, identity_persistence_strength: 0.0, generation_mode: "img2vid", second_stage_mode: "off", stage2_model_policy: "stage2_model_if_connected", second_stage_reinject_strength: 0.0 },
+            balanced: { modular_decode: "normal", steps: 20, image_compression: 33, continuity_anchor_mode: "off", anchor_refresh_interval: 3, anti_drift_mode: "off", anti_drift_strength: 0.0, identity_persistence_strength: 0.0, generation_mode: "img2vid", second_stage_mode: "off", stage2_model_policy: "stage2_model_if_connected", second_stage_reinject_strength: 0.0 },
+            high_quality: { modular_decode: "high", steps: 24, image_compression: 28, continuity_anchor_mode: "off", anchor_refresh_interval: 1, anti_drift_mode: "off", anti_drift_strength: 0.0, identity_persistence_strength: 0.0, generation_mode: "img2vid", second_stage_mode: "off", stage2_model_policy: "stage2_model_if_connected", second_stage_reinject_strength: 0.0 },
+            fast_preview: { modular_decode: "low_ram", steps: 12, image_compression: 45, continuity_anchor_mode: "off", anchor_refresh_interval: 2, anti_drift_mode: "off", anti_drift_strength: 0.0, identity_persistence_strength: 0.0, generation_mode: "img2vid", second_stage_mode: "off", stage2_model_policy: "stage2_model_if_connected", second_stage_reinject_strength: 0.0 },
         },
         visibility: {
             low_ram_safe: { anchor_image_strength: false, anti_drift_mode: false, anti_drift_strength: false, identity_persistence_strength: false, output_root: true },
@@ -50,6 +50,7 @@ const NODE_GROUPS = {
         { key: "anchor", label: "Anchor", color: "#b35c5c", widgets: ["continuity_anchor_mode", "anchor_refresh_interval", "anchor_image_strength", "anti_drift_mode", "anti_drift_strength", "identity_persistence_strength"] },
         { key: "modular", label: "Modular", color: "#46769a", widgets: ["modular_decode", "downstream_stage_mode", "output_root"] },
         { key: "debug", label: "Debug", color: "#8a8a36", widgets: ["segment_overlay_mode", "segment_overlay_text"] },
+        { key: "stage2", label: "Mode + Second Stage", color: "#8a5ca0", widgets: ["generation_mode", "second_stage_mode", "stage2_model_policy", "second_stage_upscale_model", "second_stage_reinject_strength", "second_stage_cfg", "second_stage_manual_sigmas"] },
     ],
     "IAMCCS-SuperNodes Second Stage": [
         { key: "stage2", label: "Second Stage", color: "#8a5ca0", widgets: ["second_stage_mode", "stage2_model_policy", "second_stage_upscale_model", "second_stage_reinject_strength", "second_stage_cfg", "second_stage_manual_sigmas"] },
@@ -324,9 +325,29 @@ function applyRenderAnchorLabels(node) {
     if (node.comfyClass !== "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
         return;
     }
+    setWidgetLabel(node, "generation_mode", "Generation Mode");
     setWidgetLabel(node, "continuity_anchor_mode", "Anchor Refresh");
     setWidgetLabel(node, "anchor_refresh_interval", "Refresh Interval");
     setWidgetLabel(node, "anchor_image_strength", "Anchor Guidance Strength");
+    setWidgetLabel(node, "second_stage_mode", "Second Stage");
+    setWidgetLabel(node, "stage2_model_policy", "Stage2 Model Policy");
+    setWidgetLabel(node, "second_stage_upscale_model", "2x Upscale Model");
+    setWidgetLabel(node, "second_stage_reinject_strength", "Anchor Reinject Strength");
+}
+
+function applyRenderSecondStageVisibility(node) {
+    if (node.comfyClass !== "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
+        return;
+    }
+    const mode = String(findWidget(node, "second_stage_mode")?.value || "off");
+    const stageExpanded = !!node.properties?.iamccs_section_stage2;
+    const enabled = stageExpanded && mode !== "off";
+    setWidgetVisibility(findWidget(node, "stage2_model_policy"), enabled);
+    setWidgetVisibility(findWidget(node, "second_stage_reinject_strength"), enabled);
+    setWidgetVisibility(findWidget(node, "second_stage_cfg"), enabled);
+    setWidgetVisibility(findWidget(node, "second_stage_manual_sigmas"), enabled);
+    setWidgetVisibility(findWidget(node, "second_stage_upscale_model"), enabled && mode === "latent_upscale_refine_x2_beta");
+    fitNodeToWidgets(node);
 }
 
 function syncDownstreamVaeDecodeModes(renderNode) {
@@ -373,6 +394,7 @@ function applyPresetConfig(node, nodeName) {
     }
     if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
         applyRenderAnchorLabels(node);
+        applyRenderSecondStageVisibility(node);
     }
     fitNodeToWidgets(node);
 }
@@ -444,6 +466,9 @@ function applyGroupVisibility(node, group, propKey, button) {
     for (const widgetName of group.widgets) {
         setWidgetVisibility(findWidget(node, widgetName), isExpanded);
     }
+    if (node.comfyClass === "IAMCCS-SuperNodes AU+IMG2VID Exec Render" && group.key === "stage2") {
+        applyRenderSecondStageVisibility(node);
+    }
     fitNodeToWidgets(node);
     app.graph.setDirtyCanvas(true, true);
 }
@@ -482,6 +507,8 @@ function refreshNodeLayoutState(node, nodeName) {
         applyVaeDecodeModeVisibility(node);
     } else if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec Planner") {
         applyPlannerModeVisibility(node);
+    } else if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
+        applyRenderSecondStageVisibility(node);
     } else {
         fitNodeToWidgets(node);
     }
@@ -685,6 +712,19 @@ app.registerExtension({
                     };
                     syncDownstreamVaeDecodeModes(this);
                 }
+                for (const widgetName of ["generation_mode", "second_stage_mode"]) {
+                    const widget = findWidget(this, widgetName);
+                    if (!widget) {
+                        continue;
+                    }
+                    const originalCallback = widget.callback;
+                    widget.callback = (...args) => {
+                        originalCallback?.apply(widget, args);
+                        applyRenderSecondStageVisibility(this);
+                        app.graph.setDirtyCanvas(true, true);
+                    };
+                }
+                applyRenderSecondStageVisibility(this);
             }
             if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec Planner") {
                 installExecPlannerExplicitPresetSync(this);

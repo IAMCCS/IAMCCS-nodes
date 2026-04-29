@@ -774,6 +774,7 @@ class IAMCCS_SegmentPlanner:
         continuation_loops = max(0, estimated_segments - 1)
         remainder = total_frames - unique_segment_frames * max(0, estimated_segments - 1)
         last_segment_unique_frames = unique_segment_frames if remainder <= 0 else int(remainder)
+        last_segment_raw_frames = first_segment_raw_frames if estimated_segments <= 1 else self._fix_ltx_frames(last_segment_unique_frames + overlap_frames, str(ltx_round_mode))
 
         clamped_segment_index = min(segment_index, max(0, estimated_segments - 1))
         current_segment_start_frames = unique_segment_frames * clamped_segment_index
@@ -783,7 +784,12 @@ class IAMCCS_SegmentPlanner:
             current_segment_start_frames = min(current_segment_start_frames, max(0, total_frames - current_segment_unique_frames))
         current_segment_end_frames = min(total_frames, current_segment_start_frames + current_segment_unique_frames)
         current_remaining_frames_after = max(0, total_frames - current_segment_end_frames)
-        current_segment_raw_frames = first_segment_raw_frames if clamped_segment_index == 0 else continuation_raw_frames
+        if clamped_segment_index == 0:
+            current_segment_raw_frames = first_segment_raw_frames
+        elif clamped_segment_index >= estimated_segments - 1:
+            current_segment_raw_frames = last_segment_raw_frames
+        else:
+            current_segment_raw_frames = continuation_raw_frames
         current_segment_start_s = float(current_segment_start_frames) / float(fps)
         current_segment_end_s = float(current_segment_end_frames) / float(fps)
         recommended_overlap_frames = int(rec["overlap_frames"])
@@ -981,6 +987,7 @@ class IAMCCS_SegmentPlanFromPlanner:
         estimated_segments = max(1, int(estimated_segments))
         last_segment_unique_frames = max(1, int(last_segment_unique_frames))
         segment_index = max(0, min(int(segment_index), estimated_segments - 1))
+        overlap_hint_frames = max(0, continuation_raw_frames - unique_segment_frames)
 
         current_segment_start_frames = unique_segment_frames * segment_index
         if segment_index >= estimated_segments - 1:
@@ -990,7 +997,13 @@ class IAMCCS_SegmentPlanFromPlanner:
 
         current_segment_end_frames = min(total_frames, current_segment_start_frames + current_segment_unique_frames)
         current_remaining_frames_after = max(0, total_frames - current_segment_end_frames)
-        current_segment_raw_frames = first_segment_raw_frames if segment_index == 0 else continuation_raw_frames
+        if segment_index == 0:
+            current_segment_raw_frames = first_segment_raw_frames
+        elif segment_index >= estimated_segments - 1:
+            current_segment_raw_frames = max(1, current_segment_unique_frames + overlap_hint_frames)
+            current_segment_raw_frames = 1 + 8 * max(0, int(math.ceil(float(current_segment_raw_frames - 1) / 8.0)))
+        else:
+            current_segment_raw_frames = continuation_raw_frames
         current_segment_start_s = float(current_segment_start_frames) / float(fps)
         current_segment_end_s = float(current_segment_end_frames) / float(fps)
         current_segment_report = (
