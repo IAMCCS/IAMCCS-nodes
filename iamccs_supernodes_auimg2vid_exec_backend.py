@@ -424,6 +424,23 @@ def _compute_audio_duration_seconds(audio):
         return _audio_duration_seconds(audio), "waveform"
 
 
+def _compute_audio_duration_frames_with_tail(audio, fps):
+    fps_value = max(0.001, float(fps))
+    try:
+        node = _node_class("Audio Duration (mtb)")()
+        outputs = _invoke_node(
+            node,
+            ("execute", "get_duration", "duration"),
+            positional_variants=[(audio,)],
+            keyword_variants=[{"audio": audio}],
+        )
+        duration_ms = int(outputs[0])
+        return max(1, int((float(duration_ms) * 0.001 * fps_value) + 1.0)), "mtb_plus_tail"
+    except Exception:
+        seconds = _audio_duration_seconds(audio)
+        return max(1, int((float(seconds) * fps_value) + 1.0)), "waveform_plus_tail"
+
+
 def _prepare_planner_audio(audio, audio_preprocess_mode, melband_model_name):
     mode = _normalize_audio_preprocess_mode(audio_preprocess_mode)
     model_name = str(melband_model_name or "MelBandRoformer_fp32.safetensors")
@@ -435,7 +452,15 @@ def _prepare_planner_audio(audio, audio_preprocess_mode, melband_model_name):
         "duration_audio": audio,
         "duration_seconds": raw_seconds,
         "duration_source": raw_source,
-        "preprocess_report": f"audio_preprocess=raw_audio_only | duration_source={raw_source}",
+        "duration_frames_with_tail": None,
+        "duration_frames_source": "unknown",
+        "conditioning_duration_audio": audio,
+        "conditioning_duration_seconds": raw_seconds,
+        "conditioning_duration_source": raw_source,
+        "preprocess_report": (
+            f"audio_preprocess=raw_audio_only | global_duration_source={raw_source} | "
+            f"conditioning_duration_source={raw_source}"
+        ),
         "melband_enabled": False,
     }
     if mode != "melband_vocals_duration_math":
@@ -459,14 +484,21 @@ def _prepare_planner_audio(audio, audio_preprocess_mode, melband_model_name):
         duration_seconds, duration_source = _compute_audio_duration_seconds(vocals)
         result.update({
             "conditioning_audio_single": vocals,
-            "duration_audio": vocals,
-            "duration_seconds": duration_seconds,
-            "duration_source": duration_source,
-            "preprocess_report": f"audio_preprocess=melband_vocals_duration_math | model={model_name} | duration_source={duration_source}",
+            "conditioning_duration_audio": vocals,
+            "conditioning_duration_seconds": duration_seconds,
+            "conditioning_duration_source": duration_source,
+            "preprocess_report": (
+                f"audio_preprocess=melband_vocals_duration_math | model={model_name} | "
+                f"global_duration_source={raw_source} | conditioning_duration_source={duration_source} | "
+                f"global_duration_seconds={raw_seconds:.6f} | conditioning_duration_seconds={duration_seconds:.6f}"
+            ),
             "melband_enabled": True,
         })
     except Exception as exc:
-        result["preprocess_report"] = f"audio_preprocess=raw_audio_fallback | reason={exc} | duration_source={raw_source}"
+        result["preprocess_report"] = (
+            f"audio_preprocess=raw_audio_fallback | reason={exc} | global_duration_source={raw_source} | "
+            f"conditioning_duration_source={raw_source}"
+        )
     return result
 
 
@@ -901,6 +933,9 @@ class IAMCCS_GC_AUIMG2VIDExecutablePlanner:
         segment_preset = _normalize_segment_preset(segment_preset)
         audio_preprocess_mode = _normalize_audio_preprocess_mode(audio_preprocess_mode)
         audio_plan = _prepare_planner_audio(audio, audio_preprocess_mode, melband_model_name)
+        audio_duration_frames_with_tail, audio_duration_frames_source = _compute_audio_duration_frames_with_tail(audio_plan["duration_audio"], fps)
+        audio_plan["duration_frames_with_tail"] = int(audio_duration_frames_with_tail)
+        audio_plan["duration_frames_source"] = str(audio_duration_frames_source)
         duration_seconds = _duration_hint_from_payload(audio_concat_payload)
         if duration_seconds is None:
             duration_seconds = float(audio_plan["duration_seconds"])
@@ -918,6 +953,7 @@ class IAMCCS_GC_AUIMG2VIDExecutablePlanner:
         payload = (
             f"pipeline_kind=au_img2vid_exec; total_duration_seconds={duration_seconds:.6f}; fps={float(fps):.6f}; "
             f"segment_seconds={float(segment_seconds):.6f}; planning_mode={planning_mode}; segment_preset={segment_preset}; content_profile={segment_preset}; "
+            f"audio_duration_frames_with_tail={int(audio_duration_frames_with_tail)}; audio_duration_frames_source={audio_duration_frames_source}; "
             f"overlap_frames={int(overlap_frames)}; ltx_round_mode={ltx_round_mode}; total_frames={int(planned[0])}; "
             f"unique_segment_frames={int(planned[1])}; first_segment_raw_frames={int(planned[2])}; continuation_raw_frames={int(planned[3])}; "
             f"segment_count={int(planned[4])}; continuation_loops={int(planned[5])}; last_segment_unique_frames={int(planned[6])}; "
@@ -929,6 +965,7 @@ class IAMCCS_GC_AUIMG2VIDExecutablePlanner:
             f"Executable planner. duration={duration_seconds:.3f}s @ {float(fps):.3f}fps | "
             f"segments={int(planned[4])} | first_raw={int(planned[2])}f | continuation_raw={int(planned[3])}f | "
             f"recommended_overlap={int(planned[18])}f | left_context={float(planned[19]):.3f}s | "
+            f"audio_frames_with_tail={int(audio_duration_frames_with_tail)}f ({audio_duration_frames_source}) | "
             f"audio_preprocess_mode={audio_preprocess_mode} | melband_model={melband_model_name} | "
             f"melband_enabled={bool(audio_plan['melband_enabled'])} | {audio_plan['preprocess_report']}"
         )
@@ -963,6 +1000,7 @@ class IAMCCS_GC_AUIMG2VIDExecutablePlanner:
                 "plan_payload": payload,
                 "planned_duration_seconds": float(duration_seconds),
                 "total_frames": int(planned[0]),
+                "audio_duration_frames_with_tail": int(audio_duration_frames_with_tail),
                 "segment_count": int(planned[4]),
                 "first_segment_raw_frames": int(planned[2]),
                 "continuation_raw_frames": int(planned[3]),
@@ -976,6 +1014,8 @@ class IAMCCS_GC_AUIMG2VIDExecutablePlanner:
                 "audio_conditioning_single": audio_plan["conditioning_audio_single"],
                 "audio_conditioning_segmented": audio_plan["conditioning_audio_segmented"],
                 "audio_duration_source": audio_plan["duration_audio"],
+                "audio_duration_frames_with_tail": int(audio_duration_frames_with_tail),
+                "audio_duration_frames_source": str(audio_duration_frames_source),
                 "model": model,
                 "clip": clip,
                 "vae": vae,
@@ -1299,7 +1339,10 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
         rolling_reference_latent = None
 
         if use_single_best:
-            total_frames = max(1, _to_int(_parse_payload(plan_payload), "total_frames", int(planner_head[0]) or 1))
+            payload_data = _parse_payload(plan_payload)
+            planner_total_frames = max(1, _to_int(payload_data, "total_frames", int(planner_head[0]) or 1))
+            audio_total_frames_with_tail = max(0, _to_int(payload_data, "audio_duration_frames_with_tail", 0))
+            total_frames = max(1, planner_total_frames, audio_total_frames_with_tail)
             video_latent = EmptyLTXVLatentVideo.execute(int(width), int(height), total_frames, 1)[0]
             if str(generation_mode) != "t2v":
                 preprocessed_image = LTXVPreprocess.execute(image, int(image_compression))[0]
@@ -1394,6 +1437,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 f"Planner settings used. mode={planner_settings['planning_mode']} | segment_preset={planner_settings['segment_preset']} | "
                 f"segment_seconds={float(planner_settings['segment_seconds']):.3f}s | overlap={int(planner_settings['overlap_frames'])}f | "
                 f"ltx_round={planner_settings['ltx_round_mode']}\n"
+                f"Single duration protection. planner_total={int(planner_total_frames)}f | audio_total_with_tail={int(audio_total_frames_with_tail)}f | chosen_total={int(total_frames)}f\n"
                 f"Audio preprocess. {audio_preprocess_report}\n"
                 f"Single route details. sampler=lcm | scheduler=simple(steps=8, denoise=1.0) | sampler_node=IAMCCS_SamplerAdvancedVersion1 | cleanup_before_sampling=soft_cleanup | model_sampling=workflow_single_match(no_extra_ModelSamplingLTXV) | {accelerator_report}\n"
                 f"Executable AU+IMG2VID render completed. single generation backend=workflow1_best | latent handed to VAE stage"
