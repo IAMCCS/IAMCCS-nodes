@@ -1,32 +1,52 @@
-import { app } from "../../../scripts/app.js";
+﻿import { app } from "../../../scripts/app.js";
 
 const PRESET_CONFIGS = {
     "IAMCCS-SuperNodes AU+IMG2VID Exec Render": {
         presetWidget: "ui_preset",
-        defaultPreset: "balanced",
+        defaultPreset: "custom",
         values: {
-            low_ram_safe: { modular_decode: "low_ram", steps: 16, image_compression: 40, continuity_anchor_mode: "off", anchor_refresh_interval: 2, anti_drift_mode: "off", anti_drift_strength: 0.0, identity_persistence_strength: 0.0, generation_mode: "img2vid", second_stage_mode: "off", stage2_model_policy: "stage2_model_if_connected", second_stage_reinject_strength: 0.0 },
-            balanced: { modular_decode: "normal", steps: 20, image_compression: 33, continuity_anchor_mode: "off", anchor_refresh_interval: 3, anti_drift_mode: "off", anti_drift_strength: 0.0, identity_persistence_strength: 0.0, generation_mode: "img2vid", second_stage_mode: "off", stage2_model_policy: "stage2_model_if_connected", second_stage_reinject_strength: 0.0 },
-            high_quality: { modular_decode: "high", steps: 24, image_compression: 28, continuity_anchor_mode: "off", anchor_refresh_interval: 1, anti_drift_mode: "off", anti_drift_strength: 0.0, identity_persistence_strength: 0.0, generation_mode: "img2vid", second_stage_mode: "off", stage2_model_policy: "stage2_model_if_connected", second_stage_reinject_strength: 0.0 },
-            fast_preview: { modular_decode: "low_ram", steps: 12, image_compression: 45, continuity_anchor_mode: "off", anchor_refresh_interval: 2, anti_drift_mode: "off", anti_drift_strength: 0.0, identity_persistence_strength: 0.0, generation_mode: "img2vid", second_stage_mode: "off", stage2_model_policy: "stage2_model_if_connected", second_stage_reinject_strength: 0.0 },
+            low_ram_safe: { backend_mode: "auto", vae_mode: "very_low_ram_disk", steps: 16, image_compression: 40, stitch_preset: "custom", overlap_side: "source", overlap_mode: "cut", start_frames_rule: "none", continuity_anchor_mode: "tail_only", anchor_refresh_interval: 2, anchor_image_strength: 0.2, anti_drift_mode: "rolling_adain", anti_drift_strength: 0.1, identity_persistence_strength: 0.0, generation_mode: "img2vid", media_mode: "auto_from_generation_mode", vram_flush: true, motion_intensity: 1.0, second_stage_mode: "off", stage2_model_policy: "stage2_model_if_connected", second_stage_reinject_strength: 0.0 },
+            balanced: { backend_mode: "auto", vae_mode: "normal_tiled_vhs", steps: 20, image_compression: 28, stitch_preset: "custom", overlap_side: "source", overlap_mode: "cut", start_frames_rule: "none", continuity_anchor_mode: "tail_only", anchor_refresh_interval: 2, anchor_image_strength: 0.25, anti_drift_mode: "rolling_adain", anti_drift_strength: 0.12, identity_persistence_strength: 0.0, generation_mode: "img2vid", media_mode: "auto_from_generation_mode", vram_flush: false, motion_intensity: 1.0, second_stage_mode: "off", stage2_model_policy: "stage2_model_if_connected", second_stage_reinject_strength: 0.0 },
+            high_quality: { backend_mode: "auto", vae_mode: "high_vram", steps: 24, image_compression: 20, stitch_preset: "custom", overlap_side: "source", overlap_mode: "cut", start_frames_rule: "none", continuity_anchor_mode: "tail_only", anchor_refresh_interval: 1, anchor_image_strength: 0.3, anti_drift_mode: "dual_reference_adain", anti_drift_strength: 0.16, identity_persistence_strength: 0.06, generation_mode: "img2vid", media_mode: "auto_from_generation_mode", vram_flush: false, motion_intensity: 1.0, second_stage_mode: "off", stage2_model_policy: "stage2_model_if_connected", second_stage_reinject_strength: 0.0 },
+            fast_preview: { backend_mode: "single_best", vae_mode: "low_ram_disk", steps: 12, image_compression: 45, stitch_preset: "custom", overlap_side: "source", overlap_mode: "cut", start_frames_rule: "none", continuity_anchor_mode: "off", anchor_refresh_interval: 2, anti_drift_mode: "off", anti_drift_strength: 0.0, identity_persistence_strength: 0.0, generation_mode: "img2vid", media_mode: "auto_from_generation_mode", vram_flush: true, motion_intensity: 1.0, second_stage_mode: "off", stage2_model_policy: "stage2_model_if_connected", second_stage_reinject_strength: 0.0 },
+            loop_lipsync_safe: { backend_mode: "loop_normal_vram", vae_mode: "normal_tiled_vhs", stitch_preset: "custom", overlap_side: "source", overlap_mode: "cut", start_frames_rule: "none", continuity_anchor_mode: "tail_only", anchor_refresh_interval: 2, anchor_image_strength: 0.2, anti_drift_mode: "rolling_adain", anti_drift_strength: 0.1, generation_mode: "img2vid", media_mode: "input_audio_img2vid", vram_flush: false, motion_intensity: 1.0, second_stage_mode: "off" },
+            img2vid_generated_audio: { backend_mode: "single_best", generation_mode: "img2vid", media_mode: "generated_audio_img2vid", generated_media_duration_seconds: 10.0, continuity_anchor_mode: "off", stitch_preset: "custom", start_frames_rule: "none", vram_flush: false, motion_intensity: 1.0, second_stage_mode: "off" },
+            t2v_generated_audio: { backend_mode: "single_best", generation_mode: "t2v", media_mode: "generated_audio_t2v", generated_media_duration_seconds: 10.0, continuity_anchor_mode: "off", stitch_preset: "custom", start_frames_rule: "none", vram_flush: false, motion_intensity: 1.0, second_stage_mode: "off" },
+            img2vid_pure: { backend_mode: "single_best", generation_mode: "img2vid", media_mode: "img2vid_pure", generated_media_duration_seconds: 10.0, continuity_anchor_mode: "off", stitch_preset: "custom", start_frames_rule: "none", vram_flush: false, motion_intensity: 1.0, second_stage_mode: "off" },
+            t2v_pure: { backend_mode: "single_best", generation_mode: "t2v", media_mode: "t2v_pure", generated_media_duration_seconds: 10.0, continuity_anchor_mode: "off", stitch_preset: "custom", start_frames_rule: "none", vram_flush: false, motion_intensity: 1.0, second_stage_mode: "off" },
+            loop_img2vid_pure_normal_vram: { backend_mode: "loop_normal_vram", vae_mode: "normal_tiled_vhs", generation_mode: "img2vid", media_mode: "img2vid_pure", generated_media_duration_seconds: 20.0, continuity_anchor_mode: "tail_only", stitch_preset: "custom", overlap_side: "source", overlap_mode: "cut", start_frames_rule: "none", vram_flush: false, motion_intensity: 1.0, second_stage_mode: "off", anti_drift_mode: "rolling_adain", anti_drift_strength: 0.08 },
+            loop_t2v_pure_normal_vram: { backend_mode: "loop_normal_vram", vae_mode: "normal_tiled_vhs", generation_mode: "t2v", media_mode: "t2v_pure", generated_media_duration_seconds: 20.0, continuity_anchor_mode: "tail_only", stitch_preset: "custom", overlap_side: "source", overlap_mode: "cut", start_frames_rule: "none", vram_flush: false, motion_intensity: 1.0, second_stage_mode: "off", anti_drift_mode: "rolling_adain", anti_drift_strength: 0.08 },
+            loop_img2vid_pure_low_ram: { backend_mode: "loop_low_ram_disk", vae_mode: "low_ram_disk", generation_mode: "img2vid", media_mode: "img2vid_pure", generated_media_duration_seconds: 20.0, continuity_anchor_mode: "tail_only", stitch_preset: "custom", overlap_side: "source", overlap_mode: "cut", start_frames_rule: "none", vram_flush: true, motion_intensity: 1.0, second_stage_mode: "off", anti_drift_mode: "rolling_adain", anti_drift_strength: 0.08 },
+            motion_controlled: { backend_mode: "auto", stitch_preset: "custom", overlap_side: "source", overlap_mode: "cut", start_frames_rule: "none", anchor_image_strength: 0.18, anti_drift_mode: "rolling_adain", anti_drift_strength: 0.08, motion_intensity: 1.35, image_strength: 0.78, image_compression: 32, second_stage_mode: "off" },
         },
         visibility: {
-            low_ram_safe: { anchor_image_strength: false, anti_drift_mode: false, anti_drift_strength: false, identity_persistence_strength: false, output_root: true },
-            balanced: { anchor_image_strength: false, anti_drift_mode: false, anti_drift_strength: false, identity_persistence_strength: false, output_root: true },
-            high_quality: { anchor_image_strength: false, anti_drift_mode: false, anti_drift_strength: false, identity_persistence_strength: false, output_root: true },
+            low_ram_safe: { anchor_image_strength: true, anti_drift_mode: true, anti_drift_strength: true, identity_persistence_strength: false, output_root: true },
+            balanced: { anchor_image_strength: true, anti_drift_mode: true, anti_drift_strength: true, identity_persistence_strength: false, output_root: true },
+            high_quality: { anchor_image_strength: true, anti_drift_mode: true, anti_drift_strength: true, identity_persistence_strength: true, output_root: true },
             fast_preview: { anchor_image_strength: false, anti_drift_mode: false, anti_drift_strength: false, identity_persistence_strength: false, output_root: false },
+            loop_lipsync_safe: { anchor_image_strength: true, anti_drift_mode: true, anti_drift_strength: true, identity_persistence_strength: false, output_root: true },
+            img2vid_generated_audio: { anchor_image_strength: false, anti_drift_mode: false, anti_drift_strength: false, identity_persistence_strength: false, output_root: true },
+            t2v_generated_audio: { anchor_image_strength: false, anti_drift_mode: false, anti_drift_strength: false, identity_persistence_strength: false, output_root: true },
+            img2vid_pure: { anchor_image_strength: false, anti_drift_mode: false, anti_drift_strength: false, identity_persistence_strength: false, output_root: true },
+            t2v_pure: { anchor_image_strength: false, anti_drift_mode: false, anti_drift_strength: false, identity_persistence_strength: false, output_root: true },
+            loop_img2vid_pure_normal_vram: { anchor_image_strength: false, anti_drift_mode: true, anti_drift_strength: true, identity_persistence_strength: false, output_root: true },
+            loop_t2v_pure_normal_vram: { anchor_image_strength: false, anti_drift_mode: true, anti_drift_strength: true, identity_persistence_strength: false, output_root: true },
+            loop_img2vid_pure_low_ram: { anchor_image_strength: false, anti_drift_mode: true, anti_drift_strength: true, identity_persistence_strength: false, output_root: true },
+            motion_controlled: { anchor_image_strength: true, anti_drift_mode: true, anti_drift_strength: true, identity_persistence_strength: false, output_root: true },
         },
     },
     "IAMCCS-SuperNodes AU+IMG2VID Exec VAE": {
         presetWidget: "ui_preset",
-        defaultPreset: "balanced",
+        defaultPreset: "custom",
         values: {
-            low_ram_safe: { decode_mode: "low_ram", jpg_quality: 92, crf: 21, tiled_tile_size: 512, tiled_overlap: 64 },
-            balanced: { decode_mode: "normal", jpg_quality: 95, crf: 19, tiled_tile_size: 512, tiled_overlap: 64 },
-            high_quality: { decode_mode: "high", jpg_quality: 100, crf: 16, tiled_tile_size: 768, tiled_overlap: 96 },
-            fast_preview: { decode_mode: "low_ram", jpg_quality: 88, crf: 24, tiled_tile_size: 384, tiled_overlap: 48 },
+            very_low_ram_decode: { decode_mode: "very_low_ram_disk", vram_flush: true, jpg_quality: 90, crf: 22, tiled_tile_size: 256, tiled_overlap: 32 },
+            low_ram_safe: { decode_mode: "very_low_ram_disk", vram_flush: true, jpg_quality: 92, crf: 21, tiled_tile_size: 256, tiled_overlap: 32 },
+            balanced: { decode_mode: "normal_tiled_vhs", vram_flush: false, jpg_quality: 95, crf: 19, tiled_tile_size: 512, tiled_overlap: 64 },
+            high_quality: { decode_mode: "high_vram", vram_flush: false, jpg_quality: 100, crf: 16, tiled_tile_size: 768, tiled_overlap: 96 },
+            fast_preview: { decode_mode: "low_ram_disk", vram_flush: true, jpg_quality: 88, crf: 24, tiled_tile_size: 384, tiled_overlap: 48 },
         },
         visibility: {
+            very_low_ram_decode: { frames_subdir: true, image_format: true, jpg_quality: true },
             low_ram_safe: { frames_subdir: true, image_format: true, jpg_quality: true },
             balanced: { frames_subdir: true, image_format: true, jpg_quality: true },
             high_quality: { frames_subdir: true, image_format: true, jpg_quality: true },
@@ -41,16 +61,17 @@ const NODE_GROUPS = {
         { key: "planning", label: "Planning", color: "#a07b2c", widgets: ["planning_mode", "segment_preset", "overlap_frames", "ltx_round_mode"] },
     ],
     "IAMCCS-SuperNodes AU+IMG2VID Exec Render": [
+        { key: "generation", label: "Generation Type", color: "#8a5ca0", widgets: ["generation_type", "generated_media_duration_seconds"] },
         { key: "preset", label: "Preset", color: "#557ea6", widgets: ["ui_preset"] },
         { key: "prompts", label: "Prompting", color: "#9a6b2f", widgets: ["positive_text", "negative_text"] },
         { key: "video", label: "Video", color: "#3f6fb0", widgets: ["width", "height"] },
-        { key: "sampling", label: "Sampling", color: "#8352a6", widgets: ["steps", "cfg", "sampler_name", "seed", "max_shift", "base_shift", "sigma_terminal", "manual_sigmas", "image_strength", "image_compression"] },
+        { key: "sampling", label: "Sampling", color: "#8352a6", widgets: ["steps", "cfg", "sampler_name", "seed", "max_shift", "base_shift", "sigma_terminal", "manual_sigmas", "image_strength", "motion_intensity", "image_compression"] },
         { key: "audio", label: "Audio", color: "#3d8a5c", widgets: ["audio_context_mode", "audio_left_context_s", "audio_right_context_s"] },
         { key: "stitch", label: "Stitch", color: "#a4673d", widgets: ["stitch_preset", "overlap_side", "overlap_mode", "start_frames_rule"] },
         { key: "anchor", label: "Anchor", color: "#b35c5c", widgets: ["continuity_anchor_mode", "anchor_refresh_interval", "anchor_image_strength", "anti_drift_mode", "anti_drift_strength", "identity_persistence_strength"] },
-        { key: "modular", label: "Modular", color: "#46769a", widgets: ["modular_decode", "downstream_stage_mode", "output_root"] },
+        { key: "modular", label: "Modular", color: "#46769a", widgets: ["vae_mode", "vram_flush", "downstream_stage_mode", "output_root"] },
         { key: "debug", label: "Debug", color: "#8a8a36", widgets: ["segment_overlay_mode", "segment_overlay_text"] },
-        { key: "stage2", label: "Mode + Second Stage", color: "#8a5ca0", widgets: ["generation_mode", "second_stage_mode", "stage2_model_policy", "second_stage_upscale_model", "second_stage_reinject_strength", "second_stage_cfg", "second_stage_manual_sigmas"] },
+        { key: "stage2", label: "Second Stage", color: "#8a5ca0", widgets: ["second_stage_mode", "stage2_model_policy", "second_stage_upscale_model", "second_stage_reinject_strength", "second_stage_cfg", "second_stage_manual_sigmas"] },
     ],
     "IAMCCS-SuperNodes Second Stage": [
         { key: "stage2", label: "Second Stage", color: "#8a5ca0", widgets: ["second_stage_mode", "stage2_model_policy", "second_stage_upscale_model", "second_stage_reinject_strength", "second_stage_cfg", "second_stage_manual_sigmas"] },
@@ -61,16 +82,41 @@ const NODE_GROUPS = {
     "IAMCCS-SuperNodes AU+IMG2VID Exec VAE": [
         { key: "preset", label: "Preset", color: "#557ea6", widgets: ["ui_preset"] },
         { key: "decode", label: "Decode", color: "#4b79a6", widgets: ["frame_rate", "decode_mode", "output_root", "frames_subdir", "image_format", "jpg_quality", "tiled_tile_size", "tiled_overlap"] },
-        { key: "final", label: "Finalize", color: "#9b7441", widgets: ["filename_prefix", "crf", "pix_fmt", "trim_to_audio", "save_metadata"] },
+        { key: "final", label: "Finalize", color: "#9b7441", widgets: ["filename_prefix", "crf", "pix_fmt", "trim_to_audio", "save_metadata", "vram_flush"] },
     ],
     "IAMCCS-SuperNodes AU+IMG2VID Exec Finalize": [
         { key: "output", label: "Output", color: "#6a85a0", widgets: ["frame_rate", "filename_prefix", "crf", "pix_fmt", "trim_to_audio"] },
     ],
 };
 
-const SECTION_BUTTON_COLLAPSED_BG = "#22303f";
+const SECTION_BUTTON_COLLAPSED_BG = "#1f2935";
+const SECTION_BUTTON_COLLAPSED_BORDER = "#6d7785";
+const SECTION_BUTTON_RADIUS = 6;
 const SECTION_BUTTON_TEXT = "#f8fbff";
 const SECTION_BUTTON_HEIGHT = 30;
+const RENDER_INTERNAL_WIDGETS = new Set(["backend_mode", "generation_mode", "media_mode"]);
+const GENERATED_DURATION_TYPES = new Set(["img2video", "text2video"]);
+const GENERATION_TYPE_CONFIGS = {
+    "aud+img2video_simple": { generation_mode: "img2vid", backend_mode: "single_best", media_mode: "input_audio_img2vid" },
+    "aud+img2video_2_segments": { generation_mode: "img2vid", backend_mode: "two_segments_normal_vram", media_mode: "input_audio_img2vid" },
+    "aud+img2video_infinite": { generation_mode: "img2vid", backend_mode: "loop_normal_vram", media_mode: "input_audio_img2vid" },
+    "text+audio2video": { generation_mode: "t2v", backend_mode: "loop_normal_vram", media_mode: "input_audio_t2v" },
+    img2video: { generation_mode: "img2vid", backend_mode: "single_best", media_mode: "img2vid_pure" },
+    text2video: { generation_mode: "t2v", backend_mode: "single_best", media_mode: "t2v_pure" },
+};
+const RENDER_UI_PRESET_VALUES = new Set(["custom", ...Object.keys(PRESET_CONFIGS["IAMCCS-SuperNodes AU+IMG2VID Exec Render"]?.values || {})]);
+const RENDER_UI_PRESET_VISIBLE_VALUES = ["custom", "low_ram_safe", "balanced", "high_quality", "fast_preview", "loop_lipsync_safe", "motion_controlled"];
+const RENDER_GENERATION_TYPE_VALUES = new Set(Object.keys(GENERATION_TYPE_CONFIGS));
+const RENDER_LEGACY_WIDGET_ORDER = [
+    "generation_mode", "backend_mode", "positive_text", "negative_text", "width", "height", "steps", "cfg", "sampler_name", "seed", "control_after_generate",
+    "max_shift", "base_shift", "sigma_terminal", "manual_sigmas", "image_strength", "image_compression",
+    "audio_context_mode", "audio_left_context_s", "audio_right_context_s",
+    "stitch_preset", "overlap_side", "overlap_mode", "start_frames_rule",
+    "continuity_anchor_mode", "anchor_refresh_interval", "anchor_image_strength", "anti_drift_mode", "anti_drift_strength", "identity_persistence_strength",
+    "vae_mode", "downstream_stage_mode", "output_root", "segment_overlay_mode", "segment_overlay_text",
+    "second_stage_mode", "stage2_model_policy", "second_stage_upscale_model", "second_stage_reinject_strength", "second_stage_cfg", "second_stage_manual_sigmas",
+    "media_mode", "vram_flush", "motion_intensity", "ui_preset", "generated_media_duration_seconds", "generation_type",
+];
 
 function findWidget(node, name) {
     return node.widgets?.find((widget) => widget?.name === name);
@@ -124,7 +170,71 @@ function setWidgetLabel(node, widgetName, label) {
 }
 
 function sectionButtonCaption(group, isExpanded) {
-    return `${isExpanded ? "▼" : "▶"} ${group.label}`;
+    return `${isExpanded ? "[-]" : "[+]"} ${group.label}`;
+}
+
+function sectionButtonStyle(group, isExpanded) {
+    const expandedBg = group.color || "#4f6f8f";
+    return {
+        background: isExpanded ? expandedBg : SECTION_BUTTON_COLLAPSED_BG,
+        border: isExpanded ? expandedBg : SECTION_BUTTON_COLLAPSED_BORDER,
+        rail: expandedBg,
+        text: SECTION_BUTTON_TEXT,
+    };
+}
+
+function roundedRectPath(ctx, x, y, width, height, radius) {
+    const r = Math.max(0, Math.min(radius, height * 0.5, width * 0.5));
+    if (typeof ctx.roundRect === "function") {
+        ctx.roundRect(x, y, width, height, r);
+        return;
+    }
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + width - r, y);
+    ctx.quadraticCurveTo(x + width, y, x + width, y + r);
+    ctx.lineTo(x + width, y + height - r);
+    ctx.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+    ctx.lineTo(x + r, y + height);
+    ctx.quadraticCurveTo(x, y + height, x, y + height - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+}
+
+function installSectionButtonDraw(button) {
+    if (!button || button._iamccsCustomSectionDraw) {
+        return;
+    }
+    button._iamccsCustomSectionDraw = true;
+    button.draw = function(ctx, node, widgetWidth, y, widgetHeight) {
+        const style = this._iamccsButtonStyle || sectionButtonStyle({ color: "#4f6f8f" }, true);
+        const x = 8;
+        const height = Math.max(SECTION_BUTTON_HEIGHT - 4, (widgetHeight || SECTION_BUTTON_HEIGHT) - 4);
+        const width = Math.max(40, (widgetWidth || node?.size?.[0] || 280) - 16);
+        const top = y + 2;
+        const label = String(this.label || this.name || "");
+
+        ctx.save();
+        ctx.beginPath();
+        roundedRectPath(ctx, x, top, width, height, SECTION_BUTTON_RADIUS);
+        ctx.fillStyle = style.background;
+        ctx.fill();
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = style.border;
+        ctx.stroke();
+
+        ctx.beginPath();
+        roundedRectPath(ctx, x, top, 6, height, SECTION_BUTTON_RADIUS);
+        ctx.fillStyle = style.rail;
+        ctx.fill();
+
+        ctx.fillStyle = style.text;
+        ctx.font = "bold 12px sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(label, x + 14, top + height * 0.5);
+        ctx.restore();
+        return true;
+    };
 }
 
 function insertWidget(node, widget, index) {
@@ -133,7 +243,33 @@ function insertWidget(node, widget, index) {
     if (currentIndex >= 0) {
         widgets.splice(currentIndex, 1);
     }
-    widgets.splice(index, 0, widget);
+    widgets.splice(Math.max(0, Math.min(index, widgets.length)), 0, widget);
+}
+
+function moveWidgetsAfter(node, anchorName, widgetNames) {
+    if (!node.widgets?.length) {
+        return;
+    }
+    const moving = [];
+    for (const widgetName of widgetNames) {
+        const index = node.widgets.findIndex((widget) => widget?.name === widgetName);
+        if (index >= 0) {
+            moving.push(node.widgets.splice(index, 1)[0]);
+        }
+    }
+    if (!moving.length) {
+        return;
+    }
+    const anchorIndex = node.widgets.findIndex((widget) => widget?.name === anchorName);
+    const insertAt = anchorIndex >= 0 ? anchorIndex + 1 : node.widgets.length;
+    node.widgets.splice(insertAt, 0, ...moving);
+}
+
+function normalizeRenderWidgetOrder(node) {
+    if (node.comfyClass !== "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
+        return;
+    }
+    moveWidgetsAfter(node, "second_stage_mode", ["stage2_model_policy", "second_stage_upscale_model", "second_stage_reinject_strength", "second_stage_cfg", "second_stage_manual_sigmas"]);
 }
 
 function setWidgetValue(node, widgetName, value) {
@@ -194,6 +330,7 @@ function getExecPlannerLiveConfig(node) {
 
     if (planningMode === "explicit_preset_seconds") {
         seconds = presetRec.seconds;
+        overlapSource = `${segmentPreset} preset/manual`;
     } else {
         const secondsRec = getExecPlannerPresetForSeconds(seconds);
         if (secondsRec) {
@@ -246,7 +383,7 @@ function updateExecPlannerLivePreview(node) {
     node.properties.iamccsPlannerLivePreview = lines.join("\n");
 }
 
-function syncExecPlannerExplicitPreset(node) {
+function syncExecPlannerExplicitPreset(node, sourceWidgetName = "") {
     if (node.comfyClass !== "IAMCCS-SuperNodes AU+IMG2VID Exec Planner") {
         return;
     }
@@ -254,6 +391,9 @@ function syncExecPlannerExplicitPreset(node) {
     if (planningMode === "explicit_preset_seconds") {
         const rec = getExecPlannerPreset(findWidget(node, "segment_preset")?.value);
         setWidgetValue(node, "segment_seconds", rec.seconds);
+        if (sourceWidgetName === "planning_mode" || sourceWidgetName === "segment_preset") {
+            setWidgetValue(node, "overlap_frames", rec.overlap);
+        }
     }
     updateExecPlannerLivePreview(node);
 }
@@ -276,7 +416,7 @@ function installExecPlannerExplicitPresetSync(node) {
             if (widgetName === "planning_mode") {
                 applyPlannerModeVisibility(node);
             } else {
-                syncExecPlannerExplicitPreset(node);
+                syncExecPlannerExplicitPreset(node, widgetName);
             }
             updateExecPlannerLivePreview(node);
             app.graph.setDirtyCanvas(true, true);
@@ -310,9 +450,9 @@ function applyVaeDecodeModeVisibility(node) {
     if (node.comfyClass !== "IAMCCS-SuperNodes AU+IMG2VID Exec VAE") {
         return;
     }
-    const decodeMode = String(findWidget(node, "decode_mode")?.value || "low_ram");
-    const isLowRam = decodeMode === "low_ram";
-    const isNormal = decodeMode === "normal";
+    const decodeMode = String(findWidget(node, "decode_mode")?.value || "low_ram_disk");
+    const isLowRam = decodeMode === "low_ram_disk" || decodeMode === "very_low_ram_disk";
+    const isNormal = decodeMode === "normal_tiled_vhs" || decodeMode === "custom_mode" || decodeMode === "inherit_render_backend";
     setWidgetVisibility(findWidget(node, "frames_subdir"), isLowRam);
     setWidgetVisibility(findWidget(node, "image_format"), isLowRam);
     setWidgetVisibility(findWidget(node, "jpg_quality"), isLowRam);
@@ -321,26 +461,112 @@ function applyVaeDecodeModeVisibility(node) {
     fitNodeToWidgets(node);
 }
 
+function applyRenderAnchorVisibility(node) {
+    if (node.comfyClass !== "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
+        return;
+    }
+    const anchorMode = String(findWidget(node, "continuity_anchor_mode")?.value || "off");
+    const antiDriftMode = String(findWidget(node, "anti_drift_mode")?.value || "off");
+    const anchorsEnabled = anchorMode !== "off";
+    const periodicAnchor = anchorMode.startsWith("periodic_");
+    setWidgetVisibility(findWidget(node, "anchor_refresh_interval"), anchorsEnabled && periodicAnchor);
+    setWidgetVisibility(findWidget(node, "anchor_image_strength"), anchorsEnabled);
+    setWidgetVisibility(findWidget(node, "anti_drift_strength"), antiDriftMode !== "off");
+    setWidgetVisibility(findWidget(node, "identity_persistence_strength"), antiDriftMode === "dual_reference_adain");
+    fitNodeToWidgets(node);
+}
+
 function applyRenderAnchorLabels(node) {
     if (node.comfyClass !== "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
         return;
     }
+    setWidgetLabel(node, "backend_mode", "Render Backend");
     setWidgetLabel(node, "generation_mode", "Generation Mode");
+    setWidgetLabel(node, "media_mode", "Media Mode");
+    setWidgetLabel(node, "generation_type", "Generation Type");
+    setWidgetLabel(node, "generated_media_duration_seconds", "Generated Duration");
     setWidgetLabel(node, "continuity_anchor_mode", "Anchor Refresh");
     setWidgetLabel(node, "anchor_refresh_interval", "Refresh Interval");
     setWidgetLabel(node, "anchor_image_strength", "Anchor Guidance Strength");
+    setWidgetLabel(node, "motion_intensity", "Motion Intensity");
+    setWidgetLabel(node, "vram_flush", "VRAM Flush");
     setWidgetLabel(node, "second_stage_mode", "Second Stage");
     setWidgetLabel(node, "stage2_model_policy", "Stage2 Model Policy");
     setWidgetLabel(node, "second_stage_upscale_model", "2x Upscale Model");
     setWidgetLabel(node, "second_stage_reinject_strength", "Anchor Reinject Strength");
 }
 
+function syncRenderGenerationType(node) {
+    if (node.comfyClass !== "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
+        return;
+    }
+    const generationType = String(findWidget(node, "generation_type")?.value || "aud+img2video_infinite");
+    const config = GENERATION_TYPE_CONFIGS[generationType] || GENERATION_TYPE_CONFIGS["aud+img2video_infinite"];
+    Object.entries(config).forEach(([widgetName, widgetValue]) => setWidgetValue(node, widgetName, widgetValue));
+}
+
+function renderUsesGeneratedDuration(node) {
+    const generationType = String(findWidget(node, "generation_type")?.value || "");
+    return GENERATED_DURATION_TYPES.has(generationType);
+}
+
+function applyRenderGeneratedDurationVisibility(node) {
+    if (node.comfyClass !== "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
+        return;
+    }
+    const generationExpanded = node.properties?.iamccs_section_generation !== false;
+    setWidgetVisibility(findWidget(node, "generated_media_duration_seconds"), generationExpanded && renderUsesGeneratedDuration(node));
+    fitNodeToWidgets(node);
+}
+
+function inferRenderGenerationType(valuesByName) {
+    const generationMode = String(valuesByName.generation_mode || "img2vid");
+    const backendMode = String(valuesByName.backend_mode || "auto");
+    const mediaMode = String(valuesByName.media_mode || "");
+    if (mediaMode === "t2v_pure") {
+        return "text2video";
+    }
+    if (mediaMode === "img2vid_pure" || mediaMode === "generated_audio_img2vid") {
+        return "img2video";
+    }
+    if (generationMode === "t2v" || mediaMode === "input_audio_t2v" || mediaMode === "generated_audio_t2v") {
+        return "text+audio2video";
+    }
+    if (backendMode === "two_segments_normal_vram") {
+        return "aud+img2video_2_segments";
+    }
+    if (backendMode === "loop_normal_vram" || backendMode === "loop_low_ram_disk" || backendMode === "auto") {
+        return "aud+img2video_infinite";
+    }
+    return "aud+img2video_simple";
+}
+
+function applyRenderPresetDropdownOptions(node) {
+    if (node.comfyClass !== "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
+        return;
+    }
+    const widget = findWidget(node, "ui_preset");
+    if (widget?.options) {
+        widget.options.values = RENDER_UI_PRESET_VISIBLE_VALUES;
+    }
+}
+
+function applyRenderInternalWidgetVisibility(node) {
+    if (node.comfyClass !== "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
+        return;
+    }
+    for (const widgetName of RENDER_INTERNAL_WIDGETS) {
+        setWidgetVisibility(findWidget(node, widgetName), false);
+    }
+}
+
 function applyRenderSecondStageVisibility(node) {
     if (node.comfyClass !== "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
         return;
     }
+
     const mode = String(findWidget(node, "second_stage_mode")?.value || "off");
-    const stageExpanded = !!node.properties?.iamccs_section_stage2;
+    const stageExpanded = node.properties?.iamccs_section_stage2 !== false;
     const enabled = stageExpanded && mode !== "off";
     setWidgetVisibility(findWidget(node, "stage2_model_policy"), enabled);
     setWidgetVisibility(findWidget(node, "second_stage_reinject_strength"), enabled);
@@ -351,7 +577,7 @@ function applyRenderSecondStageVisibility(node) {
 }
 
 function syncDownstreamVaeDecodeModes(renderNode) {
-    const renderDecode = String(findWidget(renderNode, "modular_decode")?.value || "low_ram");
+    const renderDecode = String(findWidget(renderNode, "vae_mode")?.value || "low_ram_disk");
     const visited = new Set();
     const queue = [...getLinxTargets(renderNode)];
     while (queue.length > 0) {
@@ -388,19 +614,62 @@ function applyPresetConfig(node, nodeName) {
         Object.entries(values).forEach(([widgetName, widgetValue]) => setWidgetValue(node, widgetName, widgetValue));
     }
     const visibilityMap = config.visibility?.[presetName] || {};
-    Object.entries(visibilityMap).forEach(([widgetName, isVisible]) => setWidgetVisibility(findWidget(node, widgetName), !!isVisible));
+    Object.entries(visibilityMap).forEach(([widgetName, isVisible]) => {
+        setWidgetVisibility(findWidget(node, widgetName), !!isVisible);
+    });
     if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec VAE") {
         applyVaeDecodeModeVisibility(node);
     }
     if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
         applyRenderAnchorLabels(node);
+        applyRenderAnchorVisibility(node);
         applyRenderSecondStageVisibility(node);
+        syncRenderGenerationType(node);
+        applyRenderGeneratedDurationVisibility(node);
+        applyRenderPresetDropdownOptions(node);
     }
     fitNodeToWidgets(node);
 }
 
 function getSerializableWidgets(node) {
-    return (node.widgets || []).filter((widget) => widget && widget.serialize !== false);
+    return (node.widgets || []).filter((widget) => widget && widget.serialize !== false && !widget._iamccsSectionKey);
+}
+
+function isSectionButtonCaption(value) {
+    const text = String(value ?? "");
+    return /^\[[+-]\]\s/.test(text) || text.startsWith("▶ ") || text.startsWith("▼ ");
+}
+
+function sanitizeSerializedValues(values) {
+    return (values || []).filter((value) => value !== null && value !== undefined && !isSectionButtonCaption(value));
+}
+
+function sanitizeRenderCombo(node, widgetName, fallback, validValues) {
+    const widget = findWidget(node, widgetName);
+    if (!widget) {
+        return;
+    }
+    const text = String(widget.value ?? "");
+    if (isSectionButtonCaption(text) || (validValues?.size && !validValues.has(text))) {
+        widget.value = fallback;
+    }
+}
+
+function sanitizeRenderWidgetValues(node) {
+    if (node.comfyClass !== "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
+        return;
+    }
+    applyRenderPresetDropdownOptions(node);
+    sanitizeRenderCombo(node, "ui_preset", "custom", RENDER_UI_PRESET_VALUES);
+    sanitizeRenderCombo(node, "generation_type", "aud+img2video_infinite", RENDER_GENERATION_TYPE_VALUES);
+
+    const durationWidget = findWidget(node, "generated_media_duration_seconds");
+    if (durationWidget && (isSectionButtonCaption(durationWidget.value) || !Number.isFinite(Number(durationWidget.value)))) {
+        durationWidget.value = 10.0;
+    }
+
+    syncRenderGenerationType(node);
+    applyRenderGeneratedDurationVisibility(node);
 }
 
 function rehydrateSerializedWidgets(node, serializedValues) {
@@ -409,13 +678,38 @@ function rehydrateSerializedWidgets(node, serializedValues) {
     }
 
     const widgets = getSerializableWidgets(node);
-    const count = Math.min(widgets.length, serializedValues.length);
+    const cleanValues = sanitizeSerializedValues(serializedValues);
+    if (node.comfyClass === "IAMCCS-SuperNodes AU+IMG2VID Exec Render" && ["img2vid", "t2v"].includes(String(cleanValues[0] || ""))) {
+        const valuesByName = {};
+        RENDER_LEGACY_WIDGET_ORDER.forEach((widgetName, index) => {
+            if (index < cleanValues.length) {
+                valuesByName[widgetName] = cleanValues[index];
+            }
+        });
+        valuesByName.generation_type = RENDER_GENERATION_TYPE_VALUES.has(String(valuesByName.generation_type || ""))
+            ? valuesByName.generation_type
+            : inferRenderGenerationType(valuesByName);
+        valuesByName.ui_preset = RENDER_UI_PRESET_VALUES.has(String(valuesByName.ui_preset || "")) ? valuesByName.ui_preset : "custom";
+        valuesByName.generated_media_duration_seconds = Number.isFinite(Number(valuesByName.generated_media_duration_seconds))
+            ? Number(valuesByName.generated_media_duration_seconds)
+            : 10.0;
+        const generationConfig = GENERATION_TYPE_CONFIGS[String(valuesByName.generation_type)] || GENERATION_TYPE_CONFIGS["aud+img2video_infinite"];
+        Object.assign(valuesByName, generationConfig);
+        for (const widget of widgets) {
+            if (Object.prototype.hasOwnProperty.call(valuesByName, widget.name)) {
+                widget.value = valuesByName[widget.name];
+            }
+        }
+        return;
+    }
+
+    const count = Math.min(widgets.length, cleanValues.length);
     for (let index = 0; index < count; index += 1) {
         const widget = widgets[index];
         if (!widget) {
             continue;
         }
-        widget.value = serializedValues[index];
+        widget.value = cleanValues[index];
     }
 }
 
@@ -425,6 +719,7 @@ function addSectionButton(node, group, index) {
     // enhanceNodeLayout is called more than once on the same node instance.
     const existing = node.widgets?.find((w) => w._iamccsSectionKey === group.key);
     if (existing) {
+        installSectionButtonDraw(existing);
         return existing;
     }
 
@@ -438,14 +733,17 @@ function addSectionButton(node, group, index) {
         node.properties[propKey] = !node.properties[propKey];
         applyGroupVisibility(node, group, propKey, sectionButton);
     });
-    // IMPORTANT: do NOT set serialize = false.
-    // Section buttons must occupy a slot in widgets_values so that ComfyUI's
-    // index-based configure() assignment keeps real widget values aligned.
-    // Their value (empty string / null) is harmless.
+    // Visual-only section buttons must never enter widgets_values/prompt payloads.
+    sectionButton.serialize = false;
     sectionButton._iamccsSectionKey = group.key;
     sectionButton.computeSize = (width) => [width || 280, SECTION_BUTTON_HEIGHT];
     sectionButton.label = group.label;
-    sectionButton.options = { bgcolor: group.color || "#4f6f8f", color: SECTION_BUTTON_TEXT };
+    installSectionButtonDraw(sectionButton);
+    sectionButton.options = {
+        bgcolor: group.color || "#4f6f8f",
+        background_color: group.color || "#4f6f8f",
+        color: SECTION_BUTTON_TEXT,
+    };
     sectionButton.value = "";
 
     applyGroupVisibility(node, group, propKey, sectionButton);
@@ -458,13 +756,20 @@ function applyGroupVisibility(node, group, propKey, button) {
     const caption = sectionButtonCaption(group, isExpanded);
     button.name = caption;
     button.label = caption;
-    button.value = caption;
+    button.value = "";
+    const style = sectionButtonStyle(group, isExpanded);
+    button._iamccsButtonStyle = style;
     button.options = {
-        bgcolor: isExpanded ? (group.color || "#4f6f8f") : SECTION_BUTTON_COLLAPSED_BG,
+        bgcolor: style.background,
+        background_color: style.background,
+        border_color: style.border,
         color: SECTION_BUTTON_TEXT,
     };
     for (const widgetName of group.widgets) {
         setWidgetVisibility(findWidget(node, widgetName), isExpanded);
+    }
+    if (node.comfyClass === "IAMCCS-SuperNodes AU+IMG2VID Exec Render" && group.key === "generation") {
+        applyRenderGeneratedDurationVisibility(node);
     }
     if (node.comfyClass === "IAMCCS-SuperNodes AU+IMG2VID Exec Render" && group.key === "stage2") {
         applyRenderSecondStageVisibility(node);
@@ -500,7 +805,9 @@ function refreshNodeLayoutState(node, nodeName) {
         const presetWidget = findWidget(node, config.presetWidget);
         const presetName = String(presetWidget?.value || config.defaultPreset || "custom");
         const visibilityMap = config.visibility?.[presetName] || {};
-        Object.entries(visibilityMap).forEach(([widgetName, isVisible]) => setWidgetVisibility(findWidget(node, widgetName), !!isVisible));
+        Object.entries(visibilityMap).forEach(([widgetName, isVisible]) => {
+            setWidgetVisibility(findWidget(node, widgetName), !!isVisible);
+        });
     }
 
     if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec VAE") {
@@ -508,7 +815,9 @@ function refreshNodeLayoutState(node, nodeName) {
     } else if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec Planner") {
         applyPlannerModeVisibility(node);
     } else if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
+        sanitizeRenderWidgetValues(node);
         applyRenderSecondStageVisibility(node);
+        applyRenderInternalWidgetVisibility(node);
     } else {
         fitNodeToWidgets(node);
     }
@@ -640,6 +949,10 @@ function enhanceNodeLayout(node, nodeName) {
         return;
     }
 
+    if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
+        normalizeRenderWidgetOrder(node);
+    }
+
     if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec Planner") {
         addPlannerChip(node);
         addMultiLineStatusBox(node, "iamccsPlannerLivePreview", "planner_live_preview", "#1d2f38", "#67a7bb", "#e5f3f7");
@@ -685,6 +998,10 @@ app.registerExtension({
             // placeholders in widgets_values land on buttons, not on real widgets.
             // (Using setTimeout here was the root cause of NaN on load / after undo.)
             enhanceNodeLayout(this, nodeName);
+            if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
+                sanitizeRenderWidgetValues(this);
+                applyRenderInternalWidgetVisibility(this);
+            }
             const config = PRESET_CONFIGS[nodeName];
             const presetWidget = config ? findWidget(this, config.presetWidget) : null;
             if (presetWidget) {
@@ -702,17 +1019,17 @@ app.registerExtension({
                 };
             }
             if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
-                const modularDecodeWidget = findWidget(this, "modular_decode");
-                if (modularDecodeWidget) {
-                    const originalCallback = modularDecodeWidget.callback;
-                    modularDecodeWidget.callback = (...args) => {
-                        originalCallback?.apply(modularDecodeWidget, args);
+                const vaeModeWidget = findWidget(this, "vae_mode");
+                if (vaeModeWidget) {
+                    const originalCallback = vaeModeWidget.callback;
+                    vaeModeWidget.callback = (...args) => {
+                        originalCallback?.apply(vaeModeWidget, args);
                         syncDownstreamVaeDecodeModes(this);
                         app.graph.setDirtyCanvas(true, true);
                     };
                     syncDownstreamVaeDecodeModes(this);
                 }
-                for (const widgetName of ["generation_mode", "second_stage_mode"]) {
+                for (const widgetName of ["generation_type", "generated_media_duration_seconds", "second_stage_mode", "continuity_anchor_mode", "anti_drift_mode"]) {
                     const widget = findWidget(this, widgetName);
                     if (!widget) {
                         continue;
@@ -720,11 +1037,16 @@ app.registerExtension({
                     const originalCallback = widget.callback;
                     widget.callback = (...args) => {
                         originalCallback?.apply(widget, args);
+                        sanitizeRenderWidgetValues(this);
+                        applyRenderAnchorVisibility(this);
                         applyRenderSecondStageVisibility(this);
+                        applyRenderInternalWidgetVisibility(this);
                         app.graph.setDirtyCanvas(true, true);
                     };
                 }
+                sanitizeRenderWidgetValues(this);
                 applyRenderSecondStageVisibility(this);
+                applyRenderInternalWidgetVisibility(this);
             }
             if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec Planner") {
                 installExecPlannerExplicitPresetSync(this);
@@ -749,7 +1071,15 @@ app.registerExtension({
             const result = onConfigure?.apply(this, arguments);
             this.properties = this.properties || {};
             enhanceNodeLayout(this, nodeName);
+            if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
+                sanitizeRenderWidgetValues(this);
+                applyRenderInternalWidgetVisibility(this);
+            }
             rehydrateSerializedWidgets(this, info?.widgets_values);
+            if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
+                sanitizeRenderWidgetValues(this);
+                applyRenderInternalWidgetVisibility(this);
+            }
             if (nodeName === "IAMCCS-SuperNodes AU+IMG2VID Exec Planner") {
                 installExecPlannerExplicitPresetSync(this);
             }
@@ -846,3 +1176,13 @@ app.registerExtension({
         }
     },
 });
+
+
+
+
+
+
+
+
+
+

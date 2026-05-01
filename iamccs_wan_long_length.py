@@ -59,6 +59,211 @@ def _split_prompt_bank(text: str, separator_mode: str = "auto") -> list[str]:
     return prompts
 
 
+_WAN_SVI_TIMELINE_TYPE = "IAMCCS_WAN_SVI_TIMELINE"
+
+
+def _parse_generation_spec(text: str, generation_count: int) -> set[int]:
+    out: set[int] = set()
+    generation_count = max(1, int(generation_count))
+    normalized = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    for token in re.split(r"[\s,;]+", normalized):
+        token = token.strip()
+        if not token:
+            continue
+        if "-" in token:
+            left, right = token.split("-", 1)
+            try:
+                start = int(left.strip())
+                end = int(right.strip())
+            except ValueError:
+                continue
+            if end < start:
+                start, end = end, start
+            for value in range(start, end + 1):
+                if 0 <= value < generation_count:
+                    out.add(value)
+            continue
+        try:
+            value = int(token)
+        except ValueError:
+            continue
+        if 0 <= value < generation_count:
+            out.add(value)
+    return out
+
+
+def _resolve_flf_generations(
+    generation_count: int,
+    every_n: int,
+    every_start: int,
+    manual_spec: str,
+    include_manual: bool,
+    include_generation_0: bool,
+) -> list[int]:
+    generation_count = max(1, int(generation_count))
+    selected: set[int] = set()
+    every_n = int(every_n or 0)
+    every_start = max(0, int(every_start or 0))
+    if every_n > 0:
+        for generation in range(every_start, generation_count, every_n):
+            selected.add(generation)
+    if include_manual:
+        selected.update(_parse_generation_spec(manual_spec, generation_count))
+    if not include_generation_0:
+        selected.discard(0)
+    return sorted(value for value in selected if 0 <= value < generation_count)
+
+
+class IAMCCS_WanSviFlfTimeline:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "generation_count": ("INT", {"default": 16, "min": 1, "max": 100000, "step": 1}),
+                "flf_every_n": ("INT", {"default": 4, "min": 0, "max": 100000, "step": 1}),
+                "flf_every_start": ("INT", {"default": 4, "min": 0, "max": 100000, "step": 1}),
+                "manual_flf_generations": ("STRING", {
+                    "multiline": True,
+                    "default": "",
+                    "tooltip": "Comma/space list and ranges, e.g. 4, 9, 13-15. These are generation indexes, zero-based.",
+                }),
+                "manual_mode": (["add_to_every_n", "manual_only"], {"default": "add_to_every_n"}),
+                "include_generation_0": ("BOOLEAN", {"default": False}),
+                "svi_motion_latent_count": ("INT", {"default": 1, "min": 0, "max": 16, "step": 1}),
+                "flf_motion_latent_count": ("INT", {"default": 1, "min": 0, "max": 16, "step": 1}),
+                "flf_end_overshoot_slots": ("INT", {"default": 1, "min": 0, "max": 8, "step": 1}),
+                "flf_end_lock_slots": ("INT", {"default": 1, "min": 0, "max": 16, "step": 1}),
+                "flf_prev_skip_last_slots": ("INT", {"default": 1, "min": 0, "max": 16, "step": 1}),
+                "latent_refresh": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
+            }
+        }
+
+    RETURN_TYPES = (_WAN_SVI_TIMELINE_TYPE, "INT", "INT", "STRING")
+    RETURN_NAMES = ("timeline", "generation_count", "flf_count", "report")
+    FUNCTION = "plan"
+    CATEGORY = "IAMCCS/Wan"
+
+    def plan(
+        self,
+        generation_count,
+        flf_every_n,
+        flf_every_start,
+        manual_flf_generations,
+        manual_mode,
+        include_generation_0,
+        svi_motion_latent_count,
+        flf_motion_latent_count,
+        flf_end_overshoot_slots,
+        flf_end_lock_slots,
+        flf_prev_skip_last_slots,
+        latent_refresh,
+    ):
+        generation_count = max(1, int(generation_count))
+        include_manual = str(manual_mode or "add_to_every_n") in ("add_to_every_n", "manual_only")
+        effective_every_n = 0 if str(manual_mode or "") == "manual_only" else int(flf_every_n or 0)
+        flf_generations = _resolve_flf_generations(
+            generation_count,
+            effective_every_n,
+            flf_every_start,
+            manual_flf_generations,
+            include_manual,
+            bool(include_generation_0),
+        )
+        flf_set = set(flf_generations)
+        segments = []
+        for generation in range(generation_count):
+            is_flf = generation in flf_set
+            segments.append({
+                "generation": generation,
+                "mode": "flf" if is_flf else "svi",
+                "motion_latent_count": int(max(0, flf_motion_latent_count if is_flf else svi_motion_latent_count)),
+                "use_prev_samples": 0 if generation == 0 else 1,
+                "use_end_frame": 1 if is_flf else 0,
+                "end_overshoot_slots": int(max(0, flf_end_overshoot_slots if is_flf else 0)),
+                "end_lock_slots": int(max(0, flf_end_lock_slots if is_flf else 0)),
+                "prev_skip_last_slots": int(max(0, flf_prev_skip_last_slots if is_flf else 0)),
+                "latent_refresh": float(max(0.0, min(1.0, float(latent_refresh)))),
+            })
+        timeline = {
+            "timeline_family": "wan_svi_flf",
+            "generation_count": generation_count,
+            "flf_generations": flf_generations,
+            "segments": segments,
+        }
+        preview = ", ".join(str(v) for v in flf_generations[:24])
+        if len(flf_generations) > 24:
+            preview += ", ..."
+        report = (
+            f"generations={generation_count} | flf_count={len(flf_generations)} | "
+            f"flf=[{preview}] | every_n={effective_every_n} start={int(flf_every_start)} manual_mode={manual_mode}"
+        )
+        log.info("[WanSviFlfTimeline] %s", report)
+        return (timeline, int(generation_count), int(len(flf_generations)), report)
+
+
+class IAMCCS_WanSviFlfTimelinePick:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline": (_WAN_SVI_TIMELINE_TYPE,),
+                "generation_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1, "lazy": True}),
+            }
+        }
+
+    RETURN_TYPES = ("INT", "INT", "INT", "BOOLEAN", "BOOLEAN", "INT", "INT", "INT", "FLOAT", "STRING", "STRING")
+    RETURN_NAMES = (
+        "is_flf",
+        "is_svi",
+        "motion_latent_count",
+        "use_prev_samples",
+        "use_end_frame",
+        "end_overshoot_slots",
+        "end_lock_slots",
+        "prev_skip_last_slots",
+        "latent_refresh",
+        "mode",
+        "report",
+    )
+    FUNCTION = "pick"
+    CATEGORY = "IAMCCS/Wan"
+
+    def check_lazy_status(self, generation_index=None, **kwargs):
+        if generation_index is None:
+            return ["generation_index"]
+        return []
+
+    def pick(self, timeline, generation_index):
+        generation_index = max(0, int(generation_index or 0))
+        segments = list((timeline or {}).get("segments") or [])
+        if not segments:
+            raise ValueError("Wan SVI FLF timeline is empty")
+        generation_count = max(1, int((timeline or {}).get("generation_count") or len(segments)))
+        index = min(generation_index, len(segments) - 1)
+        segment = dict(segments[index])
+        mode = str(segment.get("mode") or "svi")
+        is_flf = 1 if mode == "flf" else 0
+        report = (
+            f"generation={generation_index}/{generation_count - 1} | mode={mode} | "
+            f"motion={int(segment.get('motion_latent_count', 1))} | use_prev={int(segment.get('use_prev_samples', 1))} | "
+            f"use_end={int(segment.get('use_end_frame', 0))} | overshoot={int(segment.get('end_overshoot_slots', 0))} | "
+            f"end_lock={int(segment.get('end_lock_slots', 0))}"
+        )
+        return (
+            int(is_flf),
+            int(0 if is_flf else 1),
+            int(segment.get("motion_latent_count", 1)),
+            bool(segment.get("use_prev_samples", 1)),
+            bool(segment.get("use_end_frame", 0)),
+            int(segment.get("end_overshoot_slots", 0)),
+            int(segment.get("end_lock_slots", 0)),
+            int(segment.get("prev_skip_last_slots", 0)),
+            float(segment.get("latent_refresh", 0.0)),
+            mode,
+            report,
+        )
+
+
 class IAMCCS_WanPromptLoopInfo:
     @classmethod
     def INPUT_TYPES(cls):

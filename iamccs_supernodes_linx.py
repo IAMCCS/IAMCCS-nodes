@@ -26,6 +26,67 @@ def _clone_resources(existing_linx):
     return dict(value)
 
 
+_RESOURCE_TYPE_HINTS = {
+    "audio": "AUDIO",
+    "audio_raw": "AUDIO",
+    "audio_conditioning_single": "AUDIO",
+    "audio_conditioning_segmented": "AUDIO",
+    "audio_duration_source": "AUDIO",
+    "conditioning_duration_audio": "AUDIO",
+    "model": "MODEL",
+    "clip": "CLIP",
+    "vae": "VAE",
+    "audio_vae": "VAE",
+    "second_stage_model": "MODEL",
+    "video_latent": "LATENT",
+    "rendered_images": "IMAGE",
+    "fps": "FLOAT",
+    "decode_mode": "STRING",
+    "output_root": "STRING",
+    "planner_payload": "STRING",
+    "second_stage_payload": "STRING",
+}
+
+
+def _type_hint_for_key(key, value=None):
+    key = str(key)
+    if key in _RESOURCE_TYPE_HINTS:
+        return _RESOURCE_TYPE_HINTS[key]
+    if value is None:
+        return "PYTHON_OBJECT"
+    return type(value).__name__
+
+
+def _normalize_contract_map(value):
+    if not isinstance(value, dict):
+        return {}
+    normalized = {}
+    for key, item in value.items():
+        if isinstance(item, dict):
+            normalized[str(key)] = dict(item)
+        elif isinstance(item, (list, tuple, set)):
+            normalized[str(key)] = sorted(str(entry) for entry in item)
+        else:
+            normalized[str(key)] = str(item)
+    return normalized
+
+
+def linx_contract(existing_linx, stage_name=None, default=None):
+    if not isinstance(existing_linx, dict):
+        return default
+    contracts = existing_linx.get("contracts") or {}
+    if not isinstance(contracts, dict):
+        return default
+    if stage_name is None:
+        return contracts
+    return contracts.get(str(stage_name), default)
+
+
+def linx_missing_resources(existing_linx, required_keys):
+    resources = _clone_resources(existing_linx)
+    return [str(key) for key in required_keys if resources.get(str(key)) is None]
+
+
 def linx_resource(existing_linx, key, default=None):
     if not isinstance(existing_linx, dict):
         return default
@@ -86,6 +147,7 @@ def build_stage_linx_payload(
     policies=None,
     outputs=None,
     resources=None,
+    requires=None,
 ):
     linx_payload = build_supernode_linx_payload(existing_linx, stage_name, payload, report, unique_id=unique_id)
     stage_entry = {
@@ -95,6 +157,9 @@ def build_stage_linx_payload(
         "payload": dict(payload) if isinstance(payload, dict) else {"preview": str(payload or "")[:240]},
         "report_preview": str(report or "")[:240],
     }
+    normalized_requires = _normalize_contract_map(requires)
+    if normalized_requires:
+        stage_entry["requires"] = normalized_requires
 
     stages = list(linx_payload.get("stages") or [])
     stages.append(stage_entry)
@@ -118,6 +183,12 @@ def build_stage_linx_payload(
         merged_outputs.update(outputs)
     if merged_outputs:
         linx_payload["outputs"] = merged_outputs
+        output_sources = _clone_dict(linx_payload, "output_sources")
+        if isinstance(outputs, dict):
+            for output_key in outputs.keys():
+                output_sources[str(output_key)] = str(stage_name)
+        if output_sources:
+            linx_payload["output_sources"] = output_sources
 
     merged_resources = _clone_resources(linx_payload)
     if isinstance(resources, dict):
@@ -127,6 +198,52 @@ def build_stage_linx_payload(
     if merged_resources:
         linx_payload["resources"] = merged_resources
         linx_payload["resource_keys"] = sorted(str(item) for item in merged_resources.keys())
+        linx_payload["resource_types"] = {
+            str(key): _type_hint_for_key(key, value)
+            for key, value in merged_resources.items()
+        }
+        resource_sources = _clone_dict(linx_payload, "resource_sources")
+        if isinstance(resources, dict):
+            for resource_key, resource_value in resources.items():
+                if resource_value is not None:
+                    resource_sources[str(resource_key)] = str(stage_name)
+        if resource_sources:
+            linx_payload["resource_sources"] = resource_sources
+
+    provided = {}
+    if isinstance(outputs, dict) and outputs:
+        provided["outputs"] = {
+            str(key): _type_hint_for_key(key, value)
+            for key, value in outputs.items()
+        }
+    if isinstance(resources, dict):
+        resource_contract = {
+            str(key): _type_hint_for_key(key, value)
+            for key, value in resources.items()
+            if value is not None
+        }
+        if resource_contract:
+            provided["resources"] = resource_contract
+    if isinstance(slot_map, dict) and slot_map:
+        provided["slots"] = dict(slot_map)
+    if isinstance(policies, dict) and policies:
+        provided["policies"] = {
+            str(key): _type_hint_for_key(key, value)
+            for key, value in policies.items()
+        }
+    stage_contract = {}
+    if normalized_requires:
+        stage_contract["requires"] = normalized_requires
+    if provided:
+        stage_contract["provides"] = provided
+    if stage_contract:
+        stages = list(linx_payload.get("stages") or [])
+        if stages:
+            stages[-1].update(stage_contract)
+            linx_payload["stages"] = stages
+        contracts = _clone_dict(linx_payload, "contracts")
+        contracts[str(stage_name)] = stage_contract
+        linx_payload["contracts"] = contracts
 
     if downstream_stages is not None:
         linx_payload["downstream_stages"] = [str(item) for item in downstream_stages if str(item or "").strip()]

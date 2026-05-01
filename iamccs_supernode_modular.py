@@ -92,9 +92,9 @@ class IAMCCS_SupernodeBase:
         optional.update(_build_dynamic_optional_slots(_SUPERNODE_CONTRACT_TYPE))
         return {
             "required": {
-                "pipeline_kind": (["v2v", "i2v_flf", "au_img2vid", "audio_concat", "wan_flf", "wan_continuity"],),
+                "pipeline_kind": (["v2v", "i2v_flf", "au_img2vid", "img2vid_pure", "t2v_pure", "t_audio2vid", "loop_img2vid", "loop_t2v", "audio_concat", "wan_flf", "wan_continuity"],),
                 "surface_profile": (["compact", "progressive", "debug_surface"], {"default": "compact"}),
-                "backend_binding": (["ltx_v2v_disk", "ltx_audio_guided_lowram", "ltx_i2v_flf", "wan_continuity", "wan_flf", "custom"], {"default": "custom"}),
+                "backend_binding": (["ltx_v2v_disk", "ltx_audio_guided_lowram", "ltx_i2v_flf", "ltx_img2vid_pure", "ltx_t2v_pure", "ltx_audio2video", "ltx_loop_normal_vram", "ltx_loop_low_ram_disk", "wan_continuity", "wan_flf", "custom"], {"default": "custom"}),
                 "node_label": ("STRING", {"default": "Base Supernode"}),
                 "notes": ("STRING", {"default": "", "multiline": True}),
             },
@@ -172,7 +172,7 @@ class IAMCCS_SupernodeModule:
         optional.update(_build_dynamic_optional_slots(any_type))
         return {
             "required": {
-                "pipeline_kind": (["v2v", "i2v_flf", "au_img2vid", "audio_concat", "wan_flf", "wan_continuity"],),
+                "pipeline_kind": (["v2v", "i2v_flf", "au_img2vid", "img2vid_pure", "t2v_pure", "t_audio2vid", "loop_img2vid", "loop_t2v", "audio_concat", "wan_flf", "wan_continuity"],),
                 "module_role": (["planner", "backend", "continuity", "audio", "concat", "loop", "second_stage", "output", "custom"],),
                 "module_mode": (["consume", "augment", "branch"], {"default": "augment"}),
                 "node_label": ("STRING", {"default": "Module"}),

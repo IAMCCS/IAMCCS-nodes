@@ -9,7 +9,15 @@
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows + general nodes 4 ComfyUI
 
-Version: 1.4.2
+Version: 1.4.3
+
+## IAMCCS SuperNodes requirements
+
+The IAMCCS SuperNodes are wrappers around ComfyUI/LTXV, IAMCCS helper nodes,
+audio preprocessing, VAE decode, and video combine nodes. Before sharing or
+testing a SuperNode workflow, check the dedicated requirements document:
+
+- [IAMCCS SuperNodes Requirements](SUPERNODES_REQUIREMENTS.md)
 
 ## 🆕 Sdded new LTX-2.3 nodes for v2v, au+img2vid (instructions: patreon.com/IAMCCS)
 

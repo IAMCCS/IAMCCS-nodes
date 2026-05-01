@@ -318,6 +318,8 @@ class IAMCCS_LTX2_ExtensionModule:
                 "preset": ([
                     "custom",
                     "target_extension_ltx2",
+                    "lossless_refresh_24fps",
+                    "lossless_refresh_strong_24fps",
                     "videoclip_audio_24fps",
                     "monologue_audio_24fps",
                     "cut_bestofk_16",
@@ -645,6 +647,26 @@ class IAMCCS_LTX2_ExtensionModule:
             # NOTE: These presets are meant for stitching segments where crossfade is undesirable.
             # Frontend updates the widgets live; backend enforces the same mapping so renders match.
             preset_map: Dict[str, Dict[str, Any]] = {
+                "lossless_refresh_24fps": {
+                    "overlap_frames": 9,
+                    "overlap_mode": "cut",
+                    "overlap_side": "source",
+                    "seam_search_mode": "best_of_k",
+                    "k_search": 16,
+                    "color_match_mode": "none",
+                    "color_match_strength": 0.0,
+                    "color_reference_window": 8,
+                },
+                "lossless_refresh_strong_24fps": {
+                    "overlap_frames": 17,
+                    "overlap_mode": "cut",
+                    "overlap_side": "source",
+                    "seam_search_mode": "best_of_k",
+                    "k_search": 24,
+                    "color_match_mode": "none",
+                    "color_match_strength": 0.0,
+                    "color_reference_window": 12,
+                },
                 "videoclip_audio_24fps": {
                     "overlap_frames": 9,
                     "overlap_mode": "cut",
@@ -809,8 +831,9 @@ class IAMCCS_LTX2_ExtensionModule:
             suffix = new_images[blend_overlap:]
 
             if overlap_mode == "cut":
-                # Match KJNodes cut semantics
-                if overlap_side == "new_images":
+                # Keep the side selected by overlap_side and discard the duplicated
+                # overlap from the other side.
+                if overlap_side == "source":
                     extended_images = torch.cat((source_images, new_images[blend_overlap:]), dim=0)
                 else:
                     extended_images = torch.cat((source_images[:-blend_overlap], new_images), dim=0)
@@ -897,7 +920,7 @@ class IAMCCS_LTX2_ExtensionModule_Disk:
                 "math_operation": (["none", "a-b", "a-1", "a+b", "a*b", "a/b", "min(a,b)", "max(a,b)"], {"default": "none"}),
                 "safe_mode": (["none", "native_workflow_safe"], {"default": "none"}),
                 "start_frames_rule": (["none", "ltx2_round_down", "ltx2_nearest"], {"default": "none"}),
-                "preset": (["custom", "target_extension_ltx2", "videoclip_audio_24fps", "monologue_audio_24fps", "cut_bestofk_16", "cut_bestofk_16_luma", "cut_bestofk_32", "micro_crossfade_3"], {"default": "custom"}),
+                "preset": (["custom", "target_extension_ltx2", "lossless_refresh_24fps", "lossless_refresh_strong_24fps", "videoclip_audio_24fps", "monologue_audio_24fps", "cut_bestofk_16", "cut_bestofk_16_luma", "cut_bestofk_32", "micro_crossfade_3"], {"default": "custom"}),
             },
             "optional": {
                 "new_dir": ("STRING", {"default": "", "tooltip": "Optional directory containing the new generated frames for the current pass."}),
@@ -976,6 +999,22 @@ class IAMCCS_LTX2_ExtensionModule_Disk:
     ):
         preset = str(preset or "custom")
         preset_map: Dict[str, Dict[str, Any]] = {
+            "lossless_refresh_24fps": {
+                "overlap_frames": 9,
+                "overlap_mode": "cut",
+                "overlap_side": "source",
+                "math_operation": "none",
+                "safe_mode": "none",
+                "start_frames_rule": "none",
+            },
+            "lossless_refresh_strong_24fps": {
+                "overlap_frames": 17,
+                "overlap_mode": "cut",
+                "overlap_side": "source",
+                "math_operation": "none",
+                "safe_mode": "none",
+                "start_frames_rule": "none",
+            },
             "videoclip_audio_24fps": {
                 "overlap_frames": 9,
                 "overlap_mode": "cut",
@@ -1014,6 +1053,7 @@ class IAMCCS_LTX2_ExtensionModule_Disk:
             math_operation = str(cfg.get("math_operation", math_operation))
             safe_mode = str(cfg.get("safe_mode", safe_mode))
             start_frames_rule = str(cfg.get("start_frames_rule", start_frames_rule))
+        force_lossless_png = preset.startswith("lossless_refresh")
 
         source_dir = _resolve_output_path(source_dir)
         output_dir = _resolve_output_path(output_dir)
@@ -1054,17 +1094,17 @@ class IAMCCS_LTX2_ExtensionModule_Disk:
         try:
             if not new_files:
                 for idx, src_path in enumerate(source_files):
-                    ext = os.path.splitext(src_path)[1] or ".png"
+                    ext = ".png" if force_lossless_png else (os.path.splitext(src_path)[1] or ".png")
                     _copy_frame(src_path, os.path.join(output_write_dir, f"frame_{idx:05d}{ext}"))
                     written += 1
                 base_count = written
             else:
                 new_count = len(new_files)
                 blend_overlap = min(overlap_frames_in, source_count, new_count)
-                ext = _build_ext(source_files[0], new_files[0])
+                ext = ".png" if force_lossless_png else _build_ext(source_files[0], new_files[0])
 
                 if overlap_mode == "cut":
-                    if overlap_side == "new_images":
+                    if overlap_side == "source":
                         ordered = source_files + new_files[blend_overlap:]
                     else:
                         ordered = source_files[:-blend_overlap] + new_files
@@ -1122,7 +1162,7 @@ class IAMCCS_LTX2_ExtensionModule_Disk:
             output_files = _list_frame_files(output_write_dir)
             start_files = output_files[start_index:start_index + calculated_frames]
             for idx, src_path in enumerate(start_files):
-                ext = os.path.splitext(src_path)[1] or ".png"
+                ext = ".png" if force_lossless_png else (os.path.splitext(src_path)[1] or ".png")
                 _copy_frame(src_path, os.path.join(start_write_dir, f"start_{idx:05d}{ext}"))
 
             if staged_output:
@@ -1143,6 +1183,7 @@ class IAMCCS_LTX2_ExtensionModule_Disk:
             f"Start dir: {start_dir} ({len(start_files)} frames) | "
             f"Overlap: {overlap_frames_in} | Mode: {overlap_mode} | Side: {overlap_side} | "
             f"Math: {math_operation if enable_math else 'disabled'} | Safe: {safe_mode} | "
+            f"Lossless PNG refresh: {'on' if force_lossless_png else 'off'} | "
             f"Preset: {preset} | Extension delta: +{extension_frames_count}"
         )
         _log.info("[LTX2_ExtensionModule_Disk] %s", report)
@@ -1242,6 +1283,100 @@ class IAMCCS_LoadImagesFromDirLite:
             f"(total={total}, mode={mode}, count={count}, start_index={start_index}, end_index={end_index})"
         )
         return (images, int(images.shape[0]), report)
+
+
+class IAMCCS_ImageBatchRangeLite:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE", {"tooltip": "Source IMAGE batch kept in VRAM."}),
+                "mode": (["all", "from_start", "from_end", "range"], {"default": "range"}),
+                "count": ("INT", {"default": 9, "min": 1, "max": 100000, "step": 1}),
+                "start_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+                "end_index": ("INT", {"default": 9, "min": 0, "max": 100000, "step": 1}),
+            },
+            "optional": {
+                "count_in": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+                "start_index_in": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+                "end_index_in": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "INT", "STRING")
+    RETURN_NAMES = ("images", "count", "report")
+    FUNCTION = "slice"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    def slice(
+        self,
+        images: torch.Tensor,
+        mode: str,
+        count: int,
+        start_index: int,
+        end_index: int,
+        count_in: int | None = None,
+        start_index_in: int | None = None,
+        end_index_in: int | None = None,
+    ):
+        if not torch.is_tensor(images) or images.ndim != 4:
+            raise ValueError("images must be a ComfyUI IMAGE tensor with shape [N,H,W,C]")
+
+        total = int(images.shape[0])
+        if total <= 0:
+            raise ValueError("images batch is empty")
+
+        if count_in is not None and int(count_in) > 0:
+            count = int(count_in)
+        if start_index_in is not None:
+            start_index = int(start_index_in)
+        if end_index_in is not None and int(end_index_in) > 0:
+            end_index = int(end_index_in)
+
+        count = max(1, int(count))
+        start_index = max(0, int(start_index))
+        end_index = max(0, int(end_index))
+        mode = str(mode or "range")
+
+        if mode == "from_start":
+            selected = images[: min(count, total)]
+            start_used = 0
+            end_used = int(selected.shape[0])
+        elif mode == "from_end":
+            start_used = max(0, total - count)
+            end_used = total
+            selected = images[start_used:end_used]
+        elif mode == "range":
+            if start_index >= total:
+                start_used = max(0, total - count)
+                end_used = total
+                _log.warning(
+                    "[ImageBatchRangeLite] start_index=%s out of range for total=%s; falling back to tail slice [%s:%s]",
+                    start_index,
+                    total,
+                    start_used,
+                    end_used,
+                )
+            else:
+                start_used = start_index
+                end_used = max(start_used, min(end_index, total))
+            selected = images[start_used:end_used]
+        else:
+            start_used = 0
+            end_used = total
+            selected = images
+
+        if int(selected.shape[0]) <= 0:
+            raise ValueError(
+                f"No frames selected from IMAGE batch (total={total}, mode={mode}, count={count}, start_index={start_index}, end_index={end_index})"
+            )
+
+        out = selected.clone().contiguous()
+        report = (
+            f"ImageBatchRangeLite: selected {int(out.shape[0])} / {total} frames "
+            f"(mode={mode}, count={count}, range=[{start_used}..{end_used}))"
+        )
+        return (out, int(out.shape[0]), report)
 
 
 class IAMCCS_SourceFramesToDisk:
@@ -1512,6 +1647,137 @@ class IAMCCS_StartImagesToVideoLatent:
             f"encoded_t={int(encoded.shape[2])} | replaced={int(end_index - latent_idx)} latent slots"
         )
         return ({"samples": samples, "noise_mask": conditioning_latent_frames_mask}, int(images.shape[0]), report)
+
+
+def _joint_refresh_insert_pixel_frame(vae, overlap_frames: int) -> int:
+    scale_factors = getattr(vae, "downscale_index_formula", (8, 32, 32))
+    time_scale_factor = max(1, int(scale_factors[0]))
+    protected_slots = int(math.ceil(max(0, int(overlap_frames)) / float(time_scale_factor)))
+    return int(protected_slots * time_scale_factor)
+
+
+class IAMCCS_LTX2_JointRefreshLatent:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "start_images": ("IMAGE",),
+                "refresh_image": ("IMAGE",),
+                "vae": ("VAE",),
+                "latent": ("LATENT",),
+                "mode": (["tail_then_source_refresh", "tail_only", "source_refresh_after_tail"], {"default": "tail_then_source_refresh"}),
+                "overlap_frames": ("INT", {"default": 9, "min": 1, "max": 512, "step": 1}),
+                "tail_strength": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "source_refresh_strength": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "tail_preprocess": ("BOOLEAN", {"default": True}),
+                "tail_preprocess_crf": ("INT", {"default": 28, "min": 0, "max": 100, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT", "STRING")
+    RETURN_NAMES = ("latent", "report")
+    FUNCTION = "inject"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    def inject(self, start_images, refresh_image, vae, latent, mode, overlap_frames, tail_strength, source_refresh_strength, tail_preprocess, tail_preprocess_crf):
+        result_latent = latent
+        reports = []
+        mode = str(mode or "tail_then_source_refresh")
+
+        if mode in {"tail_then_source_refresh", "tail_only"}:
+            result_latent, tail_count, tail_report = IAMCCS_StartImagesToVideoLatent().inject(
+                start_images,
+                vae,
+                result_latent,
+                "all",
+                max(1, int(overlap_frames)),
+                0,
+                float(tail_strength),
+                bool(tail_preprocess),
+                int(tail_preprocess_crf),
+            )
+            reports.append(f"tail({tail_count} frames): {tail_report}")
+
+        if mode in {"tail_then_source_refresh", "source_refresh_after_tail"} and float(source_refresh_strength) > 0.0:
+            insert_pixel = _joint_refresh_insert_pixel_frame(vae, int(overlap_frames))
+            result_latent, refresh_count, refresh_report = IAMCCS_StartImagesToVideoLatent().inject(
+                refresh_image,
+                vae,
+                result_latent,
+                "from_start",
+                1,
+                insert_pixel,
+                float(source_refresh_strength),
+                False,
+                0,
+            )
+            reports.append(f"source_after_tail({refresh_count} frame, insert_pixel={insert_pixel}): {refresh_report}")
+
+        if not reports:
+            reports.append("joint_refresh no-op")
+        return (result_latent, " | ".join(reports))
+
+
+class IAMCCS_LTX2_JointRefreshLatent_Disk:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "start_dir": ("STRING", {"default": "iamccs_extension_disk/start"}),
+                "refresh_image": ("IMAGE",),
+                "vae": ("VAE",),
+                "latent": ("LATENT",),
+                "mode": (["tail_then_source_refresh", "tail_only", "source_refresh_after_tail"], {"default": "tail_then_source_refresh"}),
+                "overlap_frames": ("INT", {"default": 9, "min": 1, "max": 512, "step": 1}),
+                "tail_strength": ("FLOAT", {"default": 0.9, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "source_refresh_strength": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "tail_preprocess": ("BOOLEAN", {"default": True}),
+                "tail_preprocess_crf": ("INT", {"default": 28, "min": 0, "max": 100, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT", "STRING")
+    RETURN_NAMES = ("latent", "report")
+    FUNCTION = "inject"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    def inject(self, start_dir, refresh_image, vae, latent, mode, overlap_frames, tail_strength, source_refresh_strength, tail_preprocess, tail_preprocess_crf):
+        result_latent = latent
+        reports = []
+        mode = str(mode or "tail_then_source_refresh")
+
+        if mode in {"tail_then_source_refresh", "tail_only"}:
+            result_latent, tail_count, tail_report = IAMCCS_StartDirToVideoLatent().inject(
+                start_dir,
+                vae,
+                result_latent,
+                "all",
+                max(1, int(overlap_frames)),
+                0,
+                float(tail_strength),
+                bool(tail_preprocess),
+                int(tail_preprocess_crf),
+            )
+            reports.append(f"tail_dir({tail_count} frames): {tail_report}")
+
+        if mode in {"tail_then_source_refresh", "source_refresh_after_tail"} and float(source_refresh_strength) > 0.0:
+            insert_pixel = _joint_refresh_insert_pixel_frame(vae, int(overlap_frames))
+            result_latent, refresh_count, refresh_report = IAMCCS_StartImagesToVideoLatent().inject(
+                refresh_image,
+                vae,
+                result_latent,
+                "from_start",
+                1,
+                insert_pixel,
+                float(source_refresh_strength),
+                False,
+                0,
+            )
+            reports.append(f"source_after_tail({refresh_count} frame, insert_pixel={insert_pixel}): {refresh_report}")
+
+        if not reports:
+            reports.append("joint_refresh_disk no-op")
+        return (result_latent, " | ".join(reports))
 
 
 class IAMCCS_VideoCombineFromDir:
@@ -3103,6 +3369,8 @@ class IAMCCS_LTX2_FirstLastLatentControl_Pro(IAMCCS_LTX2_FirstLastLatentControl)
 # Node registration
 NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_ExtensionModule": IAMCCS_LTX2_ExtensionModule,
+    "IAMCCS_LTX2_JointRefreshLatent": IAMCCS_LTX2_JointRefreshLatent,
+    "IAMCCS_LTX2_JointRefreshLatent_Disk": IAMCCS_LTX2_JointRefreshLatent_Disk,
     "IAMCCS_LTX2_ExtensionModule_simple": IAMCCS_LTX2_ExtensionModule_simple,
     "IAMCCS_LTX2_GetImageFromBatch": IAMCCS_LTX2_GetImageFromBatch,
     "IAMCCS_LTX2_ReferenceImageSwitch": IAMCCS_LTX2_ReferenceImageSwitch,
@@ -3116,6 +3384,8 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "IAMCCS_LTX2_JointRefreshLatent": "LTX-2 Joint Refresh Latent",
+    "IAMCCS_LTX2_JointRefreshLatent_Disk": "LTX-2 Joint Refresh Latent (Disk)",
     "IAMCCS_LTX2_ExtensionModule": "LTX-2 Extension Module 🎬",
     "IAMCCS_LTX2_ExtensionModule_simple": "LTX-2 Extension Module (simple) 🎬",
     "IAMCCS_LTX2_GetImageFromBatch": "LTX-2 Get Images From Batch 🎞️",

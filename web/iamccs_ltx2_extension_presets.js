@@ -1,6 +1,6 @@
 import { app } from "../../scripts/app.js";
 
-const IAMCCS_LTX2_EXTENSION_PRESETS_VERSION = "2026-03-17-1";
+const IAMCCS_LTX2_EXTENSION_PRESETS_VERSION = "2026-04-30-1";
 
 console.log(
     `[IAMCCS LTX2] Loading ExtensionModule presets... v=${IAMCCS_LTX2_EXTENSION_PRESETS_VERSION}`
@@ -32,6 +32,51 @@ const PRESETS = {
         color_reference_window: 8,
 
         // Keep defaults explicit for stability
+        metric_weight_color: 1.0,
+        metric_weight_edges: 0.5,
+    },
+
+    // Recommended when an extender reuses decoded frames for many generations.
+    // Keep frame handoff lossless/no-color-match and avoid crossfade blur.
+    lossless_refresh_24fps: {
+        overlap_frames: 9,
+        overlap_mode: "cut",
+        overlap_side: "source",
+
+        enable_math: true,
+        math_operation: "none",
+        math_value_b: 1,
+        safe_mode: "none",
+        start_frames_rule: "none",
+
+        seam_search_mode: "best_of_k",
+        k_search: 16,
+        color_match_mode: "none",
+        color_match_strength: 0.0,
+        color_reference_window: 8,
+
+        metric_weight_color: 1.0,
+        metric_weight_edges: 0.5,
+    },
+
+    // Stronger anchor window for visible drift/identity loss. Heavier and slower.
+    lossless_refresh_strong_24fps: {
+        overlap_frames: 17,
+        overlap_mode: "cut",
+        overlap_side: "source",
+
+        enable_math: true,
+        math_operation: "none",
+        math_value_b: 1,
+        safe_mode: "none",
+        start_frames_rule: "none",
+
+        seam_search_mode: "best_of_k",
+        k_search: 24,
+        color_match_mode: "none",
+        color_match_strength: 0.0,
+        color_reference_window: 12,
+
         metric_weight_color: 1.0,
         metric_weight_edges: 0.5,
     },
@@ -193,6 +238,8 @@ const PRESET_UI_WIDGET = "preset_ui";
 const ALLOWED_PRESET_KEYS = [
     "custom",
     "target_extension_ltx2",
+    "lossless_refresh_24fps",
+    "lossless_refresh_strong_24fps",
     "videoclip_audio_24fps",
     "monologue_audio_24fps",
     "cut_bestofk_16",

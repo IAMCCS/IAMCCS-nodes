@@ -195,6 +195,28 @@ function isModeValue(value) {
     return value === "simple" || value === "advanced";
 }
 
+function normalizeModeValue(value, fallback = "simple") {
+    if (isModeValue(value)) return value;
+    if (typeof value === "number" && Number.isFinite(value)) {
+        return Math.trunc(value) === 1 ? "advanced" : "simple";
+    }
+    const raw = String(value ?? "").trim().toLowerCase();
+    if (isModeValue(raw)) return raw;
+    if (raw === "1") return "advanced";
+    if (raw === "0") return "simple";
+    return isModeValue(fallback) ? fallback : "simple";
+}
+
+function isSerializedModeValue(value) {
+    if (isModeValue(value)) return true;
+    if (typeof value === "number" && Number.isFinite(value)) {
+        const n = Math.trunc(value);
+        return n === 0 || n === 1;
+    }
+    const raw = String(value ?? "").trim().toLowerCase();
+    return raw === "0" || raw === "1" || isModeValue(raw);
+}
+
 function isModelTypeValue(value) {
     return value === "wan2x" || value === "flow" || value === "standard";
 }
@@ -236,10 +258,10 @@ function normalizeLegacyWidgetValues(config, node = null) {
     // "simple"/null/null/null  model_type  ...30 slots...  gen_idx  log_prefix
     if (
         values.length === LEGACY_EXPECTED_SERIALIZED_VALUES + UI_WIDGET_COUNT
-        && isModeValue(values[0])
+        && isSerializedModeValue(values[0])
         && isModelTypeValue(values[UI_WIDGET_COUNT])
     ) {
-        modeValue = values[0];
+        modeValue = normalizeModeValue(values[0], "simple");
         const generationIndex = values[values.length - 2] ?? 0;
         const logPrefix = values[values.length - 1] ?? "WAN LoRA schedule";
         const modelType = values[UI_WIDGET_COUNT] ?? "flow";
@@ -284,9 +306,9 @@ function normalizeLegacyWidgetValues(config, node = null) {
             const logPrefix = values[0] ?? "WAN LoRA schedule";
             const modelType = values[1] ?? "flow";
             const slotValues = values.slice(slotStart, values.length - 1);
-            const inferredMode = values.slice(2, slotStart).find((value) => isModeValue(value));
+            const inferredMode = values.slice(2, slotStart).find((value) => isSerializedModeValue(value));
             if (slotValues.length === maxSlotValuesLength) {
-                modeValue = isModeValue(inferredMode) ? inferredMode : modeValue;
+                modeValue = isSerializedModeValue(inferredMode) ? normalizeModeValue(inferredMode, "simple") : modeValue;
                 normalized = [generationCount, logPrefix, modelType, ...slotValues];
             }
         }
@@ -310,9 +332,9 @@ function normalizeLegacyWidgetValues(config, node = null) {
         const modelType = values[2] ?? "flow";
         const uiValues = values.slice(3, slotStart);
         const slotValues = values.slice(slotStart);
-        const inferredMode = uiValues.find((value) => isModeValue(value));
+        const inferredMode = uiValues.find((value) => isSerializedModeValue(value));
         if (slotValues.length === maxSlotValuesLength) {
-            modeValue = isModeValue(inferredMode) ? inferredMode : modeValue;
+            modeValue = isSerializedModeValue(inferredMode) ? normalizeModeValue(inferredMode, "simple") : modeValue;
             normalized = [generationCount, logPrefix, modelType, ...slotValues];
         }
     }
@@ -345,8 +367,8 @@ function normalizeLegacyWidgetValues(config, node = null) {
         config.widgets_values = values;
     }
     config.properties = config.properties || {};
-    if (isModeValue(modeValue) && !config.properties[MODE_PROP]) {
-        config.properties[MODE_PROP] = modeValue;
+    if (modeValue != null && !config.properties[MODE_PROP]) {
+        config.properties[MODE_PROP] = normalizeModeValue(modeValue, "simple");
     }
 }
 
@@ -546,7 +568,7 @@ function getScheduleSlotRecord(node, slot) {
 }
 
 function buildSchedulePreset(node) {
-    const mode = isModeValue(node?.properties?.[MODE_PROP]) ? node.properties[MODE_PROP] : "simple";
+    const mode = normalizeModeValue(node?.properties?.[MODE_PROP], "simple");
     const modelType = String(getWidget(node, "model_type")?.value || "flow");
     const logPrefix = String(getWidget(node, "log_prefix")?.value || "WAN LoRA schedule");
     return {
@@ -618,7 +640,7 @@ async function applySchedulePreset(node, payload) {
         }
     }
 
-    const nextMode = isModeValue(payload.mode) ? payload.mode : "simple";
+    const nextMode = normalizeModeValue(payload.mode, "simple");
     const nextVisibleSlots = Math.max(3, Math.min(MAX_SLOTS, Math.trunc(Number(payload.visible_slots ?? payload.visibleSlots) || 3)));
     const nextModelType = isModelTypeValue(payload.model_type || payload.modelType) ? String(payload.model_type || payload.modelType) : "flow";
     const nextLogPrefix = String(payload.log_prefix || payload.logPrefix || "WAN LoRA schedule");
@@ -792,17 +814,33 @@ function applyPresetOptions(node) {
 }
 
 function ensureModeWidget(node) {
-    if (getWidget(node, MODE_WIDGET)) return;
     node.properties = node.properties || {};
-    if (!node.properties[MODE_PROP]) {
-        node.properties[MODE_PROP] = "simple";
+    node.properties[MODE_PROP] = normalizeModeValue(node.properties[MODE_PROP], "simple");
+    const existing = getWidget(node, MODE_WIDGET);
+    if (existing) {
+        existing.value = normalizeModeValue(existing.value, node.properties[MODE_PROP]);
+        node.properties[MODE_PROP] = existing.value;
+        existing.options = { ...(existing.options || {}), values: ["simple", "advanced"], serialize: false };
+        existing.callback = (value) => {
+            const nextMode = normalizeModeValue(value, "simple");
+            existing.value = nextMode;
+            node.properties[MODE_PROP] = nextMode;
+            applyLayout(node);
+            requestSyncAllLinkedLowNodes(node);
+            node.setDirtyCanvas(true, true);
+        };
+        existing.label = "Mode";
+        markUiWidgetNonSerializable(existing);
+        return;
     }
     const widget = node.addWidget(
         "combo",
         MODE_WIDGET,
         node.properties[MODE_PROP],
         (value) => {
-            node.properties[MODE_PROP] = String(value || "simple");
+            const nextMode = normalizeModeValue(value, "simple");
+            widget.value = nextMode;
+            node.properties[MODE_PROP] = nextMode;
             applyLayout(node);
             requestSyncAllLinkedLowNodes(node);
             node.setDirtyCanvas(true, true);
@@ -947,7 +985,7 @@ function candidateLowNames(name) {
 
 function syncLowNodePresentation(highNode, lowNode) {
     lowNode.properties = lowNode.properties || {};
-    lowNode.properties[MODE_PROP] = highNode?.properties?.[MODE_PROP] || "simple";
+    lowNode.properties[MODE_PROP] = normalizeModeValue(highNode?.properties?.[MODE_PROP], "simple");
     setVisibleSlots(lowNode, getVisibleSlots(highNode));
     lowNode.flags = lowNode.flags || {};
     lowNode.flags.collapsed = !!highNode?.flags?.collapsed;
@@ -1544,11 +1582,11 @@ function reorderWidgets(node) {
 }
 
 function targetWidth(node) {
-    return (node?.properties?.[MODE_PROP] || "simple") === "advanced" ? ADVANCED_WIDTH : SIMPLE_WIDTH;
+    return normalizeModeValue(node?.properties?.[MODE_PROP], "simple") === "advanced" ? ADVANCED_WIDTH : SIMPLE_WIDTH;
 }
 
 function targetHeight(node) {
-    const mode = node?.properties?.[MODE_PROP] || "simple";
+    const mode = normalizeModeValue(node?.properties?.[MODE_PROP], "simple");
     const count = getVisibleSlots(node);
     const slotHeight = mode === "advanced" ? ADVANCED_SLOT_HEIGHT : SIMPLE_SLOT_HEIGHT;
     return BASE_HEIGHT + (count * slotHeight) + EXTRA_HEIGHT;
@@ -1564,7 +1602,13 @@ function applyLayout(node) {
     hideWidget(getWidget(node, "generation_index"));
     hideWidget(getWidget(node, "log_prefix"));
 
-    const advanced = (node?.properties?.[MODE_PROP] || "simple") === "advanced";
+    const modeWidget = getWidget(node, MODE_WIDGET);
+    const normalizedMode = normalizeModeValue(modeWidget?.value ?? node?.properties?.[MODE_PROP], "simple");
+    if (modeWidget) modeWidget.value = normalizedMode;
+    node.properties = node.properties || {};
+    node.properties[MODE_PROP] = normalizedMode;
+
+    const advanced = normalizedMode === "advanced";
     if (advanced) {
         showWidget(getWidget(node, "model_type"));
     } else {
@@ -1593,7 +1637,7 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             const result = onNodeCreated?.apply(this, arguments);
             this.properties = this.properties || {};
-            if (!this.properties[MODE_PROP]) this.properties[MODE_PROP] = "simple";
+            this.properties[MODE_PROP] = normalizeModeValue(this.properties[MODE_PROP], "simple");
             if (!this.properties[SLOTS_PROP]) this.properties[SLOTS_PROP] = 3;
             ensureModeWidget(this);
             ensureActionWidgets(this);
@@ -1670,7 +1714,7 @@ app.registerExtension({
 
             const result = onConfigure?.apply(this, arguments);
             this.properties = this.properties || {};
-            if (!this.properties[MODE_PROP]) this.properties[MODE_PROP] = "simple";
+            this.properties[MODE_PROP] = normalizeModeValue(this.properties[MODE_PROP], "simple");
             if (!this.properties[SLOTS_PROP]) this.properties[SLOTS_PROP] = 3;
             ensureModeWidget(this);
             ensureActionWidgets(this);

@@ -1,4 +1,4 @@
-import copy
+﻿import copy
 import gc
 import json
 import math
@@ -36,6 +36,24 @@ _PLANNER_AUDIO_MODES = (
     "melband_vocals_duration_math",
     "raw_audio_only",
 )
+_MEDIA_MODES = (
+    "auto_from_generation_mode",
+    "input_audio",
+    "input_audio_img2vid",
+    "input_audio_t2v",
+    "generated_audio_img2vid",
+    "generated_audio_t2v",
+    "img2vid_pure",
+    "t2v_pure",
+)
+_GENERATION_TYPE_MODES = (
+    "aud+img2video_simple",
+    "aud+img2video_2_segments",
+    "aud+img2video_infinite",
+    "text+audio2video",
+    "img2video",
+    "text2video",
+)
 _RENDER_BACKEND_MODES = (
     "auto",
     "single_best",
@@ -46,6 +64,7 @@ _RENDER_BACKEND_MODES = (
 _MODULAR_DECODE_MODES = (
     "inherit_render_backend",
     "low_ram_disk",
+    "very_low_ram_disk",
     "normal_tiled_vhs",
     "high_vram",
     "custom_mode",
@@ -53,6 +72,7 @@ _MODULAR_DECODE_MODES = (
 _VAE_DECODE_MODES = (
     "inherit_render_backend",
     "low_ram_disk",
+    "very_low_ram_disk",
     "normal_tiled_vhs",
     "high_vram",
     "custom_mode",
@@ -230,7 +250,7 @@ def _normalize_segment_preset(value):
         return "10sec"
     if text == "monologue":
         return "15sec"
-    if text in {"10sec", "15sec", "20sec"}:
+    if text in {"5sec", "10sec", "15sec", "20sec"}:
         return text
     return "15sec"
 
@@ -286,6 +306,8 @@ def _normalize_modular_decode_mode(mode, backend_mode=None):
         "inherit_from_backend": "inherit_from_backend",
         "low_ram": "low_ram_disk",
         "low_ram_disk": "low_ram_disk",
+        "very_low_ram": "very_low_ram_disk",
+        "very_low_ram_disk": "very_low_ram_disk",
         "normal": "normal_tiled_vhs_ready",
         "normal_tiled_vhs": "normal_tiled_vhs_ready",
         "normal_tiled_vhs_ready": "normal_tiled_vhs_ready",
@@ -307,6 +329,8 @@ def _modular_decode_to_vae_mode(modular_decode):
         "inherit_from_backend": "normal_tiled",
         "low_ram": "low_ram_disk",
         "low_ram_disk": "low_ram_disk",
+        "very_low_ram": "very_low_ram_disk",
+        "very_low_ram_disk": "very_low_ram_disk",
         "normal": "normal_tiled",
         "normal_tiled_vhs_ready": "normal_tiled",
         "high": "high_vram",
@@ -314,6 +338,76 @@ def _modular_decode_to_vae_mode(modular_decode):
         "custom_mode": "custom_mode",
     }
     return mapping.get(str(modular_decode), "low_ram_disk")
+
+
+def _resolve_generation_type(generation_type, generation_mode, backend_mode, media_mode):
+    requested = str(generation_type or "aud+img2video_infinite")
+    mapping = {
+        "aud+img2video_simple": ("img2vid", "single_best", "input_audio_img2vid"),
+        "aud+img2video_2_segments": ("img2vid", "two_segments_normal_vram", "input_audio_img2vid"),
+        "aud+img2video_infinite": ("img2vid", "loop_normal_vram", "input_audio_img2vid"),
+        "text+audio2video": ("t2v", "loop_normal_vram", "input_audio_t2v"),
+        "img2video": ("img2vid", "single_best", "img2vid_pure"),
+        "text2video": ("t2v", "single_best", "t2v_pure"),
+    }
+    if requested not in mapping:
+        requested = "aud+img2video_infinite"
+    resolved_generation, resolved_backend, resolved_media = mapping[requested]
+    return requested, resolved_generation, resolved_backend, resolved_media
+
+
+def _resolve_media_mode(media_mode, generation_mode):
+    requested_mode = str(media_mode or "auto_from_generation_mode")
+    requested_generation = "t2v" if str(generation_mode or "img2vid") == "t2v" else "img2vid"
+    alias_map = {
+        "img2vid_generated_audio": "generated_audio_img2vid",
+        "t2v_generated_audio": "generated_audio_t2v",
+        "pure_img2vid": "img2vid_pure",
+        "pure_t2v": "t2v_pure",
+    }
+    requested_mode = alias_map.get(requested_mode, requested_mode)
+
+    if requested_mode == "input_audio_t2v":
+        return {
+            "mode": "input_audio_t2v",
+            "generation_mode": "t2v",
+            "uses_input_audio": True,
+            "generates_audio": False,
+        }
+    if requested_mode == "input_audio_img2vid":
+        return {
+            "mode": "input_audio_img2vid",
+            "generation_mode": "img2vid",
+            "uses_input_audio": True,
+            "generates_audio": False,
+        }
+    if requested_mode in {"generated_audio_t2v", "t2v_pure"}:
+        return {
+            "mode": requested_mode,
+            "generation_mode": "t2v",
+            "uses_input_audio": False,
+            "generates_audio": True,
+        }
+    if requested_mode in {"generated_audio_img2vid", "img2vid_pure"}:
+        return {
+            "mode": requested_mode,
+            "generation_mode": "img2vid",
+            "uses_input_audio": False,
+            "generates_audio": True,
+        }
+
+    return {
+        "mode": "input_audio" if requested_mode == "input_audio" else f"input_audio_{requested_generation}",
+        "generation_mode": requested_generation,
+        "uses_input_audio": True,
+        "generates_audio": False,
+    }
+
+
+def _motion_guidance_strength(base_strength, motion_intensity):
+    base_value = max(0.0, float(base_strength))
+    intensity_value = max(0.01, float(motion_intensity or 1.0))
+    return max(0.0, min(1.0, base_value / intensity_value))
 
 
 def _resolve_backend_route(requested_backend_mode, planner_segment_count, modular_decode):
@@ -746,7 +840,11 @@ def _continuity_mode_from_payload(continuity_payload, fallback_mode, fallback_in
     payload_policy = _to_text(data, "anchor_policy", fallback_mode)
     payload_source = _to_text(data, "anchor_source_mode", "")
     resolved_mode = str(fallback_mode)
-    if payload_policy in {"periodic_anchor_refresh", "body_anchor_refresh"} or payload_source in {"periodic_keyframe_refresh", "prev_tail_plus_anchor"}:
+    if payload_source == "prev_tail_plus_anchor":
+        resolved_mode = "periodic_tail_then_source_refresh"
+    elif payload_policy == "body_anchor_refresh":
+        resolved_mode = "tail_then_source_refresh"
+    elif payload_policy == "periodic_anchor_refresh" or payload_source == "periodic_keyframe_refresh":
         resolved_mode = "periodic_source_refresh"
     elif payload_policy in {"identity_first", "start_anchor_only"}:
         resolved_mode = "always_source_refresh"
@@ -767,6 +865,17 @@ def _use_source_anchor(segment_index, continuity_mode, refresh_interval):
     if mode == "always_source_refresh":
         return True
     if mode == "periodic_source_refresh" and int(refresh_interval) > 0:
+        return (int(segment_index) + 1) % int(refresh_interval) == 0
+    return False
+
+
+def _use_tail_then_source_anchor(segment_index, continuity_mode, refresh_interval):
+    mode = str(continuity_mode)
+    if int(segment_index) <= 0:
+        return False
+    if mode == "tail_then_source_refresh":
+        return True
+    if mode == "periodic_tail_then_source_refresh" and int(refresh_interval) > 0:
         return (int(segment_index) + 1) % int(refresh_interval) == 0
     return False
 
@@ -866,25 +975,9 @@ def _hard_unload_all_models():
 
 
 def _accelerate_exec_model_if_available(model):
-    try:
-        accelerator = _node_class("IAMCCS_GGUF_accelerator")()
-    except Exception as exc:
-        return model, f"gguf_accelerator=unavailable reason={exc}"
-
-    try:
-        accelerated_model, accelerator_report = accelerator.accelerate(
-            model,
-            "auto_oom_safe",
-            True,
-            True,
-            1500,
-            True,
-            "all_or_nothing",
-            1024,
-        )
-        return accelerated_model, str(accelerator_report)
-    except Exception as exc:
-        return model, f"gguf_accelerator=fallback reason={exc}"
+    # Diffusion-model checkpoints should pass through unchanged; the GGUF helper
+    # is intentionally disabled for the SuperNode single-reference path.
+    return model, "gguf_accelerator=disabled reason=diffusion_model_path"
 
 
 class IAMCCS_GC_AUIMG2VIDExecutablePlanner:
@@ -911,7 +1004,7 @@ class IAMCCS_GC_AUIMG2VIDExecutablePlanner:
                 "fps": ("FLOAT", {"default": 24.0, "min": 0.001, "max": 240.0, "step": 0.01}),
                 "segment_seconds": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 3600.0, "step": 0.01}),
                 "planning_mode": (["manual_segment_seconds", "explicit_preset_seconds"], {"default": "manual_segment_seconds"}),
-                "segment_preset": (["10sec", "15sec", "20sec"], {"default": "15sec"}),
+                "segment_preset": (["5sec", "10sec", "15sec", "20sec"], {"default": "15sec"}),
                 "overlap_frames": ("INT", {"default": 9, "min": 0, "max": 4096, "step": 1}),
                 "ltx_round_mode": (["up", "nearest", "down"], {"default": "up"}),
                 "audio_preprocess_mode": (_PLANNER_AUDIO_MODES, {"default": "melband_vocals_duration_math"}),
@@ -986,6 +1079,10 @@ class IAMCCS_GC_AUIMG2VIDExecutablePlanner:
                 "melband_model_name": str(melband_model_name),
             },
             report,
+            requires={
+                "inputs": {"audio": "AUDIO", "model": "MODEL", "clip": "CLIP", "vae": "VAE", "audio_vae": "VAE"},
+                "optional_linx": {SUPERNODE_LINX_TYPE: "merge upstream resources"},
+            },
             slot_map={
                 "plan_payload": {"type": "STRING", "role": "exec_plan"},
                 "planner_chip": {"type": "STRING", "role": "planner_chip"},
@@ -1050,6 +1147,9 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
         return {
             "required": {
                 "image": ("IMAGE",),
+                "generation_type": (_GENERATION_TYPE_MODES, {"default": "aud+img2video_infinite"}),
+                "ui_preset": (["custom", "low_ram_safe", "balanced", "high_quality", "fast_preview", "loop_lipsync_safe", "img2vid_generated_audio", "t2v_generated_audio", "img2vid_pure", "t2v_pure", "loop_img2vid_pure_normal_vram", "loop_t2v_pure_normal_vram", "loop_img2vid_pure_low_ram", "motion_controlled"], {"default": "custom"}),
+                "generated_media_duration_seconds": ("FLOAT", {"default": 10.0, "min": 0.1, "max": 120.0, "step": 0.1}),
                 "generation_mode": (["img2vid", "t2v"], {"default": "img2vid"}),
                 "backend_mode": (_RENDER_BACKEND_MODES, {"default": "auto"}),
                 "positive_text": ("STRING", {"default": "cinematic motion, detailed scene", "multiline": True}),
@@ -1069,13 +1169,13 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 "audio_context_mode": (["left_context_only", "right_context_only", "symmetric_context", "no_overlap"], {"default": "left_context_only"}),
                 "audio_left_context_s": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 30.0, "step": 0.01}),
                 "audio_right_context_s": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 30.0, "step": 0.01}),
-                "stitch_preset": (["custom", "videoclip_audio_24fps", "monologue_audio_24fps", "target_extension_ltx2", "cut_bestofk_16", "cut_bestofk_16_luma", "cut_bestofk_32", "micro_crossfade_3"], {"default": "videoclip_audio_24fps"}),
+                "stitch_preset": (["custom", "lossless_refresh_24fps", "lossless_refresh_strong_24fps", "videoclip_audio_24fps", "monologue_audio_24fps", "target_extension_ltx2", "cut_bestofk_16", "cut_bestofk_16_luma", "cut_bestofk_32", "micro_crossfade_3"], {"default": "custom"}),
                 "overlap_side": (["source", "new_images"], {"default": "source"}),
                 "overlap_mode": (["cut", "linear_blend", "ease_in_out", "filmic_crossfade"], {"default": "cut"}),
-                "start_frames_rule": (["none", "ltx2_round_down", "ltx2_nearest"], {"default": "ltx2_round_down"}),
-                "continuity_anchor_mode": (["off", "periodic_source_refresh", "always_source_refresh"], {"default": "off"}),
+                "start_frames_rule": (["none", "ltx2_round_down", "ltx2_nearest"], {"default": "none"}),
+                "continuity_anchor_mode": (["off", "tail_only", "periodic_tail_only", "periodic_tail_then_source_refresh", "tail_then_source_refresh", "periodic_source_refresh", "always_source_refresh"], {"default": "tail_only"}),
                 "anchor_refresh_interval": ("INT", {"default": 2, "min": 1, "max": 128, "step": 1}),
-                "anchor_image_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "anchor_image_strength": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "anti_drift_mode": (["off", "rolling_adain", "dual_reference_adain"], {"default": "off"}),
                 "anti_drift_strength": ("FLOAT", {"default": 0.18, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "identity_persistence_strength": ("FLOAT", {"default": 0.08, "min": 0.0, "max": 1.0, "step": 0.01}),
@@ -1090,6 +1190,9 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 "second_stage_reinject_strength": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "second_stage_cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 30.0, "step": 0.1}),
                 "second_stage_manual_sigmas": ("STRING", {"default": "0.909375, 0.725, 0.421875, 0.0", "multiline": True}),
+                "media_mode": (_MEDIA_MODES, {"default": "auto_from_generation_mode"}),
+                "vram_flush": ("BOOLEAN", {"default": False}),
+                "motion_intensity": ("FLOAT", {"default": 1.0, "min": 0.25, "max": 4.0, "step": 0.05}),
             },
             "optional": {
                 "linx": (SUPERNODE_LINX_TYPE,),
@@ -1178,6 +1281,12 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
         second_stage_reinject_strength,
         second_stage_cfg,
         second_stage_manual_sigmas,
+        media_mode,
+        vram_flush,
+        motion_intensity,
+        ui_preset="custom",
+        generated_media_duration_seconds=10.0,
+        generation_type="aud+img2video_infinite",
         linx=None,
         audio=None,
         model=None,
@@ -1190,22 +1299,36 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
         stage2_model=None,
         unique_id=None,
     ):
-        audio = _require_runtime_value(_input_or_linx(audio, linx, "audio"), "audio")
         model = _require_runtime_value(_input_or_linx(model, linx, "model"), "model")
         clip = _require_runtime_value(_input_or_linx(clip, linx, "clip"), "clip")
         vae = _require_runtime_value(_input_or_linx(vae, linx, "vae"), "vae")
         audio_vae = _require_runtime_value(_input_or_linx(audio_vae, linx, "audio_vae"), "audio_vae")
         plan_payload = str(plan_payload or linx_resource(linx, "planner_payload") or linx_output(linx, "plan_payload") or "")
-        if not plan_payload:
-            raise ValueError("plan_payload is required either as a local input or via linx inheritance")
 
-        raw_audio = _input_or_linx(audio, linx, "audio_raw") or audio
-        single_conditioning_audio = _input_or_linx(None, linx, "audio_conditioning_single") or raw_audio
-        segmented_audio = _input_or_linx(None, linx, "audio_conditioning_segmented") or raw_audio
-        audio_preprocess_report = str(linx_resource(linx, "audio_preprocess_report", "audio_preprocess=unknown") or "audio_preprocess=unknown")
-        melband_enabled = bool(linx_resource(linx, "melband_enabled", False))
+        generation_type, generation_mode, backend_mode, media_mode = _resolve_generation_type(
+            generation_type,
+            generation_mode,
+            backend_mode,
+            media_mode,
+        )
 
         fps_value = float(linx_resource(linx, "fps", 24.0) or 24.0)
+        input_audio_probe = _input_or_linx(audio, linx, "audio")
+        requested_media_probe = str(media_mode or "auto_from_generation_mode")
+        media_probe = _resolve_media_mode(requested_media_probe, generation_mode)
+        if requested_media_probe == "auto_from_generation_mode" and input_audio_probe is None:
+            fallback_media_probe = "generated_audio_t2v" if str(generation_mode) == "t2v" else "generated_audio_img2vid"
+            media_probe = _resolve_media_mode(fallback_media_probe, generation_mode)
+        if not plan_payload and not bool(media_probe["uses_input_audio"]):
+            generated_duration = max(0.1, float(generated_media_duration_seconds or 10.0))
+            plan_payload = (
+                f"pipeline_kind=au_img2vid_exec; total_duration_seconds={generated_duration:.6f}; fps={float(fps_value):.6f}; "
+                f"segment_seconds={generated_duration:.6f}; planning_mode=manual_segment_seconds; segment_preset=10sec; "
+                f"content_profile=10sec; overlap_frames=9; ltx_round_mode=up"
+            )
+        if not plan_payload:
+            raise ValueError("plan_payload is required via Exec Planner/linx unless Media Mode is generated-audio/pure")
+
         backend_mode = _normalize_backend_mode(backend_mode)
         modular_decode = _normalize_modular_decode_mode(
             _inherit_widget_value(vae_mode, "inherit_render_backend", linx, "decode_mode"),
@@ -1214,7 +1337,46 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
         output_root = str(_inherit_widget_value(output_root, "iamccs_gc_auimg2vid/exec_run", linx, "output_root"))
         audio_concat_payload = str(linx_output(linx, "audio_concat_payload", "") or "")
         continuity_payload = str(linx_output(linx, "continuity_payload", "") or "")
-        generation_mode = str(generation_mode or "img2vid")
+        requested_media_mode = str(media_mode or "auto_from_generation_mode")
+        media_settings = _resolve_media_mode(requested_media_mode, generation_mode)
+        input_audio = _input_or_linx(audio, linx, "audio")
+        input_audio_source = "direct" if audio is not None else ("linx" if linx_resource(linx, "audio", None) is not None else "missing")
+        if requested_media_mode == "auto_from_generation_mode" and input_audio is None:
+            fallback_media_mode = "generated_audio_t2v" if str(generation_mode) == "t2v" else "generated_audio_img2vid"
+            media_settings = _resolve_media_mode(fallback_media_mode, generation_mode)
+        generation_mode = str(media_settings["generation_mode"])
+        effective_media_mode = str(media_settings["mode"])
+        uses_input_audio = bool(media_settings["uses_input_audio"])
+        generates_audio = bool(media_settings["generates_audio"])
+        audio = _require_runtime_value(input_audio, "audio") if uses_input_audio else input_audio
+        raw_audio = (_input_or_linx(audio, linx, "audio_raw") or audio) if uses_input_audio else None
+        single_conditioning_audio = (_input_or_linx(None, linx, "audio_conditioning_single") or raw_audio) if uses_input_audio else None
+        segmented_audio = (_input_or_linx(None, linx, "audio_conditioning_segmented") or raw_audio) if uses_input_audio else None
+        audio_preprocess_report = str(
+            linx_resource(linx, "audio_preprocess_report", "audio_preprocess=unknown")
+            or "audio_preprocess=unknown"
+        ) if uses_input_audio else "audio_preprocess=generated_audio_empty_latent"
+        melband_enabled = bool(linx_resource(linx, "melband_enabled", False)) if uses_input_audio else False
+        if uses_input_audio and single_conditioning_audio is None:
+            raise ValueError("input-audio generation selected, but no audio conditioning reached Exec Render")
+        if uses_input_audio:
+            if linx_resource(linx, "audio_conditioning_single", None) is not None:
+                conditioning_audio_source = "linx_audio_conditioning_single"
+            elif raw_audio is not None:
+                conditioning_audio_source = f"{input_audio_source}_raw_audio"
+            else:
+                conditioning_audio_source = "missing"
+        else:
+            conditioning_audio_source = "generated_or_pure_audio_latent"
+        print(
+            "[IAMCCS SuperNodes Render] "
+            f"audio_route generation_type={generation_type} generation_mode={generation_mode} "
+            f"backend={backend_mode} media={effective_media_mode} uses_input_audio={uses_input_audio} "
+            f"generates_audio={generates_audio} input_audio={input_audio_source} "
+            f"raw_audio={'yes' if raw_audio is not None else 'no'} conditioning_audio={conditioning_audio_source} "
+            f"melband={melband_enabled} resource_keys={','.join(str(k) for k in ((linx or {}).get('resource_keys') or []))}"
+        )
+        motion_intensity = max(0.25, min(4.0, float(motion_intensity or 1.0)))
         second_stage_payload = _stage2_payload_from_exec_widgets(
             second_stage_mode,
             stage2_model_policy,
@@ -1246,8 +1408,12 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
             total_duration_seconds = _duration_hint_from_payload(audio_concat_payload)
         if total_duration_seconds is None:
             total_duration_seconds = _duration_hint_from_linx(linx)
-        if total_duration_seconds is None:
+        if total_duration_seconds is None and uses_input_audio:
             total_duration_seconds = _audio_duration_seconds(audio)
+        if total_duration_seconds is None:
+            payload_data = _parse_payload(plan_payload)
+            total_frames_hint = _to_int(payload_data, "total_frames", 0)
+            total_duration_seconds = float(total_frames_hint) / max(0.001, float(fps_value)) if total_frames_hint > 0 else 0.0
 
         planner_node = _node_class("IAMCCS_SegmentPlanner")()
         audio_math_node = _node_class("IAMCCS_AudioExtensionMath")()
@@ -1256,6 +1422,9 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
         extension_node = _node_class("IAMCCS_LTX2_ExtensionModule_Disk")()
         start_inject_node = _node_class("IAMCCS_StartDirToVideoLatent")()
         vae_decode_node = _node_class("IAMCCS_VAEDecodeToDisk")()
+        generated_audio_latent_node = _node_class("LTXVEmptyLatentAudio")() if generates_audio else None
+        generated_audio_decode_node = _node_class("LTXVAudioVAEDecode")() if generates_audio else None
+        vram_flush_node = _node_class("IAMCCS_VRAMFlushLatent")() if bool(vram_flush) else None
 
         positive = comfy_nodes.CLIPTextEncode().encode(clip, positive_text)[0]
         negative = comfy_nodes.CLIPTextEncode().encode(clip, negative_text)[0]
@@ -1291,8 +1460,9 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
         recommended_left_context = float(planner_head[19])
         if float(audio_left_context_s) <= 0.0:
             audio_left_context_s = recommended_left_context
+        requested_backend_mode = backend_mode
         backend_mode, segment_count, use_single_best, use_in_memory_loop, modular_decode = _resolve_backend_route(
-            backend_mode,
+            requested_backend_mode,
             planner_segment_count,
             modular_decode,
         )
@@ -1305,12 +1475,12 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
             f"ltx_round={planner_settings['ltx_round_mode']}"
         )
         if str(planner_settings["planning_mode"]) == "explicit_preset_seconds":
-            planner_report_line += " | explicit_preset_seconds overrides segment_seconds with the selected 10/15/20 second preset"
+            planner_report_line += " | explicit_preset_seconds overrides segment_seconds with the selected 5/10/15/20 second preset"
 
         conditioned_positive, conditioned_negative = LTXVConditioning.execute(positive, negative, fps_value)
         decode_settings = _decode_settings("low_ram_disk")
-        internal_decode_image_format = "jpg"
-        internal_decode_jpg_quality = 95
+        internal_decode_image_format = "png"
+        internal_decode_jpg_quality = 100
         continuity_settings = _continuity_mode_from_payload(
             continuity_payload,
             continuity_anchor_mode,
@@ -1344,11 +1514,15 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
             audio_total_frames_with_tail = max(0, _to_int(payload_data, "audio_duration_frames_with_tail", 0))
             total_frames = max(1, planner_total_frames, audio_total_frames_with_tail)
             video_latent = EmptyLTXVLatentVideo.execute(int(width), int(height), total_frames, 1)[0]
+            effective_image_strength = _motion_guidance_strength(image_strength, motion_intensity)
             if str(generation_mode) != "t2v":
                 preprocessed_image = LTXVPreprocess.execute(image, int(image_compression))[0]
-                video_latent = LTXVImgToVideoInplace.execute(vae, preprocessed_image, video_latent, float(image_strength), False)[0]
+                video_latent = LTXVImgToVideoInplace.execute(vae, preprocessed_image, video_latent, float(effective_image_strength), False)[0]
 
-            audio_latent = LTXVAudioVAEEncode.execute(single_conditioning_audio, audio_vae)[0]
+            if generates_audio:
+                audio_latent = generated_audio_latent_node.execute(int(total_frames), max(1, int(round(fps_value))), 1, audio_vae)[0]
+            else:
+                audio_latent = LTXVAudioVAEEncode.execute(single_conditioning_audio, audio_vae)[0]
             audio_mask = SolidMask.execute(0.0, 1024, 1024)[0]
             audio_latent = comfy_nodes.SetLatentNoiseMask().set_mask(audio_latent, audio_mask)[0]
             _soft_cleanup()
@@ -1414,6 +1588,8 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 else:
                     reinjected_video_latent = stage2_video_latent
                 latent_stage2 = LTXVConcatAVLatent.execute(reinjected_video_latent, sampled_audio_latent)[0]
+                if vram_flush_node is not None:
+                    latent_stage2 = vram_flush_node.run(latent_stage2)[0]
                 model_stage2 = ModelSamplingLTXV.execute(stage2_model_active, float(max_shift), float(base_shift), latent_stage2)[0]
                 guider_stage2 = CFGGuider.execute(model_stage2, stage2_positive, stage2_negative, float(second_stage_cfg))[0]
                 sampler_stage2 = KSamplerSelect.execute("euler")[0]
@@ -1428,18 +1604,20 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 )[0]
                 sampled_video = LTXVSeparateAVLatent.execute(sampled_stage2_av)[0]
 
+            rendered_audio = generated_audio_decode_node.execute(sampled_audio_latent, audio_vae)[0] if generates_audio else raw_audio
+
             report = (
                 f"duration {float(total_duration_seconds):.2f}s | fps {float(fps_value):.2f} | total {int(total_frames)}f | segments 1 | "
-                f"backend_requested={backend_mode} | backend_resolved=single_best | generation_mode {generation_mode} | "
+                f"backend_requested={requested_backend_mode} | backend_resolved=single_best | media_mode={effective_media_mode} | generation_mode {generation_mode} | "
                 f"stage2 {'on' if str(second_stage_mode) != 'off' else 'off'} | decode_mode={modular_decode} | "
-                f"conditioning {'melband_vocals_duration_math' if single_conditioning_audio is not raw_audio else 'raw_audio_only'} | "
+                f"conditioning {'generated_audio_empty_latent' if generates_audio else ('melband_vocals_duration_math' if single_conditioning_audio is not raw_audio else 'raw_audio_only')} | "
                 f"melband_enabled={melband_enabled}\n"
                 f"Planner settings used. mode={planner_settings['planning_mode']} | segment_preset={planner_settings['segment_preset']} | "
                 f"segment_seconds={float(planner_settings['segment_seconds']):.3f}s | overlap={int(planner_settings['overlap_frames'])}f | "
                 f"ltx_round={planner_settings['ltx_round_mode']}\n"
                 f"Single duration protection. planner_total={int(planner_total_frames)}f | audio_total_with_tail={int(audio_total_frames_with_tail)}f | chosen_total={int(total_frames)}f\n"
                 f"Audio preprocess. {audio_preprocess_report}\n"
-                f"Single route details. sampler=lcm | scheduler=simple(steps=8, denoise=1.0) | sampler_node=IAMCCS_SamplerAdvancedVersion1 | cleanup_before_sampling=soft_cleanup | model_sampling=workflow_single_match(no_extra_ModelSamplingLTXV) | {accelerator_report}\n"
+                f"Single route details. sampler=lcm | scheduler=simple(steps=8, denoise=1.0) | sampler_node=IAMCCS_SamplerAdvancedVersion1 | cleanup_before_sampling=soft_cleanup | model_sampling=workflow_single_match(no_extra_ModelSamplingLTXV) | motion_intensity={motion_intensity:.2f} | vram_flush={'on' if bool(vram_flush) else 'off'} | {accelerator_report}\n"
                 f"Executable AU+IMG2VID render completed. single generation backend=workflow1_best | latent handed to VAE stage"
             )
             render_linx = build_stage_linx_payload(
@@ -1449,9 +1627,14 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 {
                     "pipeline_kind": "au_img2vid_exec",
                     "backend_mode": str(backend_mode),
+                    "media_mode": str(effective_media_mode),
                     "generation_mode": str(generation_mode),
                     "fps": float(fps_value),
                     "modular_decode": str(modular_decode),
+                    "motion_intensity": float(motion_intensity),
+                    "generated_media_duration_seconds": float(generated_media_duration_seconds),
+                    "generation_type": str(generation_type),
+                    "vram_flush": bool(vram_flush),
                     "segment_count": 1,
                     "segments_rendered": 1,
                     "second_stage_mode": str(second_stage_mode),
@@ -1461,6 +1644,11 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 },
                 report,
                 unique_id=unique_id,
+                requires={
+                    "resources": {"model": "MODEL", "clip": "CLIP", "vae": "VAE", "audio_vae": "VAE", "planner_payload": "STRING", "fps": "FLOAT"},
+                    "input_audio_modes": {"audio": "AUDIO", "audio_conditioning_single": "AUDIO", "audio_conditioning_segmented": "AUDIO"},
+                    "pure_or_generated_modes": {"audio": "optional final audio only"},
+                },
                 slot_map={
                     "frames_dir": {"type": "STRING", "role": "rendered_frames_dir"},
                     "start_dir": {"type": "STRING", "role": "rendered_start_dir"},
@@ -1477,9 +1665,14 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                     "segments_rendered": 1,
                     "estimated_duration_seconds": float(total_duration_seconds),
                     "render_status": _first_line(report),
+                    "backend_mode": str(backend_mode),
+                    "render_backend_mode": str(backend_mode),
+                    "decode_mode": str(modular_decode),
+                    "media_mode": str(effective_media_mode),
+                    "generation_type": str(generation_type),
                 },
                 resources={
-                    "audio": raw_audio,
+                    "audio": rendered_audio,
                     "model": model,
                     "clip": clip,
                     "vae": vae,
@@ -1488,6 +1681,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                     "decode_mode": str(modular_decode),
                     "output_root": str(output_root),
                     "planner_payload": str(plan_payload),
+                    "media_mode": str(effective_media_mode),
                     "generation_mode": str(generation_mode),
                     "video_latent": sampled_video,
                     "rendered_images": None,
@@ -1499,8 +1693,12 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
 
         extension_node_mem = _node_class("IAMCCS_LTX2_ExtensionModule")() if use_in_memory_loop else None
         start_inject_images_node = _node_class("IAMCCS_StartImagesToVideoLatent")() if use_in_memory_loop else None
+        source_anchor_inject_node = _node_class("IAMCCS_StartImagesToVideoLatent")()
         current_extended_images = None
         current_start_images = None
+        in_memory_stitch_preset = str(stitch_preset or "custom")
+        if in_memory_stitch_preset in {"lossless_refresh_24fps", "lossless_refresh_strong_24fps", "videoclip_audio_24fps", "monologue_audio_24fps"}:
+            in_memory_stitch_preset = "custom"
 
         for segment_index in range(segment_count):
             plan_segment = planner_node.plan(
@@ -1517,81 +1715,119 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
             current_segment_unique_frames = int(plan_segment[10])
             generated_frames_for_timeline = current_segment_unique_frames if segment_index == 0 else current_segment_raw_frames
 
-            math_out = audio_math_node.compute(
-                audio,
-                fps_value,
-                segment_index,
-                generated_frames_for_timeline,
-                current_segment_unique_frames,
-                True,
-                0,
-                cursor_frames,
-            )
-            cursor_frames_out = int(math_out[0])
-            segment_start_frames = int(math_out[1])
-            effective_unique_frames = int(math_out[3])
-            remaining_frames_after = int(math_out[7])
-            is_last_segment = int(math_out[8])
+            if uses_input_audio:
+                math_out = audio_math_node.compute(
+                    audio,
+                    fps_value,
+                    segment_index,
+                    generated_frames_for_timeline,
+                    current_segment_unique_frames,
+                    True,
+                    0,
+                    cursor_frames,
+                )
+                cursor_frames_out = int(math_out[0])
+                segment_start_frames = int(math_out[1])
+                effective_unique_frames = int(math_out[3])
+                remaining_frames_after = int(math_out[7])
+                is_last_segment = int(math_out[8])
 
-            conditioning_audio = audio_extender_node.slice_segment(
-                segmented_audio,
-                fps_value,
-                audio_context_mode,
-                float(audio_left_context_s),
-                float(audio_right_context_s),
-                "use_timeline_cursor",
-                "snap_to_video_duration",
-                "soft_clamp",
-                segment_index,
-                float(segment_seconds_value),
-                current_segment_unique_frames,
-                generated_frames_for_timeline,
-                current_segment_unique_frames,
-                cursor_frames,
-                segment_start_frames,
-                effective_unique_frames,
-                current_segment_unique_frames,
-            )[0]
+                conditioning_audio = audio_extender_node.slice_segment(
+                    segmented_audio,
+                    fps_value,
+                    audio_context_mode,
+                    float(audio_left_context_s),
+                    float(audio_right_context_s),
+                    "use_timeline_cursor",
+                    "snap_to_video_duration",
+                    "soft_clamp",
+                    segment_index,
+                    float(segment_seconds_value),
+                    current_segment_unique_frames,
+                    generated_frames_for_timeline,
+                    current_segment_unique_frames,
+                    cursor_frames,
+                    segment_start_frames,
+                    effective_unique_frames,
+                    current_segment_unique_frames,
+                )[0]
+            else:
+                segment_start_frames = int(cursor_frames)
+                effective_unique_frames = int(current_segment_unique_frames)
+                cursor_frames_out = min(int(planner_head[0]), int(cursor_frames) + int(effective_unique_frames))
+                remaining_frames_after = max(0, int(planner_head[0]) - int(cursor_frames_out))
+                is_last_segment = 1 if int(segment_index) >= int(segment_count) - 1 or int(remaining_frames_after) <= 0 else 0
+                conditioning_audio = None
 
             video_latent = EmptyLTXVLatentVideo.execute(int(width), int(height), current_segment_raw_frames, 1)[0]
             is_t2v = generation_mode == "t2v"
             uses_source_anchor = False if is_t2v else _use_source_anchor(segment_index, continuity_settings["mode"], continuity_settings["interval"])
+            uses_tail_source_anchor = False if is_t2v else _use_tail_then_source_anchor(segment_index, continuity_settings["mode"], continuity_settings["interval"])
+            effective_image_strength = _motion_guidance_strength(image_strength, motion_intensity)
+            effective_anchor_strength = _motion_guidance_strength(continuity_settings["strength"], motion_intensity)
             init_mode = "t2v_empty" if is_t2v and segment_index == 0 else "tail"
+            tail_refresh_report = "none"
+            anchor_refresh_report = "off"
             if uses_source_anchor:
                 anchor_image = refresh_source_image
                 if segment_index > 0 and continuity_settings["mode"] == "periodic_source_refresh":
                     anchor_image = _load_guidance_image_from_dir(start_dir, fallback_image=refresh_source_image, pick_mode="latest")
                 preprocessed_image = LTXVPreprocess.execute(anchor_image, int(image_compression))[0]
-                source_strength = float(image_strength if segment_index == 0 else continuity_settings["strength"])
+                source_strength = float(effective_image_strength if segment_index == 0 else effective_anchor_strength)
                 video_latent = LTXVImgToVideoInplace.execute(vae, preprocessed_image, video_latent, source_strength, False)[0]
                 init_mode = "source"
+                anchor_refresh_report = f"source_head:{source_strength:.2f}"
             elif segment_index > 0:
                 if use_in_memory_loop:
-                    video_latent = start_inject_images_node.inject(
+                    video_latent, _, tail_refresh_report = start_inject_images_node.inject(
                         current_start_images,
                         vae,
                         video_latent,
                         "all",
                         max(1, overlap_frames_value),
                         0,
-                        float(image_strength),
+                        float(effective_image_strength),
                         True,
                         int(image_compression),
-                    )[0]
+                    )
                 else:
-                    video_latent = start_inject_node.inject(
+                    video_latent, _, tail_refresh_report = start_inject_node.inject(
                         start_dir,
                         vae,
                         video_latent,
                         "all",
                         max(1, overlap_frames_value),
                         0,
-                        float(image_strength),
+                        float(effective_image_strength),
                         True,
                         int(image_compression),
-                    )[0]
+                    )
+                if uses_tail_source_anchor:
+                    protected_tail_slots = _protected_prefix_latent_frames(vae, overlap_frames_value)
+                    anchor_insert_pixel_frame = protected_tail_slots * _latent_time_scale_factor(vae)
+                    source_strength = float(effective_anchor_strength)
+                    video_latent, _, anchor_refresh_report = source_anchor_inject_node.inject(
+                        refresh_source_image,
+                        vae,
+                        video_latent,
+                        "from_start",
+                        1,
+                        int(anchor_insert_pixel_frame),
+                        source_strength,
+                        False,
+                        0,
+                    )
+                    init_mode = "tail+source_refresh"
 
-            audio_latent = LTXVAudioVAEEncode.execute(conditioning_audio, audio_vae)[0]
+            if generates_audio:
+                audio_latent = generated_audio_latent_node.execute(
+                    int(current_segment_raw_frames),
+                    max(1, int(round(fps_value))),
+                    1,
+                    audio_vae,
+                )[0]
+            else:
+                audio_latent = LTXVAudioVAEEncode.execute(conditioning_audio, audio_vae)[0]
             audio_mask = SolidMask.execute(0.0, 1024, 1024)[0]
             audio_latent = comfy_nodes.SetLatentNoiseMask().set_mask(audio_latent, audio_mask)[0]
             segment_positive = conditioned_positive
@@ -1616,7 +1852,9 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
             if stage_mode in {"latent_refine_3step", "latent_upscale_refine", "latent_upscale_refine_x2_beta"}:
                 guidance_source = "refresh"
                 guidance_image = refresh_source_image
-                if not uses_source_anchor:
+                if uses_tail_source_anchor:
+                    guidance_source = "refresh_after_tail"
+                elif not uses_source_anchor:
                     guidance_image = _load_guidance_image_from_dir(start_dir, fallback_image=refresh_source_image, pick_mode="latest")
                     guidance_source = "tail"
                 stage2_positive, stage2_negative, cropped_video_latent = LTXVCropGuides.execute(
@@ -1634,8 +1872,11 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 else:
                     stage2_video_latent = cropped_video_latent
                 reinject_strength = float(second_stage_reinject_strength)
-                if uses_source_anchor and segment_index > 0:
-                    reinject_strength = min(reinject_strength, float(continuity_settings["strength"]))
+                if uses_tail_source_anchor and segment_index > 0:
+                    reinject_strength = 0.0
+                elif uses_source_anchor and segment_index > 0:
+                    reinject_strength = min(reinject_strength, float(effective_anchor_strength))
+                reinject_strength = _motion_guidance_strength(reinject_strength, motion_intensity)
                 if reinject_strength > 0.0 and not (is_t2v and segment_index == 0):
                     stage2_width, stage2_height = _pixel_dims_from_latent(stage2_video_latent, vae)
                     resized_guidance_image = _resize_image_to(guidance_image, stage2_width, stage2_height)
@@ -1650,6 +1891,8 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 else:
                     reinjected_video_latent = stage2_video_latent
                 latent_stage2 = LTXVConcatAVLatent.execute(reinjected_video_latent, sampled_audio_latent)[0]
+                if vram_flush_node is not None:
+                    latent_stage2 = vram_flush_node.run(latent_stage2)[0]
                 model_stage2 = ModelSamplingLTXV.execute(stage2_model_active, float(max_shift), float(base_shift), latent_stage2)[0]
                 guider_stage2 = CFGGuider.execute(model_stage2, stage2_positive, stage2_negative, float(second_stage_cfg))[0]
                 sampler_stage2 = KSamplerSelect.execute("euler")[0]
@@ -1718,17 +1961,17 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                         "none",
                         start_frames_rule,
                         "none",
-                        0.25,
-                        8,
-                        "best_of_k",
-                        16,
+                        0.0,
+                        0,
+                        "none",
+                        0,
                         1.0,
                         0.5,
-                        stitch_preset,
+                        in_memory_stitch_preset,
                         None,
                         1,
                     )
-                    current_extended_images = decoded_images
+                    current_extended_images = ext_out[2]
                     current_start_images = ext_out[1]
                 else:
                     ext_out = extension_node_mem.process_extension(
@@ -1741,13 +1984,13 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                         "none",
                         start_frames_rule,
                         "none",
-                        0.25,
-                        8,
-                        "best_of_k",
-                        16,
+                        0.0,
+                        0,
+                        "none",
+                        0,
                         1.0,
                         0.5,
-                        stitch_preset,
+                        in_memory_stitch_preset,
                         decoded_images,
                         1,
                     )
@@ -1842,7 +2085,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
             cursor_frames = cursor_frames_out
             rendered_segments += 1
             segment_reports.append(
-                f"seg{segment_index}: raw={current_segment_raw_frames}f unique={current_segment_unique_frames}f effective={effective_unique_frames}f saved={int(frames_saved)}f init={init_mode} stage2={stage2_segment_report} guidance={guidance_source} anti_drift={anti_drift_report} {overlay_report} | {ext_out[5]}"
+                f"seg{segment_index}: raw={current_segment_raw_frames}f unique={current_segment_unique_frames}f effective={effective_unique_frames}f saved={int(frames_saved)}f init={init_mode} tail={tail_refresh_report} anchor={anchor_refresh_report} stage2={stage2_segment_report} guidance={guidance_source} anti_drift={anti_drift_report} {overlay_report} | {ext_out[5]}"
             )
             _soft_cleanup()
             if int(gate_out[0]) == 0:
@@ -1851,6 +2094,23 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
         final_frames_dir = extended_dir if not use_in_memory_loop else ""
         final_start_dir = start_dir if not use_in_memory_loop else ""
         final_report_hint = final_frames_dir if final_frames_dir else "(in-memory images)"
+        rendered_audio = raw_audio
+        if generates_audio:
+            total_audio_frames = max(
+                1,
+                _to_int(
+                    _parse_payload(plan_payload),
+                    "total_frames",
+                    int(round(float(total_duration_seconds) * float(fps_value))),
+                ),
+            )
+            rendered_audio_latent = generated_audio_latent_node.execute(
+                int(total_audio_frames),
+                max(1, int(round(fps_value))),
+                1,
+                audio_vae,
+            )[0]
+            rendered_audio = generated_audio_decode_node.execute(rendered_audio_latent, audio_vae)[0]
 
         report = (
             _render_status(
@@ -1873,7 +2133,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
             + planner_report_line
             + "\n"
             + f"Audio preprocess. melband_enabled={melband_enabled} | {audio_preprocess_report}\n"
-            + f"Render route. backend_requested={backend_mode} | backend_resolved={backend_mode} | decode_mode={modular_decode} | generation_mode={generation_mode}\n"
+            + f"Render route. backend_requested={requested_backend_mode} | backend_resolved={backend_mode} | media_mode={effective_media_mode} | decode_mode={modular_decode} | generation_mode={generation_mode} | motion_intensity={motion_intensity:.2f} | vram_flush={'on' if bool(vram_flush) else 'off'}\n"
             + f"Executable AU+IMG2VID render completed. segments_rendered={rendered_segments}/{segment_count} | "
             f"frames_dir={final_report_hint} | start_dir={final_start_dir or '(in-memory start_images)'}\n"
             + "\n".join(segment_reports)
@@ -1885,6 +2145,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
             {
                 "pipeline_kind": "au_img2vid_exec",
                 "backend_mode": str(backend_mode),
+                "media_mode": str(effective_media_mode),
                 "generation_mode": str(generation_mode),
                 "fps": fps_value,
                 "modular_decode": str(modular_decode),
@@ -1894,6 +2155,9 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 "anti_drift_mode": str(anti_drift_mode),
                 "anti_drift_strength": float(anti_drift_strength),
                 "identity_persistence_strength": float(identity_persistence_strength),
+                "motion_intensity": float(motion_intensity),
+                "generated_media_duration_seconds": float(generated_media_duration_seconds),
+                "vram_flush": bool(vram_flush),
                 "second_stage_mode": str(second_stage_mode),
                 "second_stage_scale_mode": str(second_stage_scale_mode),
                 "second_stage_upscale_model_name": str(second_stage_upscale_model_name),
@@ -1905,6 +2169,11 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
             },
             report,
             unique_id=unique_id,
+            requires={
+                "resources": {"model": "MODEL", "clip": "CLIP", "vae": "VAE", "audio_vae": "VAE", "planner_payload": "STRING", "fps": "FLOAT"},
+                "input_audio_modes": {"audio": "AUDIO", "audio_conditioning_single": "AUDIO", "audio_conditioning_segmented": "AUDIO"},
+                "pure_or_generated_modes": {"audio": "optional final audio only"},
+            },
             slot_map={
                 "frames_dir": {"type": "STRING", "role": "rendered_frames_dir"},
                 "start_dir": {"type": "STRING", "role": "rendered_start_dir"},
@@ -1929,9 +2198,14 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 "segments_rendered": int(rendered_segments),
                 "estimated_duration_seconds": float(total_duration_seconds),
                 "render_status": _first_line(report),
+                "backend_mode": str(backend_mode),
+                "render_backend_mode": str(backend_mode),
+                "decode_mode": str(modular_decode),
+                "media_mode": str(effective_media_mode),
+                "generation_type": str(generation_type),
             },
             resources={
-                "audio": raw_audio,
+                "audio": rendered_audio,
                 "model": model,
                 "clip": clip,
                 "vae": vae,
@@ -1940,6 +2214,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 "decode_mode": str(modular_decode),
                 "output_root": str(output_root),
                 "planner_payload": str(plan_payload),
+                "media_mode": str(effective_media_mode),
                 "generation_mode": str(generation_mode),
                 "second_stage_model": stage2_model_active,
                 "second_stage_payload": second_stage_payload,
@@ -2033,6 +2308,8 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
                 "pix_fmt": (["yuv420p", "yuv444p"], {"default": "yuv420p"}),
                 "trim_to_audio": ("BOOLEAN", {"default": True}),
                 "save_metadata": ("BOOLEAN", {"default": False}),
+                "vram_flush": ("BOOLEAN", {"default": False}),
+                "ui_preset": (["custom", "very_low_ram_decode", "low_ram_safe", "balanced", "high_quality", "fast_preview"], {"default": "custom"}),
             },
             "optional": {
                 "audio": ("AUDIO",),
@@ -2062,6 +2339,8 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
         pix_fmt,
         trim_to_audio,
         save_metadata,
+        vram_flush=False,
+        ui_preset="custom",
         audio=None,
         video_latent=None,
         vae=None,
@@ -2088,6 +2367,9 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
         resolved_decode_mode = _modular_decode_to_vae_mode(decode_mode)
         render_backend_mode = str(linx_output(linx, "backend_mode", "auto") or "auto")
         images_out = None
+        vram_flush_enabled = bool(vram_flush)
+        if vram_flush_enabled:
+            _hard_unload_all_models()
 
         if rendered_images is not None:
             images_out = rendered_images
@@ -2101,8 +2383,9 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
             )
             decode_report = f"decode_mode={decode_mode} used in-memory rendered images -> saved {frames_saved} frames to {actual_frames_dir}"
         elif video_latent is not None and vae is not None:
-            if str(resolved_decode_mode) == "low_ram_disk":
+            if str(resolved_decode_mode) in {"low_ram_disk", "very_low_ram_disk"}:
                 vae_decode_node = _node_class("IAMCCS_VAEDecodeToDisk")()
+                very_low_ram = str(resolved_decode_mode) == "very_low_ram_disk"
                 actual_frames_dir, _, _ = vae_decode_node.decode_to_disk(
                     video_latent,
                     vae,
@@ -2111,16 +2394,16 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
                     image_format,
                     int(jpg_quality),
                     True,
-                    "auto",
-                    512,
-                    64,
+                    "manual" if very_low_ram else "auto",
+                    256 if very_low_ram else 512,
+                    32 if very_low_ram else 64,
                     False,
                     os.path.join(run_root, "seam_debug"),
                     True,
                     True,
                     0,
                 )
-                decode_report = f"decode_mode=low_ram -> {actual_frames_dir}"
+                decode_report = f"decode_mode={resolved_decode_mode} -> {actual_frames_dir}"
                 images_out = _load_images_from_dir_for_output(actual_frames_dir)
             else:
                 actual_decode_mode = str(resolved_decode_mode)
@@ -2145,6 +2428,9 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
             images_out = _load_images_from_dir_for_output(actual_frames_dir)
         else:
             raise ValueError("Executable VAE requires either video_latent+vae or frames_dir")
+
+        if vram_flush_enabled:
+            _soft_cleanup()
 
         combine_node = _node_class("IAMCCS_VideoCombineFromDir")()
         video_path, combine_report = combine_node.combine(
@@ -2176,6 +2462,8 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
                     "pix_fmt": str(pix_fmt),
                     "trim_to_audio": bool(trim_to_audio),
                     "save_metadata": bool(save_metadata),
+                    "vram_flush": bool(vram_flush_enabled),
+                    "ui_preset": str(ui_preset),
                     "frames_dir": str(actual_frames_dir),
                     "video_path": str(video_path),
                     "resource_keys": list((linx or {}).get("resource_keys") or []),
@@ -2186,7 +2474,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
                 metadata_report = f"metadata={metadata_path}"
         report = (
             f"Executable VAE. backend_mode={render_backend_mode} | decode_requested={decode_mode} | "
-            f"decode_resolved={resolved_decode_mode} | frame_rate={float(frame_rate):.3f}\n"
+            f"decode_resolved={resolved_decode_mode} | frame_rate={float(frame_rate):.3f} | vram_flush={'on' if vram_flush_enabled else 'off'}\n"
             f"{decode_report} | {combine_report} | {metadata_report}"
         )
         vae_linx = build_stage_linx_payload(
@@ -2200,8 +2488,14 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
                 "tiled_tile_size": int(tiled_tile_size),
                 "tiled_overlap": int(tiled_overlap),
                 "save_metadata": bool(save_metadata),
+                "vram_flush": bool(vram_flush_enabled),
+                "ui_preset": str(ui_preset),
             },
             report,
+            requires={
+                "resources": {"audio": "AUDIO", "vae": "VAE", "fps": "FLOAT"},
+                "one_of": {"video_source": ["video_latent", "rendered_images", "frames_dir"]},
+            },
             slot_map={
                 "video_path": {"type": "STRING", "role": "final_video_path"},
                 "linx": {"type": SUPERNODE_LINX_TYPE, "role": "stage_linx"},
@@ -2224,3 +2518,11 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
         if images_out is None:
             images_out = _load_images_from_dir_for_output(actual_frames_dir)
         return (video_path, vae_linx, report, images_out, audio, str(actual_frames_dir))
+
+
+
+
+
+
+
+

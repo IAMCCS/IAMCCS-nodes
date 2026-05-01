@@ -722,6 +722,62 @@ def _match_latent_batch(base_samples: torch.Tensor, other_samples: torch.Tensor)
     return other_samples[:base_batch]
 
 
+def _stabilize_motion_tail_to_anchor(
+    motion_tail: torch.Tensor,
+    anchor_reference: torch.Tensor,
+    *,
+    strength: float,
+    delta_max: float = 0.0,
+    std_ratio_limit: float = 1.75,
+) -> tuple[torch.Tensor, dict]:
+    """Match per-channel latent mean and contrast of a motion tail to the anchor.
+
+    SVI chains accumulate low-frequency color drift and latent contrast drift.
+    Matching channel moments preserves spatial residuals/motion while keeping
+    the next segment statistically anchored to the current image.
+    """
+
+    strength = max(0.0, min(1.0, float(strength)))
+    if strength <= 0.0:
+        return motion_tail, {"enabled": False}
+
+    eps = 1e-6
+    anchor_ref = anchor_reference.to(device=motion_tail.device, dtype=motion_tail.dtype)
+    if anchor_ref.shape[0] == 1 and motion_tail.shape[0] > 1:
+        anchor_ref = anchor_ref.repeat(motion_tail.shape[0], 1, 1, 1, 1)
+
+    motion_mean = motion_tail.mean(dim=(2, 3, 4), keepdim=True)
+    anchor_mean = anchor_ref.mean(dim=(2, 3, 4), keepdim=True)
+    motion_std = motion_tail.float().std(dim=(2, 3, 4), keepdim=True, unbiased=False).to(motion_tail.dtype)
+    anchor_std = anchor_ref.float().std(dim=(2, 3, 4), keepdim=True, unbiased=False).to(motion_tail.dtype)
+
+    dc_drift = motion_mean - anchor_mean
+    dm = float(delta_max)
+    if dm > 0.0:
+        dc_drift = dm * torch.tanh(dc_drift / dm)
+        target_mean = motion_mean - dc_drift
+    else:
+        target_mean = anchor_mean
+
+    ratio_limit = max(1.0, float(std_ratio_limit))
+    std_ratio = (anchor_std + eps) / (motion_std + eps)
+    std_ratio = std_ratio.clamp(1.0 / ratio_limit, ratio_limit)
+
+    matched = (motion_tail - motion_mean) * std_ratio + target_mean
+    out = torch.lerp(motion_tail, matched, strength)
+
+    stats = {
+        "enabled": True,
+        "drift_max": float(dc_drift.abs().max()),
+        "drift_mean": float(dc_drift.mean()),
+        "std_ratio_min": float(std_ratio.min()),
+        "std_ratio_max": float(std_ratio.max()),
+        "strength": strength,
+        "delta_max": dm,
+    }
+    return out, stats
+
+
 def _encode_bridge_image_to_latent(vae, image: torch.Tensor, target_h: int, target_w: int) -> torch.Tensor:
     pixels = _common_upscale_nhwc_to(image, int(target_h), int(target_w))
     pixels = _prepare_vae_pixels(pixels)
@@ -826,10 +882,8 @@ class IAMCCS_WanImageMotion:
                         ),
                     },
                 ),
-                # DC Drift Correction: corrects per-channel mean shift accumulated
-                # across chained segments. Does NOT touch spatial structure or motion.
-                # Algorithm:  drift = mean(motion_tail, dims=T,H,W) − mean(anchor, dims=T,H,W)
-                #             motion_tail -= drift * latent_refresh
+                # Latent moment stabilization: corrects per-channel mean and
+                # contrast drift accumulated across chained segments.
                 "latent_refresh": (
                     "FLOAT",
                     {
@@ -838,16 +892,15 @@ class IAMCCS_WanImageMotion:
                         "max": 1.0,
                         "step": 0.05,
                         "tooltip": (
-                            "DC drift correction strength (0=disabled, 1=full correction). "
-                            "Corrects the per-channel mean shift between motion tail and anchor latent. "
-                            "Does not touch spatial structure or motion. "
-                            "Start with 0.5 for chains of 3+ segments. Enable diagnostic_log to verify."
+                            "Latent moment stabilization strength (0=disabled, 1=full correction). "
+                            "Matches per-channel mean and contrast of the motion tail to the anchor latent. "
+                            "Spatial residuals and motion are preserved. "
+                            "Start with 0.5 for chains of 3+ segments."
                         ),
                     },
                 ),
-                # Soft-clamp on the DC drift itself.
-                # Prevents over-correction when drift is very large (first segment or big motion).
-                # 0 = disabled (no clamping, full drift correction applied).
+                # Soft-clamp on the mean drift before matching contrast.
+                # Prevents over-correction when drift is very large.
                 "delta_max": (
                     "FLOAT",
                     {
@@ -856,9 +909,9 @@ class IAMCCS_WanImageMotion:
                         "max": 5.0,
                         "step": 0.1,
                         "tooltip": (
-                            "Soft-clamp on DC drift magnitude (0=disabled). "
-                            "Caps how much drift correction can be applied per channel. "
-                            "Use 0.5–1.0 to prevent over-correction on large motion segments."
+                            "Soft-clamp on latent mean drift magnitude (0=disabled). "
+                            "Caps how much mean correction can be applied per channel. "
+                            "Use 0.5-1.0 to prevent over-correction on large motion segments."
                         ),
                     },
                 ),
@@ -1058,75 +1111,30 @@ class IAMCCS_WanImageMotion:
                 motion_latent = prev_samples["samples"][:, :, -motion_latent_count:]
                 T_motion = motion_latent.shape[2]
 
-            # --- 2. DC Drift Correction ---
-            # Corrects per-channel mean shift (DC drift) accumulated across chained segments.
-            # Each KSampler output slightly shifts the per-channel mean of latents;
-            # over multiple segments this accumulates → progressive visual degradation.
-            #
-            # Algorithm:
-            #   drift  = mean(motion_tail, dims=T,H,W) − mean(anchor, dims=T,H,W)  [B,C,1,1,1]
-            #   drift  = delta_max·tanh(drift/delta_max)  if delta_max > 0  (soft-clamp)
-            #   motion_tail -= drift * latent_refresh
-            #
-            # This ONLY subtracts the mean offset per channel — spatial structure and motion
-            # are completely preserved (translational invariance of mean subtraction).
+            # --- 2. Latent moment stabilization ---
+            # Corrects mean and contrast drift accumulated across chained segments.
+            # Spatial residuals remain intact; the motion tail is statistically
+            # re-anchored to the current image latent.
             _lr = float(latent_refresh)
             _dm = float(delta_max)
             if motion_latent is not None and _lr > 0:
                 with torch.no_grad():
-                    # Per-channel mean over T, H, W → [B, C, 1, 1, 1]
-                    motion_mean  = motion_latent.mean(dim=(2, 3, 4), keepdim=True)
-                    anchor_mean  = anchor_latent.mean(dim=(2, 3, 4), keepdim=True)
-                    dc_drift     = motion_mean - anchor_mean  # signed per-channel offset
-
-                    if diagnostic_log:
-                        # Log per-channel drift (16 channels) for full visibility
-                        drift_vals = dc_drift[0, :, 0, 0, 0]  # [C]
-                        drift_abs  = drift_vals.abs()
-                        self._log.info(
-                            "[WanImageMotion][dc_drift] BEFORE correction — "
-                            "per-channel drift: max=%.4f mean=%.4f rms=%.4f "
-                            "| motion_mean=[%.3f..%.3f] anchor_mean=[%.3f..%.3f]",
-                            float(drift_abs.max()),
-                            float(drift_vals.mean()),
-                            float((drift_vals ** 2).mean().sqrt()),
-                            float(motion_mean.min()), float(motion_mean.max()),
-                            float(anchor_mean.min()), float(anchor_mean.max()),
-                        )
-                        for ci in range(min(16, int(drift_vals.shape[0]))):
-                            self._log.info(
-                                "[WanImageMotion][dc_drift]   ch%02d: drift=% .4f  motion_mean=% .4f  anchor_mean=% .4f",
-                                ci, float(drift_vals[ci]),
-                                float(motion_mean[0, ci, 0, 0, 0]),
-                                float(anchor_mean[0, ci, 0, 0, 0]),
-                            )
-
-                    # Optional soft-clamp on the drift itself (prevents over-correction)
-                    if _dm > 0:
-                        dc_drift = _dm * torch.tanh(dc_drift / _dm)
-
-                    # Apply correction: subtract drift * strength
-                    correction = dc_drift * _lr
-                    motion_latent = motion_latent - correction
-
-                    if diagnostic_log:
-                        new_mean = motion_latent.mean(dim=(2, 3, 4), keepdim=True)
-                        residual = (new_mean - anchor_mean)[0, :, 0, 0, 0]
-                        self._log.info(
-                            "[WanImageMotion][dc_drift] AFTER  correction — "
-                            "residual drift: max=%.4f mean=%.4f | correction_strength=%.2f delta_max=%.2f",
-                            float(residual.abs().max()),
-                            float(residual.mean()),
-                            _lr, _dm,
-                        )
-                    else:
-                        self._log.info(
-                            "[WanImageMotion] DC drift correction active: strength=%.2f delta_max=%.2f "
-                            "| drift_max=%.4f drift_mean=%.4f",
-                            _lr, _dm,
-                            float(dc_drift.abs().max()),
-                            float(dc_drift.mean()),
-                        )
+                    motion_latent, moment_stats = _stabilize_motion_tail_to_anchor(
+                        motion_latent,
+                        anchor_latent,
+                        strength=_lr,
+                        delta_max=_dm,
+                    )
+                    self._log.info(
+                        "[WanImageMotion] latent moment stabilization active: strength=%.2f delta_max=%.2f "
+                        "| drift_max=%.4f drift_mean=%.4f std_ratio=[%.3f..%.3f]",
+                        float(moment_stats["strength"]),
+                        float(moment_stats["delta_max"]),
+                        float(moment_stats["drift_max"]),
+                        float(moment_stats["drift_mean"]),
+                        float(moment_stats["std_ratio_min"]),
+                        float(moment_stats["std_ratio_max"]),
+                    )
 
             # --- 3. Costruzione del condizionamento ---
             if motion_latent is None:
@@ -1371,6 +1379,21 @@ class WanImageMotionPro:
                     {"default": "motion_only (prev_samples)"},
                 ),
                 "add_reference_latents": ("BOOLEAN", {"default": False}),
+                "latent_precision": (
+                    [
+                        "auto",
+                        "fp16",
+                        "fp32",
+                        "normal",
+                    ],
+                    {
+                        "default": "fp32",
+                        "tooltip": (
+                            "Output latent dtype for the empty Wan sampler latent. Kept here "
+                            "for backward compatibility with older WanImageMotionPro workflows."
+                        ),
+                    },
+                ),
                 "vram_profile": (
                     [
                         "normal",
@@ -1506,10 +1529,8 @@ class WanImageMotionPro:
                         ),
                     },
                 ),
-                # DC Drift Correction: corrects per-channel mean shift accumulated
-                # across chained segments. Does NOT touch spatial structure or motion.
-                # Algorithm:  drift = mean(motion_tail, dims=T,H,W) − mean(anchor, dims=T,H,W)
-                #             motion_tail -= drift * latent_refresh
+                # Latent moment stabilization: corrects per-channel mean and
+                # contrast drift accumulated across chained segments.
                 "latent_refresh": (
                     "FLOAT",
                     {
@@ -1518,15 +1539,15 @@ class WanImageMotionPro:
                         "max": 1.0,
                         "step": 0.05,
                         "tooltip": (
-                            "DC drift correction strength (0=disabled, 1=full correction). "
-                            "Corrects the per-channel mean shift between motion tail and anchor latent. "
-                            "Does not touch spatial structure or motion. "
-                            "Start with 0.5 for chains of 3+ segments. Enable diagnostic_log to verify."
+                            "Latent moment stabilization strength (0=disabled, 1=full correction). "
+                            "Matches per-channel mean and contrast of the motion tail to the anchor latent. "
+                            "Spatial residuals and motion are preserved. "
+                            "Start with 0.5 for chains of 3+ segments."
                         ),
                     },
                 ),
-                # Soft-clamp on the DC drift itself.
-                # 0 = disabled. Use 0.5–1.0 to prevent over-correction on large motion segments.
+                # Soft-clamp on the mean drift before matching contrast.
+                # 0 = disabled. Use 0.5-1.0 to prevent over-correction on large motion segments.
                 "delta_max": (
                     "FLOAT",
                     {
@@ -1535,9 +1556,9 @@ class WanImageMotionPro:
                         "max": 5.0,
                         "step": 0.1,
                         "tooltip": (
-                            "Soft-clamp on DC drift magnitude (0=disabled). "
-                            "Caps how much drift correction can be applied per channel. "
-                            "Use 0.5–1.0 to prevent over-correction on large motion segments."
+                            "Soft-clamp on latent mean drift magnitude (0=disabled). "
+                            "Caps how much mean correction can be applied per channel. "
+                            "Use 0.5-1.0 to prevent over-correction on large motion segments."
                         ),
                     },
                 ),
@@ -1595,7 +1616,7 @@ class WanImageMotionPro:
                         "tooltip": (
                             "Strict compatibility mode for the original WanImageToVideoSVIProFLF behavior. "
                             "When enabled, WanImageMotionPro bypasses advanced features (motion amplitude, "
-                            "DC drift correction, overshoot, clip vision routing, reference latents, slot caps) "
+                            "latent moment stabilization, overshoot, clip vision routing, reference latents, slot caps) "
                             "and builds conditioning 1:1 like the original FLF+SVI node. "
                             "Use this to benchmark or to get the baseline first/last frame behavior back."
                         ),
@@ -1665,7 +1686,7 @@ class WanImageMotionPro:
                             "Raw-like continuity path for SVI chains. "
                             "SVI_CONTINUITY keeps FLF+SVI raw semantics while still enabling overshoot and trim_slots. "
                             "The other continuity profiles stay raw-like and selectively add only safe options: prev tail handling or end_only clip vision when anchor=end. "
-                            "These profiles intentionally bypass motion shaping, DC drift correction, start-slot normalization, and the 4-channel mask."
+                            "These profiles intentionally bypass motion shaping, latent moment stabilization, start-slot normalization, and the 4-channel mask."
                         ),
                     },
                 ),
@@ -2272,63 +2293,30 @@ class WanImageMotionPro:
                     T_motion = 0
                 has_prev = motion_latent is not None and T_motion > 0
 
-            # --- 2. DC Drift Correction ---
-            # Same algorithm as IAMCCS_WanImageMotion: corrects per-channel mean shift.
-            # drift = mean(motion_tail, T,H,W) − mean(anchor, T,H,W)  → [B,C,1,1,1]
-            # motion_tail -= drift * latent_refresh  (spatial structure untouched)
+            # --- 2. Latent moment stabilization ---
+            # Corrects mean and contrast drift accumulated across chained segments.
+            # Spatial residuals remain intact; the motion tail is statistically
+            # re-anchored to the current image latent.
             _lr = float(latent_refresh)
             _dm = float(delta_max)
             if motion_latent is not None and _lr > 0:
                 with torch.no_grad():
-                    motion_mean  = motion_latent.mean(dim=(2, 3, 4), keepdim=True)
-                    anchor_mean  = anchor_latent.mean(dim=(2, 3, 4), keepdim=True)
-                    dc_drift     = motion_mean - anchor_mean
-
-                    if diagnostic_log:
-                        drift_vals = dc_drift[0, :, 0, 0, 0]
-                        drift_abs  = drift_vals.abs()
-                        self._log.info(
-                            "[WanImageMotionPro][dc_drift] BEFORE correction — "
-                            "per-channel drift: max=%.4f mean=%.4f rms=%.4f "
-                            "| motion_mean=[%.3f..%.3f] anchor_mean=[%.3f..%.3f]",
-                            float(drift_abs.max()),
-                            float(drift_vals.mean()),
-                            float((drift_vals ** 2).mean().sqrt()),
-                            float(motion_mean.min()), float(motion_mean.max()),
-                            float(anchor_mean.min()), float(anchor_mean.max()),
-                        )
-                        for ci in range(min(16, int(drift_vals.shape[0]))):
-                            self._log.info(
-                                "[WanImageMotionPro][dc_drift]   ch%02d: drift=% .4f  motion_mean=% .4f  anchor_mean=% .4f",
-                                ci, float(drift_vals[ci]),
-                                float(motion_mean[0, ci, 0, 0, 0]),
-                                float(anchor_mean[0, ci, 0, 0, 0]),
-                            )
-
-                    if _dm > 0:
-                        dc_drift = _dm * torch.tanh(dc_drift / _dm)
-
-                    correction = dc_drift * _lr
-                    motion_latent = motion_latent - correction
-
-                    if diagnostic_log:
-                        new_mean = motion_latent.mean(dim=(2, 3, 4), keepdim=True)
-                        residual = (new_mean - anchor_mean)[0, :, 0, 0, 0]
-                        self._log.info(
-                            "[WanImageMotionPro][dc_drift] AFTER  correction — "
-                            "residual drift: max=%.4f mean=%.4f | correction_strength=%.2f delta_max=%.2f",
-                            float(residual.abs().max()),
-                            float(residual.mean()),
-                            _lr, _dm,
-                        )
-                    else:
-                        self._log.info(
-                            "[WanImageMotionPro] DC drift correction active: strength=%.2f delta_max=%.2f "
-                            "| drift_max=%.4f drift_mean=%.4f",
-                            _lr, _dm,
-                            float(dc_drift.abs().max()),
-                            float(dc_drift.mean()),
-                        )
+                    motion_latent, moment_stats = _stabilize_motion_tail_to_anchor(
+                        motion_latent,
+                        anchor_latent,
+                        strength=_lr,
+                        delta_max=_dm,
+                    )
+                    self._log.info(
+                        "[WanImageMotionPro] latent moment stabilization active: strength=%.2f delta_max=%.2f "
+                        "| drift_max=%.4f drift_mean=%.4f std_ratio=[%.3f..%.3f]",
+                        float(moment_stats["strength"]),
+                        float(moment_stats["delta_max"]),
+                        float(moment_stats["drift_max"]),
+                        float(moment_stats["drift_mean"]),
+                        float(moment_stats["std_ratio_min"]),
+                        float(moment_stats["std_ratio_max"]),
+                    )
 
             # --- 3. Costruzione del condizionamento ---
             if motion_latent is None:
@@ -3435,12 +3423,23 @@ class IAMCCS_WanSVIToFLFBridgePro(WanImageMotionProAdvanced):
             _lr = float(latent_refresh)
             _dm = float(delta_max)
             if motion_latent is not None and _lr > 0:
-                motion_mean = motion_latent.mean(dim=(2, 3, 4), keepdim=True)
-                anchor_mean = anchor_latent.mean(dim=(2, 3, 4), keepdim=True)
-                dc_drift = motion_mean - anchor_mean
-                if _dm > 0:
-                    dc_drift = _dm * torch.tanh(dc_drift / _dm)
-                motion_latent = motion_latent - (dc_drift * _lr)
+                motion_latent, moment_stats = _stabilize_motion_tail_to_anchor(
+                    motion_latent,
+                    anchor_latent,
+                    strength=_lr,
+                    delta_max=_dm,
+                )
+                if diagnostic_log:
+                    self._log.info(
+                        "[WanSVIToFLFBridgePro] latent moment stabilization active: strength=%.2f delta_max=%.2f "
+                        "| drift_max=%.4f drift_mean=%.4f std_ratio=[%.3f..%.3f]",
+                        float(moment_stats["strength"]),
+                        float(moment_stats["delta_max"]),
+                        float(moment_stats["drift_max"]),
+                        float(moment_stats["drift_mean"]),
+                        float(moment_stats["std_ratio_min"]),
+                        float(moment_stats["std_ratio_max"]),
+                    )
 
             if motion_latent is None:
                 padding_size = total_latents_gen - anchor_slots_for_cond
