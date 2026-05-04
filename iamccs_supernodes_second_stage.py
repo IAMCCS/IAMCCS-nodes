@@ -42,7 +42,7 @@ class IAMCCS_SuperNodes_SecondStage:
             "required": {
                 **merge_backend_panel_inputs({
                     "second_stage_mode": (["off", "latent_upscale_refine", "latent_upscale_refine_x2_beta"],),
-                    "stage2_model_policy": (["replace_stage1_if_connected", "keep_stage1_model", "prefer_stage2_else_primary"],),
+                    "stage2_model_policy": (["replace_stage1_if_connected", "stage2_model_if_connected", "prefer_stage2_else_primary", "keep_stage1_model"],),
                     "second_stage_upscale_model": (_LATENT_UPSCALE_MODEL_NAMES, {"default": _LATENT_UPSCALE_MODEL_NAMES[0]}),
                     "second_stage_reinject_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                     "second_stage_cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 30.0, "step": 0.1}),
@@ -51,7 +51,7 @@ class IAMCCS_SuperNodes_SecondStage:
             },
             "optional": {
                 "stage2_model": ("MODEL", {"lazy": True}),
-                "linx": (SUPERNODE_LINX_TYPE,),
+                "linx": (SUPERNODE_LINX_TYPE, {"lazy": True}),
                 "model": ("MODEL", {"lazy": True}),
             },
             "hidden": {
@@ -59,11 +59,13 @@ class IAMCCS_SuperNodes_SecondStage:
             },
         }
 
-    def check_lazy_status(self, second_stage_mode, stage2_model=None, model=None, **kwargs):
+    def check_lazy_status(self, second_stage_mode, stage2_model_policy="replace_stage1_if_connected", stage2_model=None, model=None, linx=None, **kwargs):
         if str(second_stage_mode) == "off":
             return []
+        if str(stage2_model_policy) == "keep_stage1_model":
+            return [] if model is not None or linx is not None else ["model", "linx"]
         needed = []
-        if stage2_model is None:
+        if stage2_model is None and model is None:
             needed.append("stage2_model")
         return needed
 
@@ -137,7 +139,7 @@ class IAMCCS_SuperNodes_SecondStage:
         selected_model = primary_model
         policy = str(stage2_model_policy)
         if connected_stage2_model is not None:
-            if policy in {"replace_stage1_if_connected", "prefer_stage2_else_primary"}:
+            if policy in {"replace_stage1_if_connected", "stage2_model_if_connected", "prefer_stage2_else_primary"}:
                 selected_model = connected_stage2_model
         elif selected_model is None:
             selected_model = connected_stage2_model

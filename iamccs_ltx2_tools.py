@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Tuple
+from typing import Any, Mapping, Tuple
 
 import torch
 
@@ -21,6 +21,22 @@ _F = torch.nn.functional
 
 
 _log = logging.getLogger("IAMCCS.LTX2.Tools")
+
+
+def _audio_duration_seconds(audio: Any) -> float:
+    if not isinstance(audio, Mapping):
+        raise ValueError("audio input is required")
+    waveform = audio.get("waveform")
+    sample_rate = int(audio.get("sample_rate", 0) or 0)
+    if waveform is None or sample_rate <= 0:
+        raise ValueError("audio input must contain waveform and sample_rate")
+    try:
+        total_samples = int(waveform.shape[-1])
+    except Exception as exc:
+        raise ValueError("audio waveform has no sample dimension") from exc
+    if total_samples <= 0:
+        raise ValueError("audio waveform is empty")
+    return float(total_samples) / float(sample_rate)
 
 
 def _to_grayscale(image: torch.Tensor) -> torch.Tensor:
@@ -889,6 +905,148 @@ class IAMCCS_SegmentPlannerSettings(IAMCCS_SegmentPlanner):
             str(planning_mode),
             str(segment_preset),
             int(overlap_frames),
+            report,
+        )
+
+
+class IAMCCS_AudioSegmentAutoPlanner(IAMCCS_SegmentPlanner):
+    SPLIT_BY_SEGMENTS = "choose segment count (audio / segments)"
+    SPLIT_BY_SECONDS = "choose seconds per segment (auto count)"
+    SEGMENT_COUNT_CHOICES = (1, 2, 3, 4, 5, 6, 8, 10, 12)
+    SEGMENT_SECONDS_CHOICES = (5.0, 8.0, 10.0, 12.0, 15.0, 20.0, 30.0)
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "fps": ("FLOAT", {"default": 25.0, "min": 0.001, "max": 240.0, "step": 0.01}),
+                "split_mode": ([cls.SPLIT_BY_SEGMENTS, cls.SPLIT_BY_SECONDS], {"default": cls.SPLIT_BY_SEGMENTS}),
+                "segment_count": (list(cls.SEGMENT_COUNT_CHOICES), {"default": 2}),
+                "target_segment_seconds": (list(cls.SEGMENT_SECONDS_CHOICES), {"default": 10.0}),
+                "overlap_frames": ("INT", {"default": 9, "min": 0, "max": 4096, "step": 1}),
+                "ltx_round_mode": (["up", "nearest", "down"], {"default": "up"}),
+            }
+        }
+
+    RETURN_TYPES = (
+        "FLOAT", "FLOAT", "STRING", "STRING", "INT",
+        "INT", "INT", "INT", "INT", "INT", "INT", "FLOAT", "STRING",
+    )
+    RETURN_NAMES = (
+        "audio_duration_s",
+        "segment_duration_s",
+        "planning_mode",
+        "segment_preset",
+        "overlap_frames",
+        "segment_count",
+        "total_frames",
+        "unique_segment_frames",
+        "first_segment_raw_frames",
+        "continuation_raw_frames",
+        "last_segment_unique_frames",
+        "fps_out",
+        "report",
+    )
+    FUNCTION = "plan_audio_segments"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    def _preset_from_seconds(self, seconds: float) -> str:
+        preset, _rec = self._recommend_profile_for_segment_seconds(float(seconds))
+        if preset is not None:
+            return str(preset)
+        choices = ((5.0, "5sec"), (10.0, "10sec"), (15.0, "15sec"), (20.0, "20sec"))
+        return min(choices, key=lambda item: abs(float(seconds) - item[0]))[1]
+
+    @staticmethod
+    def _first_number(value: Any, default: float) -> float:
+        if isinstance(value, (int, float)):
+            return float(value)
+        text = str(value or "").strip()
+        token = ""
+        seen_decimal = False
+        for ch in text:
+            if ch.isdigit():
+                token += ch
+            elif ch == "." and token and not seen_decimal:
+                token += ch
+                seen_decimal = True
+            elif token:
+                break
+        if not token or token == ".":
+            return float(default)
+        try:
+            return float(token)
+        except Exception:
+            return float(default)
+
+    def _normalize_split_mode(self, split_mode: Any) -> tuple[str, str]:
+        text = str(split_mode or "").strip().lower()
+        if text in ("fixed_segment_seconds", "choose_seconds_per_segment_auto_count"):
+            return "fixed_segment_seconds", self.SPLIT_BY_SECONDS
+        if "seconds per segment" in text or "auto count" in text:
+            return "fixed_segment_seconds", self.SPLIT_BY_SECONDS
+        return "fixed_segment_count", self.SPLIT_BY_SEGMENTS
+
+    def plan_audio_segments(
+        self,
+        audio,
+        fps: float,
+        split_mode: str,
+        segment_count: int,
+        target_segment_seconds: float,
+        overlap_frames: int,
+        ltx_round_mode: str,
+    ):
+        audio_duration_s = max(0.01, _audio_duration_seconds(audio))
+        fps = max(0.001, float(fps))
+        split_mode_key, split_mode_label = self._normalize_split_mode(split_mode)
+        requested_segment_count = max(1, int(round(self._first_number(segment_count, 2))))
+        target_segment_seconds = max(0.01, float(self._first_number(target_segment_seconds, 10.0)))
+
+        if split_mode_key == "fixed_segment_seconds":
+            segment_duration_s = target_segment_seconds
+        else:
+            segment_duration_s = max(0.01, audio_duration_s / float(requested_segment_count))
+
+        segment_preset = self._preset_from_seconds(segment_duration_s)
+        planning_mode = "manual_segment_seconds"
+
+        planner_result = self.plan(
+            audio_duration_s,
+            fps,
+            segment_duration_s,
+            planning_mode,
+            segment_preset,
+            int(overlap_frames),
+            str(ltx_round_mode),
+            0,
+        )
+
+        computed_segment_count = int(planner_result[4])
+        report = (
+            f"audio_duration={audio_duration_s:.3f}s @ {fps:.3f}fps | split_mode={split_mode_key} ({split_mode_label}) | "
+            f"requested_segments={requested_segment_count} | computed_segments={computed_segment_count} | "
+            f"segment_duration={segment_duration_s:.3f}s | total={int(planner_result[0])}f | "
+            f"unique={int(planner_result[1])}f | first_raw={int(planner_result[2])}f | "
+            f"continuation_raw={int(planner_result[3])}f | last_unique={int(planner_result[6])}f | "
+            f"preset={segment_preset} | overlap={int(overlap_frames)}f | ltx_round={ltx_round_mode}"
+        )
+        _log.info("[AudioSegmentAutoPlanner] %s", report)
+
+        return (
+            float(audio_duration_s),
+            float(segment_duration_s),
+            planning_mode,
+            segment_preset,
+            int(overlap_frames),
+            computed_segment_count,
+            int(planner_result[0]),
+            int(planner_result[1]),
+            int(planner_result[2]),
+            int(planner_result[3]),
+            int(planner_result[6]),
+            float(planner_result[17]),
             report,
         )
 

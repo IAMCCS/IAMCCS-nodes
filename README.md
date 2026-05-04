@@ -9,7 +9,7 @@
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows + general nodes 4 ComfyUI
 
-Version: 1.4.3
+Version: 1.4.4 (Supernodes and wan 2.2 + LTX 2.2 utilities added)
 
 ## IAMCCS SuperNodes requirements
 
