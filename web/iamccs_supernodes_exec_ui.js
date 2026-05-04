@@ -1,6 +1,6 @@
 ﻿import { app } from "../../../scripts/app.js";
 
-const IAMCCS_SUPERNODES_EXEC_UI_VERSION = "2026-05-03-text-audio-duration-v6";
+const IAMCCS_SUPERNODES_EXEC_UI_VERSION = "2026-05-04-section-button-reposition-v1";
 
 const PRESET_CONFIGS = {
     "IAMCCS-SuperNodes AU+IMG2VID Exec Render": {
@@ -2408,6 +2408,7 @@ function addSectionButton(node, group, index) {
     const existing = node.widgets.find((w) => w._iamccsSectionKey === group.key);
     if (existing) {
         installSectionButtonDraw(existing);
+        insertWidget(node, existing, index);
         return existing;
     }
 
