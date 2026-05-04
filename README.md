@@ -19,7 +19,7 @@ testing a SuperNode workflow, check the dedicated requirements document:
 
 - [IAMCCS SuperNodes Requirements](SUPERNODES_REQUIREMENTS.md)
 
-## 🆕 Sdded new LTX-2.3 nodes for v2v, au+img2vid (instructions: patreon.com/IAMCCS)
+## 🆕 Added new LTX-2.3 nodes for v2v, au+img2vid (instructions: patreon.com/IAMCCS)
 
 Version: 1.4.0
 
