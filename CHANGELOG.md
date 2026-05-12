@@ -1,5 +1,7 @@
 # IAMCCS Nodes - Changelog
 
+## 🆕 2026-05-12 - version 1.4.5 — Cine nodes added
+
 ## 🆕 2026-05-04 - version 1.4.4 — Supernodes v.2 and bug fixed pplus utilities added
 
 ## 🆕 2026-04-24 - version 1.4.3 — Supwenodes, more LTX and WAN 2.2 nodes and utilities added

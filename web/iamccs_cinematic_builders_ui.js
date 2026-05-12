@@ -1,6 +1,10 @@
 import { app } from "../../scripts/app.js";
 
 const CINEMATIC_BUILDERS = new Set([
+    "IAMCCS_CinePromptComposer",
+    "IAMCCS_CineShotLineBuilder",
+    "IAMCCS_CineV2VTimelineLineBuilder",
+    "IAMCCS_CineLineStacker",
     "IAMCCS_LTX2_CinematicPromptComposer",
     "IAMCCS_LTX2_CinematicShotLineBuilder",
     "IAMCCS_LTX2_CinematicV2VTimelineLineBuilder",
@@ -8,10 +12,20 @@ const CINEMATIC_BUILDERS = new Set([
 ]);
 
 const SIZE_PRESETS = {
+    IAMCCS_CinePromptComposer: [520, 620],
+    IAMCCS_CineShotLineBuilder: [560, 760],
+    IAMCCS_CineV2VTimelineLineBuilder: [590, 840],
+    IAMCCS_CineLineStacker: [520, 520],
     IAMCCS_LTX2_CinematicPromptComposer: [520, 620],
     IAMCCS_LTX2_CinematicShotLineBuilder: [560, 760],
     IAMCCS_LTX2_CinematicV2VTimelineLineBuilder: [590, 840],
     IAMCCS_LTX2_CinematicLineStacker: [520, 520],
+};
+
+const CINE_FILM_LAB = {
+    header: "#2E2A24",
+    nodeBg: "#171512",
+    relay: "#5FA8C7",
 };
 
 function tuneWidgets(node) {
@@ -45,9 +59,9 @@ app.registerExtension({
         nodeType.prototype.onNodeCreated = function () {
             const result = onNodeCreated?.apply(this, arguments);
             try {
-                this.color = "#243447";
-                this.bgcolor = "#18232f";
-                this.boxcolor = "#4f9fd8";
+                this.color = CINE_FILM_LAB.header;
+                this.bgcolor = CINE_FILM_LAB.nodeBg;
+                this.boxcolor = CINE_FILM_LAB.relay;
                 this.shape = typeof LiteGraph !== "undefined" ? LiteGraph.BOX_SHAPE : 0;
 
                 const preset = SIZE_PRESETS[name];

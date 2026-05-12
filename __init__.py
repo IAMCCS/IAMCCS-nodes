@@ -91,19 +91,45 @@ from .iamccs_ltx2_extension_module import (
     IAMCCS_LTX2_FirstLastLatentControl_Pro,
 )
 
-from .iamccs_ltx2_cinematic_flf import (
-    IAMCCS_LTX2_CinematicShotPlanner,
-    IAMCCS_LTX2_CinematicRefLatentControl,
-    IAMCCS_LTX2_AudioPromptDirector,
-    IAMCCS_LTX2_CinematicPromptRelayAdapter,
-    IAMCCS_LTX2_CinematicPromptComposer,
-    IAMCCS_LTX2_CinematicShotLineBuilder,
-    IAMCCS_LTX2_CinematicV2VTimelineLineBuilder,
-    IAMCCS_LTX2_CinematicLineStacker,
-    IAMCCS_LTX2_CinematicMultiGenPlanner,
-    IAMCCS_LTX2_CinematicShotAudioSelector,
-    IAMCCS_LTX2_CinematicV2VTimelinePlanner,
-    IAMCCS_LTX2_CinematicV2VAssetSelector,
+from .iamccs_wdc_ltx_port import (
+    IAMCCS_WDC_MultiImageLoader,
+    IAMCCS_WDC_LTXKeyframer,
+    IAMCCS_WDC_LTXSequencer,
+    IAMCCS_CineLTXSequencerExact,
+    IAMCCS_CineFLFEngineSimple,
+    IAMCCS_WDC_LTXSequencerFixed5,
+)
+
+from .iamccs_cine_nodes import (
+    IAMCCS_CineReferenceBoard,
+    IAMCCS_CineLTXSequencer,
+    IAMCCS_CineAllInOneFLFEngine,
+    IAMCCS_CinePromptRelayTimeline,
+    IAMCCS_CineShotboardTimelinePro,
+    IAMCCS_CineShotboardPlannerPro,
+    IAMCCS_CineShotboardPlannerProV2,
+    IAMCCS_CineShotboardLite,
+    IAMCCS_CineShotboardPlannerProLegacy,
+    IAMCCS_CineInfo,
+    IAMCCS_CineSwitch,
+    IAMCCS_CinePromptRelayLatentShapeSync,
+    IAMCCS_CineFLFLengthCompensator,
+    IAMCCS_CinePromptRelaySafeEncode,
+    IAMCCS_CineRelayOrBypass,
+    IAMCCS_CineMusicVideoPlanner,
+    IAMCCS_CineShotPlanner,
+    IAMCCS_CineRefLatentControl,
+    IAMCCS_CineAudioPromptDirector,
+    IAMCCS_CinePromptRelayAdapter,
+    IAMCCS_CinePromptComposer,
+    IAMCCS_CineShotLineBuilder,
+    IAMCCS_CineV2VTimelineLineBuilder,
+    IAMCCS_CineLineStacker,
+    IAMCCS_CineMultiGenDirector,
+    IAMCCS_CineShotAudioDirector,
+    IAMCCS_CineV2VTimelineDirector,
+    IAMCCS_CineV2VAssetSelector,
+    IAMCCS_CineWorkflowInspector,
 )
 
 from .iamccs_ltx2_temporal_overlap_samplers import (
@@ -341,18 +367,41 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LTX2_MiddleFrames": IAMCCS_LTX2_MiddleFrames,
     "IAMCCS_LTX2_FirstLastLatentControl": IAMCCS_LTX2_FirstLastLatentControl,
     "IAMCCS_LTX2_FirstLastLatentControl_Pro": IAMCCS_LTX2_FirstLastLatentControl_Pro,
-    "IAMCCS_LTX2_CinematicShotPlanner": IAMCCS_LTX2_CinematicShotPlanner,
-    "IAMCCS_LTX2_CinematicRefLatentControl": IAMCCS_LTX2_CinematicRefLatentControl,
-    "IAMCCS_LTX2_AudioPromptDirector": IAMCCS_LTX2_AudioPromptDirector,
-    "IAMCCS_LTX2_CinematicPromptRelayAdapter": IAMCCS_LTX2_CinematicPromptRelayAdapter,
-    "IAMCCS_LTX2_CinematicPromptComposer": IAMCCS_LTX2_CinematicPromptComposer,
-    "IAMCCS_LTX2_CinematicShotLineBuilder": IAMCCS_LTX2_CinematicShotLineBuilder,
-    "IAMCCS_LTX2_CinematicV2VTimelineLineBuilder": IAMCCS_LTX2_CinematicV2VTimelineLineBuilder,
-    "IAMCCS_LTX2_CinematicLineStacker": IAMCCS_LTX2_CinematicLineStacker,
-    "IAMCCS_LTX2_CinematicMultiGenPlanner": IAMCCS_LTX2_CinematicMultiGenPlanner,
-    "IAMCCS_LTX2_CinematicShotAudioSelector": IAMCCS_LTX2_CinematicShotAudioSelector,
-    "IAMCCS_LTX2_CinematicV2VTimelinePlanner": IAMCCS_LTX2_CinematicV2VTimelinePlanner,
-    "IAMCCS_LTX2_CinematicV2VAssetSelector": IAMCCS_LTX2_CinematicV2VAssetSelector,
+    "IAMCCS_CineReferenceBoard": IAMCCS_CineReferenceBoard,
+    "IAMCCS_CineLTXSequencer": IAMCCS_CineLTXSequencer,
+    "IAMCCS_CineAllInOneFLFEngine": IAMCCS_CineAllInOneFLFEngine,
+    "IAMCCS_CinePromptRelayTimeline": IAMCCS_CinePromptRelayTimeline,
+    "IAMCCS_CineShotboardTimelinePro": IAMCCS_CineShotboardTimelinePro,
+    "IAMCCS_CineShotboardPlannerPro": IAMCCS_CineShotboardPlannerPro,
+    "IAMCCS_CineShotboardPlannerProV2": IAMCCS_CineShotboardPlannerProV2,
+    "IAMCCS_CineShotboardLite": IAMCCS_CineShotboardLite,
+    "IAMCCS_CineShotboardPlannerProLegacy": IAMCCS_CineShotboardPlannerProLegacy,
+    "IAMCCS_CineInfo": IAMCCS_CineInfo,
+    "IAMCCS_CineSwitch": IAMCCS_CineSwitch,
+    "IAMCCS_CinePromptRelayLatentShapeSync": IAMCCS_CinePromptRelayLatentShapeSync,
+    "IAMCCS_CineFLFLengthCompensator": IAMCCS_CineFLFLengthCompensator,
+    "IAMCCS_CinePromptRelaySafeEncode": IAMCCS_CinePromptRelaySafeEncode,
+    "IAMCCS_CineRelayOrBypass": IAMCCS_CineRelayOrBypass,
+    "IAMCCS_CineMusicVideoPlanner": IAMCCS_CineMusicVideoPlanner,
+    "IAMCCS_CineShotPlanner": IAMCCS_CineShotPlanner,
+    "IAMCCS_CineRefLatentControl": IAMCCS_CineRefLatentControl,
+    "IAMCCS_CineAudioPromptDirector": IAMCCS_CineAudioPromptDirector,
+    "IAMCCS_CinePromptRelayAdapter": IAMCCS_CinePromptRelayAdapter,
+    "IAMCCS_CinePromptComposer": IAMCCS_CinePromptComposer,
+    "IAMCCS_CineShotLineBuilder": IAMCCS_CineShotLineBuilder,
+    "IAMCCS_CineV2VTimelineLineBuilder": IAMCCS_CineV2VTimelineLineBuilder,
+    "IAMCCS_CineLineStacker": IAMCCS_CineLineStacker,
+    "IAMCCS_CineMultiGenDirector": IAMCCS_CineMultiGenDirector,
+    "IAMCCS_CineShotAudioDirector": IAMCCS_CineShotAudioDirector,
+    "IAMCCS_CineV2VTimelineDirector": IAMCCS_CineV2VTimelineDirector,
+    "IAMCCS_CineV2VAssetSelector": IAMCCS_CineV2VAssetSelector,
+    "IAMCCS_CineWorkflowInspector": IAMCCS_CineWorkflowInspector,
+    "IAMCCS_WDC_MultiImageLoader": IAMCCS_WDC_MultiImageLoader,
+    "IAMCCS_WDC_LTXKeyframer": IAMCCS_WDC_LTXKeyframer,
+    "IAMCCS_WDC_LTXSequencer": IAMCCS_WDC_LTXSequencer,
+    "IAMCCS_CineLTXSequencerExact": IAMCCS_CineLTXSequencerExact,
+    "IAMCCS_CineFLFEngineSimple": IAMCCS_CineFLFEngineSimple,
+    "IAMCCS_WDC_LTXSequencerFixed5": IAMCCS_WDC_LTXSequencerFixed5,
     "IAMCCS_LTX2_InitLatentSampler": IAMCCS_LTX2_InitLatentSampler,
     "IAMCCS_LTX2_LoopingSampler": IAMCCS_LTX2_LoopingSampler,
     "IAMCCS_LTX2_OneShotLowRAMLooper": IAMCCS_LTX2_OneShotLowRAMLooper,
@@ -530,18 +579,41 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_MiddleFrames": "LTX-2 Middle Frames (accumulator) 🧷",
     "IAMCCS_LTX2_FirstLastLatentControl": "LTX-2 First/Last → Latent (noise_mask) 🎯",
     "IAMCCS_LTX2_FirstLastLatentControl_Pro": "LTX-2 First/Last → Latent (Pro, slot caps) 🎯",
-    "IAMCCS_LTX2_CinematicShotPlanner": "LTX-2 Cinematic Shot Planner",
-    "IAMCCS_LTX2_CinematicRefLatentControl": "LTX-2 Cinematic Ref -> Latent",
-    "IAMCCS_LTX2_AudioPromptDirector": "LTX-2 Audio Prompt Director",
-    "IAMCCS_LTX2_CinematicPromptRelayAdapter": "LTX-2 Cinematic PromptRelay Adapter",
-    "IAMCCS_LTX2_CinematicPromptComposer": "LTX-2 Cinematic Prompt Composer",
-    "IAMCCS_LTX2_CinematicShotLineBuilder": "LTX-2 Cinematic Shot Line Builder",
-    "IAMCCS_LTX2_CinematicV2VTimelineLineBuilder": "LTX-2 Cinematic V2V Line Builder",
-    "IAMCCS_LTX2_CinematicLineStacker": "LTX-2 Cinematic Line Stacker",
-    "IAMCCS_LTX2_CinematicMultiGenPlanner": "LTX-2 Cinematic MultiGen Planner",
-    "IAMCCS_LTX2_CinematicShotAudioSelector": "LTX-2 Cinematic Shot Audio Selector",
-    "IAMCCS_LTX2_CinematicV2VTimelinePlanner": "LTX-2 Cinematic V2V Timeline Planner",
-    "IAMCCS_LTX2_CinematicV2VAssetSelector": "LTX-2 Cinematic V2V Asset Selector",
+    "IAMCCS_CineReferenceBoard": "IAMCCS Cine Reference Board",
+    "IAMCCS_CineLTXSequencer": "IAMCCS Cine FLF Timeline Sequencer",
+    "IAMCCS_CineAllInOneFLFEngine": "IAMCCS Cine AllInOne FLF Engine",
+    "IAMCCS_CinePromptRelayTimeline": "IAMCCS Cine PromptRelay Timeline",
+    "IAMCCS_CineShotboardTimelinePro": "IAMCCS Cine Shotboard Timeline Pro",
+    "IAMCCS_CineShotboardPlannerPro": "IAMCCS Cine Shotboard Planner Pro",
+    "IAMCCS_CineShotboardPlannerProV2": "IAMCCS Cine Shotboard Planner Pro V2",
+    "IAMCCS_CineShotboardLite": "IAMCCS Cine Shotboard Lite",
+    "IAMCCS_CineShotboardPlannerProLegacy": "IAMCCS Cine Shotboard Planner Pro Legacy Outputs",
+    "IAMCCS_CineInfo": "IAMCCS CineInfo",
+    "IAMCCS_CineSwitch": "IAMCCS CineSwitch Lazy FLF/PromptRelay",
+    "IAMCCS_CinePromptRelayLatentShapeSync": "IAMCCS Cine PromptRelay Latent Shape Sync",
+    "IAMCCS_CineFLFLengthCompensator": "IAMCCS Cine FLF Length Compensator",
+    "IAMCCS_CinePromptRelaySafeEncode": "IAMCCS Cine PromptRelay Safe Encode",
+    "IAMCCS_CineRelayOrBypass": "IAMCCS Cine Relay Or Bypass",
+    "IAMCCS_CineMusicVideoPlanner": "IAMCCS Cine Videoclip Maker Planner",
+    "IAMCCS_CineShotPlanner": "IAMCCS Cine Shot Planner",
+    "IAMCCS_CineRefLatentControl": "IAMCCS Cine Reference Latent Control",
+    "IAMCCS_CineAudioPromptDirector": "IAMCCS Cine Audio Prompt Director",
+    "IAMCCS_CinePromptRelayAdapter": "IAMCCS Cine PromptRelay Adapter",
+    "IAMCCS_CinePromptComposer": "IAMCCS Cine Prompt Composer",
+    "IAMCCS_CineShotLineBuilder": "IAMCCS Cine Shot Line Builder",
+    "IAMCCS_CineV2VTimelineLineBuilder": "IAMCCS Cine V2V Line Builder",
+    "IAMCCS_CineLineStacker": "IAMCCS Cine Line Stacker",
+    "IAMCCS_CineMultiGenDirector": "IAMCCS Cine Multi-Generation Director",
+    "IAMCCS_CineShotAudioDirector": "IAMCCS Cine Shot Audio Director",
+    "IAMCCS_CineV2VTimelineDirector": "IAMCCS Cine V2V Timeline Director",
+    "IAMCCS_CineV2VAssetSelector": "IAMCCS Cine V2V Asset Selector",
+    "IAMCCS_CineWorkflowInspector": "IAMCCS Cine Workflow Inspector",
+    "IAMCCS_WDC_MultiImageLoader": "IAMCCS Cine Reference Board (legacy alias)",
+    "IAMCCS_WDC_LTXKeyframer": "IAMCCS Cine LTX Keyframer (legacy alias)",
+    "IAMCCS_WDC_LTXSequencer": "IAMCCS Cine LTX Sequencer (legacy alias)",
+    "IAMCCS_CineLTXSequencerExact": "IAMCCS Cine LTX Sequencer Exact",
+    "IAMCCS_CineFLFEngineSimple": "IAMCCS Cine FLF Engine Simple",
+    "IAMCCS_WDC_LTXSequencerFixed5": "IAMCCS Cine LTX Sequencer Fixed 5 (legacy alias)",
     "IAMCCS_LTX2_InitLatentSampler": "LTX-2 Init Latent Sampler 🧱",
     "IAMCCS_LTX2_LoopingSampler": "LTX-2 Looping Sampler (temporal overlap) 🧷",
     "IAMCCS_LTX2_OneShotLowRAMLooper": "LTX-2 One-Shot Low-RAM Looper 🪶",
@@ -708,6 +780,165 @@ def setup_api_routes() -> None:
         from .iamccs_hw_probe import recommend_settings
 
         routes = PromptServer.instance.routes
+
+        @routes.get("/api/iamccs/cine/view_image")
+        async def iamccs_cine_view_image(request):
+            try:
+                q = request.rel_url.query
+                path = q.get("path", "")
+                if not path:
+                    return web.Response(status=400, text="Missing path")
+                path = os.path.abspath(os.path.expanduser(path))
+                allowed_ext = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff"}
+                ext = os.path.splitext(path)[1].lower()
+                if ext not in allowed_ext:
+                    return web.Response(status=400, text="Unsupported image extension")
+                if not os.path.exists(path) or not os.path.isfile(path):
+                    return web.Response(status=404, text="Image not found")
+                return web.FileResponse(path)
+            except Exception as e:
+                return web.Response(status=500, text=str(e))
+
+        @routes.post("/api/iamccs/cine/transform_reference")
+        async def iamccs_cine_transform_reference(request):
+            try:
+                import json
+                import re
+                import time
+                import folder_paths
+                from PIL import Image, ImageOps
+
+                def _float(value, default):
+                    try:
+                        return float(value)
+                    except Exception:
+                        return float(default)
+
+                def _int(value, default):
+                    try:
+                        return int(round(float(value)))
+                    except Exception:
+                        return int(default)
+
+                data = await request.json()
+                source = str(data.get("path") or data.get("source_path") or "").strip()
+                if not source:
+                    return web.json_response({"error": "Missing source path"}, status=400)
+
+                input_dir = folder_paths.get_input_directory()
+                if os.path.isabs(source):
+                    source_path = os.path.abspath(os.path.expanduser(source))
+                else:
+                    source_path = os.path.abspath(os.path.join(input_dir, source.replace("/", os.sep)))
+                if not os.path.exists(source_path) or not os.path.isfile(source_path):
+                    return web.json_response({"error": f"Source image not found: {source}"}, status=404)
+
+                target_w = max(64, min(8192, _int(data.get("width"), 768)))
+                target_h = max(64, min(8192, _int(data.get("height"), 432)))
+                fit_mode = str(data.get("fit_mode") or "cover").strip().lower()
+                if fit_mode not in {"cover", "contain"}:
+                    fit_mode = "cover"
+                zoom = max(1.0, min(16.0, _float(data.get("zoom"), 1.0)))
+                pan_x = max(-1.0, min(1.0, _float(data.get("pan_x"), 0.0)))
+                pan_y = max(-1.0, min(1.0, _float(data.get("pan_y"), 0.0)))
+                rotation = max(-45.0, min(45.0, _float(data.get("rotation"), 0.0)))
+
+                resample_name = str(data.get("resample") or "lanczos").lower()
+                resampling = {
+                    "nearest": Image.Resampling.NEAREST,
+                    "bilinear": Image.Resampling.BILINEAR,
+                    "bicubic": Image.Resampling.BICUBIC,
+                    "lanczos": Image.Resampling.LANCZOS,
+                }.get(resample_name, Image.Resampling.LANCZOS)
+
+                with Image.open(source_path) as im:
+                    im = ImageOps.exif_transpose(im).convert("RGB")
+                    if abs(rotation) > 0.001:
+                        fill = tuple(int(v) for v in im.resize((1, 1), Image.Resampling.BILINEAR).getpixel((0, 0)))
+                        im = im.rotate(rotation, resample=Image.Resampling.BICUBIC, expand=True, fillcolor=fill)
+                    src_w, src_h = im.size
+                    crop_box = None
+                    preview_crop_box = None
+                    raw_crop_box = data.get("crop_box")
+                    if isinstance(raw_crop_box, (list, tuple)) and len(raw_crop_box) >= 4:
+                        try:
+                            l = max(0.0, min(float(src_w - 1), float(raw_crop_box[0])))
+                            t = max(0.0, min(float(src_h - 1), float(raw_crop_box[1])))
+                            r = max(l + 1.0, min(float(src_w), float(raw_crop_box[2])))
+                            b = max(t + 1.0, min(float(src_h), float(raw_crop_box[3])))
+                            left_i = max(0, min(src_w - 1, int(round(l))))
+                            top_i = max(0, min(src_h - 1, int(round(t))))
+                            right_i = max(left_i + 1, min(src_w, int(round(r))))
+                            bottom_i = max(top_i + 1, min(src_h, int(round(b))))
+                            preview_crop_box = (left_i, top_i, right_i, bottom_i)
+                        except Exception:
+                            preview_crop_box = None
+                    if preview_crop_box is not None:
+                        crop_box = preview_crop_box
+                        out = im.crop(crop_box).resize((target_w, target_h), resampling)
+                    elif fit_mode == "contain":
+                        bg = Image.new("RGB", (target_w, target_h), tuple(int(v) for v in im.resize((1, 1), Image.Resampling.BILINEAR).getpixel((0, 0))))
+                        fitted = ImageOps.contain(im, (target_w, target_h), method=resampling)
+                        paste_x = int(round((target_w - fitted.size[0]) / 2.0))
+                        paste_y = int(round((target_h - fitted.size[1]) / 2.0))
+                        bg.paste(fitted, (paste_x, paste_y))
+                        out = bg
+                    else:
+                        aspect = target_w / float(target_h)
+                        if src_w / float(src_h) >= aspect:
+                            base_h = src_h
+                            base_w = base_h * aspect
+                        else:
+                            base_w = src_w
+                            base_h = base_w / aspect
+                        crop_w = max(1.0, min(src_w, base_w / zoom))
+                        crop_h = max(1.0, min(src_h, base_h / zoom))
+                        max_shift_x = max(0.0, (src_w - crop_w) / 2.0)
+                        max_shift_y = max(0.0, (src_h - crop_h) / 2.0)
+                        center_x = src_w / 2.0 + pan_x * max_shift_x
+                        center_y = src_h / 2.0 + pan_y * max_shift_y
+                        left = max(0.0, min(src_w - crop_w, center_x - crop_w / 2.0))
+                        top = max(0.0, min(src_h - crop_h, center_y - crop_h / 2.0))
+                        crop_box = (int(round(left)), int(round(top)), int(round(left + crop_w)), int(round(top + crop_h)))
+                        out = im.crop(crop_box).resize((target_w, target_h), resampling)
+
+                out_dir = os.path.join(input_dir, "IAMCCS_newimages")
+                os.makedirs(out_dir, exist_ok=True)
+                stem = os.path.splitext(os.path.basename(source_path))[0]
+                stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("._")[:60] or "cine_ref"
+                filename = f"{stem}_cinecrop_{int(time.time() * 1000)}.png"
+                out_path = os.path.join(out_dir, filename)
+                out.save(out_path, "PNG", optimize=True)
+
+                rel_path = "IAMCCS_newimages/" + filename
+                metadata = {
+                    "source_path": source_path,
+                    "edited_path": out_path,
+                    "relative_path": rel_path,
+                    "transform": {
+                        "width": target_w,
+                        "height": target_h,
+                        "fit_mode": fit_mode,
+                        "zoom": zoom,
+                        "pan_x": pan_x,
+                        "pan_y": pan_y,
+                        "rotation": rotation,
+                        "resample": resample_name,
+                        "crop_box_after_rotation": crop_box,
+                        "crop_box_source": data.get("crop_box_source") or ("ui_preview" if preview_crop_box is not None else "backend_formula"),
+                    },
+                }
+                with open(out_path + ".json", "w", encoding="utf-8") as meta_file:
+                    json.dump(metadata, meta_file, indent=2)
+
+                return web.json_response({
+                    "ok": True,
+                    "path": rel_path,
+                    "absolute_path": out_path,
+                    "metadata": metadata,
+                })
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
 
         @routes.get("/api/iamccs/hw_probe")
         async def iamccs_hw_probe_endpoint(request):

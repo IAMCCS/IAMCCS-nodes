@@ -231,6 +231,7 @@ const RENDER_UI_PRESET_VISIBLE_VALUES = ["custom", "low_ram_safe", "balanced", "
 const RENDER_BACKEND_MODE_VISIBLE_VALUES = [
     "auto",
     "single_best",
+    "ti2v_incremental_advanced",
     "legacy_single",
     "legacy_two_segments",
     "legacy_loop",
@@ -240,6 +241,7 @@ const RENDER_BACKEND_MODE_VISIBLE_VALUES = [
     "loop_low_ram_disk",
 ];
 const RENDER_BACKEND_MODE_VALUES = new Set([...RENDER_BACKEND_MODE_VISIBLE_VALUES, "legacy backend"]);
+const TI2V_RENDER_BACKEND_VISIBLE_VALUES = ["single_best", "ti2v_incremental_advanced"];
 const RENDER_STITCH_PRESET_VALUES = new Set([
     "custom",
     "lossless_refresh_24fps",
@@ -1553,10 +1555,24 @@ function applyRenderBackendModeDefaults(node, modeOverride = null) {
         return;
     }
     const generationType = String(findWidget(node, "generation_type")?.value || "");
+    const backendMode = normalizeRenderBackendValue(modeOverride ?? findWidget(node, "backend_mode")?.value);
+    if (GENERATED_DURATION_TYPES.has(generationType)) {
+        if (backendMode === "ti2v_incremental_advanced") {
+            setWidgetValue(node, "second_stage_mode", "latent_upscale_refine_x2_beta", { notify: false });
+            setWidgetValue(node, "stage2_model_policy", "keep_stage1_model", { notify: false });
+            setWidgetValue(node, "second_stage_upscale_model", REF_LTX23_UPSCALE_MODEL, { notify: false });
+            setWidgetValue(node, "second_stage_reinject_strength", generationType === "text2video" ? 0.0 : 1.0, { notify: false });
+            setWidgetValue(node, "second_stage_cfg", 1.0, { notify: false });
+            setWidgetValue(node, "second_stage_manual_sigmas", REF_STAGE2_SIGMAS, { notify: false });
+        } else if (backendMode === "single_best") {
+            setWidgetValue(node, "second_stage_mode", "off", { notify: false });
+            setWidgetValue(node, "second_stage_reinject_strength", 0.0, { notify: false });
+        }
+        return;
+    }
     if (generationType !== REFERENCE_AUDIO_IMG2VID_TYPE) {
         return;
     }
-    const backendMode = normalizeRenderBackendValue(modeOverride ?? findWidget(node, "backend_mode")?.value);
     const defaults = LEGACY_RENDER_BACKEND_DEFAULTS[backendMode];
     if (!defaults) {
         return;
@@ -1709,6 +1725,9 @@ function inferRenderGenerationType(valuesByName) {
     if (generationMode === "t2v" || mediaMode === "input_audio_t2v" || mediaMode === "generated_audio_t2v") {
         return "text+audio2video";
     }
+    if (backendMode === "ti2v_incremental_advanced") {
+        return generationMode === "t2v" ? "text2video" : "img2video";
+    }
     if (
         backendMode === "two_segments_normal_vram"
         || backendMode === "three_segments_normal_vram"
@@ -1729,13 +1748,16 @@ function applyRenderPresetDropdownOptions(node) {
     if (node?.comfyClass !== "IAMCCS-SuperNodes AU+IMG2VID Exec Render") {
         return;
     }
+    const generationType = String(findWidget(node, "generation_type")?.value || "audio+image2video");
     const widget = findWidget(node, "ui_preset");
     if (widget?.options) {
         widget.options.values = RENDER_UI_PRESET_VISIBLE_VALUES;
     }
     const backendWidget = findWidget(node, "backend_mode");
     if (backendWidget?.options) {
-        backendWidget.options.values = RENDER_BACKEND_MODE_VISIBLE_VALUES;
+        backendWidget.options.values = GENERATED_DURATION_TYPES.has(generationType)
+            ? TI2V_RENDER_BACKEND_VISIBLE_VALUES
+            : RENDER_BACKEND_MODE_VISIBLE_VALUES;
     }
 }
 
@@ -1748,7 +1770,7 @@ function applyRenderInternalWidgetVisibility(node) {
     }
     const generationType = String(findWidget(node, "generation_type")?.value || "audio+image2video");
     const generationExpanded = node.properties?.iamccs_section_generation !== false;
-    setWidgetVisibility(findWidget(node, "backend_mode"), false);
+    setWidgetVisibility(findWidget(node, "backend_mode"), generationExpanded && GENERATED_DURATION_TYPES.has(generationType));
     applyRenderManualSigmasVisibility(node);
 }
 

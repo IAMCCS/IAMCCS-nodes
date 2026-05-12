@@ -615,6 +615,153 @@ class IAMCCS_LTX2_CinematicRefLatentControl:
         return (out_latent, int(applied), report)
 
 
+class IAMCCS_LTX2_CinematicFLFSequencer:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "vae": ("VAE", {}),
+                "latent": ("LATENT", {}),
+                "plan_json": ("STRING", {"default": "{}", "multiline": True}),
+                "default_strength": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "reference_fallback": (["cycle", "clamp", "skip"], {"default": "cycle"}),
+            },
+            "optional": {
+                "reference_1": ("IMAGE",),
+                "reference_2": ("IMAGE",),
+                "reference_3": ("IMAGE",),
+                "reference_4": ("IMAGE",),
+                "reference_5": ("IMAGE",),
+                "reference_6": ("IMAGE",),
+                "reference_7": ("IMAGE",),
+                "reference_8": ("IMAGE",),
+            },
+        }
+
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT", "INT", "STRING")
+    RETURN_NAMES = ("positive", "negative", "latent", "applied_count", "report")
+    FUNCTION = "apply"
+    CATEGORY = "IAMCCS/LTX-2/Cinematic"
+
+    @staticmethod
+    def _load_plan(plan_json: str) -> Dict[str, Any]:
+        return IAMCCS_LTX2_CinematicRefLatentControl._load_plan(plan_json)
+
+    @staticmethod
+    def _select_reference(refs: List[Optional[torch.Tensor]], ref_index: int, fallback: str) -> Optional[torch.Tensor]:
+        return IAMCCS_LTX2_CinematicRefLatentControl._select_reference(refs, ref_index, fallback)
+
+    @staticmethod
+    def _ensure_noise_mask(latent: Dict[str, Any], samples: torch.Tensor) -> torch.Tensor:
+        return IAMCCS_LTX2_CinematicRefLatentControl._ensure_noise_mask(latent, samples)
+
+    @staticmethod
+    def _match_latent_batch(base_samples: torch.Tensor, guide_samples: torch.Tensor) -> torch.Tensor:
+        return IAMCCS_LTX2_CinematicRefLatentControl._match_latent_batch(base_samples, guide_samples)
+
+    def apply(
+        self,
+        positive,
+        negative,
+        vae,
+        latent,
+        plan_json,
+        default_strength,
+        reference_fallback,
+        reference_1=None,
+        reference_2=None,
+        reference_3=None,
+        reference_4=None,
+        reference_5=None,
+        reference_6=None,
+        reference_7=None,
+        reference_8=None,
+    ):
+        samples_in = latent.get("samples")
+        if samples_in is None:
+            raise ValueError("LATENT input is missing 'samples'")
+
+        from comfy_extras.nodes_lt import LTXVAddGuide
+
+        latent_image = samples_in.clone()
+        noise_mask = self._ensure_noise_mask(latent, latent_image)
+        _, _, base_latent_frames, latent_height, latent_width = latent_image.shape
+        scale_factors = getattr(vae, "downscale_index_formula", (8, 8, 8))
+
+        plan = self._load_plan(plan_json)
+        entries = plan.get("entries", [])
+        if not isinstance(entries, list):
+            entries = []
+        entries = sorted(
+            [entry for entry in entries if isinstance(entry, dict)],
+            key=lambda item: int(item.get("frame", 0)),
+        )
+
+        refs = [reference_1, reference_2, reference_3, reference_4, reference_5, reference_6, reference_7, reference_8]
+        encoded_cache: Dict[int, torch.Tensor] = {}
+        applied = 0
+        ops: List[str] = []
+        default_strength = _clamp(default_strength, 0.0, 1.0)
+
+        for entry in entries:
+            ref_index = max(1, _safe_int(entry.get("reference_index", 1), 1))
+            image = self._select_reference(refs, ref_index, str(reference_fallback))
+            if image is None:
+                ops.append(f"skip(ref={ref_index})")
+                continue
+
+            strength = _clamp(_safe_float(entry.get("strength", default_strength), default_strength), 0.0, 1.0)
+            if strength <= 0.0:
+                ops.append(f"skip(ref={ref_index},strength=0)")
+                continue
+
+            if ref_index not in encoded_cache:
+                img = image[:1] if int(image.shape[0]) > 1 else image
+                _, guiding_latent = LTXVAddGuide.encode(vae, int(latent_width), int(latent_height), img, scale_factors)
+                guiding_latent = self._match_latent_batch(latent_image, guiding_latent)
+                encoded_cache[ref_index] = guiding_latent.to(device=latent_image.device, dtype=latent_image.dtype)
+
+            guiding_latent = encoded_cache[ref_index]
+            frame = _safe_int(entry.get("frame", 0), 0)
+            label = str(entry.get("label", f"ref_{ref_index}"))
+            frame_idx, latent_idx = LTXVAddGuide.get_latent_index(
+                positive,
+                int(base_latent_frames),
+                int(guiding_latent.shape[2]),
+                int(frame),
+                scale_factors,
+            )
+            if latent_idx + int(guiding_latent.shape[2]) > int(base_latent_frames):
+                ops.append(f"skip({label}:frame={frame},ref={ref_index},out_of_range)")
+                continue
+
+            positive, negative, latent_image, noise_mask = LTXVAddGuide.append_keyframe(
+                positive,
+                negative,
+                int(frame_idx),
+                latent_image,
+                noise_mask,
+                guiding_latent,
+                float(strength),
+                scale_factors,
+            )
+            applied += 1
+            ops.append(f"{label}:f{frame_idx}->t{latent_idx},ref={ref_index},s={strength:.2f}")
+
+        out_latent = dict(latent)
+        out_latent["samples"] = latent_image
+        out_latent["noise_mask"] = noise_mask
+        report = (
+            f"cinematic_flf_sequencer applied={applied}/{len(entries)} "
+            f"base_latent_frames={base_latent_frames} final_latent_frames={latent_image.shape[2]} | "
+            + ("; ".join(ops) if ops else "no-op")
+        )
+        _log.info("[CinematicFLFSequencer] %s", report)
+        return (positive, negative, out_latent, int(applied), report)
+
+
 class IAMCCS_LTX2_AudioPromptDirector:
     @classmethod
     def INPUT_TYPES(cls):

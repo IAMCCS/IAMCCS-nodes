@@ -1,6 +1,11 @@
 import { app } from "../../scripts/app.js";
 
 const EDITOR_VERSION = "2026-04-30-1";
+const CINE_FILM_LAB = {
+    header: "#2E2A24",
+    nodeBg: "#171512",
+    relay: "#5FA8C7",
+};
 
 const CUT_MODES = ["hard_cut", "continuity_cut", "soft_cut", "match_cut"];
 const AUDIO_VALUES = ["0", "1", "2", "3", "4", "5", "6", "7", "8"];
@@ -92,16 +97,28 @@ const FRAMING_OPTIONS = [
 ];
 
 const CONFIGS = {
+    IAMCCS_CineMultiGenDirector: {
+        kind: "multigen",
+        widgetName: "shot_lines",
+        title: "IAMCCS Cine Multi-Generation Director",
+        lineFields: ["seconds", "cut", "ref", "audio", "label", "prompt", "dialogue", "voice"],
+    },
+    IAMCCS_CineV2VTimelineDirector: {
+        kind: "v2v",
+        widgetName: "timeline_lines",
+        title: "IAMCCS Cine V2V Timeline Director",
+        lineFields: ["seconds", "cut", "source", "sourceRange", "ref", "audio", "label", "prompt", "dialogue", "voice", "v2vMode"],
+    },
     IAMCCS_LTX2_CinematicMultiGenPlanner: {
         kind: "multigen",
         widgetName: "shot_lines",
-        title: "IAMCCS MultiGen Timeline Editor",
+        title: "IAMCCS Cine Multi-Generation Director",
         lineFields: ["seconds", "cut", "ref", "audio", "label", "prompt", "dialogue", "voice"],
     },
     IAMCCS_LTX2_CinematicV2VTimelinePlanner: {
         kind: "v2v",
         widgetName: "timeline_lines",
-        title: "IAMCCS V2V Timeline Editor",
+        title: "IAMCCS Cine V2V Timeline Director",
         lineFields: ["seconds", "cut", "source", "sourceRange", "ref", "audio", "label", "prompt", "dialogue", "voice", "v2vMode"],
     },
 };
@@ -416,18 +433,18 @@ function ensureStyles() {
             position: fixed;
             inset: 0;
             z-index: 100000;
-            background: rgba(5, 8, 12, 0.72);
+            background: rgba(12, 9, 6, 0.76);
             display: flex;
             align-items: center;
             justify-content: center;
             font-family: Inter, Arial, sans-serif;
-            color: #eaf1f8;
+            color: #F1E8D2;
         }
         .iamccs-cine-modal {
             width: min(96vw, 1500px);
             height: min(92vh, 920px);
-            background: #101820;
-            border: 1px solid #375064;
+            background: #171512;
+            border: 1px solid #4A4032;
             box-shadow: 0 24px 80px rgba(0,0,0,0.55);
             display: grid;
             grid-template-rows: auto auto 1fr auto;
@@ -441,14 +458,14 @@ function ensureStyles() {
         .iamccs-cine-assets,
         .iamccs-cine-footer {
             padding: 12px 16px;
-            border-bottom: 1px solid #263847;
+            border-bottom: 1px solid #4A4032;
             display: flex;
             gap: 10px;
             align-items: center;
             flex-wrap: wrap;
         }
         .iamccs-cine-footer {
-            border-top: 1px solid #263847;
+            border-top: 1px solid #4A4032;
             border-bottom: 0;
             justify-content: space-between;
         }
@@ -459,7 +476,7 @@ function ensureStyles() {
             margin-right: auto;
         }
         .iamccs-cine-help {
-            color: #9eb2c4;
+            color: #B8A98E;
             font-size: 12px;
         }
         .iamccs-cine-steps {
@@ -469,30 +486,30 @@ function ensureStyles() {
             width: 100%;
         }
         .iamccs-cine-step {
-            background: #0d141c;
-            border: 1px solid #31485b;
+            background: #201D18;
+            border: 1px solid #4A4032;
             border-radius: 6px;
             padding: 8px;
             min-height: 52px;
         }
         .iamccs-cine-step strong {
             display: block;
-            color: #eaf1f8;
+            color: #F1E8D2;
             font-size: 12px;
             margin-bottom: 4px;
         }
         .iamccs-cine-step span {
-            color: #9eb2c4;
+            color: #B8A98E;
             font-size: 11px;
             line-height: 1.25;
         }
         .iamccs-cine-assets {
-            background: #0d141c;
+            background: #201D18;
             align-items: flex-start;
         }
         .iamccs-cine-assets-title {
             min-width: 160px;
-            color: #cfe0ee;
+            color: #F1E8D2;
             font-size: 12px;
             font-weight: 700;
             padding-top: 7px;
@@ -508,16 +525,16 @@ function ensureStyles() {
             gap: 4px;
         }
         .iamccs-cine-asset-field label {
-            color: #9eb2c4;
+            color: #B8A98E;
             font-size: 11px;
         }
         .iamccs-cine-btn,
         .iamccs-cine-select,
         .iamccs-cine-input,
         .iamccs-cine-textarea {
-            background: #172331;
-            color: #edf6ff;
-            border: 1px solid #3c5368;
+            background: #11100D;
+            color: #F1E8D2;
+            border: 1px solid #4A4032;
             border-radius: 6px;
             font-size: 12px;
             font-family: Inter, Arial, sans-serif;
@@ -527,9 +544,9 @@ function ensureStyles() {
             cursor: pointer;
             white-space: nowrap;
         }
-        .iamccs-cine-btn:hover { background: #20344a; }
-        .iamccs-cine-btn.primary { background: #2d6f9f; border-color: #4d9bd0; }
-        .iamccs-cine-btn.danger { background: #552734; border-color: #81445a; }
+        .iamccs-cine-btn:hover { background: #4A4032; }
+        .iamccs-cine-btn.primary { background: #5A4424; border-color: #D6A85A; }
+        .iamccs-cine-btn.danger { background: #6E2D31; border-color: #B84A4A; }
         .iamccs-cine-select,
         .iamccs-cine-input {
             height: 30px;
@@ -554,21 +571,21 @@ function ensureStyles() {
         .iamccs-cine-table th {
             position: sticky;
             top: 0;
-            background: #172331;
+            background: #201D18;
             z-index: 1;
-            border-bottom: 1px solid #3c5368;
-            color: #bcd0df;
+            border-bottom: 1px solid #4A4032;
+            color: #B8A98E;
             font-size: 11px;
             text-align: left;
             padding: 7px 6px;
         }
         .iamccs-cine-table td {
-            border-bottom: 1px solid #253747;
+            border-bottom: 1px solid #3A332A;
             padding: 6px;
             vertical-align: top;
         }
         .iamccs-cine-row-index {
-            color: #91a9bc;
+            color: #B8A98E;
             font-weight: 700;
             text-align: center;
             padding-top: 12px;
@@ -586,11 +603,11 @@ function ensureStyles() {
             width: min(720px, 44vw);
             min-height: 86px;
             max-height: 130px;
-            color: #c9d8e5;
-            background: #0b1118;
+            color: #F1E8D2;
+            background: #11100D;
         }
         .iamccs-cine-status {
-            color: #9eb2c4;
+            color: #B8A98E;
             font-size: 12px;
             max-width: 360px;
             white-space: pre-line;
@@ -599,9 +616,9 @@ function ensureStyles() {
             width: min(420px, 30vw);
             max-height: 130px;
             overflow: auto;
-            background: #0b1118;
-            border: 1px solid #31485b;
-            color: #cfe0ee;
+            background: #11100D;
+            border: 1px solid #4A4032;
+            color: #F1E8D2;
             padding: 8px;
             font-size: 12px;
             line-height: 1.35;
@@ -995,6 +1012,9 @@ function installEditorButton(node, config) {
     if (!node || node.__iamccsTimelineEditorInstalled) return;
     node.__iamccsTimelineEditorInstalled = true;
     node.properties = node.properties || {};
+    node.color = CINE_FILM_LAB.header;
+    node.bgcolor = CINE_FILM_LAB.nodeBg;
+    node.boxcolor = CINE_FILM_LAB.relay;
 
     const rawWidget = getWidget(node, config.widgetName);
     if (rawWidget) {

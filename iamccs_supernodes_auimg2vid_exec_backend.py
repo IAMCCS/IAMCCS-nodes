@@ -77,6 +77,7 @@ _GENERATION_TYPE_MODES = (
 _RENDER_BACKEND_MODES = (
     "auto",
     "single_best",
+    "ti2v_incremental_advanced",
     "legacy backend",
     "legacy_single",
     "legacy_two_segments",
@@ -203,6 +204,34 @@ def _audio_duration_seconds(audio):
         waveform = torch.tensor(waveform)
     total_samples = int(waveform.shape[-1])
     return float(total_samples) / float(sample_rate)
+
+
+def _sanitize_audio_for_ffmpeg(audio):
+    if audio is None:
+        return None, "audio_sanitize=off(no_audio)"
+    if not isinstance(audio, dict):
+        return audio, "audio_sanitize=skipped(non_dict_audio)"
+    waveform = audio.get("waveform")
+    if waveform is None:
+        return audio, "audio_sanitize=skipped(no_waveform)"
+    if not isinstance(waveform, torch.Tensor):
+        waveform = torch.tensor(waveform)
+    finite_mask = torch.isfinite(waveform)
+    non_finite_count = int((~finite_mask).sum().item()) if waveform.numel() else 0
+    sanitized_waveform = torch.nan_to_num(waveform.float(), nan=0.0, posinf=0.0, neginf=0.0)
+    pre_clamp_peak = float(sanitized_waveform.abs().max().item()) if sanitized_waveform.numel() else 0.0
+    clipped = pre_clamp_peak > 1.0
+    if clipped:
+        sanitized_waveform = sanitized_waveform.clamp(-1.0, 1.0)
+    if non_finite_count == 0 and not clipped:
+        return audio, "audio_sanitize=clean"
+    sanitized_audio = dict(audio)
+    sanitized_audio["waveform"] = sanitized_waveform.to(device=waveform.device)
+    report = (
+        f"audio_sanitize={'fixed' if (non_finite_count or clipped) else 'clean'} | "
+        f"non_finite={non_finite_count} | peak_before_clamp={pre_clamp_peak:.6f} | clipped={'yes' if clipped else 'no'}"
+    )
+    return sanitized_audio, report
 
 
 def _parse_payload(payload):
@@ -516,6 +545,10 @@ def _normalize_backend_mode(mode):
         "auto": "auto",
         "single_workflow1_best": "single_best",
         "single_best": "single_best",
+        "ti2v_incremental": "ti2v_incremental_advanced",
+        "ti2v_advanced": "ti2v_incremental_advanced",
+        "ti2v_incremental_advanced": "ti2v_incremental_advanced",
+        "advanced_incremental": "ti2v_incremental_advanced",
         "legacy backend": "legacy_single",
         "legacy_backend": "legacy_single",
         "legacy_github": "legacy_single",
@@ -602,6 +635,8 @@ def _resolve_generation_type(generation_type, generation_mode, backend_mode, med
         requested = _AUDIO_IMAGE_GENERATION_TYPE
     resolved_generation, resolved_backend, resolved_media = mapping[requested]
     requested_backend = _normalize_backend_mode(backend_mode)
+    if requested in {"img2video", "text2video"} and requested_backend in {"single_best", "ti2v_incremental_advanced"}:
+        resolved_backend = requested_backend
     if requested == _AUDIO_IMAGE_GENERATION_TYPE and requested_backend in _LEGACY_AUDIO_IMG2VID_BACKENDS:
         resolved_backend = requested_backend
     return requested, resolved_generation, resolved_backend, resolved_media
@@ -734,6 +769,8 @@ def _resolve_backend_route(requested_backend_mode, planner_segment_count, modula
     modular_decode = _normalize_modular_decode_mode(modular_decode, backend_mode)
     decode_is_disk = modular_decode in {"low_ram_disk", "very_low_ram_disk"}
 
+    if backend_mode == "ti2v_incremental_advanced":
+        return backend_mode, 1, True, False, modular_decode
     if backend_mode == "legacy_single":
         return backend_mode, 1, True, False, modular_decode
     if backend_mode == "legacy_two_segments":
@@ -2552,6 +2589,11 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
         )
         legacy_audio_img2vid_backend = reference_audio_img2vid and _is_legacy_audio_img2vid_backend(backend_mode)
         legacy_planner_adapter = bool(legacy_audio_img2vid_backend)
+        ti2v_incremental_backend = (
+            str(backend_mode) == "ti2v_incremental_advanced"
+            and not bool(uses_input_audio)
+            and str(generation_type) in {"img2video", "text2video"}
+        )
         _pipeline_debug_step(
             pipeline_debug,
             "planner_route",
@@ -2658,10 +2700,21 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
             str(second_stage_mode) != "off"
             and _to_text(stage2_data, "stage2_model_policy", "stage2_model_if_connected") == "stage2_model_if_connected"
             and second_stage_model is None
+            and not ti2v_incremental_backend
         ):
             second_stage_mode = "off"
             second_stage_scale_mode = "same_resolution_refine"
             reference_stage2_auto = ""
+        ti2v_incremental_final_width = None
+        ti2v_incremental_final_height = None
+        if ti2v_incremental_backend:
+            second_stage_mode = "latent_upscale_refine_x2_beta"
+            second_stage_scale_mode = "x2_latent_upscale_beta"
+            second_stage_upscale_model_name = _reference_ltx23_upscale_model_name()
+            second_stage_reinject_strength = 0.0 if str(generation_mode) == "t2v" else (1.0 if float(second_stage_reinject_strength) <= 0.0 else float(second_stage_reinject_strength))
+            second_stage_cfg = float(second_stage_cfg or 1.0)
+            second_stage_manual_sigmas = second_stage_manual_sigmas or "0.909375, 0.725, 0.421875, 0.0"
+            reference_stage2_auto = "ti2v_incremental_advanced"
         second_stage_model_source = "stage2_model" if second_stage_model is not None and stage2_model_active is second_stage_model else "stage1_model"
         _pipeline_debug_step(
             pipeline_debug,
@@ -2763,6 +2816,29 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
             resize_report = "image_resize=not_used"
             latent_width = int(width)
             latent_height = int(height)
+            if ti2v_incremental_backend:
+                ti2v_incremental_final_width = _round_up_to_multiple(int(width), 32)
+                ti2v_incremental_final_height = _round_up_to_multiple(int(height), 32)
+                latent_width = max(64, int(round(float(ti2v_incremental_final_width) / 2.0)))
+                latent_height = max(64, int(round(float(ti2v_incremental_final_height) / 2.0)))
+                width = int(latent_width)
+                height = int(latent_height)
+                if str(generation_mode) != "t2v":
+                    guidance_image = _resize_image_to(image, int(ti2v_incremental_final_width), int(ti2v_incremental_final_height))
+                    resize_report = (
+                        "ti2v_incremental_advanced:first_pass_half_res | "
+                        f"final={int(ti2v_incremental_final_width)}x{int(ti2v_incremental_final_height)} | "
+                        f"first={int(width)}x{int(height)}"
+                    )
+                _pipeline_debug_step(
+                    pipeline_debug,
+                    "ti2v_incremental_resolution",
+                    final_width=ti2v_incremental_final_width,
+                    final_height=ti2v_incremental_final_height,
+                    first_pass_width=width,
+                    first_pass_height=height,
+                    second_stage="latent_upscale_x2",
+                )
             if str(generation_mode) != "t2v" and reference_audio_img2vid and legacy_audio_img2vid_backend:
                 (
                     legacy_requested_width,
@@ -2993,10 +3069,19 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 str(second_stage_mode) != "off"
                 and _to_text(stage2_data, "stage2_model_policy", "stage2_model_if_connected") == "stage2_model_if_connected"
                 and second_stage_model is None
+                and not ti2v_incremental_backend
             ):
                 second_stage_mode = "off"
                 second_stage_scale_mode = "same_resolution_refine"
                 reference_stage2_auto = ""
+            if ti2v_incremental_backend:
+                second_stage_mode = "latent_upscale_refine_x2_beta"
+                second_stage_scale_mode = "x2_latent_upscale_beta"
+                second_stage_upscale_model_name = _reference_ltx23_upscale_model_name()
+                second_stage_reinject_strength = 0.0 if str(generation_mode) == "t2v" else (1.0 if float(second_stage_reinject_strength) <= 0.0 else float(second_stage_reinject_strength))
+                second_stage_cfg = float(second_stage_cfg or 1.0)
+                second_stage_manual_sigmas = second_stage_manual_sigmas or "0.909375, 0.725, 0.421875, 0.0"
+                reference_stage2_auto = "ti2v_incremental_advanced"
             second_stage_model_source = "stage2_model" if second_stage_model is not None and stage2_model_active is second_stage_model else "stage1_model"
             _pipeline_debug_step(
                 pipeline_debug,
@@ -3025,7 +3110,9 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 else:
                     stage2_video_latent = cropped_video_latent
                 if float(second_stage_reinject_strength) > 0.0 and str(generation_mode) != "t2v":
-                    resized_guidance_image = _resize_image_to(image, int(width), int(height))
+                    reinject_width = int(ti2v_incremental_final_width or width)
+                    reinject_height = int(ti2v_incremental_final_height or height)
+                    resized_guidance_image = _resize_image_to(image, reinject_width, reinject_height)
                     preprocessed_guidance = LTXVPreprocess.execute(resized_guidance_image, int(image_compression))[0]
                     reinjected_video_latent = LTXVImgToVideoInplace.execute(
                         vae,
@@ -3089,7 +3176,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 f"Single duration protection. planner_total={int(planner_total_frames)}f | audio_total_with_tail={int(audio_total_frames_with_tail)}f | chosen_total={int(total_frames)}f\n"
                 f"Audio preprocess. {audio_preprocess_report}\n"
                 f"Single route details. sampler={effective_sampler} | cfg={float(effective_cfg_value):.3f} | sigmas={sigmas_report} | sampler_node={sampler_node_name} | cleanup_before_sampling=soft_cleanup | model_sampling={model_sampling_report} | motion_intensity={'ignored_strict_reference' if reference_audio_img2vid else f'{motion_intensity:.2f}'} | vram_flush={'on' if bool(vram_flush) else 'off'} | vae_frame_align={'off_official_audio_img2vid' if disable_vae_frame_align else 'on'} | {route_extra_report}\n"
-                f"Executable AU+IMG2VID render completed. single generation backend={'legacy_single' if legacy_audio_img2vid_backend else ('strict_workflow1_canvas_reference' if reference_audio_img2vid else 'workflow1_best')} | latent handed to VAE stage"
+                f"Executable AU+IMG2VID render completed. single generation backend={'ti2v_incremental_advanced' if ti2v_incremental_backend else ('legacy_single' if legacy_audio_img2vid_backend else ('strict_workflow1_canvas_reference' if reference_audio_img2vid else 'workflow1_best'))} | latent handed to VAE stage"
             )
             report = _append_debug_report(report, single_debug_report)
             render_linx = build_stage_linx_payload(
@@ -4301,6 +4388,15 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
         if audio is None and not pure_no_audio:
             _pipeline_debug_step(pipeline_debug, "error_missing_audio", pure_no_audio=pure_no_audio, media_mode=media_mode_hint, generation_type=generation_type_hint)
             audio = _require_runtime_value(audio, "audio")
+        audio, audio_sanitize_report = _sanitize_audio_for_ffmpeg(audio)
+        if audio_sanitize_report not in {"audio_sanitize=clean", "audio_sanitize=off(no_audio)"}:
+            _pipeline_debug_step(
+                pipeline_debug,
+                "audio_sanitized_for_ffmpeg",
+                audio_source=audio_source,
+                sanitize_report=audio_sanitize_report,
+                audio=audio,
+            )
         _pipeline_debug_step(
             pipeline_debug,
             "audio_resolved",
@@ -4308,6 +4404,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
             media_mode_hint=media_mode_hint,
             generation_type_hint=generation_type_hint,
             audio_source=audio_source,
+            audio_sanitize=audio_sanitize_report,
             audio=audio,
         )
         vae = _input_or_linx(vae, linx, "vae")
@@ -4478,6 +4575,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
             pix_fmt=pix_fmt,
             trim_to_audio=bool(trim_to_audio) and audio is not None,
             audio_mux=audio is not None,
+            audio_sanitize=audio_sanitize_report,
             target_frame_count=target_frame_count,
             target_frame_count_source=target_frame_count_source,
             frame_align_report=frame_align_report,
@@ -4508,6 +4606,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
                     "target_frame_count": int(target_frame_count),
                     "target_frame_count_source": str(target_frame_count_source),
                     "frame_align_report": str(frame_align_report),
+                    "audio_sanitize": str(audio_sanitize_report),
                     "save_metadata": bool(save_metadata),
                     "vram_flush": bool(vram_flush_enabled),
                     "ui_preset": str(ui_preset),
@@ -4528,7 +4627,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
             f"tile_size={int(tiled_tile_size)} | overlap={int(tiled_overlap)} | "
             f"temporal_size={int(tiled_temporal_size)} | temporal_overlap={int(tiled_temporal_overlap)} | "
             f"cleanup_before_decode={'on' if bool(cleanup_before_decode) else 'off'} | "
-            f"audio_mux={'on' if audio is not None else 'off'} | audio_source={audio_source} | vram_flush={'on' if vram_flush_enabled else 'off'}\n"
+            f"audio_mux={'on' if audio is not None else 'off'} | audio_source={audio_source} | {audio_sanitize_report} | vram_flush={'on' if vram_flush_enabled else 'off'}\n"
             f"{decode_report} | {combine_report} | {metadata_report}"
         )
         report = _append_debug_report(report, vae_debug_report)
@@ -4578,6 +4677,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableVAE:
             resources={
                 "audio": audio,
                 "audio_passthrough": audio,
+                "audio_sanitize_report": str(audio_sanitize_report),
                 "vae": vae,
                 "fps": float(frame_rate),
                 "target_frame_count": int(target_frame_count),

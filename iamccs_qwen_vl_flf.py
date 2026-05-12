@@ -516,7 +516,144 @@ def _build_node_classes():
                 seed, keep_model_loaded, attention_mode, use_torch_compile, device,
             )
 
-    return IAMCCS_QWEN_VL_FLF, IAMCCS_QWEN_VL_FLF_Advanced
+    # ------------------------------------------------------------------
+    # Cine Reference Board analyzer: multi-image input for Shotboard/NarrativePlanner
+    # ------------------------------------------------------------------
+    class IAMCCS_QWEN_VL_CineReferenceBoardAnalyzer(_FLFMixin, Base):
+        """Analyze a complete CineReferenceBoard image batch and emit structured planner text."""
+
+        @classmethod
+        def INPUT_TYPES(cls):
+            models = list(HF_VL_MODELS.keys())
+            default_model = models[0] if models else "Qwen2.5-VL-3B-Instruct"
+            default_instruction = (
+                "You are an IAMCCS Cine reference-board analyzer for LTX 2.3 FLF. "
+                "You will receive multiple images in order. Treat image 1 as ref 1, image 2 as ref 2, and so on. "
+                "Output plain text only, no markdown. Use exactly this format, with one line for each visible image: "
+                "ref 1: short visual description and cinematic role. "
+                "ref 2: short visual description and cinematic role. "
+                "After the ref lines, add one line starting with global prompt: describing one coherent cinematic motion path. "
+                "Then add local prompt N: lines for the key beats that should guide PromptRelay if the user enables relay. "
+                "Keep everything concise, practical, and suitable for a filmmaker editing a shotboard."
+            )
+            return {
+                "required": {
+                    "model_name": (models, {"default": default_model, "tooltip": FLF_TOOLTIPS["model_name"]}),
+                    "quantization": (Quantization.get_values(), {"default": Quantization.FP16.value, "tooltip": FLF_TOOLTIPS["quantization"]}),
+                    "attention_mode": (ATTENTION_MODES, {"default": "auto", "tooltip": FLF_TOOLTIPS["attention_mode"]}),
+                    "planner_instruction": ("STRING", {"default": default_instruction, "multiline": True}),
+                    "max_images": ("INT", {"default": 12, "min": 1, "max": 64}),
+                    "max_tokens": ("INT", {"default": 768, "min": 128, "max": 4096, "tooltip": FLF_TOOLTIPS["max_tokens"]}),
+                    "keep_model_loaded": ("BOOLEAN", {"default": True, "tooltip": FLF_TOOLTIPS["keep_model_loaded"]}),
+                    "seed": ("INT", {"default": 1, "min": 1, "max": 2**32 - 1, "tooltip": FLF_TOOLTIPS["seed"]}),
+                },
+                "optional": {
+                    "images": ("IMAGE", {"tooltip": "Connect IAMCCS_CineReferenceBoard.multi_output here."}),
+                },
+            }
+
+        RETURN_TYPES = ("STRING",)
+        RETURN_NAMES = ("VLM_ANALYSIS",)
+        FUNCTION = "process"
+        OUTPUT_NODE = True
+        CATEGORY = "IAMCCS/QwenVL"
+        DESCRIPTION = (
+            "Analyzes every image in a CineReferenceBoard batch and outputs structured ref/global/local text "
+            "for IAMCCS_CineNarrativePlanner.vlm_analysis_text."
+        )
+
+        @torch.no_grad()
+        def generate_board_analysis(self, prompt_text, images, max_images, max_tokens):
+            content = []
+            image_items = []
+            if images is not None and torch.is_tensor(images):
+                count = min(int(max_images), int(images.shape[0]))
+                for i in range(count):
+                    pil = self.tensor_to_pil(images[i:i + 1])
+                    if pil is not None:
+                        content.append({"type": "image", "image": pil})
+                        image_items.append(pil)
+
+            if not image_items:
+                return "global prompt: no reference images were connected to the VLM analyzer."
+
+            content.append({"type": "text", "text": prompt_text})
+            conversation = [{"role": "user", "content": content}]
+            chat = self.processor.apply_chat_template(
+                conversation, tokenize=False, add_generation_prompt=True
+            )
+            processed = self.processor(
+                text=chat,
+                images=image_items,
+                videos=None,
+                return_tensors="pt",
+            )
+
+            model_device = next(self.model.parameters()).device
+            model_inputs = {
+                k: v.to(model_device) if torch.is_tensor(v) else v
+                for k, v in processed.items()
+            }
+            stop_tokens = [self.tokenizer.eos_token_id]
+            if hasattr(self.tokenizer, "eot_id") and self.tokenizer.eot_id is not None:
+                stop_tokens.append(self.tokenizer.eot_id)
+
+            outputs = self.model.generate(
+                **model_inputs,
+                max_new_tokens=max_tokens,
+                repetition_penalty=1.15,
+                num_beams=1,
+                do_sample=True,
+                temperature=0.35,
+                top_p=0.9,
+                eos_token_id=stop_tokens,
+                pad_token_id=self.tokenizer.pad_token_id,
+            )
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            input_len = model_inputs["input_ids"].shape[-1]
+            text = self.tokenizer.decode(outputs[0, input_len:], skip_special_tokens=True)
+            return text.strip()
+
+        def process(
+            self,
+            model_name,
+            quantization,
+            attention_mode,
+            planner_instruction,
+            max_images,
+            max_tokens,
+            keep_model_loaded,
+            seed,
+            images=None,
+        ):
+            from comfy.utils import ProgressBar
+            pbar = ProgressBar(3)
+            torch.manual_seed(seed)
+            pbar.update_absolute(1, 3, None)
+            self.load_model(
+                model_name,
+                quantization,
+                attention_mode,
+                False,
+                "auto",
+                keep_model_loaded,
+            )
+            pbar.update_absolute(2, 3, None)
+            try:
+                text = self.generate_board_analysis(
+                    str(planner_instruction or ""),
+                    images,
+                    int(max_images),
+                    int(max_tokens),
+                )
+                pbar.update_absolute(3, 3, None)
+                return {"ui": {"text": [text]}, "result": (text,)}
+            finally:
+                if not keep_model_loaded:
+                    self.clear()
+
+    return IAMCCS_QWEN_VL_FLF, IAMCCS_QWEN_VL_FLF_Advanced, IAMCCS_QWEN_VL_CineReferenceBoardAnalyzer
 
 
 # ---------------------------------------------------------------------------
@@ -524,19 +661,22 @@ def _build_node_classes():
 # ---------------------------------------------------------------------------
 
 try:
-    IAMCCS_QWEN_VL_FLF, IAMCCS_QWEN_VL_FLF_Advanced = _build_node_classes()
+    IAMCCS_QWEN_VL_FLF, IAMCCS_QWEN_VL_FLF_Advanced, IAMCCS_QWEN_VL_CineReferenceBoardAnalyzer = _build_node_classes()
 
     NODE_CLASS_MAPPINGS = {
         "IAMCCS_QWEN_VL_FLF":          IAMCCS_QWEN_VL_FLF,
         "IAMCCS_QWEN_VL_FLF_Advanced": IAMCCS_QWEN_VL_FLF_Advanced,
+        "IAMCCS_QWEN_VL_CineReferenceBoardAnalyzer": IAMCCS_QWEN_VL_CineReferenceBoardAnalyzer,
     }
 
     NODE_DISPLAY_NAME_MAPPINGS = {
-        "IAMCCS_QWEN_VL_FLF":          "QwenVL FLF — First/Last Frame Prompt 🎬",
-        "IAMCCS_QWEN_VL_FLF_Advanced": "QwenVL FLF — First/Last Frame Prompt (Advanced) 🎬",
+        "IAMCCS_QWEN_VL_FLF":          "QwenVL FLF - First/Last Frame Prompt",
+        "IAMCCS_QWEN_VL_FLF_Advanced": "QwenVL FLF - First/Last Frame Prompt (Advanced)",
+        "IAMCCS_QWEN_VL_CineReferenceBoardAnalyzer": "QwenVL Cine Reference Board Analyzer",
     }
 
-    print("[IAMCCS] IAMCCS_QWEN_VL_FLF nodes loaded OK")
+    print("[IAMCCS] IAMCCS_QWEN_VL_FLF / Cine Board Analyzer nodes loaded OK")
+
 
 except Exception as _err:
     print(f"[IAMCCS] WARNING: IAMCCS_QWEN_VL_FLF could not load — {_err}")
@@ -546,3 +686,4 @@ except Exception as _err:
     NODE_DISPLAY_NAME_MAPPINGS = {}
     IAMCCS_QWEN_VL_FLF          = None
     IAMCCS_QWEN_VL_FLF_Advanced = None
+    IAMCCS_QWEN_VL_CineReferenceBoardAnalyzer = None
