@@ -9,10 +9,6 @@ import torch
 from comfy_api.latest import io as comfy_io
 from comfy_extras.nodes_lt import LTXVAddGuide
 
-try:
-    from comfy_extras.nodes_lt import _append_guide_attention_entry
-except Exception:
-    _append_guide_attention_entry = None
 from PIL import Image, ImageOps
 
 
@@ -324,16 +320,6 @@ class IAMCCS_WDC_LTXSequencer(LTXVAddGuide):
                 float(strength),
                 scale_factors,
             )
-            if _append_guide_attention_entry is not None:
-                pre_filter_count = t.shape[2] * t.shape[3] * t.shape[4]
-                guide_latent_shape = list(t.shape[2:])
-                positive, negative = _append_guide_attention_entry(
-                    positive,
-                    negative,
-                    pre_filter_count,
-                    guide_latent_shape,
-                    strength=float(strength),
-                )
 
         return comfy_io.NodeOutput(positive, negative, {"samples": latent_image, "noise_mask": noise_mask})
 
@@ -469,21 +455,19 @@ class IAMCCS_CineLTXSequencerExact(LTXVAddGuide):
                 float(strength),
                 scale_factors,
             )
-            if _append_guide_attention_entry is not None:
-                pre_filter_count = t.shape[2] * t.shape[3] * t.shape[4]
-                guide_latent_shape = list(t.shape[2:])
-                positive, negative = _append_guide_attention_entry(
-                    positive,
-                    negative,
-                    pre_filter_count,
-                    guide_latent_shape,
-                    strength=float(strength),
-                )
 
         return comfy_io.NodeOutput(positive, negative, {"samples": latent_image, "noise_mask": noise_mask})
 
 
 class IAMCCS_CineFLFEngineSimple(LTXVAddGuide):
+    @classmethod
+    def fingerprint_inputs(cls, *args, **kwargs):
+        return float("nan")
+
+    @classmethod
+    def IS_CHANGED(cls, *args, **kwargs):
+        return float("nan")
+
     @classmethod
     def define_schema(cls):
         inputs = [
@@ -735,16 +719,6 @@ class IAMCCS_CineFLFEngineSimple(LTXVAddGuide):
                 strength,
                 scale_factors,
             )
-            if _append_guide_attention_entry is not None:
-                pre_filter_count = t.shape[2] * t.shape[3] * t.shape[4]
-                guide_latent_shape = list(t.shape[2:])
-                positive, negative = _append_guide_attention_entry(
-                    positive,
-                    negative,
-                    pre_filter_count,
-                    guide_latent_shape,
-                    strength=strength,
-                )
 
         return comfy_io.NodeOutput(positive, negative, {"samples": latent_image, "noise_mask": noise_mask})
 
@@ -846,16 +820,6 @@ class IAMCCS_WDC_LTXSequencerFixed5:
                 float(strength),
                 scale_factors,
             )
-            if _append_guide_attention_entry is not None:
-                pre_filter_count = t.shape[2] * t.shape[3] * t.shape[4]
-                guide_latent_shape = list(t.shape[2:])
-                positive, negative = _append_guide_attention_entry(
-                    positive,
-                    negative,
-                    pre_filter_count,
-                    guide_latent_shape,
-                    strength=float(strength),
-                )
             applied += 1
             ops.append(f"image_{idx}:f{frame_idx}->t{latent_idx},s={float(strength):.2f}")
 

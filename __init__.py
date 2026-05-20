@@ -1,4 +1,4 @@
-# ==========================================================
+﻿# ==========================================================
 # __init__.py — Registro nodi IAMCCS
 # ==========================================================
 
@@ -108,14 +108,24 @@ from .iamccs_cine_nodes import (
     IAMCCS_CineShotboardTimelinePro,
     IAMCCS_CineShotboardPlannerPro,
     IAMCCS_CineShotboardPlannerProV2,
+    IAMCCS_CineShotboardPlannerV3,
     IAMCCS_CineShotboardLite,
     IAMCCS_CineShotboardPlannerProLegacy,
     IAMCCS_CineInfo,
+    IAMCCS_CineInfoV2,
+    IAMCCS_CineFLFProductor,
+    IAMCCS_CineFilmmaker,
+    IAMCCS_CineFilmmakerBackend,
+    IAMCCS_CineShotboardBackendPro,
+    IAMCCS_CineFilmmakerGuide,
+    IAMCCS_CineFilmmakerGuide1to1,
     IAMCCS_CineSwitch,
     IAMCCS_CinePromptRelayLatentShapeSync,
     IAMCCS_CineFLFLengthCompensator,
     IAMCCS_CinePromptRelaySafeEncode,
     IAMCCS_CineRelayOrBypass,
+    IAMCCS_CinePromptArchitect,
+    IAMCCS_BoardMaker,
     IAMCCS_CineMusicVideoPlanner,
     IAMCCS_CineShotPlanner,
     IAMCCS_CineRefLatentControl,
@@ -131,6 +141,12 @@ from .iamccs_cine_nodes import (
     IAMCCS_CineV2VAssetSelector,
     IAMCCS_CineWorkflowInspector,
 )
+from .iamccs_cine_resolution_parity import IAMCCS_CineResolutionParityTranslator
+from .iamccs_cine_stage_switch import IAMCCS_CineStage2BypassSwitch
+from .iamccs_cine_stage2_preview_toggle import IAMCCS_CineStage2PreviewToggle
+from .iamccs_cine_flf_productor_dyno import IAMCCS_CineFLFProductorDyno
+from .iamccs_cine_flf_engine_simple_dyno import IAMCCS_CineFLFEngineSimpleDyno
+from .iamccs_cine_duration_lock import IAMCCS_CineBoardDurationLock, IAMCCS_CineLatentDurationCrop
 
 from .iamccs_ltx2_temporal_overlap_samplers import (
     IAMCCS_LTX2_ConditionNextLatentWithPrevOverlap,
@@ -210,6 +226,12 @@ from .iamccs_hw_supporter import (
 
 from .iamccs_hw_probe_node import (
     IAMCCS_HWProbeRecommendations,
+)
+
+from .iamccs_detail_atelier import (
+    IAMCCS_DetailAtelier,
+    IAMCCS_DetailAtelierAdvanced,
+    IAMCCS_DetailAtelierSampler,
 )
 
 from .iamccs_qwen_vl_flf import (
@@ -374,14 +396,30 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_CineShotboardTimelinePro": IAMCCS_CineShotboardTimelinePro,
     "IAMCCS_CineShotboardPlannerPro": IAMCCS_CineShotboardPlannerPro,
     "IAMCCS_CineShotboardPlannerProV2": IAMCCS_CineShotboardPlannerProV2,
+    "IAMCCS_CineShotboardPlannerV3": IAMCCS_CineShotboardPlannerV3,
     "IAMCCS_CineShotboardLite": IAMCCS_CineShotboardLite,
     "IAMCCS_CineShotboardPlannerProLegacy": IAMCCS_CineShotboardPlannerProLegacy,
+    "IAMCCS_CineResolutionParityTranslator": IAMCCS_CineResolutionParityTranslator,
+    "IAMCCS_CineStage2BypassSwitch": IAMCCS_CineStage2BypassSwitch,
+    "IAMCCS_CineStage2PreviewToggle": IAMCCS_CineStage2PreviewToggle,
     "IAMCCS_CineInfo": IAMCCS_CineInfo,
+    "IAMCCS_CineInfoV2": IAMCCS_CineInfoV2,
+    "IAMCCS_CineFLFProductor": IAMCCS_CineFLFProductor,
+    "IAMCCS_CineFLFProductorDyno": IAMCCS_CineFLFProductorDyno,
+    "IAMCCS_CineFilmmaker": IAMCCS_CineFilmmaker,
+    "IAMCCS_CineFilmmakerBackend": IAMCCS_CineFilmmakerBackend,
+    "IAMCCS_CineShotboardBackendPro": IAMCCS_CineShotboardBackendPro,
+    "IAMCCS_CineFilmmakerGuide": IAMCCS_CineFilmmakerGuide,
+    "IAMCCS_CineFilmmakerGuide1to1": IAMCCS_CineFilmmakerGuide1to1,
     "IAMCCS_CineSwitch": IAMCCS_CineSwitch,
     "IAMCCS_CinePromptRelayLatentShapeSync": IAMCCS_CinePromptRelayLatentShapeSync,
     "IAMCCS_CineFLFLengthCompensator": IAMCCS_CineFLFLengthCompensator,
+    "IAMCCS_CineBoardDurationLock": IAMCCS_CineBoardDurationLock,
+    "IAMCCS_CineLatentDurationCrop": IAMCCS_CineLatentDurationCrop,
     "IAMCCS_CinePromptRelaySafeEncode": IAMCCS_CinePromptRelaySafeEncode,
     "IAMCCS_CineRelayOrBypass": IAMCCS_CineRelayOrBypass,
+    "IAMCCS_CinePromptArchitect": IAMCCS_CinePromptArchitect,
+    "IAMCCS_BoardMaker": IAMCCS_BoardMaker,
     "IAMCCS_CineMusicVideoPlanner": IAMCCS_CineMusicVideoPlanner,
     "IAMCCS_CineShotPlanner": IAMCCS_CineShotPlanner,
     "IAMCCS_CineRefLatentControl": IAMCCS_CineRefLatentControl,
@@ -401,6 +439,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_WDC_LTXSequencer": IAMCCS_WDC_LTXSequencer,
     "IAMCCS_CineLTXSequencerExact": IAMCCS_CineLTXSequencerExact,
     "IAMCCS_CineFLFEngineSimple": IAMCCS_CineFLFEngineSimple,
+    "IAMCCS_CineFLFEngineSimpleDyno": IAMCCS_CineFLFEngineSimpleDyno,
     "IAMCCS_WDC_LTXSequencerFixed5": IAMCCS_WDC_LTXSequencerFixed5,
     "IAMCCS_LTX2_InitLatentSampler": IAMCCS_LTX2_InitLatentSampler,
     "IAMCCS_LTX2_LoopingSampler": IAMCCS_LTX2_LoopingSampler,
@@ -457,6 +496,9 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_VAEDecodeTiledSafe": IAMCCS_VAEDecodeTiledSafe,
     "IAMCCS_VAEDecodeToDisk": IAMCCS_VAEDecodeToDisk,
     "IAMCCS_HWProbeRecommendations": IAMCCS_HWProbeRecommendations,
+    "IAMCCS_DetailAtelier": IAMCCS_DetailAtelier,
+    "IAMCCS_DetailAtelierAdvanced": IAMCCS_DetailAtelierAdvanced,
+    "IAMCCS_DetailAtelierSampler": IAMCCS_DetailAtelierSampler,
 
     "IAMCCS_MoveAhead": IAMCCS_MoveAhead,
     "IAMCCS_MoveAheadEnforcer": IAMCCS_MoveAheadEnforcer,
@@ -586,14 +628,30 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_CineShotboardTimelinePro": "IAMCCS Cine Shotboard Timeline Pro",
     "IAMCCS_CineShotboardPlannerPro": "IAMCCS Cine Shotboard Planner Pro",
     "IAMCCS_CineShotboardPlannerProV2": "IAMCCS Cine Shotboard Planner Pro V2",
+    "IAMCCS_CineShotboardPlannerV3": "IAMCCS Cine Shotboard Planner V3",
     "IAMCCS_CineShotboardLite": "IAMCCS Cine Shotboard Lite",
     "IAMCCS_CineShotboardPlannerProLegacy": "IAMCCS Cine Shotboard Planner Pro Legacy Outputs",
+    "IAMCCS_CineResolutionParityTranslator": "IAMCCS Cine Resolution Parity Translator",
+    "IAMCCS_CineStage2BypassSwitch": "IAMCCS Cine Stage 2 Bypass Switch",
+    "IAMCCS_CineStage2PreviewToggle": "IAMCCS Cine Stage 2 Preview Toggle",
     "IAMCCS_CineInfo": "IAMCCS CineInfo",
+    "IAMCCS_CineInfoV2": "IAMCCS CineInfo V2",
+    "IAMCCS_CineFLFProductor": "IAMCCS Cine FLF Productor",
+    "IAMCCS_CineFLFProductorDyno": "IAMCCS Cine FLF Productor Dyno",
+    "IAMCCS_CineFilmmaker": "IAMCCS Cine Filmmaker",
+    "IAMCCS_CineFilmmakerBackend": "IAMCCS Cine Filmmaker Backend",
+    "IAMCCS_CineShotboardBackendPro": "IAMCCS Cine Shotboard Backend Pro",
+    "IAMCCS_CineFilmmakerGuide": "IAMCCS Cine Filmmaker Guide",
+    "IAMCCS_CineFilmmakerGuide1to1": "IAMCCS Cine Filmmaker Guide 1:1",
     "IAMCCS_CineSwitch": "IAMCCS CineSwitch Lazy FLF/PromptRelay",
     "IAMCCS_CinePromptRelayLatentShapeSync": "IAMCCS Cine PromptRelay Latent Shape Sync",
     "IAMCCS_CineFLFLengthCompensator": "IAMCCS Cine FLF Length Compensator",
+    "IAMCCS_CineBoardDurationLock": "IAMCCS Cine Board Duration Lock",
+    "IAMCCS_CineLatentDurationCrop": "IAMCCS Cine Latent Duration Crop",
     "IAMCCS_CinePromptRelaySafeEncode": "IAMCCS Cine PromptRelay Safe Encode",
     "IAMCCS_CineRelayOrBypass": "IAMCCS Cine Relay Or Bypass",
+    "IAMCCS_CinePromptArchitect": "IAMCCS CinePrompt Architect",
+    "IAMCCS_BoardMaker": "IAMCCS_BoardMaker",
     "IAMCCS_CineMusicVideoPlanner": "IAMCCS Cine Videoclip Maker Planner",
     "IAMCCS_CineShotPlanner": "IAMCCS Cine Shot Planner",
     "IAMCCS_CineRefLatentControl": "IAMCCS Cine Reference Latent Control",
@@ -613,6 +671,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_WDC_LTXSequencer": "IAMCCS Cine LTX Sequencer (legacy alias)",
     "IAMCCS_CineLTXSequencerExact": "IAMCCS Cine LTX Sequencer Exact",
     "IAMCCS_CineFLFEngineSimple": "IAMCCS Cine FLF Engine Simple",
+    "IAMCCS_CineFLFEngineSimpleDyno": "IAMCCS Cine FLF Engine Simple Dyno",
     "IAMCCS_WDC_LTXSequencerFixed5": "IAMCCS Cine LTX Sequencer Fixed 5 (legacy alias)",
     "IAMCCS_LTX2_InitLatentSampler": "LTX-2 Init Latent Sampler 🧱",
     "IAMCCS_LTX2_LoopingSampler": "LTX-2 Looping Sampler (temporal overlap) 🧷",
@@ -700,6 +759,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_VAEDecodeTiledSafe": "VAE Decode Tiled (safe, optional cleanup)",
     "IAMCCS_VAEDecodeToDisk": "VAE Decode → Disk (frames, low RAM)",
     "IAMCCS_HWProbeRecommendations": "HW Probe Recommendations (JSON)",
+    "IAMCCS_DetailAtelier": "IAMCCS Detail Atelier",
+    "IAMCCS_DetailAtelierAdvanced": "IAMCCS Detail Atelier Advanced",
+    "IAMCCS_DetailAtelierSampler": "IAMCCS Detail Atelier",
 
     "IAMCCS_MoveAhead": "MoveAhead (FreeLong spectral blend) 🎬",
     "IAMCCS_MoveAheadEnforcer": "MoveAhead Enforcer (3-tier motion lock) 🎬",
@@ -855,7 +917,7 @@ def setup_api_routes() -> None:
                     im = ImageOps.exif_transpose(im).convert("RGB")
                     if abs(rotation) > 0.001:
                         fill = tuple(int(v) for v in im.resize((1, 1), Image.Resampling.BILINEAR).getpixel((0, 0)))
-                        im = im.rotate(rotation, resample=Image.Resampling.BICUBIC, expand=True, fillcolor=fill)
+                        im = im.rotate(-rotation, resample=Image.Resampling.BICUBIC, expand=True, fillcolor=fill)
                     src_w, src_h = im.size
                     crop_box = None
                     preview_crop_box = None
@@ -936,6 +998,221 @@ def setup_api_routes() -> None:
                     "path": rel_path,
                     "absolute_path": out_path,
                     "metadata": metadata,
+                })
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+
+        @routes.post("/api/iamccs/cine/save_shotboard_package")
+        async def iamccs_cine_save_shotboard_package(request):
+            try:
+                import base64
+                import copy
+                import json
+                import re
+                import shutil
+                import time
+                import folder_paths
+
+                def _sanitize(value, fallback="cine_shotboard_package"):
+                    clean = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', "_", str(value or fallback).strip())
+                    clean = re.sub(r"\s+", "_", clean).strip("._")
+                    return (clean[:90] or fallback)
+
+                def _split_paths(value):
+                    if isinstance(value, list):
+                        return [str(item).strip() for item in value if str(item or "").strip()]
+                    raw = str(value or "").strip()
+                    if not raw:
+                        return []
+                    try:
+                        parsed = json.loads(raw)
+                        if isinstance(parsed, list):
+                            return [str(item).strip() for item in parsed if str(item or "").strip()]
+                    except Exception:
+                        pass
+                    if "\n" in raw or "\r" in raw:
+                        return [item.strip() for item in raw.splitlines() if item.strip()]
+                    return [item.strip() for item in raw.split(",") if item.strip()] if "," in raw else [raw]
+
+                def _add_path(paths, seen, value):
+                    clean = str(value or "").strip()
+                    if clean and clean not in seen:
+                        seen.add(clean)
+                        paths.append(clean)
+
+                def _collect_paths(board):
+                    paths = []
+                    seen = set()
+                    for path in _split_paths(board.get("image_paths")):
+                        _add_path(paths, seen, path)
+                    for item in board.get("images") or []:
+                        if isinstance(item, dict):
+                            _add_path(paths, seen, item.get("path") or item.get("original_path") or item.get("filename") or item.get("name"))
+                    for seg in (board.get("segments") or []):
+                        if isinstance(seg, dict):
+                            _add_path(paths, seen, seg.get("imageFile") or seg.get("image_file") or seg.get("path"))
+                    timeline = board.get("timeline")
+                    if isinstance(timeline, dict):
+                        for seg in (timeline.get("segments") or []):
+                            if isinstance(seg, dict):
+                                _add_path(paths, seen, seg.get("imageFile") or seg.get("image_file") or seg.get("path"))
+                    timeline_data = board.get("timeline_data")
+                    if isinstance(timeline_data, str) and timeline_data.strip():
+                        try:
+                            parsed = json.loads(timeline_data)
+                            for path in _split_paths(parsed.get("image_paths") if isinstance(parsed, dict) else None):
+                                _add_path(paths, seen, path)
+                            for seg in (parsed.get("segments") if isinstance(parsed, dict) else []) or []:
+                                if isinstance(seg, dict):
+                                    _add_path(paths, seen, seg.get("imageFile") or seg.get("image_file") or seg.get("path"))
+                        except Exception:
+                            pass
+                    return paths
+
+                def _resolve_source(path, input_dir):
+                    clean = str(path or "").strip()
+                    if not clean or clean.startswith("data:"):
+                        return None
+                    if os.path.isabs(clean):
+                        return os.path.abspath(os.path.expanduser(clean))
+                    return os.path.abspath(os.path.join(input_dir, clean.replace("/", os.sep)))
+
+                def _rewrite_segments(segments, path_map):
+                    if not isinstance(segments, list):
+                        return
+                    for seg in segments:
+                        if not isinstance(seg, dict):
+                            continue
+                        for key in ("imageFile", "image_file", "path"):
+                            value = str(seg.get(key) or "").strip()
+                            if value in path_map:
+                                seg[key] = path_map[value]
+
+                def _rewrite_board_paths(board, ordered_paths, path_map):
+                    board["image_paths"] = [path_map.get(path, path) for path in ordered_paths if path_map.get(path, path)]
+                    if isinstance(board.get("images"), list):
+                        for item in board["images"]:
+                            if not isinstance(item, dict):
+                                continue
+                            value = str(item.get("path") or item.get("original_path") or item.get("filename") or item.get("name") or "").strip()
+                            if value in path_map:
+                                item["original_path"] = value
+                                item["path"] = path_map[value]
+                    _rewrite_segments(board.get("segments"), path_map)
+                    if isinstance(board.get("timeline"), dict):
+                        board["timeline"]["image_paths"] = [path_map.get(path, path) for path in ordered_paths if path_map.get(path, path)]
+                        _rewrite_segments(board["timeline"].get("segments"), path_map)
+                    if isinstance(board.get("timeline_data"), str) and board["timeline_data"].strip():
+                        try:
+                            parsed = json.loads(board["timeline_data"])
+                            if isinstance(parsed, dict):
+                                parsed["image_paths"] = [path_map.get(path, path) for path in ordered_paths if path_map.get(path, path)]
+                                _rewrite_segments(parsed.get("segments"), path_map)
+                                board["timeline_data"] = json.dumps(parsed, indent=2)
+                        except Exception:
+                            pass
+
+                def _write_data_url(value, out_path):
+                    header, _, payload = str(value or "").partition(",")
+                    if not header.startswith("data:image") or not payload:
+                        return False
+                    with open(out_path, "wb") as fh:
+                        fh.write(base64.b64decode(payload))
+                    return True
+
+                data = await request.json()
+                board = data.get("board")
+                if not isinstance(board, dict):
+                    return web.json_response({"error": "Missing board object"}, status=400)
+
+                input_dir = folder_paths.get_input_directory()
+                package_root = os.path.join(input_dir, "IAMCCS_shotboard_packages")
+                package_name = _sanitize(data.get("package_name") or data.get("label") or f"cine_shotboard_{int(time.time())}")
+                package_dir = os.path.join(package_root, package_name)
+                images_dir = os.path.join(package_dir, "images")
+                os.makedirs(images_dir, exist_ok=True)
+
+                original_board = copy.deepcopy(board)
+                ordered_paths = _collect_paths(original_board)
+                path_map = {}
+                manifest_images = []
+                allowed_ext = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif", ".tiff", ".avif"}
+
+                for index, original_path in enumerate(ordered_paths, start=1):
+                    source_path = _resolve_source(original_path, input_dir)
+                    source_name = os.path.basename(source_path or original_path) or f"ref_{index:03d}.png"
+                    ext = os.path.splitext(source_name)[1].lower()
+                    if ext not in allowed_ext:
+                        ext = ".png"
+                    clean_stem = _sanitize(os.path.splitext(source_name)[0], f"ref_{index:03d}")[:52]
+                    filename = f"ref_{index:03d}_{clean_stem}{ext}"
+                    target_path = os.path.join(images_dir, filename)
+                    rel_path = "/".join(["IAMCCS_shotboard_packages", package_name, "images", filename])
+                    entry = {
+                        "ref": index,
+                        "original_path": original_path,
+                        "package_path": rel_path,
+                        "filename": filename,
+                    }
+                    try:
+                        if str(original_path).startswith("data:image"):
+                            if not _write_data_url(original_path, target_path):
+                                raise ValueError("Unsupported data URL")
+                        else:
+                            if not source_path or not os.path.isfile(source_path):
+                                raise FileNotFoundError(f"Image not found: {original_path}")
+                            shutil.copy2(source_path, target_path)
+                            entry["source_path"] = source_path
+                        entry["bytes"] = os.path.getsize(target_path)
+                        path_map[original_path] = rel_path
+                    except Exception as err:
+                        entry["error"] = str(err)
+                    manifest_images.append(entry)
+
+                packaged_board = copy.deepcopy(original_board)
+                _rewrite_board_paths(packaged_board, ordered_paths, path_map)
+                saved_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+                packaged_board["metadata"] = {
+                    **(packaged_board.get("metadata") or {}),
+                    "packaged_at": saved_at,
+                    "package_schema": "iamccs.cine.shotboard.package",
+                }
+                packaged_board["package"] = {
+                    "name": package_name,
+                    "root": package_dir,
+                    "images_dir": "images",
+                    "images": manifest_images,
+                }
+
+                manifest = {
+                    "metadata": {
+                        "schema": "iamccs.cine.shotboard.package",
+                        "schema_version": 2,
+                        "saved_at": saved_at,
+                        "package_name": package_name,
+                        "package_root": package_dir,
+                    },
+                    "board_file": "board.json",
+                    "images_dir": "images",
+                    "image_count": len(ordered_paths),
+                    "images": manifest_images,
+                }
+
+                with open(os.path.join(package_dir, "board.json"), "w", encoding="utf-8") as fh:
+                    json.dump(packaged_board, fh, indent=2, ensure_ascii=False)
+                with open(os.path.join(package_dir, "manifest.json"), "w", encoding="utf-8") as fh:
+                    json.dump(manifest, fh, indent=2, ensure_ascii=False)
+
+                failed = sum(1 for item in manifest_images if item.get("error"))
+                return web.json_response({
+                    "ok": True,
+                    "package_name": package_name,
+                    "package_dir": package_dir,
+                    "board_file": os.path.join(package_dir, "board.json"),
+                    "manifest_file": os.path.join(package_dir, "manifest.json"),
+                    "image_count": len(ordered_paths),
+                    "failed_images": failed,
+                    "images": manifest_images,
                 })
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)
