@@ -5819,6 +5819,7 @@ function renderShotboardV3(node) {
     let timelineNotice = null;
     let timelineNoticeUntil = 0;
     let lastDefaultForce = Math.max(0, Math.min(1, Number(defaultForceWidget?.value || 0.25)));
+    let durationValueControl = null;
 
     const getDuration = () => Math.max(0.1, Number(durationWidget?.value || 20));
     const getFps = () => Math.max(1, Math.round(Number(fpsWidget?.value || 24)));
@@ -5868,6 +5869,7 @@ function renderShotboardV3(node) {
         const next = Math.max(0.1, Number(seconds) || 0.1);
         if (durationWidget) durationWidget.value = next;
         setWidgetValue(node, "duration_seconds", next);
+        durationValueControl?._iamccsSetValue?.(next);
     };
     const enforceDurationMinimum = () => {
         const fps = getFps();
@@ -6303,6 +6305,7 @@ function renderShotboardV3(node) {
             writeTimeline();
             draw();
         }, name === "duration_seconds" ? { liveInput: false } : {});
+        if (name === "duration_seconds") durationValueControl = ctrl;
         styleValueControls(ctrl);
         wrap.append(span, ctrl);
         settings.appendChild(wrap);
@@ -7218,16 +7221,23 @@ function renderShotboardV3(node) {
         event?.preventDefault?.();
         event?.stopPropagation?.();
         root.querySelectorAll(".iamccs-v3-add-menu").forEach((item) => item.remove());
+        document.querySelectorAll(".iamccs-v3-add-menu").forEach((item) => item.remove());
         const menu = document.createElement("div");
         menu.className = "iamccs-v3-add-menu";
-        const rootRect = root.getBoundingClientRect();
-        const x = Math.max(8, Math.min(rootRect.width - 188, Number(event?.clientX || rootRect.left + 24) - rootRect.left));
-        const y = Math.max(8, Math.min(rootRect.height - 122, Number(event?.clientY || rootRect.top + 24) - rootRect.top));
+        const fallbackRect = root.getBoundingClientRect();
+        const menuW = 180;
+        const menuH = 122;
+        const viewportW = Math.max(1, Number(window.innerWidth || document.documentElement?.clientWidth || fallbackRect.right || 1));
+        const viewportH = Math.max(1, Number(window.innerHeight || document.documentElement?.clientHeight || fallbackRect.bottom || 1));
+        const pointerX = Number.isFinite(Number(event?.clientX)) ? Number(event.clientX) : fallbackRect.left + 24;
+        const pointerY = Number.isFinite(Number(event?.clientY)) ? Number(event.clientY) : fallbackRect.top + 24;
+        const x = Math.max(8, Math.min(viewportW - menuW - 8, pointerX));
+        const y = Math.max(8, Math.min(viewportH - menuH - 8, pointerY));
         menu.style.cssText = [
-            "position:absolute",
+            "position:fixed",
             `left:${x}px`,
             `top:${y}px`,
-            "width:180px",
+            `width:${menuW}px`,
             "box-sizing:border-box",
             `border:1px solid ${purple.border}`,
             "border-radius:6px",
@@ -7270,7 +7280,7 @@ function renderShotboardV3(node) {
             pendingAudioTrack = 0;
             audioInput.click();
         });
-        root.appendChild(menu);
+        document.body.appendChild(menu);
         const close = (closeEvent) => {
             if (!menu.contains(closeEvent.target)) {
                 menu.remove();
