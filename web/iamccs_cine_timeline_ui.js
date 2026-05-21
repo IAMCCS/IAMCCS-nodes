@@ -6046,6 +6046,7 @@ function renderShotboardV3(node) {
         });
     };
     const writeTimeline = (options = {}) => {
+        neutralizeLegacyStepTransitions();
         enforceDurationMinimum();
         cleanupAudioPlaceholdersOverlappingMedia();
         magnetize();
@@ -6709,6 +6710,24 @@ function renderShotboardV3(node) {
     }
     function isActionBridgeRelaySegment(seg) {
         return String(seg?.type || "") === "text" && Boolean(seg?.actionBridgeSourceId);
+    }
+    function normalizeV3RelayOnlySegment(seg) {
+        const next = { ...(seg || {}) };
+        if (isActionBridgeRelaySegment(next)) {
+            delete next.actionBridgeSourceId;
+            delete next.actionBridgeSourceLabel;
+            if (!String(next.label || "").trim() || /^action_bridge/i.test(String(next.label || ""))) next.label = "text_relay_slot";
+        }
+        next.step_transition_enabled = false;
+        next.step_transition_type = "off";
+        next.step_transition_prompt = "";
+        next.step_transition_duration = 0;
+        next.step_transition_arrival = "auto";
+        next.step_transition_auto_fit = true;
+        return next;
+    }
+    function neutralizeLegacyStepTransitions() {
+        timeline.segments = (timeline.segments || []).map((seg) => normalizeV3RelayOnlySegment(seg));
     }
     function sortedActionBridgeSources(items = timeline.segments || []) {
         return (items || [])
@@ -8131,8 +8150,6 @@ function renderShotboardV3(node) {
             const startFrame = Math.max(0, Math.round(Number(seg.start || 0)));
             const lenFrame = Math.max(1, Math.round(Number(seg.length || 1)));
             const endFrame = startFrame + lenFrame;
-            const activeStep = Boolean(seg.step_transition_enabled && index < total - 1);
-            const stepSeconds = Math.max(0, Number(seg.step_transition_duration || 0) || 0);
             const summary = document.createElement("div");
             summary.style.cssText = [
                 "align-self:start",
@@ -8143,23 +8160,23 @@ function renderShotboardV3(node) {
                 "gap:3px",
                 "min-width:0",
                 "padding:5px 8px",
-                `border:1px solid ${activeStep ? "rgba(223,164,81,.74)" : "rgba(120,112,98,.44)"}`,
+                "border:1px solid rgba(120,112,98,.44)",
                 "border-radius:6px",
-                `background:${activeStep ? "linear-gradient(180deg, rgba(64,43,25,.92), rgba(35,31,28,.78))" : "linear-gradient(180deg, rgba(52,50,47,.78), rgba(28,28,27,.52))"}`,
+                "background:linear-gradient(180deg, rgba(52,50,47,.78), rgba(28,28,27,.52))",
                 "box-shadow:inset 0 1px 0 rgba(255,255,255,.10), 0 4px 12px rgba(0,0,0,.14)",
                 "box-sizing:border-box",
                 "overflow:hidden",
                 "text-align:center",
             ].join(";");
             const title = document.createElement("div");
-            title.textContent = activeStep ? `${stepTransitionLabel(seg.step_transition_type)} -> next` : "Segment";
-            title.style.cssText = `max-width:100%;padding:2px 7px;border-radius:999px;border:1px solid ${activeStep ? "rgba(223,164,81,.55)" : "rgba(143,208,204,.22)"};background:${activeStep ? "rgba(223,164,81,.12)" : "rgba(143,208,204,.07)"};color:${activeStep ? "#F4D49E" : purple.muted};font-size:7px;font-weight:900;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1;`;
+            title.textContent = "Segment";
+            title.style.cssText = `max-width:100%;padding:2px 7px;border-radius:999px;border:1px solid rgba(143,208,204,.22);background:rgba(143,208,204,.07);color:${purple.muted};font-size:7px;font-weight:900;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1;`;
             const range = document.createElement("div");
             range.textContent = `${(startFrame / fps).toFixed(2)}s -> ${(endFrame / fps).toFixed(2)}s`;
             range.style.cssText = `color:${purple.text};font-size:10px;font-weight:900;white-space:nowrap;line-height:1;`;
             const meta = document.createElement("div");
-            meta.textContent = `${lenFrame}f / ${(lenFrame / fps).toFixed(2)}s${activeStep ? ` | ${stepSeconds > 0 ? stepSeconds.toFixed(1) : "auto"}s move` : ""}`;
-            meta.style.cssText = `max-width:100%;color:${activeStep ? "#DFA451" : purple.muted};font-size:8px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1;`;
+            meta.textContent = `${lenFrame}f / ${(lenFrame / fps).toFixed(2)}s`;
+            meta.style.cssText = `max-width:100%;color:${purple.muted};font-size:8px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1;`;
             summary.append(title, range, meta);
             return summary;
         };
@@ -8919,19 +8936,19 @@ function renderShotboardV3(node) {
             defaultForceSource: isText ? 0 : (explicitForceCustom ? rowForceValue : defaultForceValue),
                 forceCustom: Boolean(!isText && explicitForceCustom),
                 use_guide: !isText && row.use_guide !== false,
-                use_prompt: Boolean(prompt || row.step_transition_enabled || row.stepTransitionEnabled || row.dialogue_pin || row.dialoguePin || row.image_lock || row.imageLock || row.motion_boost || row.motionBoost),
+                use_prompt: Boolean(prompt || row.dialogue_pin || row.dialoguePin || row.image_lock || row.imageLock || row.motion_boost || row.motionBoost),
                 dialogue_pin: Boolean(row.dialogue_pin || row.dialoguePin),
                 image_lock: Boolean(row.image_lock || row.imageLock),
                 motion_boost: Boolean(row.motion_boost || row.motionBoost),
                 clean_relay: Boolean(row.clean_relay || row.cleanRelay),
-                step_transition_enabled: Boolean(row.step_transition_enabled || row.stepTransitionEnabled),
-                step_transition_type: String(row.step_transition_type || row.stepTransitionType || "off"),
-                step_transition_prompt: String(row.step_transition_prompt || row.stepTransitionPrompt || ""),
+                step_transition_enabled: false,
+                step_transition_type: "off",
+                step_transition_prompt: "",
                 step_transition_easing: String(row.step_transition_easing || row.stepTransitionEasing || "ease_in_out"),
                 step_transition_force_curve: String(row.step_transition_force_curve || row.stepTransitionForceCurve || "late_target"),
-                step_transition_duration: Math.max(0, Number(row.step_transition_duration ?? row.stepTransitionDuration ?? 0) || 0),
-                step_transition_arrival: String(row.step_transition_arrival || row.stepTransitionArrival || "auto"),
-                step_transition_auto_fit: (row.step_transition_auto_fit ?? row.stepTransitionAutoFit ?? true) !== false,
+                step_transition_duration: 0,
+                step_transition_arrival: "auto",
+                step_transition_auto_fit: true,
             };
         });
     }
@@ -8966,7 +8983,7 @@ function renderShotboardV3(node) {
             timeline = {
                 schema: "iamccs.cine.filmmaker_timeline",
                 schema_version: Number(loadedTimeline.schema_version || 1),
-                segments: loadedTimeline.segments.map((seg) => ({ ...seg, id: seg.id || newId(seg.type === "text" ? "text" : "seg") })),
+                segments: loadedTimeline.segments.map((seg) => normalizeV3RelayOnlySegment({ ...seg, id: seg.id || newId(seg.type === "text" ? "text" : "seg") })),
                 audioSegments: Array.isArray(loadedTimeline.audioSegments) ? loadedTimeline.audioSegments.map((seg) => ({ ...seg, id: seg.id || newId("aud") })) : [],
                 audioTrackCount: Math.max(1, Number(loadedTimeline.audioTrackCount || 2)),
             };
