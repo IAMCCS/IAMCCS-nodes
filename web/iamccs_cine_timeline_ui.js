@@ -2610,6 +2610,7 @@ function attachVerticalStepDrag(element, getValue, applyValue, stepValue, option
     element.style.cursor = element.style.cursor || "ns-resize";
     element.addEventListener("pointerdown", (event) => {
         if (event.button !== 0) return;
+        if (event.detail > 1 || element.dataset.iamccsNumberEditing === "true") return;
         event.preventDefault();
         event.stopPropagation();
         const startY = event.clientY;
@@ -2655,6 +2656,7 @@ function numberStepperControl(value, step, min, max, onChange, options = {}) {
     const input = document.createElement("input");
     input.type = "text";
     input.inputMode = "decimal";
+    input.readOnly = true;
     input.value = formatStepperValue(value, precision);
     input.style.cssText = inputBase() + "height:30px;padding:4px 6px;text-align:center;font-variant-numeric:tabular-nums;cursor:ns-resize;";
 
@@ -2685,13 +2687,27 @@ function numberStepperControl(value, step, min, max, onChange, options = {}) {
         const n = Number(raw);
         if (Number.isFinite(n)) onChange(clamp(n));
     };
+    const setEditing = (editing) => {
+        input.dataset.iamccsNumberEditing = editing ? "true" : "false";
+        input.readOnly = !editing;
+        input.style.cursor = editing ? "text" : "ns-resize";
+    };
+    input.ondblclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setEditing(true);
+        input.focus();
+        input.select();
+    };
     input.onblur = () => {
         const raw = String(input.value).replace(",", ".").trim();
         if (!raw) {
             input.value = formatStepperValue(value, precision);
+            setEditing(false);
             return;
         }
         apply(Number(raw));
+        setEditing(false);
     };
     input.onkeydown = (event) => {
         if (event.key === "Enter") {
@@ -2706,7 +2722,9 @@ function numberStepperControl(value, step, min, max, onChange, options = {}) {
         const current = Number(String(input.value).replace(",", ".")) || 0;
         apply(current + (event.key === "ArrowUp" ? stepValue : -stepValue));
     };
-    input.onfocus = () => input.select();
+    input.onfocus = () => {
+        if (input.dataset.iamccsNumberEditing === "true") input.select();
+    };
     attachVerticalStepDrag(
         input,
         () => Number(String(input.value).replace(",", ".")) || 0,
@@ -5809,6 +5827,7 @@ function renderShotboardV3(node) {
     const defaultForceWidget = getWidget(node, "default_force");
     const imageWidthWidget = getWidget(node, "image_width");
     const imageHeightWidget = getWidget(node, "image_height");
+    if (defaultForceWidget) defaultForceWidget.value = Math.max(0, Math.min(1, Number(defaultForceWidget.value || 0)));
     let collapsed = Boolean(node.properties?.iamccs_v3_collapsed);
     let promptTextScale = Math.max(0.85, Math.min(1.55, Number(node.properties?.iamccs_v3_prompt_text_scale || 1)));
     const promptFontSize = (base) => `${Math.max(8, Math.round(Number(base || 10) * promptTextScale * 10) / 10)}px`;
@@ -5824,6 +5843,10 @@ function renderShotboardV3(node) {
     const getDuration = () => Math.max(0.1, Number(durationWidget?.value || 20));
     const getFps = () => Math.max(1, Math.round(Number(fpsWidget?.value || 24)));
     const getTotalFrames = () => Math.max(1, Math.round(getDuration() * getFps()));
+    const clampGuideStrength = (value, fallback = 0) => {
+        const parsed = Number(value);
+        return Math.max(0, Math.min(1, Number.isFinite(parsed) ? parsed : Number(fallback) || 0));
+    };
     const clampTimelineMeterSeconds = (value = timelineMeterSeconds) => {
         const duration = Math.max(0.5, getDuration());
         const rounded = Math.round((Number(value) || duration) * 2) / 2;
@@ -5911,10 +5934,9 @@ function renderShotboardV3(node) {
         return Math.abs(current - Number(previousDefault || 0)) < 0.0005;
     };
     const applyDefaultForceToLinkedSegments = (value) => {
-        const next = Math.max(0, Math.min(1, Number(value) || 0));
-        const previous = lastDefaultForce;
+        const next = clampGuideStrength(value);
         (timeline.segments || []).forEach((seg) => {
-            if (!followsDefaultForce(seg, previous)) return;
+            if (!seg || String(seg.type || "image") === "text") return;
             seg.guideStrength = next;
             seg.imageLockStrength = next;
             seg.defaultForceSource = next;
@@ -5927,6 +5949,12 @@ function renderShotboardV3(node) {
         seg.length = Math.max(1, Math.round(Number(seg.length || defaultLen())));
         seg.start = Math.max(0, Math.min(Math.round(Number(seg.start || 0)), Math.max(0, total - 1)));
         if (seg.start + seg.length > total) seg.length = Math.max(1, total - seg.start);
+        if (String(seg.type || "image") !== "text" && String(seg.type || "image") !== "audio") {
+            const strength = clampGuideStrength(seg.guideStrength ?? seg.force ?? defaultForceWidget?.value ?? 0.25);
+            seg.guideStrength = strength;
+            seg.imageLockStrength = clampGuideStrength(seg.imageLockStrength ?? strength, strength);
+            if (seg.defaultForceSource !== undefined) seg.defaultForceSource = clampGuideStrength(seg.defaultForceSource, strength);
+        }
         return seg;
     };
     const audioSegmentHasMedia = (seg) => Boolean(seg && (String(seg.audioFile || "").trim() || String(seg.audioB64 || "").trim()));
@@ -6297,9 +6325,11 @@ function renderShotboardV3(node) {
         const span = document.createElement("span");
         span.textContent = label;
         const widget = getWidget(node, name);
-        const ctrl = numberStepperControl(widget?.value ?? "", step, min, null, (value) => {
-            if (name === "default_force") applyDefaultForceToLinkedSegments(value);
-            setWidgetValue(node, name, value);
+        const max = name === "default_force" ? "1" : null;
+        const ctrl = numberStepperControl(widget?.value ?? "", step, min, max, (value) => {
+            const nextValue = name === "default_force" ? clampGuideStrength(value) : value;
+            if (name === "default_force") applyDefaultForceToLinkedSegments(nextValue);
+            setWidgetValue(node, name, nextValue);
             if (name === "duration_seconds" && enforceDurationMinimum()) {
                 ctrl._iamccsSetValue?.(durationWidget?.value);
             }
@@ -6491,7 +6521,7 @@ function renderShotboardV3(node) {
     const inspector = document.createElement("div");
     inspector.style.cssText = `display:${collapsed ? "none" : "block"};`;
     const boxList = document.createElement("div");
-    boxList.style.cssText = `border:1px solid ${purple.borderSoft};background:${purple.panel};border-radius:6px;padding:6px;overflow-y:auto;overflow-x:hidden;box-sizing:border-box;max-height:300px;`;
+    boxList.style.cssText = `border:1px solid ${purple.borderSoft};background:${purple.panel};border-radius:6px;padding:6px;overflow:visible;box-sizing:border-box;`;
     const editBox = document.createElement("div");
     editBox.style.cssText = "display:none;";
     inspector.append(boxList, editBox);
@@ -7381,6 +7411,7 @@ function renderShotboardV3(node) {
         const promptTop = frameShellHeight + 10;
         const promptHeight = 74;
         const selected = selectedId === seg.id;
+        const showDragStripes = Boolean(dragState && !isAudio && dragState.targetId === seg.id && dragState.kind !== "center");
         const color = isAudio ? purple.audio : (String(seg.type) === "text" ? purple.textBlock : purple.image2);
         block.style.cssText = [
             "position:absolute",
@@ -7421,10 +7452,29 @@ function renderShotboardV3(node) {
             const refNumber = Number(seg.ref || 0);
             const path = refNumber >= 1 ? refPaths()[Math.max(0, refNumber - 1)] : "";
             if (path) {
-                const img = document.createElement("img");
-                img.src = previewUrlForPath(path);
-                img.style.cssText = `position:absolute;left:24px;right:0;top:0;width:calc(100% - 24px);height:${imageHeight}px;object-fit:cover;opacity:.9;`;
-                block.appendChild(img);
+                const previewUrl = previewUrlForPath(path);
+                if (showDragStripes) {
+                    const stripe = document.createElement("div");
+                    stripe.style.cssText = [
+                        "position:absolute",
+                        "left:24px",
+                        "right:0",
+                        "top:0",
+                        `height:${imageHeight}px`,
+                        `background-image:url("${previewUrl}")`,
+                        "background-size:132px 108px",
+                        "background-repeat:repeat-x",
+                        "background-position:left center",
+                        "opacity:.9",
+                        "box-shadow:inset 0 0 0 999px rgba(0,0,0,.08)",
+                    ].join(";");
+                    block.appendChild(stripe);
+                } else {
+                    const img = document.createElement("img");
+                    img.src = previewUrl;
+                    img.style.cssText = `position:absolute;left:24px;right:0;top:0;width:calc(100% - 24px);height:${imageHeight}px;object-fit:cover;opacity:.9;`;
+                    block.appendChild(img);
+                }
                 const replaceImage = document.createElement("button");
                 replaceImage.type = "button";
                 replaceImage.textContent = "+";
@@ -7855,29 +7905,15 @@ function renderShotboardV3(node) {
                 }, { liveInput: false });
                 ctrl.style.minWidth = "0";
                 ctrl.style.width = "100%";
-                ctrl.style.gridTemplateColumns = "28px minmax(42px,1fr) 28px";
-                ctrl.style.gap = "7px";
+                ctrl.style.gridTemplateColumns = "26px minmax(52px,1fr) 26px";
+                ctrl.style.gap = "5px";
                 ctrl.querySelectorAll("button").forEach((button) => {
-                    button.style.minWidth = "28px";
-                    button.style.width = "28px";
+                    button.style.minWidth = "26px";
+                    button.style.width = "26px";
                     button.style.margin = "0";
                 });
                 styleValueControls(ctrl);
                 wrap.append(span, ctrl);
-                if (key === "length") {
-                    const fps = getFps();
-                    const startFrame = Math.round(Number(seg.start || 0));
-                    const lenFrame = Math.max(1, Math.round(Number(seg.length || 1)));
-                    const endFrame = startFrame + lenFrame;
-                    const info = document.createElement("div");
-                    info.style.cssText = `display:grid;gap:2px;color:${purple.muted};font-size:9px;font-weight:800;line-height:1.1;text-align:center;white-space:nowrap;`;
-                    const dur = document.createElement("span");
-                    dur.textContent = `${lenFrame}f / ${(lenFrame / fps).toFixed(2)}s`;
-                    const range = document.createElement("span");
-                    range.textContent = `${(startFrame / fps).toFixed(2)}s -> ${(endFrame / fps).toFixed(2)}s`;
-                    info.append(dur, range);
-                    wrap.appendChild(info);
-                }
                 return wrap;
             }
             const input = type === "textarea" ? document.createElement("textarea") : document.createElement("input");
@@ -8320,9 +8356,9 @@ function renderShotboardV3(node) {
             const card = document.createElement("div");
             card.style.cssText = [
                 "display:grid",
-                "grid-template-columns:32px minmax(650px,.82fr) minmax(0,1fr) 112px 30px",
+                "grid-template-columns:32px minmax(750px,780px) minmax(520px,1fr) 112px 30px",
                 "gap:8px",
-                "align-items:stretch",
+                "align-items:center",
                 "margin-bottom:6px",
                 "padding:8px 9px",
                 "min-height:96px",
@@ -8410,9 +8446,9 @@ function renderShotboardV3(node) {
             });
 
             const leftPane = document.createElement("div");
-            leftPane.style.cssText = "display:flex;align-items:center;min-width:0;align-self:stretch;";
+            leftPane.style.cssText = "display:flex;align-items:center;min-width:0;align-self:center;";
             const numericRow = document.createElement("div");
-            numericRow.style.cssText = "display:grid;grid-template-columns:minmax(94px,104px) minmax(116px,126px) minmax(94px,104px) minmax(116px,132px) minmax(150px,1fr);gap:8px;align-items:center;min-width:0;width:100%;";
+            numericRow.style.cssText = "display:grid;grid-template-columns:122px 122px 122px 144px minmax(170px,1fr);gap:8px;align-items:center;min-width:0;width:100%;";
             numericRow.append(
                 makeField(seg, "Frame", "start", "number"),
                 makeField(seg, "Len", "length", "number"),
@@ -8423,7 +8459,7 @@ function renderShotboardV3(node) {
             leftPane.append(numericRow);
 
             const rightPane = document.createElement("div");
-            rightPane.style.cssText = "display:flex;align-items:center;min-width:0;align-self:stretch;padding-bottom:0;";
+            rightPane.style.cssText = "display:flex;align-items:center;min-width:0;align-self:center;padding-bottom:0;";
             const promptField = makeField(seg, "Action in segment", "prompt", "textarea");
             const promptHeader = document.createElement("div");
             promptHeader.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr);gap:0;align-items:center;min-width:0;width:100%;";
@@ -8624,7 +8660,8 @@ function renderShotboardV3(node) {
         refsPanel.style.display = "none";
         collapseBtn.textContent = collapsed ? "Show Boxes" : "Collapse Boxes";
         root.style.maxHeight = `${currentNodeHeight()}px`;
-        boxList.style.maxHeight = collapsed ? "0" : "300px";
+        boxList.style.maxHeight = collapsed ? "0" : "none";
+        boxList.style.overflow = collapsed ? "hidden" : "visible";
         if (!collapsed && !dragState) drawBoxes();
         const desiredHeight = currentNodeHeight();
         node._iamccsCineMinSize = [SHOTBOARD_V3_RIGID_WIDTH, desiredHeight];
