@@ -2706,6 +2706,22 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                 f"rebuilt_legacy_prompts={rebuilt_step_prompts} "
                 f"mode={flfreal_mode}"
             )
+            if promptrelay_requested and local_parts:
+                local_hash = hashlib.sha1(str(resources.get("cine_local_prompts", "") or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
+                print(
+                    "[IAMCCS FLFReal] "
+                    f"LOCAL_PROMPTS_USED source=shotboard_v3_timeline "
+                    f"count={len(local_parts)} segments={len(length_parts)} "
+                    f"local_hash={local_hash}"
+                )
+                for idx, prompt in enumerate(local_parts[:50]):
+                    compact = str(prompt or "").replace("\n", " ")
+                    if len(compact) > 360:
+                        compact = compact[:357] + "..."
+                    length = length_parts[idx] if idx < len(length_parts) else "<missing>"
+                    print(f"[IAMCCS FLFReal] local[{idx:02d}] length={length} prompt={compact!r}")
+                if len(local_parts) > 50:
+                    print(f"[IAMCCS FLFReal] local prompt log truncated: {len(local_parts) - 50} more prompts.")
             cine_linx["mode"] = "cine_ltx23_filmmaker_timeline"
             cine_linx["chain"][0]["name"] = "Cine Shotboard Planner V3"
             cine_linx["stages"][0]["kind"] = "cine_filmmaker_timeline_planner"
@@ -3088,6 +3104,13 @@ class IAMCCS_CineInfo:
         length_parts = [part for part in re.split(r"[,;\s]+", str(segment_lengths or "")) if part.strip()]
         global_hash = hashlib.sha1(str(global_prompt or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
         local_hash = hashlib.sha1(str(local_prompts or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
+        relay_prompt_log = []
+        for idx, prompt in enumerate(locals_list):
+            relay_prompt_log.append({
+                "index": idx,
+                "segment_length": length_parts[idx] if idx < len(length_parts) else "<missing>",
+                "prompt": prompt,
+            })
         flf_hash = hashlib.sha1(str(flf_timeline or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
         image_shape = [int(v) for v in multi_output.shape] if torch.is_tensor(multi_output) else []
         _cine_debug(
@@ -4005,6 +4028,14 @@ class IAMCCS_CineFilmmakerBackend:
         local_parts = [part.strip() for part in str(local_prompts or "").split("|") if part.strip()]
         length_parts = [part for part in re.split(r"[,;\s]+", str(segment_lengths or "")) if part.strip()]
         local_hash = hashlib.sha1(str(local_prompts or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
+        relay_prompt_log = [
+            {
+                "index": idx,
+                "segment_length": length_parts[idx] if idx < len(length_parts) else "<missing>",
+                "prompt": prompt,
+            }
+            for idx, prompt in enumerate(local_parts)
+        ]
         print(
             "[IAMCCS FilmmakerBackend] "
             f"PromptRelay requested={bool(promptrelay_requested)} "
@@ -4021,6 +4052,25 @@ class IAMCCS_CineFilmmakerBackend:
                 if safety_budget_enabled and safety_budget > 0 and prompt_budget > safety_budget:
                     raise RuntimeError(f"PromptRelay disabled by optional safety budget: estimated matrix load {prompt_budget} > {safety_budget}")
                 promptrelay_nodes = _load_original_promptrelay_module()
+                print(
+                    "[IAMCCS FilmmakerBackend] "
+                    f"PROMPT_RELAY_LOCAL_PROMPTS_USED source=cine_linx "
+                    f"count={len(local_parts)} segments={len(length_parts)} "
+                    f"global_hash={hashlib.sha1(str(global_prompt or '').encode('utf-8', errors='ignore')).hexdigest()[:12]} "
+                    f"local_hash={local_hash}"
+                )
+                for item in relay_prompt_log[:50]:
+                    compact = str(item["prompt"]).replace("\n", " ")
+                    if len(compact) > 360:
+                        compact = compact[:357] + "..."
+                    print(
+                        "[IAMCCS FilmmakerBackend] "
+                        f"relay[{int(item['index']):02d}] "
+                        f"length={item['segment_length']} "
+                        f"prompt={compact!r}"
+                    )
+                if len(relay_prompt_log) > 50:
+                    print(f"[IAMCCS FilmmakerBackend] relay prompt log truncated: {len(relay_prompt_log) - 50} more prompts.")
                 patched_model, positive = promptrelay_nodes._encode_relay(
                     model,
                     clip,
@@ -4087,6 +4137,8 @@ class IAMCCS_CineFilmmakerBackend:
             "promptrelay_error": relay_error,
             "promptrelay_safety_budget_enabled": bool(safety_budget_enabled),
             "promptrelay_safety_budget": int(safety_budget),
+            "local_hash": local_hash,
+            "local_prompts_used": relay_prompt_log,
             "duration_seconds": float(duration_seconds),
             "frame_rate": int(frame_rate),
             "max_frames": int(max_frames),
@@ -4952,28 +5004,40 @@ class IAMCCS_CineRelayOrBypass:
         outputs = cls._outputs(cine_linx)
         payload = cls._payload(cine_linx, resources)
 
-        source = "explicit_inputs" if local_prompts is not None else "cine_linx"
-        resolved_local_prompts = str(local_prompts if local_prompts is not None else (
+        cine_local_prompts = str(
             resources.get("cine_local_prompts",
             outputs.get("local_prompts",
             payload.get("local_prompts", "")))
-        ) or "")
-        resolved_segment_lengths = str(segment_lengths if segment_lengths is not None else (
+            or ""
+        )
+        cine_segment_lengths = str(
             resources.get("cine_segment_lengths",
             outputs.get("segment_lengths",
             payload.get("segment_lengths", "")))
-        ) or "")
-        resolved_global_prompt = str(global_prompt if global_prompt is not None else (
+            or ""
+        )
+        cine_global_prompt = str(
             resources.get("cine_global_prompt",
             outputs.get("global_prompt",
             payload.get("global_prompt", "")))
-        ) or "")
-        resolved_epsilon = _safe_float(
-            epsilon if epsilon is not None else resources.get("cine_promptrelay_epsilon",
-            outputs.get("promptrelay_epsilon",
-            payload.get("promptrelay_epsilon", 1e-3))),
-            1e-3,
+            or ""
         )
+        cine_epsilon = resources.get("cine_promptrelay_epsilon",
+            outputs.get("promptrelay_epsilon",
+            payload.get("promptrelay_epsilon", None)))
+
+        if cine_local_prompts.strip():
+            source = "cine_linx"
+            resolved_local_prompts = cine_local_prompts
+            resolved_segment_lengths = cine_segment_lengths
+            resolved_global_prompt = cine_global_prompt or str(global_prompt or "")
+            resolved_epsilon = _safe_float(cine_epsilon if cine_epsilon is not None else epsilon, 1e-3)
+        else:
+            source = "explicit_inputs" if local_prompts is not None else "cine_linx"
+            resolved_local_prompts = str(local_prompts if local_prompts is not None else cine_local_prompts or "")
+            resolved_segment_lengths = str(segment_lengths if segment_lengths is not None else cine_segment_lengths or "")
+            resolved_global_prompt = str(global_prompt if global_prompt is not None else cine_global_prompt or "")
+            resolved_epsilon = _safe_float(epsilon if epsilon is not None else cine_epsilon, 1e-3)
         active = bool(resolved_local_prompts.strip())
         return active, resolved_local_prompts, resolved_segment_lengths, resolved_global_prompt, resolved_epsilon, source
 
@@ -5117,11 +5181,30 @@ class IAMCCS_CineRelayOrBypass:
             "prompt_source": prompt_source,
             "first_local": locals_list[0][:220] if locals_list else "",
             "last_local": locals_list[-1][:220] if locals_list else "",
+            "local_prompts_used": relay_prompt_log,
             "truth": (
                 "Relay active. Called ComfyUI-PromptRelay _encode_relay 1:1. "
                 "By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS"
             ),
         })
+        print(
+            "[IAMCCS CineRelayOrBypass] "
+            f"PROMPT_RELAY_LOCAL_PROMPTS_USED source={prompt_source} "
+            f"count={len(locals_list)} segments={len(length_parts)} "
+            f"global_hash={global_hash} local_hash={local_hash}"
+        )
+        for item in relay_prompt_log[:50]:
+            compact = str(item["prompt"]).replace("\n", " ")
+            if len(compact) > 360:
+                compact = compact[:357] + "..."
+            print(
+                "[IAMCCS CineRelayOrBypass] "
+                f"relay[{int(item['index']):02d}] "
+                f"length={item['segment_length']} "
+                f"prompt={compact!r}"
+            )
+        if len(relay_prompt_log) > 50:
+            print(f"[IAMCCS CineRelayOrBypass] relay prompt log truncated: {len(relay_prompt_log) - 50} more prompts.")
         _cine_debug(
             "[IAMCCS CineRelayOrBypass] "
             f"mode=PROMPT_RELAY_ORIGINAL_1TO1 promptrelay_enabled=True "

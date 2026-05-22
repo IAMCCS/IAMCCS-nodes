@@ -46,7 +46,7 @@ _PRESETS: dict[str, dict[str, DetailAtelierPreset]] = {
     },
     "12GB": {
         "preview": DetailAtelierPreset(960, 40, 16, 0.45, 0.90, 1.0, 1, 1, 1, 384, 48, 128, 16, 2.0, True, False, False, "off", "Preview for 12GB cards."),
-        "balanced": DetailAtelierPreset(1280, 48, 16, 0.50, 1.00, 1.0, 1, 1, 1, 384, 48, 128, 16, 2.0, True, True, False, "rtx_x2", "Recommended 12GB daily preset."),
+        "balanced": DetailAtelierPreset(1280, 56, 24, 0.50, 1.00, 1.0, 1, 1, 1, 384, 48, 128, 16, 2.0, True, True, False, "rtx_x2", "12GB fidelity preset aligned with the reference LTX looper."),
         "quality": DetailAtelierPreset(1536, 56, 24, 0.55, 1.00, 1.0, 1, 1, 1, 384, 48, 128, 16, 2.5, True, True, True, "rtx_x2", "Final-ish 12GB preset; interpolation is optional."),
     },
     "16GB": {
@@ -214,7 +214,7 @@ def _auto_adjust_loop_values(
 
     max_tile_by_vram = {
         "8GB": 40,
-        "12GB": 48,
+        "12GB": 56,
         "16GB": 64,
         "24GB": 80,
     }
@@ -226,7 +226,7 @@ def _auto_adjust_loop_values(
     }
     if low_ram:
         max_tile_by_vram["8GB"] = 32
-        max_tile_by_vram["12GB"] = 48
+        max_tile_by_vram["12GB"] = 56
 
     max_tile = max_tile_by_vram.get(effective_vram, 48)
     min_tile = min_tile_by_vram.get(effective_vram, 40)
@@ -237,7 +237,7 @@ def _auto_adjust_loop_values(
         decisions.append(f"temporal_tile_size:floor {temporal_tile_size}->{min_tile}")
         temporal_tile_size = min_tile
 
-    max_overlap = 16 if effective_vram in {"8GB", "12GB"} else 24
+    max_overlap = 16 if effective_vram == "8GB" else 24
     if int(temporal_overlap) > max_overlap:
         decisions.append(f"temporal_overlap:cap {temporal_overlap}->{max_overlap}")
         temporal_overlap = max_overlap
@@ -601,6 +601,11 @@ class IAMCCS_DetailAtelierSampler:
             preset.temporal_overlap_cond_strength,
         )
         cond_image_strength = adv_float("cond_image_strength", preset.cond_image_strength)
+        has_manual_loop_override = False
+        try:
+            has_manual_loop_override = int(advanced.get("temporal_tile_size", 0)) > 0 or int(advanced.get("temporal_overlap", 0)) > 0
+        except Exception:
+            has_manual_loop_override = False
 
         horizontal_tiles = adv_int("horizontal_tiles", preset.horizontal_tiles)
         vertical_tiles = adv_int("vertical_tiles", preset.vertical_tiles)
@@ -628,7 +633,7 @@ class IAMCCS_DetailAtelierSampler:
                 int(latent_info.get("time_scale_factor") or 8),
             )
         }
-        if str(hardware_mode or "auto") == "auto":
+        if str(hardware_mode or "auto") == "auto" and not has_manual_loop_override:
             vram, auto_values, auto_decisions = _auto_adjust_loop_values(
                 selected_vram=requested_vram,
                 quality=quality,
@@ -646,6 +651,8 @@ class IAMCCS_DetailAtelierSampler:
             horizontal_tiles = int(auto_values["horizontal_tiles"])
             vertical_tiles = int(auto_values["vertical_tiles"])
             spatial_overlap = int(auto_values["spatial_overlap"])
+        elif str(hardware_mode or "auto") == "auto" and has_manual_loop_override:
+            auto_decisions.append("advanced_loop_override:respect_temporal_values")
 
         adain = adv_float("adain_factor", float(adain_factor))
         guide_start = adv_int("guiding_start_step", int(guiding_start_step))

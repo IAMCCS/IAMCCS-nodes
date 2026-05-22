@@ -1,9 +1,9 @@
-import { app } from "../../scripts/app.js";
+﻿import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const CINE_VERSION = "2026-05-19-shotboard-package-self-contained-import-1";
+const CINE_VERSION = "2026-05-22-v3-node-all-values-truth-1";
 const SHOTBOARD_V3_RIGID_WIDTH = 1920;
-const SHOTBOARD_V3_OPEN_HEIGHT = 760;
+const SHOTBOARD_V3_OPEN_HEIGHT = 900;
 const SHOTBOARD_V3_COLLAPSED_HEIGHT = 560;
 const SHOTBOARD_NODE_MIN_SIZE = [1500, 760];
 const SHOTBOARD_NODE_DEFAULT_SIZE = [1500, 780];
@@ -209,9 +209,31 @@ function setWidgetValue(node, name, value) {
     const widget = getWidget(node, name);
     if (!widget) return false;
     widget.value = value;
+    syncWidgetSerializedValue(node, widget, value);
     try { widget.callback?.(value, app.canvas, node); } catch {}
     try { node.setDirtyCanvas?.(true, true); app.graph?.setDirtyCanvas?.(true, true); } catch {}
     try { node.graph?.change?.(); app.graph?.change?.(); } catch {}
+    return true;
+}
+
+function syncWidgetSerializedValue(node, widget, value) {
+    if (!node || !widget) return false;
+    const index = Array.isArray(node.widgets) ? node.widgets.indexOf(widget) : -1;
+    if (index < 0) return false;
+    if (!Array.isArray(node.widgets_values)) node.widgets_values = [];
+    node.widgets_values[index] = value;
+    return true;
+}
+
+function syncSerializedWidgetValue(node, serialized, name, value) {
+    const widget = getWidget(node, name);
+    if (!widget || !serialized) return false;
+    const index = Array.isArray(node.widgets) ? node.widgets.indexOf(widget) : -1;
+    if (index < 0) return false;
+    if (!Array.isArray(serialized.widgets_values)) serialized.widgets_values = [];
+    serialized.widgets_values[index] = value;
+    widget.value = value;
+    syncWidgetSerializedValue(node, widget, value);
     return true;
 }
 
@@ -482,7 +504,7 @@ function protectControlDrag(element) {
     element.setAttribute?.("draggable", "false");
     for (const eventName of ["pointerdown", "pointermove", "mousedown", "mousemove", "touchstart", "touchmove", "wheel", "drag", "dragover", "drop"]) {
         element.addEventListener(eventName, (event) => {
-            if ((eventName === "dragover" || eventName === "drop") && hasJsonBoardDrag(event)) return;
+            if ((eventName === "dragover" || eventName === "drop") && hasFileDrag(event)) return;
             if ((eventName === "pointerdown" || eventName === "pointermove" || eventName === "mousedown" || eventName === "mousemove") && isNumericStepDragTarget(event)) return;
             event.stopPropagation();
         }, { passive: false, capture: true });
@@ -508,6 +530,14 @@ function hasJsonBoardDrag(event) {
         const type = String(item?.type || "");
         return item?.kind === "file" && (/\.json$/i.test(name) || type.includes("json"));
     });
+}
+
+function hasFileDrag(event) {
+    const transfer = event?.dataTransfer;
+    if (!transfer) return false;
+    if (Array.from(transfer.files || []).length) return true;
+    if (Array.from(transfer.items || []).some((item) => item?.kind === "file")) return true;
+    return Array.from(transfer.types || []).includes("Files");
 }
 
 function protectDragHandle(element) {
@@ -1832,6 +1862,22 @@ function replaceReferencePathAt(node, index, newPath) {
     return compact;
 }
 
+function syncSegmentImageFileForReference(segments, refIndex, imagePath) {
+    const refNumber = Math.max(1, Math.round(Number(refIndex || 0) + 1));
+    const cleanPath = String(imagePath || "").trim();
+    if (!Array.isArray(segments) || !cleanPath) return false;
+    let changed = false;
+    for (const seg of segments) {
+        if (!seg || typeof seg !== "object") continue;
+        if (String(seg.type || "image") === "text" || String(seg.type || "image") === "audio") continue;
+        if (Math.round(Number(seg.ref || 0)) !== refNumber) continue;
+        seg.imageFile = cleanPath;
+        delete seg.image_file;
+        changed = true;
+    }
+    return changed;
+}
+
 function isShotboardV2Node(node) {
     return nodeClassName(node) === "IAMCCS_CineShotboardPlannerProV2";
 }
@@ -2836,8 +2882,8 @@ function timeControl(value, onChange, frameRate = null, opts = {}) {
         const dur = Math.max(0, end - start);
         const durText = formatTimeValue(dur);
         const frameText = validFps ? ` (${Math.round(dur * validFps)}f)` : "";
-        durationLine.textContent = `⏱ ${durText}s${frameText} - segment duration`;
-        rangeLine.textContent = `${formatTimeValue(start)}s → ${formatTimeValue(end)}s`;
+        durationLine.textContent = `â± ${durText}s${frameText} - segment duration`;
+        rangeLine.textContent = `${formatTimeValue(start)}s â†’ ${formatTimeValue(end)}s`;
     }
 
     updateInfo();
@@ -5827,6 +5873,41 @@ function renderShotboardV3(node) {
     const defaultForceWidget = getWidget(node, "default_force");
     const imageWidthWidget = getWidget(node, "image_width");
     const imageHeightWidget = getWidget(node, "image_height");
+    const v3SettingNames = [
+        "duration_seconds",
+        "frame_rate",
+        "default_force",
+        "promptrelay_epsilon",
+        "image_width",
+        "image_height",
+        "image_resize_method",
+        "image_multiple_of",
+        "img_compression",
+        "guide_policy",
+        "min_guide_gap_seconds",
+        "max_guides",
+    ];
+    const clearV3BoardTransientState = () => {
+        node.properties = node.properties || {};
+        [
+            "iamccs_v3_imported_board",
+            "iamccs_v3_imported_board_backup",
+            "iamccs_v3_imported_timeline_data",
+            "iamccs_v3_imported_settings",
+            "iamccs_v3_board",
+            "iamccs_v3_board_settings",
+            "iamccs_v3_board_data",
+        ].forEach((key) => {
+            if (Object.prototype.hasOwnProperty.call(node.properties, key)) delete node.properties[key];
+        });
+    };
+    const v3SettingsSnapshot = () => Object.fromEntries(v3SettingNames
+        .filter((name) => getWidget(node, name))
+        .map((name) => {
+            const value = getWidget(node, name)?.value;
+            return [name, name === "image_resize_method" ? cineResizeMethodValue(value) : value];
+        }));
+    clearV3BoardTransientState();
     if (defaultForceWidget) defaultForceWidget.value = Math.max(0, Math.min(1, Number(defaultForceWidget.value || 0)));
     let collapsed = Boolean(node.properties?.iamccs_v3_collapsed);
     let promptTextScale = Math.max(0.85, Math.min(1.55, Number(node.properties?.iamccs_v3_prompt_text_scale || 1)));
@@ -5855,9 +5936,75 @@ function renderShotboardV3(node) {
     const defaultLen = () => Math.max(1, Math.round(getFps() * 3));
     const newId = (prefix) => `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
 
+    const timelinePromptStats = (data) => {
+        const prompts = [];
+        if (data && typeof data === "object") {
+            if (Array.isArray(data.segments)) {
+                data.segments.forEach((seg) => {
+                    const prompt = String(seg?.prompt || "").trim();
+                    if (prompt) prompts.push(prompt);
+                });
+            }
+            if (Array.isArray(data.rows)) {
+                data.rows.forEach((row) => {
+                    const prompt = String(row?.relay_prompt ?? row?.local_prompt ?? row?.prompt ?? "").trim();
+                    if (prompt) prompts.push(prompt);
+                });
+            }
+            for (const key of ["director_local_prompts", "local_prompts"]) {
+                const value = String(data[key] || "").trim();
+                if (value) value.split("|").forEach((part) => {
+                    const prompt = String(part || "").trim();
+                    if (prompt) prompts.push(prompt);
+                });
+            }
+        }
+        const joined = prompts.join(" | ");
+        return {
+            promptCount: prompts.length,
+            containsCoastline: /\bcoastline\b/i.test(joined),
+            firstPrompt: prompts[0] || "",
+        };
+    };
+
     function readTimeline() {
         try {
-            const data = JSON.parse(String(timelineWidget?.value || "{}"));
+            const candidates = [];
+            const widgetText = String(timelineWidget?.value || "").trim();
+            const backupText = String(node.properties?.iamccs_v3_timeline_data_backup || "").trim();
+            let widgetCandidate = null;
+            let backupCandidate = null;
+            if (widgetText) {
+                try {
+                    const value = JSON.parse(widgetText);
+                    widgetCandidate = { source: "widget.timeline_data", textLength: widgetText.length, value, stats: timelinePromptStats(value) };
+                    candidates.push(widgetCandidate);
+                } catch {}
+            }
+            if (backupText) {
+                try {
+                    const value = JSON.parse(backupText);
+                    backupCandidate = { source: "properties.iamccs_v3_timeline_data_backup", textLength: backupText.length, value, stats: timelinePromptStats(value) };
+                    candidates.push(backupCandidate);
+                } catch {}
+            }
+            const selected = widgetCandidate || backupCandidate || { source: "empty", value: {} };
+            const data = selected.value;
+            console.log("[IAMCCS V3 TIMELINE LOAD]", {
+                selected: selected.source,
+                truth: widgetCandidate ? "node.timeline_data" : "backup_fallback",
+                nodeId: node?.id,
+                candidates: candidates.map((candidate) => ({
+                    source: candidate.source,
+                    textLength: candidate.textLength,
+                    hasSegments: Array.isArray(candidate.value?.segments),
+                    segmentCount: Array.isArray(candidate.value?.segments) ? candidate.value.segments.length : 0,
+                    rowCount: Array.isArray(candidate.value?.rows) ? candidate.value.rows.length : 0,
+                    promptCount: candidate.stats?.promptCount || 0,
+                    containsCoastline: Boolean(candidate.stats?.containsCoastline),
+                    firstPrompt: String(candidate.stats?.firstPrompt || "").slice(0, 220),
+                })),
+            });
             if (data && typeof data === "object") {
                 return {
                     schema: data.schema || "iamccs.cine.filmmaker_timeline",
@@ -6035,12 +6182,29 @@ function renderShotboardV3(node) {
         };
     };
     let pendingTimelineCommit = 0;
+    let promptEditCounter = 0;
+    const markPromptFieldEdited = (field) => {
+        if (!field?.dataset) return "";
+        const stamp = `${Date.now()}-${++promptEditCounter}`;
+        field.dataset.iamccsV3EditedAt = stamp;
+        return stamp;
+    };
+    const fieldEditStamp = (field) => {
+        const raw = String(field?.dataset?.iamccsV3EditedAt || "");
+        const [time, order] = raw.split("-");
+        return (Number(time) || 0) * 100000 + (Number(order) || 0);
+    };
     const isTextEditing = () => {
         const active = document.activeElement;
         return Boolean(active && root.contains(active) && /^(TEXTAREA|INPUT)$/i.test(active.tagName || ""));
     };
     const commitTimelineJson = (json, force = false) => {
-        if (timelineWidget) timelineWidget.value = json;
+        if (timelineWidget) {
+            timelineWidget.value = json;
+            syncWidgetSerializedValue(node, timelineWidget, json);
+        }
+        node.properties = node.properties || {};
+        node.properties.iamccs_v3_timeline_data_backup = json;
         if (pendingTimelineCommit) {
             clearTimeout(pendingTimelineCommit);
             pendingTimelineCommit = 0;
@@ -6054,17 +6218,51 @@ function renderShotboardV3(node) {
             setWidgetValue(node, "timeline_data", timelineWidget?.value ?? json);
         }, 220);
     };
+    const syncTimelineTextFromDom = () => {
+        let changed = 0;
+        const active = document.activeElement;
+        const fields = Array.from(root.querySelectorAll("[data-iamccs-v3-segment-id][data-iamccs-v3-key]"))
+            .sort((a, b) => {
+                if (a === active) return -1;
+                if (b === active) return 1;
+                return fieldEditStamp(b) - fieldEditStamp(a);
+            });
+        fields.forEach((el) => {
+            const key = String(el.dataset.iamccsV3Key || "");
+            if (key !== "prompt") return;
+            const segmentId = String(el.dataset.iamccsV3SegmentId || "");
+            if (!segmentId) return;
+            const seg = (timeline.segments || []).find((item) => String(item?.id || "") === segmentId);
+            if (!seg) return;
+            const value = String(el.value ?? "");
+            if (String(seg.prompt ?? "") === value) return;
+            seg.prompt = value;
+            seg.use_prompt = Boolean(value.trim());
+            changed += 1;
+            syncSegmentTextPeers(segmentId, "prompt", value, el);
+            syncSegmentRelayPeers(segmentId, Boolean(seg.use_prompt), null);
+        });
+        if (changed) {
+            console.log("[IAMCCS V3 PERSIST] DOM text authority sync", { changed });
+        }
+        return changed;
+    };
     const flushTimelineWrite = () => {
+        syncTimelineTextFromDom();
         if (pendingTimelineCommit) {
             clearTimeout(pendingTimelineCommit);
             pendingTimelineCommit = 0;
-            setWidgetValue(node, "timeline_data", timelineWidget?.value || "");
+            const value = timelineWidget?.value || "";
+            if (timelineWidget) syncWidgetSerializedValue(node, timelineWidget, value);
+            setWidgetValue(node, "timeline_data", value);
         }
     };
     const syncSegmentTextPeers = (segmentId, key, value, source) => {
+        const sourceStamp = String(source?.dataset?.iamccsV3EditedAt || "");
         root.querySelectorAll(`[data-iamccs-v3-segment-id="${String(segmentId)}"][data-iamccs-v3-key="${String(key)}"]`).forEach((el) => {
             if (el === source) return;
             if (el.value !== value) el.value = value;
+            if (sourceStamp && el.dataset) el.dataset.iamccsV3EditedAt = sourceStamp;
         });
     };
     const syncSegmentRelayPeers = (segmentId, checked, source) => {
@@ -6073,7 +6271,24 @@ function renderShotboardV3(node) {
             if (el.checked !== checked) el.checked = checked;
         });
     };
+    const logPromptPersistence = (seg, source) => {
+        try {
+            const prompt = String(seg?.prompt || "");
+            const preview = prompt.replace(/\s+/g, " ").slice(0, 220);
+            console.log("[IAMCCS V3 PERSIST]", {
+                source,
+                segmentId: seg?.id,
+                label: seg?.label,
+                promptLength: prompt.length,
+                promptPreview: preview,
+                timelineWidgetLength: String(timelineWidget?.value || "").length,
+                widgetIndex: Array.isArray(node.widgets) ? node.widgets.indexOf(timelineWidget) : -1,
+                widgetsValueLength: Array.isArray(node.widgets_values) && timelineWidget ? String(node.widgets_values[node.widgets.indexOf(timelineWidget)] || "").length : 0,
+            });
+        } catch {}
+    };
     const writeTimeline = (options = {}) => {
+        if (!options.skipDomSync) syncTimelineTextFromDom();
         neutralizeLegacyStepTransitions();
         enforceDurationMinimum();
         cleanupAudioPlaceholdersOverlappingMedia();
@@ -6314,7 +6529,13 @@ function renderShotboardV3(node) {
     promptArea.value = String(promptWidget?.value || "");
     promptArea.rows = 3;
     promptArea.style.cssText = inputBase() + `background:${purple.valueBg};border-color:${purple.border};color:${purple.valueText};resize:vertical;min-height:64px;font-weight:700;font-size:${promptFontSize(12)};`;
-    promptArea.oninput = () => setWidgetValue(node, "global_prompt", promptArea.value);
+    promptArea.oninput = () => {
+        setWidgetValue(node, "global_prompt", promptArea.value);
+        node.properties = node.properties || {};
+        node.properties.iamccs_v3_global_prompt_backup = promptArea.value;
+    };
+    promptArea.onchange = promptArea.oninput;
+    promptArea.onblur = promptArea.oninput;
     promptWrap.append(promptLabel, promptArea);
 
     const settings = document.createElement("div");
@@ -7607,15 +7828,40 @@ function renderShotboardV3(node) {
             caption.onclick = (event) => event.stopPropagation();
             caption.ondblclick = (event) => event.stopPropagation();
             caption.oninput = () => {
+                markPromptFieldEdited(caption);
                 seg.prompt = caption.value;
                 seg.use_prompt = Boolean(String(caption.value || "").trim());
                 if (isActionBridgeRelaySegment(seg)) syncActionBridgeSourceFromRelay(seg);
                 syncSegmentTextPeers(seg.id, "prompt", caption.value, caption);
                 syncSegmentRelayPeers(seg.id, Boolean(seg.use_prompt), null);
-                writeTimeline();
+                writeTimeline({ force: true });
+                logPromptPersistence(seg, "timeline_caption_input");
             };
             caption.onchange = flushTimelineWrite;
             caption.onblur = flushTimelineWrite;
+            caption.onkeyup = () => {
+                markPromptFieldEdited(caption);
+                writeTimeline({ force: true });
+                logPromptPersistence(seg, "timeline_caption_keyup");
+            };
+            caption.onpaste = () => setTimeout(() => {
+                markPromptFieldEdited(caption);
+                seg.prompt = caption.value;
+                seg.use_prompt = Boolean(String(caption.value || "").trim());
+                syncSegmentTextPeers(seg.id, "prompt", caption.value, caption);
+                syncSegmentRelayPeers(seg.id, Boolean(seg.use_prompt), null);
+                writeTimeline({ force: true });
+                logPromptPersistence(seg, "timeline_caption_paste");
+            }, 0);
+            caption.oncompositionend = () => {
+                markPromptFieldEdited(caption);
+                seg.prompt = caption.value;
+                seg.use_prompt = Boolean(String(caption.value || "").trim());
+                syncSegmentTextPeers(seg.id, "prompt", caption.value, caption);
+                syncSegmentRelayPeers(seg.id, Boolean(seg.use_prompt), null);
+                writeTimeline({ force: true });
+                logPromptPersistence(seg, "timeline_caption_compositionend");
+            };
             protectControlDrag(caption);
             block.appendChild(caption);
         }
@@ -7922,6 +8168,7 @@ function renderShotboardV3(node) {
             input.dataset.iamccsV3Key = String(key);
             input.style.cssText = inputBase() + `background:${purple.valueBg};border-color:${purple.border};color:${purple.valueText};font-weight:${type === "textarea" ? "700" : "800"};text-align:${type === "textarea" ? "left" : "center"};${type === "textarea" ? `min-height:54px;resize:vertical;font-size:${promptFontSize(11)};` : "height:28px;"}`;
             input.oninput = () => {
+                if (key === "prompt") markPromptFieldEdited(input);
                 let shouldRedraw = false;
                 if (key === "start") {
                     const nextStart = Math.max(0, Math.round(Number(input.value || 0)));
@@ -7957,11 +8204,36 @@ function renderShotboardV3(node) {
                     }
                     if (type === "textarea") syncSegmentTextPeers(seg.id, key, input.value, input);
                 }
-                writeTimeline();
+                writeTimeline(key === "prompt" ? { force: true } : {});
+                if (key === "prompt") logPromptPersistence(seg, "inspector_prompt_input");
                 if (shouldRedraw) draw();
             };
             input.onchange = flushTimelineWrite;
             input.onblur = flushTimelineWrite;
+            if (key === "prompt") {
+                input.onkeyup = () => {
+                    markPromptFieldEdited(input);
+                    writeTimeline({ force: true });
+                };
+                input.onpaste = () => setTimeout(() => {
+                    markPromptFieldEdited(input);
+                    seg[key] = input.value;
+                    seg.use_prompt = Boolean(String(input.value || "").trim());
+                    syncSegmentTextPeers(seg.id, key, input.value, input);
+                    syncSegmentRelayPeers(seg.id, Boolean(seg.use_prompt), null);
+                    writeTimeline({ force: true });
+                    logPromptPersistence(seg, "inspector_prompt_paste");
+                }, 0);
+                input.oncompositionend = () => {
+                    markPromptFieldEdited(input);
+                    seg[key] = input.value;
+                    seg.use_prompt = Boolean(String(input.value || "").trim());
+                    syncSegmentTextPeers(seg.id, key, input.value, input);
+                    syncSegmentRelayPeers(seg.id, Boolean(seg.use_prompt), null);
+                    writeTimeline({ force: true });
+                    logPromptPersistence(seg, "inspector_prompt_compositionend");
+                };
+            }
             protectControlDrag(input);
             wrap.append(span, input);
             return wrap;
@@ -8291,6 +8563,7 @@ function renderShotboardV3(node) {
             prompt.style.cssText = `width:100%;height:68px;min-height:68px;box-sizing:border-box;padding:7px 9px;background:${purple.valueBg};border:1px solid rgba(143,208,204,.44);border-radius:5px;color:${purple.valueText};font:${promptFontSize(10)}/1.26 monospace;font-weight:700;outline:none;resize:none;overflow-y:auto;box-shadow:inset 0 1px 0 rgba(255,255,255,.56);`;
             prompt.onpointerdown = (event) => event.stopPropagation();
             prompt.oninput = () => {
+                markPromptFieldEdited(prompt);
                 seg.prompt = prompt.value;
                 seg.note = prompt.value;
                 seg.use_prompt = Boolean(String(prompt.value || "").trim());
@@ -8406,7 +8679,7 @@ function renderShotboardV3(node) {
             relayStatus.style.gridRow = "1";
             relayStatus.style.alignSelf = "end";
             const dialogueHint = document.createElement("span");
-            const looksDialogue = /["“”]|\bsays?\b|\bspeak\b|\bdialog/i.test(String(seg.prompt || ""));
+            const looksDialogue = /["â€œâ€]|\bsays?\b|\bspeak\b|\bdialog/i.test(String(seg.prompt || ""));
             dialogueHint.textContent = seg.dialogue_pin ? "PIN" : looksDialogue ? "DIALOG" : "PROMPT";
             dialogueHint.title = seg.dialogue_pin ? "Dialogue pin is active for this box" : looksDialogue ? "This prompt appears to contain dialogue timing or spoken text" : "No obvious dialogue marker detected";
             dialogueHint.style.cssText = `display:flex;align-items:center;justify-content:center;min-width:44px;padding:2px 5px;border-radius:999px;border:1px solid ${looksDialogue || seg.dialogue_pin ? "rgba(223,164,81,.62)" : purple.borderSoft};background:${looksDialogue || seg.dialogue_pin ? "rgba(96,64,34,.28)" : "rgba(0,0,0,.10)"};color:${looksDialogue || seg.dialogue_pin ? "#F4D49E" : purple.muted};font-size:7px;font-weight:900;line-height:1;white-space:nowrap;`;
@@ -9001,9 +9274,13 @@ function renderShotboardV3(node) {
         for (const [name, value] of Object.entries(settingsData)) {
             if (getWidget(node, name)) setWidgetValue(node, name, name === "image_resize_method" ? cineResizeMethodValue(value) : value);
         }
-        for (const name of ["duration_seconds", "frame_rate", "default_force", "promptrelay_epsilon", "image_width", "image_height", "image_resize_method", "image_multiple_of", "img_compression", "guide_policy"]) {
+        for (const name of v3SettingNames) {
             if (Object.prototype.hasOwnProperty.call(board, name) && getWidget(node, name)) setWidgetValue(node, name, name === "image_resize_method" ? cineResizeMethodValue(board[name]) : board[name]);
         }
+        console.log("[IAMCCS V3 BOARD IMPORT] settings absorbed into node widgets", {
+            nodeId: node?.id,
+            settings: v3SettingsSnapshot(),
+        });
         const paths = await packagedReferencePathsForImport(board, (message) => {
             showTimelineNotice(message, /failed/i.test(String(message || "")) ? "error" : "warn");
         });
@@ -9011,11 +9288,46 @@ function renderShotboardV3(node) {
         else clearOwnReferencePaths(node);
 
         let loadedTimeline = null;
+        let loadedTimelineSource = "";
         const timelineText = String(board.timeline_data || data?.timeline_data || "").trim();
-        if (timelineText) {
-            try { loadedTimeline = JSON.parse(timelineText); } catch {}
+        const timelineCandidates = [];
+        if (board.timeline && typeof board.timeline === "object") {
+            timelineCandidates.push({ source: "board.timeline", value: board.timeline });
         }
-        if (!loadedTimeline && board.timeline && typeof board.timeline === "object") loadedTimeline = board.timeline;
+        if (timelineText) {
+            try { timelineCandidates.push({ source: "board.timeline_data", value: JSON.parse(timelineText) }); } catch {}
+        }
+        if (data?.timeline && typeof data.timeline === "object" && data.timeline !== board.timeline) {
+            timelineCandidates.push({ source: "root.timeline", value: data.timeline });
+        }
+        const scoreTimelineCandidate = (candidate) => {
+            const value = candidate?.value;
+            if (!value || typeof value !== "object") return -1;
+            const segments = Array.isArray(value.segments) ? value.segments : [];
+            const rows = Array.isArray(value.rows) ? value.rows : [];
+            const prompts = segments.length
+                ? segments.filter((seg) => String(seg?.prompt || "").trim()).length
+                : rows.filter((row) => String(row?.relay_prompt ?? row?.local_prompt ?? row?.prompt ?? "").trim()).length;
+            const sourceBonus = candidate.source === "board.timeline" || candidate.source === "root.timeline" ? 1000 : 0;
+            return sourceBonus + segments.length * 20 + rows.length * 10 + prompts;
+        };
+        timelineCandidates.sort((a, b) => scoreTimelineCandidate(b) - scoreTimelineCandidate(a));
+        if (timelineCandidates.length) {
+            loadedTimeline = timelineCandidates[0].value;
+            loadedTimelineSource = timelineCandidates[0].source;
+            console.log("[IAMCCS V3 BOARD IMPORT]", {
+                selected: loadedTimelineSource,
+                candidates: timelineCandidates.map((candidate) => ({
+                    source: candidate.source,
+                    score: scoreTimelineCandidate(candidate),
+                    segments: Array.isArray(candidate.value?.segments) ? candidate.value.segments.length : 0,
+                    rows: Array.isArray(candidate.value?.rows) ? candidate.value.rows.length : 0,
+                    firstPrompt: Array.isArray(candidate.value?.segments)
+                        ? String(candidate.value.segments.find((seg) => String(seg?.prompt || "").trim())?.prompt || "").slice(0, 220)
+                        : String((candidate.value?.rows || []).find((row) => String(row?.relay_prompt ?? row?.local_prompt ?? row?.prompt ?? "").trim())?.relay_prompt || "").slice(0, 220),
+                })),
+            });
+        }
         if (loadedTimeline && typeof loadedTimeline === "object" && Array.isArray(loadedTimeline.segments)) {
             timeline = {
                 schema: "iamccs.cine.filmmaker_timeline",
@@ -9043,8 +9355,10 @@ function renderShotboardV3(node) {
                 };
             }
         }
+        showTimelineNotice(`Imported board timeline source: ${loadedTimelineSource || "rows/timeline_data"}`, "warn");
         selectedId = timeline.segments?.[0]?.id || null;
-        writeTimeline();
+        clearV3BoardTransientState();
+        writeTimeline({ force: true });
         draw();
     }
     importBoardBtn.onclick = () => boardInput.click();
@@ -9060,8 +9374,11 @@ function renderShotboardV3(node) {
         }
     };
     root.addEventListener("dragover", (event) => {
-        if (Array.from(event.dataTransfer?.items || []).some((item) => item.kind === "file")) event.preventDefault();
-    });
+        if (!hasFileDrag(event)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+    }, { capture: true });
     root.addEventListener("drop", async (event) => {
         const files = Array.from(event.dataTransfer?.files || []);
         const file = files.find((item) => /\.json$/i.test(item.name || ""));
@@ -9069,6 +9386,7 @@ function renderShotboardV3(node) {
         const imageFiles = files.filter((item) => String(item.type || "").startsWith("image/"));
         if (!file && !audioFiles.length && !imageFiles.length) return;
         event.preventDefault();
+        event.stopPropagation();
         if (file) {
             try {
                 await applyImportedBoard(await readJsonFile(file));
@@ -9085,7 +9403,7 @@ function renderShotboardV3(node) {
             await uploadAudioFiles(audioFiles);
             return;
         }
-    });
+    }, { capture: true });
     collapseBtn.onclick = () => {
         collapsed = !collapsed;
         node.properties = node.properties || {};
@@ -9097,23 +9415,26 @@ function renderShotboardV3(node) {
     };
     saveBtn.onclick = () => {
         writeTimeline({ force: true });
+        const timelineText = getWidget(node, "timeline_data")?.value || "";
+        let timelinePayload = null;
+        try { timelinePayload = JSON.parse(timelineText || "{}"); } catch {}
+        const promptText = timelineText || JSON.stringify(timeline || {});
+        console.log("[IAMCCS V3 BOARD SAVE]", {
+            kind: "board",
+            nodeId: node?.id,
+            containsCoastline: /\bcoastline\b/i.test(promptText),
+            firstPrompt: String(timelinePayload?.segments?.[0]?.prompt || timelinePayload?.rows?.[0]?.relay_prompt || "").replace(/\s+/g, " ").slice(0, 220),
+            settings: v3SettingsSnapshot(),
+        });
         const board = {
             metadata: { schema: "iamccs.cine.filmmaker_board", schema_version: 1, saved_at: new Date().toISOString(), node_type: nodeClassName(node) },
             global_prompt: promptArea.value,
-            timeline_data: getWidget(node, "timeline_data")?.value || "",
+            timeline_data: timelineText,
+            timeline: timelinePayload || JSON.parse(JSON.stringify(timeline || {})),
             image_paths: refPaths(),
-            settings: {
-                duration_seconds: durationWidget?.value,
-                frame_rate: fpsWidget?.value,
-                default_force: defaultForceWidget?.value,
-                promptrelay_epsilon: getWidget(node, "promptrelay_epsilon")?.value,
-                image_width: imageWidthWidget?.value,
-                image_height: imageHeightWidget?.value,
-                image_resize_method: cineResizeMethodValue(getWidget(node, "image_resize_method")?.value),
-                image_multiple_of: getWidget(node, "image_multiple_of")?.value,
-                img_compression: getWidget(node, "img_compression")?.value,
-            },
+            settings: v3SettingsSnapshot(),
         };
+        Object.assign(board, board.settings);
         downloadJsonFile(board, safeBoardFilename("cine_filmmaker_v3"));
     };
     savePackageBtn.onclick = async () => {
@@ -9121,24 +9442,25 @@ function renderShotboardV3(node) {
             savePackageBtn.disabled = true;
             writeTimeline({ force: true });
             const timelineText = getWidget(node, "timeline_data")?.value || "";
+            let timelinePayload = null;
+            try { timelinePayload = JSON.parse(timelineText || "{}"); } catch {}
+            const promptText = timelineText || JSON.stringify(timeline || {});
+            console.log("[IAMCCS V3 BOARD SAVE]", {
+                kind: "package",
+                nodeId: node?.id,
+                containsCoastline: /\bcoastline\b/i.test(promptText),
+                firstPrompt: String(timelinePayload?.segments?.[0]?.prompt || timelinePayload?.rows?.[0]?.relay_prompt || "").replace(/\s+/g, " ").slice(0, 220),
+                settings: v3SettingsSnapshot(),
+            });
             const board = {
                 metadata: { schema: "iamccs.cine.filmmaker_board", schema_version: 1, saved_at: new Date().toISOString(), node_type: nodeClassName(node) },
                 global_prompt: promptArea.value,
                 timeline_data: timelineText,
-                timeline,
+                timeline: timelinePayload || JSON.parse(JSON.stringify(timeline || {})),
                 image_paths: refPaths(),
-                settings: {
-                    duration_seconds: durationWidget?.value,
-                    frame_rate: fpsWidget?.value,
-                    default_force: defaultForceWidget?.value,
-                    promptrelay_epsilon: getWidget(node, "promptrelay_epsilon")?.value,
-                    image_width: imageWidthWidget?.value,
-                    image_height: imageHeightWidget?.value,
-                    image_resize_method: cineResizeMethodValue(getWidget(node, "image_resize_method")?.value),
-                    image_multiple_of: getWidget(node, "image_multiple_of")?.value,
-                    img_compression: getWidget(node, "img_compression")?.value,
-                },
+                settings: v3SettingsSnapshot(),
             };
+            Object.assign(board, board.settings);
             await saveShotboardPackageFolder(board, "cine_filmmaker_v3", (message) => {
                 showTimelineNotice(message, message && /failed/i.test(message) ? "error" : "warn");
             });
@@ -9174,6 +9496,27 @@ function renderShotboardV3(node) {
         lockWidth: true,
         preferredSize: [v3RigidWidth, currentNodeHeight()],
     });
+    if (!node._iamccsCineShotboardV3SerializeWrapped) {
+        node._iamccsCineShotboardV3SerializeWrapped = true;
+        const originalOnSerialize = node.onSerialize;
+        node.onSerialize = function (serialized) {
+            const result = originalOnSerialize?.call?.(this, serialized);
+            try {
+                if (node._iamccsCineShotboardV3WriteTimeline) node._iamccsCineShotboardV3WriteTimeline({ force: true });
+                const timelineValue = String(getWidget(node, "timeline_data")?.value || "");
+                const globalValue = String(getWidget(node, "global_prompt")?.value || "");
+                syncSerializedWidgetValue(node, serialized, "timeline_data", timelineValue);
+                syncSerializedWidgetValue(node, serialized, "global_prompt", globalValue);
+                serialized.properties = serialized.properties || {};
+                serialized.properties.iamccs_v3_timeline_data_backup = timelineValue;
+                serialized.properties.iamccs_v3_global_prompt_backup = globalValue;
+            } catch (err) {
+                console.warn("[IAMCCS Cine Shotboard V3] timeline serialize flush failed", err);
+            }
+            return result;
+        };
+    }
+    node._iamccsCineShotboardV3WriteTimeline = writeTimeline;
     setTimeout(draw, 0);
 }
 
@@ -10324,8 +10667,55 @@ function scheduleRender(node) {
     setTimeout(() => renderForNode(node), 450);
 }
 
+function flushAllShotboardV3Timelines(reason = "flush") {
+    const nodes = Array.isArray(app.graph?._nodes) ? app.graph._nodes : [];
+    let flushed = 0;
+    for (const node of nodes) {
+        if (nodeClassName(node) !== "IAMCCS_CineShotboardPlannerV3") continue;
+        if (typeof node._iamccsCineShotboardV3WriteTimeline !== "function") continue;
+        try {
+            node._iamccsCineShotboardV3WriteTimeline({ force: true });
+            flushed += 1;
+            const text = String(getWidget(node, "timeline_data")?.value || "");
+            let firstPrompt = "";
+            let containsCoastline = false;
+            try {
+                const data = JSON.parse(text || "{}");
+                firstPrompt = String(data?.segments?.[0]?.prompt || data?.rows?.[0]?.relay_prompt || "");
+                containsCoastline = /\bcoastline\b/i.test(text);
+            } catch {}
+            console.log("[IAMCCS V3 QUEUE FLUSH]", {
+                reason,
+                nodeId: node?.id,
+                timelineLength: text.length,
+                containsCoastline,
+                firstPrompt: firstPrompt.replace(/\s+/g, " ").slice(0, 220),
+            });
+        } catch (err) {
+            console.warn("[IAMCCS V3 QUEUE FLUSH] failed", { reason, nodeId: node?.id, err });
+        }
+    }
+    return flushed;
+}
+
+function wrapQueueFlush(target, methodName, label) {
+    if (!target || typeof target[methodName] !== "function") return;
+    const guard = `_iamccsCineV3QueueFlushWrapped_${methodName}`;
+    if (target[guard]) return;
+    target[guard] = true;
+    const original = target[methodName];
+    target[methodName] = function (...args) {
+        flushAllShotboardV3Timelines(label);
+        return original.apply(this, args);
+    };
+}
+
 app.registerExtension({
     name: "iamccs.cine.timeline.ui",
+    async setup() {
+        wrapQueueFlush(api, "queuePrompt", "api.queuePrompt");
+        wrapQueueFlush(app, "queuePrompt", "app.queuePrompt");
+    },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         const name = String(nodeData?.name || nodeData?.class_type || "");
         if (name !== "IAMCCS_CineLTXSequencer" && name !== "IAMCCS_CinePromptRelayLatentShapeSync" && name !== "IAMCCS_CinePromptRelayTimeline" && name !== "IAMCCS_CineShotboardLite" && name !== "IAMCCS_CineShotboardTimelinePro" && name !== "IAMCCS_CineShotboardPlannerPro" && name !== "IAMCCS_CineShotboardPlannerProV2" && name !== "IAMCCS_CineShotboardPlannerV3" && name !== "IAMCCS_CineShotboardPlannerProLegacy" && name !== "IAMCCS_CineFLFEngineSimple" && name !== "IAMCCS_CineInfo" && name !== "IAMCCS_CinePromptArchitect" && name !== "IAMCCS_BoardMaker" && name !== "IAMCCS_CineMusicVideoPlanner") return;
@@ -10343,8 +10733,8 @@ app.registerExtension({
     },
 });
 
-// â”€â”€ NarrativePlanner push listener â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-// When the NarrativePlanner "â†’ Push to PlannerPro" button fires, re-render
+// Ã¢â€â‚¬Ã¢â€â‚¬ NarrativePlanner push listener Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+// When the NarrativePlanner "Ã¢â€ â€™ Push to PlannerPro" button fires, re-render
 // the shotboard so the new rows appear immediately without a page reload.
 // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
 document.addEventListener("iamccs:planner_rows_updated", (ev) => {
@@ -10362,3 +10752,5 @@ document.addEventListener("iamccs:planner_rows_updated", (ev) => {
     plannerNode._iamccsCineShotboardV3Version = "";
     scheduleRender(plannerNode);
 });
+
+

@@ -18,7 +18,7 @@ const PRESETS = {
     },
     "12GB": {
         preview: { temporal_tile_size: 40, temporal_overlap: 16, guiding_strength: 0.90, temporal_overlap_cond_strength: 0.45, cond_image_strength: 1.0 },
-        balanced: { temporal_tile_size: 48, temporal_overlap: 16, guiding_strength: 1.00, temporal_overlap_cond_strength: 0.50, cond_image_strength: 1.0 },
+        balanced: { temporal_tile_size: 56, temporal_overlap: 24, guiding_strength: 1.00, temporal_overlap_cond_strength: 0.50, cond_image_strength: 1.0 },
         quality: { temporal_tile_size: 56, temporal_overlap: 24, guiding_strength: 1.00, temporal_overlap_cond_strength: 0.55, cond_image_strength: 1.0 },
     },
     "16GB": {
@@ -172,8 +172,8 @@ function chooseAutoValues(hw, ctx, quality = "balanced", fallbackVram = "12GB") 
         base.spatial_overlap = 1;
         base.spatial_tiling_mode = "force_off";
         if (vram === "12GB") {
-            base.temporal_tile_size = Math.min(base.temporal_tile_size, 48);
-            base.temporal_overlap = Math.min(base.temporal_overlap, 16);
+            base.temporal_tile_size = Math.min(base.temporal_tile_size, 56);
+            base.temporal_overlap = Math.min(base.temporal_overlap, 24);
         }
         if (vram === "8GB") {
             base.temporal_tile_size = Math.min(base.temporal_tile_size, 32);
