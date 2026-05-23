@@ -301,6 +301,48 @@ def _cine_change_fingerprint(payload: Dict[str, Any]) -> str:
     return hashlib.sha256(encoded.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _cine_linx_change_signature(cine_linx: Any) -> Dict[str, Any]:
+    if not isinstance(cine_linx, dict):
+        return {}
+    resources = cine_linx.get("resources") if isinstance(cine_linx.get("resources"), dict) else {}
+    payload = resources.get("cine_payload") if isinstance(resources.get("cine_payload"), dict) else {}
+    tensor = resources.get("cine_multi_input")
+    tensor_sig = None
+    if torch.is_tensor(tensor):
+        tensor_sig = {
+            "shape": [int(v) for v in tensor.shape],
+            "dtype": str(tensor.dtype),
+            "device": str(tensor.device),
+        }
+    helper_keys = [
+        "cine_audio_layers",
+        "cine_audio_tracks",
+        "cine_dialogue_tracks",
+        "cine_script_layers",
+        "cine_box_groups",
+        "cine_helper_patches",
+        "cine_group_metadata",
+    ]
+    helper_sig: Dict[str, Any] = {}
+    for key in helper_keys:
+        if key not in resources:
+            continue
+        raw = repr(resources.get(key))
+        helper_sig[key] = {
+            "type": type(resources.get(key)).__name__,
+            "hash": hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()[:12],
+            "length": len(raw),
+        }
+    return {
+        "type": cine_linx.get("type"),
+        "mode": cine_linx.get("mode"),
+        "resource_keys": sorted(str(key) for key in resources.keys()),
+        "payload_mode": payload.get("backend_mode"),
+        "multi_input": tensor_sig,
+        "helpers": helper_sig,
+    }
+
+
 def _iamccs_ltx_compress_image(tensor: torch.Tensor, crf: int) -> torch.Tensor:
     """Mirror LTX Director's guide-image compression path for shotboard-owned images."""
     crf = int(crf or 0)
@@ -2026,6 +2068,7 @@ class IAMCCS_CineShotboardPlannerPro(IAMCCS_CineShotboardTimelinePro):
         image_resize_method=None,
         image_multiple_of=None,
         img_compression=None,
+        cine_linx=None,
         multi_input=None,
         **kwargs,
     ):
@@ -2048,6 +2091,7 @@ class IAMCCS_CineShotboardPlannerPro(IAMCCS_CineShotboardTimelinePro):
             "image_resize_method": _iamccs_cine_resize_method(image_resize_method),
             "image_multiple_of": int(image_multiple_of or 0),
             "img_compression": int(img_compression or 0),
+            "cine_linx": _cine_linx_change_signature(cine_linx),
         })
 
     def execute(self, global_prompt, timeline_data, duration_seconds, frame_rate, guide_policy, min_guide_gap_seconds, max_guides, default_force, promptrelay_epsilon, ltx_round_mode, image_paths, image_width, image_height, image_resize_method="crop", image_multiple_of=32, img_compression=0, multi_input=None):
@@ -2172,7 +2216,6 @@ class IAMCCS_CineShotboardPlannerProV2(IAMCCS_CineShotboardPlannerPro):
                 row["step_transition_type"] = "action_beat"
             row["use_prompt"] = True
         return rows
-
     def execute(self, global_prompt, timeline_data, duration_seconds, frame_rate, guide_policy, min_guide_gap_seconds, max_guides, default_force, promptrelay_epsilon, ltx_round_mode, image_paths, image_width, image_height, image_resize_method="crop", image_multiple_of=32, img_compression=0, multi_input=None):
         (cine_linx,) = super().execute(
             global_prompt,
@@ -2292,6 +2335,9 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
     @classmethod
     def INPUT_TYPES(cls):
         data = super().INPUT_TYPES()
+        data.setdefault("optional", {})
+        data["optional"].pop("multi_input", None)
+        data["optional"]["cine_linx"] = (SUPERNODE_LINX_TYPE,)
         data["required"]["global_prompt"] = ("STRING", {
             "default": "one continuous cinematic shot with coherent motion, stable identity and controlled camera movement",
             "multiline": True,
@@ -2307,6 +2353,62 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
         data["required"]["max_guides"] = ("INT", {"default": 50, "min": 0, "max": 50, "step": 1})
         data["required"]["default_force"] = ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01})
         return data
+
+    @staticmethod
+    def _input_linx_resources(cine_linx: Any) -> Dict[str, Any]:
+        if not isinstance(cine_linx, dict):
+            return {}
+        resources = cine_linx.get("resources")
+        return resources if isinstance(resources, dict) else {}
+
+    @classmethod
+    def _multi_input_from_cine_linx(cls, cine_linx: Any) -> Any:
+        resources = cls._input_linx_resources(cine_linx)
+        candidate = resources.get("cine_multi_input")
+        if torch.is_tensor(candidate):
+            return candidate
+        candidate = resources.get("multi_input")
+        if torch.is_tensor(candidate):
+            return candidate
+        return None
+
+    @classmethod
+    def _merge_upstream_helper_layers(cls, output_linx: Dict[str, Any], upstream_linx: Any) -> None:
+        if not isinstance(output_linx, dict) or not isinstance(upstream_linx, dict):
+            return
+        upstream_resources = cls._input_linx_resources(upstream_linx)
+        if not upstream_resources:
+            return
+        resources = output_linx.setdefault("resources", {})
+        payload = resources.get("cine_payload") if isinstance(resources.get("cine_payload"), dict) else {}
+        pass_keys = (
+            "cine_audio_layers",
+            "cine_audio_tracks",
+            "cine_dialogue_tracks",
+            "cine_script_layers",
+            "cine_box_groups",
+            "cine_helper_patches",
+            "cine_group_metadata",
+        )
+        forwarded = []
+        for key in pass_keys:
+            if key in upstream_resources and key not in resources:
+                resources[key] = upstream_resources[key]
+                forwarded.append(key)
+        if forwarded:
+            payload["upstream_helper_layers"] = sorted(forwarded)
+            resources["cine_payload"] = payload
+            output_linx["resource_keys"] = sorted(resources.keys())
+            output_linx["resource_types"] = {key: type(value).__name__ for key, value in resources.items()}
+
+    @classmethod
+    def _v3_segment_prompt_enabled(cls, seg: Dict[str, Any], prompt: str) -> bool:
+        if not str(prompt or "").strip():
+            return False
+        manual_off = cls._as_bool(seg.get("relay_manual_off", seg.get("promptrelay_manual_off", False)), False)
+        if manual_off:
+            return False
+        return True
 
     @classmethod
     def _parse_rows(cls, timeline_data: str, duration_seconds: float, default_force: float) -> List[Dict[str, Any]]:
@@ -2342,6 +2444,7 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
             strength = _clamp(seg.get("guideStrength", seg.get("guide_strength", seg.get("strength", default_force))), 0.0, 1.0, default_force)
             guide_strength = _wdc_image_guide_strength(seg, strength)
             prompt = str(seg.get("prompt", seg.get("local_prompt", "")) or "").strip()
+            prompt_enabled = cls._v3_segment_prompt_enabled(seg, prompt)
             label = _normalise_label(str(seg.get("label", seg.get("name", "")) or ""), f"{'text' if is_text else 'shot'}_{idx + 1}")
             rows.append({
                 "second": max(0.0, second),
@@ -2356,7 +2459,7 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                 "transition": str(seg.get("transition", "continuous_motion") or "continuous_motion").strip(),
                 "note": str(seg.get("note", "") or "").strip(),
                 "use_guide": (not is_text) and cls._as_bool(seg.get("use_guide", seg.get("guide", True)), True),
-                "use_prompt": bool(cls._as_bool(seg.get("use_prompt", bool(prompt)), bool(prompt))),
+                "use_prompt": bool(prompt_enabled),
                 "relay_prompt": prompt,
                 "use_relay_modifiers": cls._as_bool(seg.get("use_relay_modifiers", False), False),
                 "camera_relay_mode": str(seg.get("camera_relay_mode", "off") or "off").strip(),
@@ -2452,7 +2555,7 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
             cursor = start + seg_len
 
             prompt = str(seg.get("prompt", seg.get("local_prompt", seg.get("relay_prompt", ""))) or "").strip()
-            use_prompt = cls._as_bool(seg.get("use_prompt", bool(prompt)), bool(prompt))
+            use_prompt = cls._v3_segment_prompt_enabled(seg, prompt)
             step_enabled = False
             step_type = "off"
             next_seg = visual_segments[index + 1] if index + 1 < len(visual_segments) else None
@@ -2498,8 +2601,9 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
             "report": report,
         }
 
-
-    def execute(self, global_prompt, timeline_data, duration_seconds, frame_rate, guide_policy, min_guide_gap_seconds, max_guides, default_force, promptrelay_epsilon, ltx_round_mode, image_paths, image_width, image_height, image_resize_method="crop", image_multiple_of=32, img_compression=0, multi_input=None):
+    def execute(self, global_prompt, timeline_data, duration_seconds, frame_rate, guide_policy, min_guide_gap_seconds, max_guides, default_force, promptrelay_epsilon, ltx_round_mode, image_paths, image_width, image_height, image_resize_method="crop", image_multiple_of=32, img_compression=0, cine_linx=None):
+        upstream_cine_linx = cine_linx
+        multi_input = self._multi_input_from_cine_linx(upstream_cine_linx)
         (cine_linx,) = super().execute(
             global_prompt,
             timeline_data,
@@ -2519,6 +2623,7 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
             img_compression,
             multi_input=multi_input,
         )
+        self._merge_upstream_helper_layers(cine_linx, upstream_cine_linx)
         data = _safe_json_loads(str(timeline_data or "{}"), {})
         audio_segments = data.get("audioSegments", []) if isinstance(data, dict) else []
         visual_segments = data.get("segments", []) if isinstance(data, dict) else []
@@ -2547,6 +2652,7 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
         director_guide_strength = str(data.get("director_guide_strength", data.get("guide_strength", "")) if isinstance(data, dict) else "")
         director_audio_data = str(data.get("audio_data", "") if isinstance(data, dict) else "")
         global_prompt_only = bool(_safe_bool(data.get("global_prompt_only", data.get("use_global_prompt_only", False)), False)) if isinstance(data, dict) else False
+        verbose_log = bool(_safe_bool(data.get("verbose_log", data.get("verboseLog", True)), True)) if isinstance(data, dict) else True
         fps = max(1, _safe_int(frame_rate, 24))
         promptrelay_requested = False
         if isinstance(data, dict):
@@ -2560,7 +2666,7 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                     if not isinstance(seg, dict) or str(seg.get("type", "image") or "image").strip().lower() == "audio":
                         continue
                     prompt = str(seg.get("prompt", seg.get("local_prompt", seg.get("relay_prompt", ""))) or "").strip()
-                    if self._as_bool(seg.get("use_prompt", bool(prompt)), bool(prompt)) and prompt:
+                    if self._v3_segment_prompt_enabled(seg, prompt):
                         promptrelay_requested = True
                         break
             if not global_prompt_only and not promptrelay_requested:
@@ -2583,6 +2689,7 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
             payload["director_guide_strength"] = director_guide_strength
             payload["director_audio_data"] = director_audio_data
             payload["global_prompt_only"] = bool(global_prompt_only)
+            payload["verbose_log"] = bool(verbose_log)
             payload["filmmaker_promptrelay_enabled"] = bool(promptrelay_requested)
             payload["visual_segments"] = visual_segments if isinstance(visual_segments, list) else []
             payload["audioSegments"] = audio_segments if isinstance(audio_segments, list) else []
@@ -2602,6 +2709,7 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                 outputs["local_prompts"] = ""
                 outputs["segment_lengths"] = ""
             resources["cine_payload"] = payload
+            resources["cine_verbose_log"] = bool(verbose_log)
             resources["cine_audio_timeline_json"] = json.dumps(audio_segments if isinstance(audio_segments, list) else [], ensure_ascii=False)
             resources["cine_visual_segments_json"] = json.dumps(visual_segments if isinstance(visual_segments, list) else [], ensure_ascii=False)
             resources["cine_director_local_prompts"] = director_local_prompts
@@ -2706,7 +2814,7 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                 f"rebuilt_legacy_prompts={rebuilt_step_prompts} "
                 f"mode={flfreal_mode}"
             )
-            if promptrelay_requested and local_parts:
+            if verbose_log and promptrelay_requested and local_parts:
                 local_hash = hashlib.sha1(str(resources.get("cine_local_prompts", "") or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
                 print(
                     "[IAMCCS FLFReal] "
@@ -3105,7 +3213,7 @@ class IAMCCS_CineInfo:
         global_hash = hashlib.sha1(str(global_prompt or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
         local_hash = hashlib.sha1(str(local_prompts or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
         relay_prompt_log = []
-        for idx, prompt in enumerate(locals_list):
+        for idx, prompt in enumerate(local_parts):
             relay_prompt_log.append({
                 "index": idx,
                 "segment_length": length_parts[idx] if idx < len(length_parts) else "<missing>",
@@ -3707,6 +3815,7 @@ class IAMCCS_CineFilmmakerBackend:
                 "use_custom_audio": ("BOOLEAN", {"default": False}),
                 "promptrelay_safety_budget_enabled": ("BOOLEAN", {"default": True}),
                 "promptrelay_safety_budget": ("INT", {"default": 24000, "min": 1000, "max": 5000000, "step": 1000}),
+                "goya_audio_strict": ("BOOLEAN", {"default": False, "tooltip": "When enabled, custom timeline audio encode problems raise instead of silently falling back to empty audio."}),
             },
         }
 
@@ -3848,9 +3957,23 @@ class IAMCCS_CineFilmmakerBackend:
                 if src_end <= src_start:
                     continue
                 clip_waveform = waveform[:, src_start:src_end]
+                if _safe_bool(seg.get("normalizeAudio", seg.get("normalize", False)), False) and clip_waveform.numel():
+                    peak = float(torch.max(torch.abs(clip_waveform)).detach().cpu().item())
+                    if peak > 0.0001:
+                        clip_waveform = clip_waveform * min(4.0, 0.92 / peak)
                 gain = _clamp(seg.get("gain", seg.get("volume", 1.0)), 0.0, 2.0, 1.0)
                 if abs(float(gain) - 1.0) > 0.0001:
                     clip_waveform = clip_waveform * float(gain)
+                fade_in_frames = max(0.0, float(seg.get("fadeInFrames", seg.get("fade_in_frames", 0)) or 0))
+                fade_out_frames = max(0.0, float(seg.get("fadeOutFrames", seg.get("fade_out_frames", 0)) or 0))
+                fade_in_samples = min(clip_waveform.shape[1], int(fade_in_frames / safe_fps * target_sr))
+                fade_out_samples = min(clip_waveform.shape[1], int(fade_out_frames / safe_fps * target_sr))
+                if fade_in_samples > 1:
+                    ramp = torch.linspace(0.0, 1.0, fade_in_samples, dtype=clip_waveform.dtype, device=clip_waveform.device)
+                    clip_waveform[:, :fade_in_samples] *= ramp.unsqueeze(0)
+                if fade_out_samples > 1:
+                    ramp = torch.linspace(1.0, 0.0, fade_out_samples, dtype=clip_waveform.dtype, device=clip_waveform.device)
+                    clip_waveform[:, -fade_out_samples:] *= ramp.unsqueeze(0)
                 dst_start = int(start_frames / safe_fps * target_sr)
                 if dst_start >= out_waveform.shape[1]:
                     continue
@@ -3859,20 +3982,45 @@ class IAMCCS_CineFilmmakerBackend:
                 if actual <= 0:
                     continue
                 out_waveform[:, dst_start:dst_end] += clip_waveform[:, :actual]
-            except Exception:
+            except Exception as exc:
+                print(f"[IAMCCS FilmmakerBackend] audio segment decode skipped file={seg.get('fileName') or seg.get('audioFile')} error={exc}")
                 continue
+
+        if isinstance(data, dict):
+            master_gain = _clamp(data.get("masterAudioGain", data.get("master_audio_gain", 1.0)), 0.0, 2.0, 1.0)
+            if abs(float(master_gain) - 1.0) > 0.0001:
+                out_waveform = out_waveform * float(master_gain)
+            if _safe_bool(data.get("masterAudioNormalize", data.get("master_audio_normalize", False)), False) and out_waveform.numel():
+                peak = float(torch.max(torch.abs(out_waveform)).detach().cpu().item())
+                if peak > 0.0001:
+                    out_waveform = out_waveform * min(4.0, 0.92 / peak)
 
         return {"waveform": out_waveform.unsqueeze(0), "sample_rate": target_sr}
 
     @staticmethod
-    def _encode_audio_latent(audio_vae: Any, audio_out: Dict[str, Any]) -> Dict[str, Any]:
+    def _encode_audio_latent(audio_vae: Any, audio_out: Dict[str, Any], strict: bool = False) -> Dict[str, Any]:
         if audio_vae is None or not isinstance(audio_out, dict) or "waveform" not in audio_out:
+            if strict:
+                raise RuntimeError("Custom audio was requested, but audio_vae or waveform is missing.")
             return {}
         try:
             import comfy.model_management
 
-            latent_samples = audio_vae.encode(audio_out["waveform"].movedim(1, -1))
+            waveform = audio_out["waveform"]
+            if torch.is_tensor(waveform) and waveform.ndim == 2:
+                waveform = waveform.unsqueeze(0)
+            if not torch.is_tensor(waveform) or waveform.ndim != 3:
+                raise RuntimeError(f"Expected custom audio waveform with 2 or 3 dims, got {getattr(waveform, 'shape', None)}")
+            if hasattr(audio_vae, "first_stage_model"):
+                latent_samples = audio_vae.encode(waveform.movedim(1, -1))
+            else:
+                latent_samples = audio_vae.encode({
+                    "waveform": waveform,
+                    "sample_rate": int(audio_out.get("sample_rate", getattr(audio_vae, "sample_rate", 44100))),
+                })
             if not torch.is_tensor(latent_samples) or latent_samples.numel() == 0:
+                if strict:
+                    raise RuntimeError("Encoded custom audio latent is empty.")
                 return {}
             mask = torch.full(
                 (1, latent_samples.shape[-2], latent_samples.shape[-1]),
@@ -3886,7 +4034,10 @@ class IAMCCS_CineFilmmakerBackend:
                 "type": "audio",
                 "noise_mask": mask.reshape((-1, 1, mask.shape[-2], mask.shape[-1])),
             }
-        except Exception:
+        except Exception as exc:
+            if strict:
+                raise RuntimeError(f"Failed to encode custom audio latent: {exc}") from exc
+            print(f"[IAMCCS FilmmakerBackend] audio latent encode fallback: {exc}")
             return {}
 
 
@@ -3979,10 +4130,12 @@ class IAMCCS_CineFilmmakerBackend:
         use_custom_audio=False,
         promptrelay_safety_budget_enabled=True,
         promptrelay_safety_budget=24000,
+        goya_audio_strict=False,
     ):
         resources = IAMCCS_CineInfo._resources(cine_linx)
         outputs = IAMCCS_CineInfo._outputs(cine_linx)
         payload = resources.get("cine_payload") if isinstance(resources.get("cine_payload"), dict) else {}
+        verbose_log = bool(_safe_bool(resources.get("cine_verbose_log", payload.get("verbose_log", payload.get("verboseLog", True))), True))
 
         global_prompt = str(resources.get("cine_global_prompt", outputs.get("global_prompt", payload.get("global_prompt", ""))) or "")
         local_prompts = str(resources.get("cine_local_prompts", outputs.get("local_prompts", payload.get("local_prompts", ""))) or "")
@@ -4052,25 +4205,26 @@ class IAMCCS_CineFilmmakerBackend:
                 if safety_budget_enabled and safety_budget > 0 and prompt_budget > safety_budget:
                     raise RuntimeError(f"PromptRelay disabled by optional safety budget: estimated matrix load {prompt_budget} > {safety_budget}")
                 promptrelay_nodes = _load_original_promptrelay_module()
-                print(
-                    "[IAMCCS FilmmakerBackend] "
-                    f"PROMPT_RELAY_LOCAL_PROMPTS_USED source=cine_linx "
-                    f"count={len(local_parts)} segments={len(length_parts)} "
-                    f"global_hash={hashlib.sha1(str(global_prompt or '').encode('utf-8', errors='ignore')).hexdigest()[:12]} "
-                    f"local_hash={local_hash}"
-                )
-                for item in relay_prompt_log[:50]:
-                    compact = str(item["prompt"]).replace("\n", " ")
-                    if len(compact) > 360:
-                        compact = compact[:357] + "..."
+                if verbose_log:
                     print(
                         "[IAMCCS FilmmakerBackend] "
-                        f"relay[{int(item['index']):02d}] "
-                        f"length={item['segment_length']} "
-                        f"prompt={compact!r}"
+                        f"PROMPT_RELAY_LOCAL_PROMPTS_USED source=cine_linx "
+                        f"count={len(local_parts)} segments={len(length_parts)} "
+                        f"global_hash={hashlib.sha1(str(global_prompt or '').encode('utf-8', errors='ignore')).hexdigest()[:12]} "
+                        f"local_hash={local_hash}"
                     )
-                if len(relay_prompt_log) > 50:
-                    print(f"[IAMCCS FilmmakerBackend] relay prompt log truncated: {len(relay_prompt_log) - 50} more prompts.")
+                    for item in relay_prompt_log[:50]:
+                        compact = str(item["prompt"]).replace("\n", " ")
+                        if len(compact) > 360:
+                            compact = compact[:357] + "..."
+                        print(
+                            "[IAMCCS FilmmakerBackend] "
+                            f"relay[{int(item['index']):02d}] "
+                            f"length={item['segment_length']} "
+                            f"prompt={compact!r}"
+                        )
+                    if len(relay_prompt_log) > 50:
+                        print(f"[IAMCCS FilmmakerBackend] relay prompt log truncated: {len(relay_prompt_log) - 50} more prompts.")
                 patched_model, positive = promptrelay_nodes._encode_relay(
                     model,
                     clip,
@@ -4123,18 +4277,99 @@ class IAMCCS_CineFilmmakerBackend:
         )
         if not guide_data.get("images"):
             guide_data = IAMCCS_CineInfoV2._guide_data_from_plan(guide_plan_json, multi_output)
+        if verbose_log:
+            visual_segments_for_log = _safe_json_loads(visual_segments_json, [])
+            if isinstance(visual_segments_for_log, dict):
+                visual_segments_for_log = visual_segments_for_log.get("segments", [])
+            if not isinstance(visual_segments_for_log, list):
+                visual_segments_for_log = []
+            print(
+                "[IAMCCS FilmmakerBackend] "
+                f"VALUES_USED source=cine_linx verbose_log={bool(verbose_log)} "
+                f"duration={float(duration_seconds):.3f}s fps={int(frame_rate)} max_frames={int(max_frames)} "
+                f"width={int(width)} height={int(height)} resize={image_resize_method} multiple={int(image_multiple_of)} "
+                f"img_compression={int(img_compression)} default_force={float(default_force):.4f} "
+                f"relay_softness={float(epsilon):.4f} promptrelay={bool(promptrelay_enabled and not relay_error)}"
+            )
+            print(
+                "[IAMCCS FilmmakerBackend] "
+                f"GUIDE_VALUES_USED source={guide_data_source} count={len(guide_data.get('images', []))} "
+                f"frames={guide_data.get('insert_frames', [])} "
+                f"strengths={guide_data.get('strengths', [])} "
+                f"refs={guide_data.get('reference_indices', [])} "
+                f"labels={guide_data.get('labels', [])} "
+                f"motion_forces={guide_data.get('motion_forces', [])} "
+                f"image_lock_strengths={guide_data.get('image_lock_strengths', [])}"
+            )
+            image_sources_for_log = guide_data.get("image_sources", [])
+            if image_sources_for_log:
+                print(f"[IAMCCS FilmmakerBackend] GUIDE_IMAGE_SOURCES_USED sources={image_sources_for_log}")
+            for idx, seg in enumerate(visual_segments_for_log[:80]):
+                if not isinstance(seg, dict):
+                    continue
+                prompt = str(seg.get("prompt", seg.get("local_prompt", seg.get("relay_prompt", ""))) or "").replace("\n", " ")
+                if len(prompt) > 260:
+                    prompt = prompt[:257] + "..."
+                image_file = str(seg.get("imageFile", seg.get("image_file", "")) or "")
+                if len(image_file) > 180:
+                    image_file = "..." + image_file[-177:]
+                print(
+                    "[IAMCCS FilmmakerBackend] "
+                    f"segment[{idx:02d}] "
+                    f"id={str(seg.get('id', ''))!r} type={str(seg.get('type', 'image'))!r} "
+                    f"start={_safe_int(seg.get('start', seg.get('frame', 0)), 0)} "
+                    f"length={_safe_int(seg.get('length', seg.get('len', 0)), 0)} "
+                    f"ref={_safe_int(seg.get('ref', seg.get('reference_index', seg.get('image_ref', 0))), 0)} "
+                    f"use_guide={bool(_safe_bool(seg.get('use_guide', seg.get('guide', True)), True))} "
+                    f"guideStrength={float(_safe_float(seg.get('guideStrength', seg.get('force', default_force)), float(default_force))):.4f} "
+                    f"imageLockStrength={float(_safe_float(seg.get('imageLockStrength', seg.get('image_lock_strength', seg.get('guideStrength', default_force))), float(default_force))):.4f} "
+                    f"label={str(seg.get('label', ''))!r} "
+                    f"imageFile={image_file!r} "
+                    f"prompt={prompt!r}"
+                )
+            if len(visual_segments_for_log) > 80:
+                print(f"[IAMCCS FilmmakerBackend] segment log truncated: {len(visual_segments_for_log) - 80} more segments.")
         has_timeline_audio = self._has_custom_audio(audio_timeline_json)
         custom_audio_requested = bool(_safe_bool(payload.get("use_custom_audio", resources.get("cine_use_custom_audio", use_custom_audio)), False) or has_timeline_audio)
         audio_out = self._build_combined_audio(audio_timeline_json, int(max_frames), float(frame_rate))
-        audio_latent = self._encode_audio_latent(audio_vae, audio_out) if custom_audio_requested and has_timeline_audio else {}
+        audio_peak = 0.0
+        audio_samples = 0
+        try:
+            waveform = audio_out.get("waveform") if isinstance(audio_out, dict) else None
+            if torch.is_tensor(waveform):
+                audio_samples = int(waveform.shape[-1])
+                audio_peak = float(torch.max(torch.abs(waveform)).detach().cpu().item()) if waveform.numel() else 0.0
+        except Exception:
+            audio_peak = 0.0
+        print(
+            "[IAMCCS FilmmakerBackend] "
+            f"Audio requested={bool(custom_audio_requested)} timeline_audio={bool(has_timeline_audio)} "
+            f"segments={len(_safe_json_loads(audio_timeline_json, [])) if isinstance(_safe_json_loads(audio_timeline_json, []), list) else len(_safe_json_loads(audio_timeline_json, {}).get('audioSegments', [])) if isinstance(_safe_json_loads(audio_timeline_json, {}), dict) else 0} "
+            f"samples={audio_samples} peak={audio_peak:.6f}"
+        )
+        strict_audio = bool(_safe_bool(goya_audio_strict, False) and custom_audio_requested and has_timeline_audio)
+        if custom_audio_requested and has_timeline_audio and audio_peak <= 0.000001:
+            message = "Custom timeline audio was requested, but the decoded audio waveform is silent or missing."
+            if strict_audio:
+                raise RuntimeError(message)
+            print(f"[IAMCCS FilmmakerBackend] WARNING: {message}")
+        audio_latent = self._encode_audio_latent(audio_vae, audio_out, strict=strict_audio) if custom_audio_requested and has_timeline_audio else {}
         if not audio_latent:
             audio_latent = self._empty_audio_latent(audio_vae, int(max_frames), float(frame_rate))
+        else:
+            samples = audio_latent.get("samples") if isinstance(audio_latent, dict) else None
+            print(
+                "[IAMCCS FilmmakerBackend] "
+                f"Custom audio latent encoded shape={tuple(samples.shape) if torch.is_tensor(samples) else None} "
+                f"mask={bool(isinstance(audio_latent, dict) and torch.is_tensor(audio_latent.get('noise_mask')))}"
+            )
         report = _json_report({
             "node": "IAMCCS_CineFilmmakerBackend",
             "mode": "shotboard_v3_runtime_backend",
             "promptrelay_requested": bool(promptrelay_requested),
             "promptrelay_enabled": bool(promptrelay_enabled and not relay_error),
             "promptrelay_error": relay_error,
+            "verbose_log": bool(verbose_log),
             "promptrelay_safety_budget_enabled": bool(safety_budget_enabled),
             "promptrelay_safety_budget": int(safety_budget),
             "local_hash": local_hash,
@@ -4165,7 +4400,10 @@ class IAMCCS_CineFilmmakerBackend:
             "audio_segments": len(_safe_json_loads(audio_timeline_json, [])) if isinstance(_safe_json_loads(audio_timeline_json, []), list) else len(_safe_json_loads(audio_timeline_json, {}).get("audioSegments", [])) if isinstance(_safe_json_loads(audio_timeline_json, {}), dict) else 0,
             "custom_audio_requested": bool(custom_audio_requested),
             "custom_audio_encoded": bool(custom_audio_requested and has_timeline_audio),
+            "goya_audio_strict": bool(strict_audio),
             "audio_latent_valid": bool(isinstance(audio_latent, dict) and torch.is_tensor(audio_latent.get("samples"))),
+            "audio_waveform_peak": float(audio_peak),
+            "audio_waveform_samples": int(audio_samples),
             "guide_plan_report": _safe_json_loads(plan_report, {}),
             "truth": "This node consumes the FLFreal visual timeline contract from Shotboard Planner V3 cine_linx.",
         })

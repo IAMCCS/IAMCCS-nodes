@@ -1517,7 +1517,7 @@ async function ensureDirectoryWritable(directoryHandle) {
     return false;
 }
 
-async function downloadShotboardPackageJsonFallback(board, label, reason = "", statusCallback = null) {
+async function buildShotboardPackageJson(board, label, reason = "", statusCallback = null) {
     const imagePaths = collectPackageImagePaths(board);
     const packageName = `${sanitizePackageComponent(label)}_${timestampForPackageName()}`;
     const images = [];
@@ -1540,7 +1540,10 @@ async function downloadShotboardPackageJsonFallback(board, label, reason = "", s
         }
         images.push(entry);
     }
-    downloadJsonFile({
+    return {
+        filename: `${packageName}.json`,
+        packageName,
+        payload: {
         metadata: {
             schema: "iamccs.cine.shotboard.package.fallback",
             schema_version: 2,
@@ -1552,8 +1555,14 @@ async function downloadShotboardPackageJsonFallback(board, label, reason = "", s
         },
         board,
         images,
-    }, `${packageName}.json`);
-    statusCallback?.(`Downloaded fallback package JSON: ${packageName}.json`);
+        },
+    };
+}
+
+async function downloadShotboardPackageJsonFallback(board, label, reason = "", statusCallback = null) {
+    const built = await buildShotboardPackageJson(board, label, reason, statusCallback);
+    downloadJsonFile(built.payload, built.filename);
+    statusCallback?.(`Downloaded fallback package JSON: ${built.filename}`);
 }
 
 async function saveShotboardPackageViaBackend(board, label, packageName, statusCallback = null) {
@@ -1572,9 +1581,9 @@ async function saveShotboardPackageViaBackend(board, label, packageName, statusC
     return data;
 }
 
-async function saveShotboardPackageFolder(board, label, statusCallback = null) {
+async function saveShotboardPackageFolder(board, label, statusCallback = null, packageNameOverride = "") {
     const imagePaths = collectPackageImagePaths(board);
-    const packageName = `${sanitizePackageComponent(label)}_${timestampForPackageName()}`;
+    const packageName = sanitizePackageComponent(packageNameOverride || `${sanitizePackageComponent(label)}_${timestampForPackageName()}`);
     if (typeof window.showDirectoryPicker !== "function") {
         try {
             await saveShotboardPackageViaBackend(board, label, packageName, statusCallback);
@@ -1588,10 +1597,6 @@ async function saveShotboardPackageFolder(board, label, statusCallback = null) {
     try {
         statusCallback?.("Choose a folder for the shotboard package...");
         const rootHandle = await window.showDirectoryPicker({ mode: "readwrite" });
-        if (!(await ensureDirectoryWritable(rootHandle))) {
-            statusCallback?.("Folder write permission was not granted.");
-            return;
-        }
         const packageHandle = await rootHandle.getDirectoryHandle(packageName, { create: true });
         const imagesHandle = await packageHandle.getDirectoryHandle("images", { create: true });
         const pathMap = {};
@@ -1690,6 +1695,44 @@ function safeBoardFilename(label) {
         .replace(/^_+|_+$/g, "")
         .slice(0, 80);
     return `${clean || "cine_shotboard"}_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.json`;
+}
+
+function sanitizeSaveFilename(filename, extension = ".json") {
+    let value = String(filename || "iamccs_board")
+        .replace(/[<>:"/\\|?*\x00-\x1F]+/g, "_")
+        .replace(/^_+|_+$/g, "")
+        .slice(0, 140) || "iamccs_board";
+    return extension && !value.toLowerCase().endsWith(extension.toLowerCase()) ? `${value}${extension}` : value;
+}
+
+async function saveJsonAsFile(payload, suggestedName, statusCallback = null, description = "IAMCCS JSON") {
+    const safeName = sanitizeSaveFilename(suggestedName || safeBoardFilename("iamccs_board"), ".json");
+    if (typeof window.showSaveFilePicker === "function") {
+        try {
+            const fileHandle = await window.showSaveFilePicker({
+                suggestedName: safeName,
+                types: [{ description, accept: { "application/json": [".json"] } }],
+            });
+            const writable = await fileHandle.createWritable();
+            await writable.write(JSON.stringify(payload, null, 2));
+            await writable.close();
+            statusCallback?.(`Saved: ${safeName}`);
+            return { mode: "save_file_picker", filename: safeName };
+        } catch (err) {
+            if (String(err?.name || "") === "AbortError") {
+                statusCallback?.("Save cancelled.");
+                return { mode: "cancelled", filename: safeName };
+            }
+            console.warn("[IAMCCS Cine Shotboard] Save As file picker failed; using download fallback", err);
+        }
+    }
+    downloadJsonFile(payload, safeName);
+    statusCallback?.(`Downloaded: ${safeName}`);
+    return { mode: "download", filename: safeName };
+}
+
+async function saveBoardJsonAs(board, suggestedName, statusCallback = null) {
+    return saveJsonAsFile(board, suggestedName || safeBoardFilename("iamccs_board"), statusCallback, "IAMCCS Shotboard Board");
 }
 
 async function saveBoardJsonToChosenFolder(board, filename, statusCallback = null) {
@@ -5873,6 +5916,14 @@ function renderShotboardV3(node) {
     const defaultForceWidget = getWidget(node, "default_force");
     const imageWidthWidget = getWidget(node, "image_width");
     const imageHeightWidget = getWidget(node, "image_height");
+    const removeStaleV3MultiInput = () => {
+        const slot = findInputSlotByName(node, ["multi_input"]);
+        if (slot < 0 || !Array.isArray(node.inputs)) return;
+        try { node.disconnectInput?.(slot); } catch {}
+        node.inputs.splice(slot, 1);
+        try { node.setDirtyCanvas?.(true, true); app.graph?.setDirtyCanvas?.(true, true); } catch {}
+    };
+    removeStaleV3MultiInput();
     const v3SettingNames = [
         "duration_seconds",
         "frame_rate",
@@ -5912,7 +5963,11 @@ function renderShotboardV3(node) {
     let collapsed = Boolean(node.properties?.iamccs_v3_collapsed);
     let promptTextScale = Math.max(0.85, Math.min(1.55, Number(node.properties?.iamccs_v3_prompt_text_scale || 1)));
     const promptFontSize = (base) => `${Math.max(8, Math.round(Number(base || 10) * promptTextScale * 10) / 10)}px`;
-    let timelineMeterSeconds = Math.max(0.5, Number(node.properties?.iamccs_v3_timeline_meter_seconds || durationWidget?.value || 20) || 20);
+    const storedTimelineMeter = Number(node.properties?.iamccs_v3_timeline_meter_seconds);
+    const timelineMeterWasUserSet = Boolean(node.properties?.iamccs_v3_timeline_meter_user_set);
+    let timelineMeterSeconds = timelineMeterWasUserSet && Number.isFinite(storedTimelineMeter)
+        ? Math.max(0.5, storedTimelineMeter)
+        : Math.max(0.5, Number(durationWidget?.value || 20) || 20);
     let selectedId = null;
     let pendingImageInsertFrame = null;
     let pendingImageTargetId = null;
@@ -5969,6 +6024,12 @@ function renderShotboardV3(node) {
 
     function readTimeline() {
         try {
+            const candidateRevision = (value) => Math.max(0, Number(
+                value?.truth_revision ??
+                value?._iamccs_v3_truth_revision ??
+                value?.metadata?.truth_revision ??
+                0
+            ) || 0);
             const candidates = [];
             const widgetText = String(timelineWidget?.value || "").trim();
             const backupText = String(node.properties?.iamccs_v3_timeline_data_backup || "").trim();
@@ -5977,26 +6038,36 @@ function renderShotboardV3(node) {
             if (widgetText) {
                 try {
                     const value = JSON.parse(widgetText);
-                    widgetCandidate = { source: "widget.timeline_data", textLength: widgetText.length, value, stats: timelinePromptStats(value) };
+                    widgetCandidate = { source: "widget.timeline_data", textLength: widgetText.length, value, revision: candidateRevision(value), stats: timelinePromptStats(value) };
                     candidates.push(widgetCandidate);
                 } catch {}
             }
             if (backupText) {
                 try {
                     const value = JSON.parse(backupText);
-                    backupCandidate = { source: "properties.iamccs_v3_timeline_data_backup", textLength: backupText.length, value, stats: timelinePromptStats(value) };
+                    backupCandidate = { source: "properties.iamccs_v3_timeline_data_backup", textLength: backupText.length, value, revision: candidateRevision(value), stats: timelinePromptStats(value) };
                     candidates.push(backupCandidate);
                 } catch {}
             }
-            const selected = widgetCandidate || backupCandidate || { source: "empty", value: {} };
+            const selected = candidates.length
+                ? candidates.slice().sort((a, b) => {
+                    const revisionDelta = Number(b.revision || 0) - Number(a.revision || 0);
+                    if (revisionDelta) return revisionDelta;
+                    if (a.source === "widget.timeline_data") return -1;
+                    if (b.source === "widget.timeline_data") return 1;
+                    return 0;
+                })[0]
+                : { source: "empty", value: {}, revision: 0 };
             const data = selected.value;
             console.log("[IAMCCS V3 TIMELINE LOAD]", {
                 selected: selected.source,
-                truth: widgetCandidate ? "node.timeline_data" : "backup_fallback",
+                truth: selected.source === "widget.timeline_data" ? "node.timeline_data" : selected.source === "properties.iamccs_v3_timeline_data_backup" ? "backup_revision_wins" : "empty",
+                revision: Number(selected.revision || 0),
                 nodeId: node?.id,
                 candidates: candidates.map((candidate) => ({
                     source: candidate.source,
                     textLength: candidate.textLength,
+                    revision: Number(candidate.revision || 0),
                     hasSegments: Array.isArray(candidate.value?.segments),
                     segmentCount: Array.isArray(candidate.value?.segments) ? candidate.value.segments.length : 0,
                     rowCount: Array.isArray(candidate.value?.rows) ? candidate.value.rows.length : 0,
@@ -6012,14 +6083,18 @@ function renderShotboardV3(node) {
                     segments: Array.isArray(data.segments) ? data.segments : [],
                     audioSegments: Array.isArray(data.audioSegments) ? data.audioSegments : [],
                     audioTrackCount: Math.max(1, Number(data.audioTrackCount || 2)),
+                    masterAudioGain: Math.max(0, Math.min(2, Number(data.masterAudioGain ?? data.master_audio_gain ?? 1) || 1)),
+                    masterAudioNormalize: Boolean(data.masterAudioNormalize || data.master_audio_normalize),
                     audioSyncMode: String(data.audioSyncMode || "timeline_audio"),
                     generationStrategy: String(data.generationStrategy || "single_timeline"),
                     flfrealMode: String(data.flfrealMode || data.flfreal_mode || "iamccs_enhanced"),
                     globalPromptOnly: Boolean(data.global_prompt_only || data.use_global_prompt_only),
+                    verboseLog: data.verbose_log !== undefined ? Boolean(data.verbose_log) : data.verboseLog !== undefined ? Boolean(data.verboseLog) : true,
+                    truthRevision: candidateRevision(data),
                 };
             }
         } catch {}
-        return { schema: "iamccs.cine.filmmaker_timeline", schema_version: 1, segments: [], audioSegments: [], audioTrackCount: 2, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false };
+        return { schema: "iamccs.cine.filmmaker_timeline", schema_version: 1, segments: [], audioSegments: [], audioTrackCount: 2, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
     }
 
     let timeline = readTimeline();
@@ -6105,6 +6180,29 @@ function renderShotboardV3(node) {
         return seg;
     };
     const audioSegmentHasMedia = (seg) => Boolean(seg && (String(seg.audioFile || "").trim() || String(seg.audioB64 || "").trim()));
+    const stripEmptyAudioForBoardExport = (payload) => {
+        const clean = cloneJsonData(payload || {});
+        const audioSegments = Array.isArray(clean.audioSegments) ? clean.audioSegments : [];
+        const hasAudioMedia = audioSegments.some((seg) => audioSegmentHasMedia(seg));
+        if (hasAudioMedia) return clean;
+        delete clean.audioSegments;
+        delete clean.audioTrackCount;
+        delete clean.masterAudioGain;
+        delete clean.masterAudioNormalize;
+        delete clean.audioSyncMode;
+        delete clean.audio_data;
+        delete clean.use_custom_audio;
+        return clean;
+    };
+    const boardTimelineForExport = (timelineText) => {
+        let payload = null;
+        try { payload = JSON.parse(String(timelineText || "{}")); } catch {}
+        const cleanPayload = stripEmptyAudioForBoardExport(payload || timeline || {});
+        return {
+            payload: cleanPayload,
+            text: JSON.stringify(cleanPayload, null, 2),
+        };
+    };
     const segmentRangesOverlap = (aStart, aLength, bStart, bLength) => {
         const a0 = Math.max(0, Math.round(Number(aStart || 0)));
         const b0 = Math.max(0, Math.round(Number(bStart || 0)));
@@ -6161,7 +6259,7 @@ function renderShotboardV3(node) {
             transition: String(seg.transition || "continuous_motion"),
             note: String(seg.note || ""),
             use_guide: !isText && seg.use_guide !== false,
-            use_prompt: Boolean((seg.use_prompt !== false && String(seg.prompt || "").trim()) || seg.dialogue_pin || seg.image_lock || seg.motion_boost),
+            use_prompt: Boolean((String(seg.prompt || "").trim() && seg.relay_manual_off !== true && seg.promptrelay_manual_off !== true) || seg.dialogue_pin || seg.image_lock || seg.motion_boost),
             relay_prompt: String(seg.prompt || ""),
             camera_relay_mode: String(seg.camera_relay_mode || "off"),
             transition_relay_mode: String(seg.transition_relay_mode || "off"),
@@ -6238,6 +6336,10 @@ function renderShotboardV3(node) {
             if (String(seg.prompt ?? "") === value) return;
             seg.prompt = value;
             seg.use_prompt = Boolean(value.trim());
+            if (value.trim()) {
+                seg.relay_manual_off = false;
+                seg.promptrelay_manual_off = false;
+            }
             changed += 1;
             syncSegmentTextPeers(segmentId, "prompt", value, el);
             syncSegmentRelayPeers(segmentId, Boolean(seg.use_prompt), null);
@@ -6321,7 +6423,8 @@ function renderShotboardV3(node) {
             const length = Math.max(1, clippedEnd - start + pendingGap);
             pendingGap = 0;
             const prompt = String(seg.prompt || "").trim();
-            if (prompt) {
+            const promptActive = Boolean(prompt && seg.relay_manual_off !== true && seg.promptrelay_manual_off !== true);
+            if (promptActive) {
                 directorPrompts.push(prompt);
                 directorLengths.push(length);
             } else if (directorLengths.length) {
@@ -6341,6 +6444,8 @@ function renderShotboardV3(node) {
         const audioData = JSON.stringify({
             audioSegments: timeline.audioSegments || [],
             use_custom_audio: audioHasMedia,
+            masterAudioGain: Math.max(0, Math.min(2, Number(timeline.masterAudioGain ?? 1) || 1)),
+            masterAudioNormalize: Boolean(timeline.masterAudioNormalize),
             audioSyncMode: String(timeline.audioSyncMode || "timeline_audio"),
         });
         const flfrealMode = ["flfreal_parity", "iamccs_enhanced"].includes(String(timeline.flfrealMode || "iamccs_enhanced"))
@@ -6350,11 +6455,24 @@ function renderShotboardV3(node) {
         const effectiveDirectorPrompts = globalPromptOnly ? [] : directorPrompts;
         const effectiveDirectorLengths = globalPromptOnly ? [] : directorLengths;
         const effectivePromptRelayEnabled = globalPromptOnly ? false : promptRelayEnabled;
+        node.properties = node.properties || {};
+        const nextTruthRevision = Math.max(
+            Number(node.properties.iamccs_v3_timeline_revision || 0),
+            Number(timeline.truthRevision || 0),
+            0
+        ) + 1;
+        const truthUpdatedAt = new Date().toISOString();
+        timeline.truthRevision = nextTruthRevision;
         const clean = {
             schema: "iamccs.cine.filmmaker_timeline",
             schema_version: 2,
+            truth_revision: nextTruthRevision,
+            _iamccs_v3_truth_revision: nextTruthRevision,
+            truth_updated_at: truthUpdatedAt,
             flfrealMode,
             flfreal_mode: flfrealMode,
+            verbose_log: timeline.verboseLog !== false,
+            verboseLog: timeline.verboseLog !== false,
             global_prompt_only: globalPromptOnly,
             use_global_prompt_only: globalPromptOnly,
             promptrelay_enabled: effectivePromptRelayEnabled,
@@ -6378,10 +6496,14 @@ function renderShotboardV3(node) {
             promptrelay_epsilon: Number(getWidget(node, "promptrelay_epsilon")?.value || 0.65),
             img_compression: Number(getWidget(node, "img_compression")?.value || 0),
             audioTrackCount: Math.max(1, Math.round(Number(timeline.audioTrackCount || 2))),
+            masterAudioGain: Math.max(0, Math.min(2, Number(timeline.masterAudioGain ?? 1) || 1)),
+            masterAudioNormalize: Boolean(timeline.masterAudioNormalize),
             segments: timeline.segments,
             audioSegments: timeline.audioSegments,
             rows,
         };
+        node.properties.iamccs_v3_timeline_revision = nextTruthRevision;
+        node.properties.iamccs_v3_timeline_updated_at = truthUpdatedAt;
         commitTimelineJson(JSON.stringify(clean, null, 2), Boolean(options.force));
     };
 
@@ -6432,34 +6554,61 @@ function renderShotboardV3(node) {
         btn.onmouseleave = () => { btn.style.background = colors.bg; };
         return protectControlDrag(btn);
     };
-    const setFlfrealMode = (value) => {
-        timeline.flfrealMode = value;
-        writeTimeline({ force: true });
-        draw();
-    };
-    const makeModeBtn = (value, label, tone = "teal") => {
-        const active = String(timeline.flfrealMode || "iamccs_enhanced") === value;
-        const colors = v3ButtonColors[tone] || v3ButtonColors.teal;
-        const btn = makeBtn(label, tone);
-        btn.style.background = active ? colors.hover : colors.bg;
-        btn.style.borderColor = active ? "#F2FFFB" : colors.border;
-        btn.style.color = colors.color;
-        btn.title = active ? `${label} active` : `Switch to ${label}`;
-        btn.onmouseenter = () => { btn.style.background = colors.hover; };
-        btn.onmouseleave = () => { btn.style.background = active ? colors.hover : colors.bg; };
-        btn.onclick = () => setFlfrealMode(value);
+    const markToggleButton = (btn, active) => {
+        btn.setAttribute("aria-pressed", active ? "true" : "false");
+        btn.style.borderColor = active ? "#F2FFFB" : "";
+        btn.style.boxShadow = active ? "inset 0 0 0 1px rgba(255,255,255,.38),0 0 0 1px rgba(143,208,204,.16)" : "none";
+        btn.style.opacity = active ? "1" : ".82";
         return btn;
     };
-    const flfrealBtn = makeModeBtn("flfreal_parity", "FLFreal parity", "teal");
-    const globalOnlyBtn = makeBtn(Boolean(timeline.globalPromptOnly) ? "Global only: ON" : "Global only: OFF", Boolean(timeline.globalPromptOnly) ? "green" : "slate");
-    globalOnlyBtn.title = "When ON, ignore local PromptRelay text/action lanes and use only the global prompt, while keeping image guides.";
-    globalOnlyBtn.onclick = (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        timeline.globalPromptOnly = !Boolean(timeline.globalPromptOnly);
+    const bindToolbarToggle = (btn, apply) => {
+        let lastFire = 0;
+        const fire = (event) => {
+            event?.preventDefault?.();
+            event?.stopPropagation?.();
+            event?.stopImmediatePropagation?.();
+            const now = Date.now();
+            if (now - lastFire < 180) return;
+            lastFire = now;
+            apply();
+        };
+        btn.onpointerdown = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation?.();
+        };
+        btn.onpointerup = fire;
+        btn.onclick = fire;
+        btn.onkeydown = (event) => {
+            if (event.key === " " || event.key === "Enter") fire(event);
+        };
+        return btn;
+    };
+    const setFlfrealMode = (value) => {
+        timeline.flfrealMode = ["flfreal_parity", "iamccs_enhanced"].includes(String(value)) ? String(value) : "iamccs_enhanced";
         writeTimeline({ force: true });
         draw();
     };
+    const logBtn = makeBtn(timeline.verboseLog === false ? "Log: OFF" : "Log: ON", timeline.verboseLog === false ? "slate" : "blue");
+    logBtn.title = "Toggle verbose ComfyUI backend logs for Shotboard V3 values, prompts, guide strengths and audio state.";
+    markToggleButton(logBtn, timeline.verboseLog !== false);
+    bindToolbarToggle(logBtn, () => {
+        timeline.verboseLog = timeline.verboseLog === false;
+        logBtn.textContent = timeline.verboseLog === false ? "Log: OFF" : "Log: ON";
+        markToggleButton(logBtn, timeline.verboseLog !== false);
+        writeTimeline({ force: true });
+        draw();
+    });
+    const globalOnlyBtn = makeBtn(Boolean(timeline.globalPromptOnly) ? "Global only: ON" : "Global only: OFF", Boolean(timeline.globalPromptOnly) ? "green" : "slate");
+    globalOnlyBtn.title = "When ON, ignore local PromptRelay text/action lanes and use only the global prompt, while keeping image guides.";
+    markToggleButton(globalOnlyBtn, Boolean(timeline.globalPromptOnly));
+    bindToolbarToggle(globalOnlyBtn, () => {
+        timeline.globalPromptOnly = !Boolean(timeline.globalPromptOnly);
+        globalOnlyBtn.textContent = Boolean(timeline.globalPromptOnly) ? "Global only: ON" : "Global only: OFF";
+        markToggleButton(globalOnlyBtn, Boolean(timeline.globalPromptOnly));
+        writeTimeline({ force: true });
+        draw();
+    });
     const promptSizeWrap = document.createElement("div");
     promptSizeWrap.title = "Prompt text size";
     promptSizeWrap.style.cssText = `display:flex;align-items:center;gap:3px;height:28px;padding:0 4px;border:1px solid ${purple.border};border-radius:5px;background:${purple.button};`;
@@ -6496,6 +6645,7 @@ function renderShotboardV3(node) {
             timelineMeterSeconds = clampTimelineMeterSeconds(timelineMeterSeconds + delta);
             node.properties = node.properties || {};
             node.properties.iamccs_v3_timeline_meter_seconds = timelineMeterSeconds;
+            node.properties.iamccs_v3_timeline_meter_user_set = true;
             draw();
         };
         return protectControlDrag(btn);
@@ -6503,7 +6653,6 @@ function renderShotboardV3(node) {
     const timelineMeterReadout = document.createElement("span");
     timelineMeterReadout.style.cssText = `min-width:50px;text-align:center;color:${purple.muted};font-size:9px;font-weight:900;`;
     timelineMeterWrap.append(timelineMeterButton("-", -0.5), timelineMeterReadout, timelineMeterButton("+", 0.5));
-    const enhancedBtn = makeModeBtn("iamccs_enhanced", "IAMCCS enhanced", "amber");
     const addImageBtn = makeBtn("Add Image", "blue");
     const addTextBtn = makeBtn("Add Text", "violet");
     const addAudioBtn = makeBtn("Add Audio", "olive");
@@ -6514,7 +6663,7 @@ function renderShotboardV3(node) {
     const saveBtn = makeBtn("Save Board", "green");
     const savePackageBtn = makeBtn("Save Package", "gold");
     const clearBtn = makeBtn("Clear Board", "danger");
-    topActions.append(flfrealBtn, globalOnlyBtn, promptSizeWrap, timelineMeterWrap, enhancedBtn, addImageBtn, addTextBtn, addAudioBtn, addTrackBtn, collapseBtn, openEditorBtn, importBoardBtn, saveBtn, savePackageBtn, clearBtn);
+    topActions.append(logBtn, globalOnlyBtn, promptSizeWrap, timelineMeterWrap, addImageBtn, addTextBtn, addAudioBtn, addTrackBtn, collapseBtn, openEditorBtn, importBoardBtn, saveBtn, savePackageBtn, clearBtn);
     head.append(title, topActions);
     root.addEventListener("iamccs:cine-fullscreen", (event) => {
         openEditorBtn.textContent = event.detail?.open ? "Close Editor" : "Open Editor";
@@ -6667,6 +6816,19 @@ function renderShotboardV3(node) {
     const loopBtn = makeBtn("Loop");
     const timeReadout = document.createElement("div");
     timeReadout.style.cssText = `width:86px;color:${purple.muted};font-size:11px;font-weight:800;`;
+    const audioPlaybarControls = document.createElement("div");
+    audioPlaybarControls.style.cssText = [
+        "flex:0 0 auto",
+        "display:flex",
+        "align-items:center",
+        "gap:6px",
+        "min-height:28px",
+        "padding:3px 6px",
+        `border:1px solid ${purple.borderSoft}`,
+        "border-radius:6px",
+        "background:rgba(0,0,0,.16)",
+        "box-sizing:border-box",
+    ].join(";");
     const scrub = document.createElement("input");
     scrub.type = "range";
     scrub.min = "0";
@@ -6734,7 +6896,7 @@ function renderShotboardV3(node) {
     let pendingAudioTrack = 0;
     let drawRaf = 0;
     let transitionAppliedStamp = 0;
-    playbar.append(scrubStyle, playBtn, loopBtn, timeReadout, scrub);
+    playbar.append(scrubStyle, playBtn, loopBtn, timeReadout, audioPlaybarControls, scrub);
     timelineCanvas.append(ruler, timelineBox);
     timelineViewport.appendChild(timelineCanvas);
     root.append(timelineViewport, playbar);
@@ -6828,6 +6990,108 @@ function renderShotboardV3(node) {
         loopBtn.style.color = isLooping ? "#FFF2B8" : purple.text;
     }
 
+    const effectiveClipGain = (seg) => {
+        const peaks = Array.isArray(seg?.waveformPeaks) ? seg.waveformPeaks.map((item) => Math.abs(Number(item) || 0)) : [];
+        const rawPeak = peaks.length ? Math.max(...peaks) : 0;
+        const gain = Math.max(0, Math.min(2, Number(seg?.gain ?? seg?.volume ?? 1) || 1));
+        const levelGain = seg?.normalizeAudio && rawPeak > 0.0001 ? Math.min(4, 0.92 / rawPeak) : 1;
+        return gain * levelGain;
+    };
+
+    const mixedAudioLivePeak = () => {
+        let peak = 0;
+        const fps = getFps();
+        const frame = Math.max(0, Math.round(Number(playFrame || 0)));
+        for (const seg of timeline.audioSegments || []) {
+            if (!audioSegmentHasMedia(seg) || seg.placeholder) continue;
+            const start = Math.max(0, Math.round(Number(seg.start || 0)));
+            const length = Math.max(1, Math.round(Number(seg.length || 1)));
+            if (frame < start || frame > start + length) continue;
+            const peaks = Array.isArray(seg.waveformPeaks) ? seg.waveformPeaks.map((item) => Math.abs(Number(item) || 0)) : [];
+            if (!peaks.length) continue;
+            const localFrame = frame - start + Math.max(0, Math.round(Number(seg.trimStart || 0)));
+            const audioDuration = Math.max(1, Math.round(Number(seg.audioDurationFrames || length)));
+            const index = Math.max(0, Math.min(peaks.length - 1, Math.floor((localFrame / audioDuration) * peaks.length)));
+            peak += peaks[index] * effectiveClipGain(seg);
+        }
+        const masterGain = Math.max(0, Math.min(2, Number(timeline.masterAudioGain ?? 1) || 1));
+        const masterNormalize = Boolean(timeline.masterAudioNormalize);
+        const normalized = peak * masterGain;
+        return Math.max(0, Math.min(1, masterNormalize && normalized > 0.0001 ? Math.min(1, normalized * Math.min(4, 0.92 / normalized)) : normalized));
+    };
+
+    function drawAudioPlaybarControls() {
+        audioPlaybarControls.innerHTML = "";
+        const hasAudio = (timeline.audioSegments || []).some((seg) => audioSegmentHasMedia(seg) && !seg.placeholder);
+        const miniLabel = document.createElement("span");
+        miniLabel.textContent = "MASTER";
+        miniLabel.style.cssText = `color:${purple.muted};font-size:9px;font-weight:900;line-height:1;`;
+        audioPlaybarControls.appendChild(miniLabel);
+        if (!hasAudio) {
+            const empty = document.createElement("button");
+            empty.type = "button";
+            empty.textContent = "+";
+            empty.title = "Import audio";
+            empty.style.cssText = `width:24px;height:22px;border:1px dashed ${purple.border};border-radius:5px;background:${purple.valueBg};color:${purple.valueText};font-size:15px;font-weight:900;cursor:pointer;line-height:1;`;
+            empty.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
+            empty.onclick = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                pendingAudioInsertFrame = null;
+                pendingAudioTrack = 0;
+                audioInput.click();
+            };
+            audioPlaybarControls.appendChild(protectControlDrag(empty));
+            return;
+        }
+        const makeMasterNumber = (label, key, step = "0.05", width = 42) => {
+            const wrap = document.createElement("label");
+            wrap.title = label;
+            wrap.style.cssText = "display:flex;align-items:center;gap:3px;color:#EDE3D0;font-size:8px;font-weight:900;line-height:1;";
+            const text = document.createElement("span");
+            text.textContent = label;
+            const input = document.createElement("input");
+            input.type = "number";
+            input.step = step;
+            input.value = timeline[key] ?? 1;
+            input.style.cssText = `width:${width}px;height:22px;box-sizing:border-box;border:1px solid ${purple.border};border-radius:4px;background:${purple.valueBg};color:${purple.valueText};font-size:10px;font-weight:800;text-align:center;padding:0 3px;`;
+            input.onpointerdown = (event) => event.stopPropagation();
+            input.onchange = input.oninput = () => {
+                const raw = Number(input.value || 0);
+                timeline[key] = Math.max(0, Math.min(2, raw));
+                writeTimeline({ force: true });
+            };
+            protectControlDrag(input);
+            wrap.append(text, input);
+            return wrap;
+        };
+        const level = document.createElement("label");
+        level.title = "Normalize final mixed audio";
+        level.style.cssText = "display:flex;align-items:center;gap:3px;color:#EDE3D0;font-size:8px;font-weight:900;line-height:1;";
+        const levelCheck = document.createElement("input");
+        levelCheck.type = "checkbox";
+        levelCheck.checked = Boolean(timeline.masterAudioNormalize);
+        levelCheck.style.cssText = `width:15px;height:15px;accent-color:${purple.accent};cursor:pointer;`;
+        levelCheck.onpointerdown = (event) => event.stopPropagation();
+        levelCheck.onchange = () => {
+            timeline.masterAudioNormalize = Boolean(levelCheck.checked);
+            writeTimeline({ force: true });
+            draw();
+        };
+        level.append(document.createTextNode("Level"), levelCheck);
+        const meterShell = document.createElement("div");
+        meterShell.title = "Realtime final audio peak";
+        meterShell.style.cssText = "width:42px;height:8px;border:1px solid rgba(255,255,255,.2);border-radius:999px;background:rgba(0,0,0,.35);overflow:hidden;";
+        const meterFill = document.createElement("div");
+        meterFill.style.cssText = `width:${Math.round(mixedAudioLivePeak() * 100)}%;height:100%;background:linear-gradient(90deg,#5EB9B4,#F4D49E,#D8792B);`;
+        meterShell.appendChild(meterFill);
+        audioPlaybarControls.append(
+            makeMasterNumber("Vol", "masterAudioGain", "0.05", 42),
+            protectControlDrag(level),
+            meterShell
+        );
+    }
+
     function stopAudioNodes() {
         activeAudioNodes.forEach((node) => {
             try { node.stop(); } catch {}
@@ -6886,7 +7150,12 @@ function renderShotboardV3(node) {
                 if (!buffer || scheduleAudioFromFrame._token !== playToken || !isPlaying) return;
                 const source = audioContext.createBufferSource();
                 const gain = audioContext.createGain();
-                gain.gain.value = Math.max(0, Math.min(2, Number(seg.gain ?? seg.volume ?? 1) || 1));
+                const peaks = Array.isArray(seg.waveformPeaks) ? seg.waveformPeaks.map((item) => Math.abs(Number(item) || 0)) : [];
+                const rawPeak = peaks.length ? Math.max(...peaks) : 0;
+                const clipGain = effectiveClipGain(seg);
+                const masterGain = Math.max(0, Math.min(2, Number(timeline.masterAudioGain ?? 1) || 1));
+                const masterLevelGain = timeline.masterAudioNormalize && rawPeak > 0.0001 ? Math.min(4, 0.92 / rawPeak) : 1;
+                gain.gain.value = Math.max(0, Math.min(8, clipGain * masterGain * masterLevelGain));
                 source.buffer = buffer;
                 source.connect(gain);
                 gain.connect(audioContext.destination);
@@ -7130,6 +7399,37 @@ function renderShotboardV3(node) {
         return items;
     }
 
+    function audioDragPreview(initItems, targetId, dragDelta, edge, durationFrames) {
+        const items = cloneSegments(initItems).sort((a, b) => (Number(a.track || 0) - Number(b.track || 0)) || (Number(a.start || 0) - Number(b.start || 0)));
+        const target = items.find((item) => item.id === targetId);
+        if (!target) return items;
+        const total = Math.max(1, Math.round(Number(durationFrames || getTotalFrames())));
+        const oldStart = Math.max(0, Math.round(Number(target.start || 0)));
+        const oldLength = Math.max(1, Math.round(Number(target.length || 1)));
+        const oldEnd = oldStart + oldLength;
+        const audioDuration = Math.max(1, Math.round(Number(target.audioDurationFrames || oldLength)));
+        const oldTrim = Math.max(0, Math.round(Number(target.trimStart || 0)));
+        if (edge === "center") {
+            target.start = Math.max(0, Math.min(Math.round(oldStart + dragDelta), Math.max(0, total - oldLength)));
+            return items;
+        }
+        if (edge === "right") {
+            const newEnd = Math.max(oldStart + 1, Math.min(total, oldEnd + dragDelta));
+            target.length = Math.max(1, Math.min(newEnd - oldStart, Math.max(1, audioDuration - oldTrim)));
+            return items;
+        }
+        if (edge === "left") {
+            const newStart = Math.max(0, Math.min(oldStart + dragDelta, oldEnd - 1));
+            const trimDelta = newStart - oldStart;
+            const newTrim = Math.max(0, Math.min(audioDuration - 1, oldTrim + trimDelta));
+            target.start = newStart;
+            target.trimStart = newTrim;
+            target.length = Math.max(1, Math.min(oldEnd - newStart, audioDuration - newTrim));
+            return items;
+        }
+        return items;
+    }
+
     function startTimelineDrag(event, seg, isAudio = false, edge = "center") {
         event.preventDefault();
         event.stopPropagation();
@@ -7161,7 +7461,9 @@ function renderShotboardV3(node) {
             const widthPx = rect.width || 1;
             const deltaFrames = Math.round(((move.clientX - startX) / widthPx) * getTotalFrames());
             let next;
-            if (edge === "center") {
+            if (isAudio) {
+                next = audioDragPreview(dragState.initial, dragState.targetId, deltaFrames, edge, getTotalFrames());
+            } else if (edge === "center") {
                 const pointerFrame = Math.round(((move.clientX - rect.left) / Math.max(1, widthPx)) * getTotalFrames());
                 next = applyCenterDragPhysics(dragState.initial, dragState.targetId, dragState.originalStart + deltaFrames, pointerFrame, getTotalFrames());
             } else {
@@ -7831,6 +8133,10 @@ function renderShotboardV3(node) {
                 markPromptFieldEdited(caption);
                 seg.prompt = caption.value;
                 seg.use_prompt = Boolean(String(caption.value || "").trim());
+                if (String(caption.value || "").trim()) {
+                    seg.relay_manual_off = false;
+                    seg.promptrelay_manual_off = false;
+                }
                 if (isActionBridgeRelaySegment(seg)) syncActionBridgeSourceFromRelay(seg);
                 syncSegmentTextPeers(seg.id, "prompt", caption.value, caption);
                 syncSegmentRelayPeers(seg.id, Boolean(seg.use_prompt), null);
@@ -7848,6 +8154,10 @@ function renderShotboardV3(node) {
                 markPromptFieldEdited(caption);
                 seg.prompt = caption.value;
                 seg.use_prompt = Boolean(String(caption.value || "").trim());
+                if (String(caption.value || "").trim()) {
+                    seg.relay_manual_off = false;
+                    seg.promptrelay_manual_off = false;
+                }
                 syncSegmentTextPeers(seg.id, "prompt", caption.value, caption);
                 syncSegmentRelayPeers(seg.id, Boolean(seg.use_prompt), null);
                 writeTimeline({ force: true });
@@ -7857,6 +8167,10 @@ function renderShotboardV3(node) {
                 markPromptFieldEdited(caption);
                 seg.prompt = caption.value;
                 seg.use_prompt = Boolean(String(caption.value || "").trim());
+                if (String(caption.value || "").trim()) {
+                    seg.relay_manual_off = false;
+                    seg.promptrelay_manual_off = false;
+                }
                 syncSegmentTextPeers(seg.id, "prompt", caption.value, caption);
                 syncSegmentRelayPeers(seg.id, Boolean(seg.use_prompt), null);
                 writeTimeline({ force: true });
@@ -8094,17 +8408,22 @@ function renderShotboardV3(node) {
     }
 
     function rippleDeleteVisualSegment(target) {
-        const removedStart = Number(target?.start || 0);
         const removedLength = Math.max(1, Math.round(Number(target?.length || 1)));
-        timeline.segments = (timeline.segments || [])
-            .filter((item) => item.id !== target.id)
-            .map((item) => {
-                if (Number(item.start || 0) > removedStart) {
-                    return { ...item, start: Math.max(0, Math.round(Number(item.start || 0) - removedLength)) };
-                }
-                return item;
-            });
-        selectedId = timeline.segments[0]?.id || null;
+        const sorted = (timeline.segments || []).slice().sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
+        const index = sorted.findIndex((item) => item.id === target?.id);
+        if (index < 0) return;
+        const prev = index > 0 ? sorted[index - 1] : null;
+        sorted.splice(index, 1);
+        if (prev && String(prev.type || "image") !== "audio") {
+            prev.length = Math.max(1, Math.round(Number(prev.length || 1) + removedLength));
+        } else if (sorted.length) {
+            const first = sorted[0];
+            const oldStart = Math.max(0, Math.round(Number(first.start || 0)));
+            first.start = 0;
+            first.length = Math.max(1, Math.round(Number(first.length || 1) + oldStart + removedLength));
+        }
+        timeline.segments = sorted;
+        selectedId = prev?.id || timeline.segments[0]?.id || null;
         writeTimeline();
         draw();
     }
@@ -8113,6 +8432,8 @@ function renderShotboardV3(node) {
         boxList.innerHTML = "";
         editBox.innerHTML = "";
         const makeField = (seg, labelText, key, type = "input", style = "") => {
+            const segmentId = String(seg?.id || "");
+            const currentSegment = () => (timeline.segments || []).find((item) => String(item?.id || "") === segmentId) || seg;
             const wrap = document.createElement("label");
             wrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;min-width:0;${style}`;
             const span = document.createElement("span");
@@ -8124,29 +8445,30 @@ function renderShotboardV3(node) {
                 const min = "0";
                 const max = isStrengthKey ? "1" : null;
                 const ctrl = numberStepperControl(seg[key] ?? "", step, min, max, (value) => {
+                    const target = currentSegment();
                     let shouldRedraw = true;
                     if (key === "start") {
                         const nextStart = Math.max(0, Math.round(Number(value || 0)));
-                        timeline.segments = edgeDragPreview(timeline.segments, seg.id, nextStart - Number(seg.start || 0), "left", getTotalFrames());
+                        timeline.segments = edgeDragPreview(timeline.segments, target.id, nextStart - Number(target.start || 0), "left", getTotalFrames());
                     }
                     else if (key === "length") {
                         const nextLength = Math.max(1, Math.round(Number(value || 1)));
-                        timeline.segments = edgeDragPreview(timeline.segments, seg.id, nextLength - Number(seg.length || 1), "right", getTotalFrames());
+                        timeline.segments = edgeDragPreview(timeline.segments, target.id, nextLength - Number(target.length || 1), "right", getTotalFrames());
                     }
-                    else if (key === "ref") seg.ref = Math.max(1, Math.round(Number(value || 1)));
+                    else if (key === "ref") target.ref = Math.max(1, Math.round(Number(value || 1)));
                     else if (key === "guideStrength") {
                         const nextStrength = Math.max(0, Math.min(1, Number(value || 0)));
-                        seg.guideStrength = nextStrength;
-                        seg.imageLockStrength = nextStrength;
-                        seg.forceCustom = true;
-                        delete seg.defaultForceSource;
+                        target.guideStrength = nextStrength;
+                        target.imageLockStrength = nextStrength;
+                        target.forceCustom = true;
+                        delete target.defaultForceSource;
                         shouldRedraw = false;
                     }
                     else if (key === "imageLockStrength") {
-                        seg.imageLockStrength = Math.max(0, Math.min(1, Number(value || 0)));
+                        target.imageLockStrength = Math.max(0, Math.min(1, Number(value || 0)));
                         shouldRedraw = false;
                     }
-                    writeTimeline();
+                    writeTimeline({ force: true });
                     if (shouldRedraw) draw();
                 }, { liveInput: false });
                 ctrl.style.minWidth = "0";
@@ -8168,44 +8490,49 @@ function renderShotboardV3(node) {
             input.dataset.iamccsV3Key = String(key);
             input.style.cssText = inputBase() + `background:${purple.valueBg};border-color:${purple.border};color:${purple.valueText};font-weight:${type === "textarea" ? "700" : "800"};text-align:${type === "textarea" ? "left" : "center"};${type === "textarea" ? `min-height:54px;resize:vertical;font-size:${promptFontSize(11)};` : "height:28px;"}`;
             input.oninput = () => {
+                const target = currentSegment();
                 if (key === "prompt") markPromptFieldEdited(input);
                 let shouldRedraw = false;
                 if (key === "start") {
                     const nextStart = Math.max(0, Math.round(Number(input.value || 0)));
-                    timeline.segments = edgeDragPreview(timeline.segments, seg.id, nextStart - Number(seg.start || 0), "left", getTotalFrames());
+                    timeline.segments = edgeDragPreview(timeline.segments, target.id, nextStart - Number(target.start || 0), "left", getTotalFrames());
                     shouldRedraw = true;
                 }
                 else if (key === "length") {
                     const nextLength = Math.max(1, Math.round(Number(input.value || 1)));
-                    timeline.segments = edgeDragPreview(timeline.segments, seg.id, nextLength - Number(seg.length || 1), "right", getTotalFrames());
+                    timeline.segments = edgeDragPreview(timeline.segments, target.id, nextLength - Number(target.length || 1), "right", getTotalFrames());
                     shouldRedraw = true;
                 }
                 else if (key === "ref") {
-                    seg.ref = Math.max(1, Math.round(Number(input.value || 1)));
+                    target.ref = Math.max(1, Math.round(Number(input.value || 1)));
                     shouldRedraw = true;
                 }
                 else if (key === "guideStrength") {
                     const nextStrength = Math.max(0, Math.min(1, Number(input.value || 0)));
-                    seg.guideStrength = nextStrength;
-                    seg.imageLockStrength = nextStrength;
-                    seg.forceCustom = true;
-                    delete seg.defaultForceSource;
+                    target.guideStrength = nextStrength;
+                    target.imageLockStrength = nextStrength;
+                    target.forceCustom = true;
+                    delete target.defaultForceSource;
                     shouldRedraw = true;
                 }
                 else if (key === "imageLockStrength") {
-                    seg.imageLockStrength = Math.max(0, Math.min(1, Number(input.value || 0)));
+                    target.imageLockStrength = Math.max(0, Math.min(1, Number(input.value || 0)));
                     shouldRedraw = true;
                 }
                 else {
-                    seg[key] = input.value;
+                    target[key] = input.value;
                     if (key === "prompt") {
-                        seg.use_prompt = Boolean(String(input.value || "").trim());
-                        syncSegmentRelayPeers(seg.id, Boolean(seg.use_prompt), null);
+                        target.use_prompt = Boolean(String(input.value || "").trim());
+                        if (String(input.value || "").trim()) {
+                            target.relay_manual_off = false;
+                            target.promptrelay_manual_off = false;
+                        }
+                        syncSegmentRelayPeers(target.id, Boolean(target.use_prompt), null);
                     }
-                    if (type === "textarea") syncSegmentTextPeers(seg.id, key, input.value, input);
+                    if (type === "textarea") syncSegmentTextPeers(target.id, key, input.value, input);
                 }
-                writeTimeline(key === "prompt" ? { force: true } : {});
-                if (key === "prompt") logPromptPersistence(seg, "inspector_prompt_input");
+                writeTimeline(key === "prompt" || key === "start" || key === "length" || key === "ref" || key === "guideStrength" || key === "imageLockStrength" ? { force: true } : {});
+                if (key === "prompt") logPromptPersistence(target, "inspector_prompt_input");
                 if (shouldRedraw) draw();
             };
             input.onchange = flushTimelineWrite;
@@ -8219,6 +8546,10 @@ function renderShotboardV3(node) {
                     markPromptFieldEdited(input);
                     seg[key] = input.value;
                     seg.use_prompt = Boolean(String(input.value || "").trim());
+                    if (String(input.value || "").trim()) {
+                        seg.relay_manual_off = false;
+                        seg.promptrelay_manual_off = false;
+                    }
                     syncSegmentTextPeers(seg.id, key, input.value, input);
                     syncSegmentRelayPeers(seg.id, Boolean(seg.use_prompt), null);
                     writeTimeline({ force: true });
@@ -8228,6 +8559,10 @@ function renderShotboardV3(node) {
                     markPromptFieldEdited(input);
                     seg[key] = input.value;
                     seg.use_prompt = Boolean(String(input.value || "").trim());
+                    if (String(input.value || "").trim()) {
+                        seg.relay_manual_off = false;
+                        seg.promptrelay_manual_off = false;
+                    }
                     syncSegmentTextPeers(seg.id, key, input.value, input);
                     syncSegmentRelayPeers(seg.id, Boolean(seg.use_prompt), null);
                     writeTimeline({ force: true });
@@ -8516,6 +8851,7 @@ function renderShotboardV3(node) {
             const lenFrame = Math.max(1, Math.round(Number(seg.length || 1)));
             const endFrame = startFrame + lenFrame;
             const card = document.createElement("div");
+            card.dataset.iamccsV3BoxSegmentId = String(seg.id || "");
             card.style.cssText = [
                 "display:grid",
                 "grid-template-columns:38px minmax(190px,240px) minmax(0,1fr) minmax(150px,190px) 32px",
@@ -8567,6 +8903,10 @@ function renderShotboardV3(node) {
                 seg.prompt = prompt.value;
                 seg.note = prompt.value;
                 seg.use_prompt = Boolean(String(prompt.value || "").trim());
+                if (String(prompt.value || "").trim()) {
+                    seg.relay_manual_off = false;
+                    seg.promptrelay_manual_off = false;
+                }
                 if (isActionBridgeRelaySegment(seg)) syncActionBridgeSourceFromRelay(seg);
                 syncSegmentTextPeers(seg.id, "prompt", prompt.value, prompt);
                 syncSegmentRelayPeers(seg.id, Boolean(seg.use_prompt), null);
@@ -8627,6 +8967,7 @@ function renderShotboardV3(node) {
                 return;
             }
             const card = document.createElement("div");
+            card.dataset.iamccsV3BoxSegmentId = String(seg.id || "");
             card.style.cssText = [
                 "display:grid",
                 "grid-template-columns:32px minmax(750px,780px) minmax(520px,1fr) 112px 30px",
@@ -8654,7 +8995,7 @@ function renderShotboardV3(node) {
             relayLabel.style.cssText = "grid-column:1;grid-row:1;text-align:center;align-self:end;";
             const relayToggle = document.createElement("input");
             relayToggle.type = "checkbox";
-            relayToggle.checked = Boolean((seg.use_prompt !== false && String(seg.prompt || "").trim()) || seg.dialogue_pin || seg.image_lock || seg.motion_boost);
+            relayToggle.checked = Boolean((String(seg.prompt || "").trim() && seg.relay_manual_off !== true && seg.promptrelay_manual_off !== true) || seg.dialogue_pin || seg.image_lock || seg.motion_boost);
             relayToggle.dataset.iamccsV3SegmentId = String(seg.id);
             relayToggle.dataset.iamccsV3Key = "use_prompt";
             relayToggle.title = "Use this box prompt as a local PromptRelay beat";
@@ -8666,11 +9007,13 @@ function renderShotboardV3(node) {
             relayToggle.onpointerdown = (event) => event.stopPropagation();
             relayToggle.onchange = () => {
                 seg.use_prompt = relayToggle.checked;
+                seg.relay_manual_off = !relayToggle.checked;
+                seg.promptrelay_manual_off = !relayToggle.checked;
                 syncSegmentRelayPeers(seg.id, Boolean(seg.use_prompt), relayToggle);
-                writeTimeline();
+                writeTimeline({ force: true });
                 draw();
             };
-            const localRelayActive = Boolean((seg.use_prompt !== false && String(seg.prompt || "").trim()) || seg.dialogue_pin || seg.image_lock || seg.motion_boost);
+            const localRelayActive = Boolean((String(seg.prompt || "").trim() && seg.relay_manual_off !== true && seg.promptrelay_manual_off !== true) || seg.dialogue_pin || seg.image_lock || seg.motion_boost);
             const relayStatus = document.createElement("span");
             relayStatus.textContent = localRelayActive ? "LOCAL" : "OFF";
             relayStatus.title = "PromptRelay status for this box";
@@ -8753,15 +9096,34 @@ function renderShotboardV3(node) {
             boxList.appendChild(card);
         });
 
-        const selectedAudio = (timeline.audioSegments || []).find((seg) => seg.id === selectedId);
-        if (selectedAudio) {
+        const audioAnchorSegmentId = (audio) => {
+            if (!audio) return "";
+            const linked = String(audio.linkedVisualId || "");
+            if (linked && orderedBoxSegments.some((seg) => String(seg.id || "") === linked)) return linked;
+            const start = Math.max(0, Math.round(Number(audio.start || 0)));
+            const end = start + Math.max(1, Math.round(Number(audio.length || 1)));
+            const overlapped = orderedBoxSegments.find((seg) => {
+                const segStart = Math.max(0, Math.round(Number(seg.start || 0)));
+                const segEnd = segStart + Math.max(1, Math.round(Number(seg.length || 1)));
+                return start < segEnd && segStart < end;
+            });
+            if (overlapped) return String(overlapped.id || "");
+            const previous = orderedBoxSegments.slice().reverse().find((seg) => Number(seg.start || 0) <= start);
+            return String((previous || orderedBoxSegments[0] || {})?.id || "");
+        };
+
+        const audioCardsToShow = (timeline.audioSegments || [])
+            .filter((seg) => audioSegmentHasMedia(seg) && !seg.placeholder)
+            .slice()
+            .sort((a, b) => (Number(a.start || 0) - Number(b.start || 0)) || (Number(a.track || 0) - Number(b.track || 0)));
+        audioCardsToShow.forEach((selectedAudio) => {
             const audioCard = document.createElement("div");
             audioCard.style.cssText = [
                 "display:grid",
-                "grid-template-columns:150px 120px 120px 120px minmax(180px,1fr) minmax(180px,1fr) 32px",
+                "grid-template-columns:150px 82px 92px 92px 84px 84px 84px 82px minmax(280px,1.15fr) minmax(190px,.85fr) 32px",
                 "gap:10px",
                 "align-items:end",
-                "margin-top:8px",
+                "margin:12px 0 10px 42px",
                 "padding:10px",
                 `border:1px solid ${purple.audio}`,
                 "border-radius:6px",
@@ -8774,6 +9136,36 @@ function renderShotboardV3(node) {
                 const span = document.createElement("span");
                 span.textContent = labelText;
                 span.style.cssText = "line-height:1.1;";
+                if (type === "number") {
+                    const step = key === "gain" ? "0.05" : "1";
+                    const max = key === "gain" ? "2" : null;
+                    const ctrl = numberStepperControl(selectedAudio[key] ?? (key === "gain" ? 1 : 0), step, "0", max, (value) => {
+                        const raw = Number(value || 0);
+                        selectedAudio[key] = key === "gain" ? Math.max(0, Math.min(2, raw)) : Math.max(0, Math.round(raw));
+                        if (key === "start" || key === "length" || key === "track") {
+                            selectedAudio.length = Math.max(1, Math.round(Number(selectedAudio.length || 1)));
+                            selectedAudio.start = Math.max(0, Math.round(Number(selectedAudio.start || 0)));
+                            selectedAudio.track = Math.max(0, Math.round(Number(selectedAudio.track || 0)));
+                        }
+                        writeTimeline({ force: true });
+                        if (key === "start" || key === "length" || key === "track") draw();
+                    }, { liveInput: false });
+                    ctrl.style.minWidth = "0";
+                    ctrl.style.width = "100%";
+                    ctrl.style.gridTemplateColumns = "22px minmax(36px,1fr) 22px";
+                    ctrl.style.gap = "4px";
+                    ctrl.querySelectorAll("button").forEach((button) => {
+                        button.style.width = "22px";
+                        button.style.minWidth = "22px";
+                        button.style.height = "24px";
+                        button.style.margin = "0";
+                    });
+                    const input = ctrl.querySelector("input");
+                    if (input) input.style.height = "24px";
+                    styleValueControls(ctrl);
+                    wrap.append(span, ctrl);
+                    return wrap;
+                }
                 let input;
                 if (type === "select") {
                     input = document.createElement("select");
@@ -8791,6 +9183,10 @@ function renderShotboardV3(node) {
                     input.value = selectedAudio[key] ?? "";
                 }
                 input.style.cssText = inputBase() + `height:28px;background:${purple.valueBg};border-color:${purple.border};color:${purple.valueText};font-weight:800;text-align:center;`;
+                if (key === "linkedVisualId") {
+                    wrap.style.width = "100%";
+                    input.style.width = "100%";
+                }
                 input.onpointerdown = (event) => event.stopPropagation();
                 input.onchange = input.oninput = () => {
                     if (type === "number") {
@@ -8799,13 +9195,34 @@ function renderShotboardV3(node) {
                     } else {
                         selectedAudio[key] = input.value;
                     }
+                    if (key === "linkedVisualId") selectedId = selectedAudio.id;
                     if (key === "start" || key === "length" || key === "track") {
                         selectedAudio.length = Math.max(1, Math.round(Number(selectedAudio.length || 1)));
                         selectedAudio.start = Math.max(0, Math.round(Number(selectedAudio.start || 0)));
                         selectedAudio.track = Math.max(0, Math.round(Number(selectedAudio.track || 0)));
                     }
-                    writeTimeline();
-                    if (key === "start" || key === "length" || key === "track") draw();
+                    writeTimeline({ force: key === "linkedVisualId" });
+                    if (key === "start" || key === "length" || key === "track" || key === "linkedVisualId") draw();
+                };
+                protectControlDrag(input);
+                wrap.append(span, input);
+                return wrap;
+            };
+            const audioToggle = (labelText, key) => {
+                const wrap = document.createElement("label");
+                wrap.style.cssText = `display:flex;flex-direction:column;gap:5px;color:${purple.muted};font-size:9px;font-weight:900;text-align:center;min-width:0;align-items:center;`;
+                const span = document.createElement("span");
+                span.textContent = labelText;
+                span.style.cssText = "line-height:1.1;";
+                const input = document.createElement("input");
+                input.type = "checkbox";
+                input.checked = Boolean(selectedAudio[key]);
+                input.style.cssText = `width:18px;height:18px;accent-color:${purple.accent};cursor:pointer;`;
+                input.onpointerdown = (event) => event.stopPropagation();
+                input.onchange = () => {
+                    selectedAudio[key] = Boolean(input.checked);
+                    writeTimeline({ force: true });
+                    draw();
                 };
                 protectControlDrag(input);
                 wrap.append(span, input);
@@ -8827,27 +9244,97 @@ function renderShotboardV3(node) {
                 writeTimeline({ force: true });
                 draw();
             };
+            const makeAudioHelper = () => {
+                const fps = getFps();
+                const peaks = Array.isArray(selectedAudio.waveformPeaks) ? selectedAudio.waveformPeaks.map((item) => Math.abs(Number(item) || 0)) : [];
+                const rawPeak = peaks.length ? Math.max(...peaks) : 0;
+                const gain = Math.max(0, Math.min(2, Number(selectedAudio.gain ?? selectedAudio.volume ?? 1) || 1));
+                const levelGain = selectedAudio.normalizeAudio && rawPeak > 0.0001 ? Math.min(4, 0.92 / rawPeak) : 1;
+                const masterGain = Math.max(0, Math.min(2, Number(timeline.masterAudioGain ?? 1) || 1));
+                const masterLevelGain = timeline.masterAudioNormalize && rawPeak > 0.0001 ? Math.min(4, 0.92 / rawPeak) : 1;
+                const localFrame = Math.round(Number(playFrame || 0) - Number(selectedAudio.start || 0) + Number(selectedAudio.trimStart || 0));
+                const peakIndex = peaks.length && Number(selectedAudio.audioDurationFrames || 0) > 0
+                    ? Math.max(0, Math.min(peaks.length - 1, Math.floor((localFrame / Math.max(1, Number(selectedAudio.audioDurationFrames || selectedAudio.length || 1))) * peaks.length)))
+                    : -1;
+                const livePeak = peakIndex >= 0 && playFrame >= Number(selectedAudio.start || 0) && playFrame <= Number(selectedAudio.start || 0) + Number(selectedAudio.length || 1)
+                    ? peaks[peakIndex]
+                    : 0;
+                const finalPeak = Math.max(0, Math.min(1, livePeak * gain * levelGain * masterGain * masterLevelGain));
+                const seconds = Math.max(0, Number(selectedAudio.length || 0) / fps);
+                const trimSeconds = Math.max(0, Number(selectedAudio.trimStart || 0) / fps);
+                const panel = document.createElement("div");
+                panel.style.cssText = [
+                    "display:grid",
+                    "grid-template-columns:42px 1fr",
+                    "gap:3px 6px",
+                    "align-items:center",
+                    "padding:5px 6px",
+                    `border:1px solid ${purple.borderSoft}`,
+                    "border-radius:6px",
+                    "background:linear-gradient(180deg,rgba(0,0,0,.18),rgba(255,255,255,.025))",
+                    "color:#EDE3D0",
+                    "font:8px/1.15 monospace",
+                    "font-weight:900",
+                    "box-sizing:border-box",
+                    "width:100%",
+                    "min-width:190px",
+                    "min-height:44px",
+                ].join(";");
+                const line = (label, value) => {
+                    const l = document.createElement("span");
+                    l.textContent = label;
+                    l.style.cssText = `color:${purple.muted};text-transform:uppercase;white-space:nowrap;`;
+                    const v = document.createElement("span");
+                    v.textContent = value;
+                    v.style.cssText = "text-align:right;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+                    panel.append(l, v);
+                };
+                const meter = (label, value, color) => {
+                    const l = document.createElement("span");
+                    l.textContent = label;
+                    l.style.cssText = `color:${purple.muted};text-transform:uppercase;white-space:nowrap;`;
+                    const shell = document.createElement("div");
+                    shell.style.cssText = "height:8px;border:1px solid rgba(255,255,255,.18);border-radius:999px;background:rgba(0,0,0,.35);overflow:hidden;";
+                    const fill = document.createElement("div");
+                    fill.style.cssText = `width:${Math.round(Math.max(0, Math.min(1, value)) * 100)}%;height:100%;background:${color};box-shadow:0 0 8px rgba(244,212,158,.28);`;
+                    shell.appendChild(fill);
+                    panel.append(l, shell);
+                };
+                line("Len", `${seconds.toFixed(2)}s`);
+                line("Trim", `${trimSeconds.toFixed(2)}s`);
+                meter("Live", livePeak, "linear-gradient(90deg,#5EB9B4,#F4D49E)");
+                meter("Out", finalPeak, "linear-gradient(90deg,#6FCF8D,#F4D49E,#D8792B)");
+                return panel;
+            };
             audioCard.append(
                 audioField("Audio purpose", "purpose", "select", [["music", "Music / score"], ["dialogue", "Dialogue / lipsync"], ["sfx", "SFX"], ["lipsync_or_music", "Auto"]]),
                 audioField("Track", "track", "number"),
                 audioField("Start frame", "start", "number"),
                 audioField("Len frames", "length", "number"),
-                audioField("Gain", "gain", "number"),
+                audioField("Volume", "gain", "number"),
+                audioField("Fade in f", "fadeInFrames", "number"),
+                audioField("Fade out f", "fadeOutFrames", "number"),
+                audioToggle("Level", "normalizeAudio"),
                 audioField("Linked shot", "linkedVisualId", "select", linkOptions),
+                makeAudioHelper(),
                 remove
             );
             const title = document.createElement("div");
             title.textContent = `Selected audio: ${String(selectedAudio.name || selectedAudio.fileName || selectedAudio.audioFile || "clip")}`;
             title.style.cssText = `grid-column:1 / -1;color:#F4D49E;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.02em;`;
             audioCard.prepend(title);
-            boxList.appendChild(audioCard);
-        }
+            const anchorId = audioAnchorSegmentId(selectedAudio);
+            const anchorCard = Array.from(boxList.children).find((item) => String(item?.dataset?.iamccsV3BoxSegmentId || "") === anchorId);
+            if (anchorCard?.nextSibling) boxList.insertBefore(audioCard, anchorCard.nextSibling);
+            else boxList.appendChild(audioCard);
+        });
     }
 
     function draw() {
         if (!dragState) writeTimeline();
         drawRuler();
         updatePlayUI();
+        drawAudioPlaybarControls();
         timelineMeterSeconds = clampTimelineMeterSeconds(timelineMeterSeconds);
         promptSizeReadout.textContent = `${Math.round(promptTextScale * 100)}%`;
         const timelineZoomSteps = Math.round((timelineMeterSeconds - Math.max(0.5, getDuration())) * 2);
@@ -9114,13 +9601,26 @@ function renderShotboardV3(node) {
         return String(best?.id || "");
     }
 
+    function visualSegmentIdByAudioIndex(frame, indexOffset = 0) {
+        const visual = (timeline.segments || [])
+            .filter((seg) => String(seg.type || "image") !== "audio" && !seg.placeholder)
+            .slice()
+            .sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
+        if (!visual.length) return "";
+        const nearestId = nearestVisualSegmentId(frame);
+        const nearestIndex = Math.max(0, visual.findIndex((seg) => String(seg.id || "") === nearestId));
+        const targetIndex = Math.max(0, Math.min(visual.length - 1, nearestIndex + Math.max(0, Math.round(Number(indexOffset || 0)))));
+        return String(visual[targetIndex]?.id || nearestId || "");
+    }
+
     async function uploadAudioFiles(files, targetFrameStart = null, targetTrack = 0) {
         const audioFiles = Array.from(files || []).filter((file) => String(file.type || "").startsWith("audio/"));
         const track = Math.max(0, Math.round(Number(targetTrack || 0)));
         let cursor = targetFrameStart == null
             ? endOfSegments((timeline.audioSegments || []).filter((item) => Number(item.track || 0) === track && audioSegmentHasMedia(item) && !item.placeholder))
             : Math.max(0, Math.round(Number(targetFrameStart || 0)));
-        for (const file of audioFiles) {
+        const existingAudioCount = (timeline.audioSegments || []).filter((item) => audioSegmentHasMedia(item) && !item.placeholder).length;
+        for (const [fileIndex, file] of audioFiles.entries()) {
             try {
                 const body = new FormData();
                 body.append("image", file);
@@ -9150,7 +9650,10 @@ function renderShotboardV3(node) {
                     waveformPeaks: info.peaks,
                     purpose: "lipsync_or_music",
                     gain: 1,
-                    linkedVisualId: nearestVisualSegmentId(cursor),
+                    fadeInFrames: 0,
+                    fadeOutFrames: 0,
+                    normalizeAudio: false,
+                    linkedVisualId: visualSegmentIdByAudioIndex(cursor, existingAudioCount + fileIndex),
                 };
                 timeline.audioSegments.push(seg);
                 cursor += length;
@@ -9413,38 +9916,48 @@ function renderShotboardV3(node) {
         if (typeof node.setSize === "function") node.setSize([SHOTBOARD_V3_RIGID_WIDTH, nextHeight]);
         draw();
     };
-    saveBtn.onclick = () => {
-        writeTimeline({ force: true });
-        const timelineText = getWidget(node, "timeline_data")?.value || "";
-        let timelinePayload = null;
-        try { timelinePayload = JSON.parse(timelineText || "{}"); } catch {}
-        const promptText = timelineText || JSON.stringify(timeline || {});
-        console.log("[IAMCCS V3 BOARD SAVE]", {
-            kind: "board",
-            nodeId: node?.id,
-            containsCoastline: /\bcoastline\b/i.test(promptText),
-            firstPrompt: String(timelinePayload?.segments?.[0]?.prompt || timelinePayload?.rows?.[0]?.relay_prompt || "").replace(/\s+/g, " ").slice(0, 220),
-            settings: v3SettingsSnapshot(),
-        });
-        const board = {
-            metadata: { schema: "iamccs.cine.filmmaker_board", schema_version: 1, saved_at: new Date().toISOString(), node_type: nodeClassName(node) },
-            global_prompt: promptArea.value,
-            timeline_data: timelineText,
-            timeline: timelinePayload || JSON.parse(JSON.stringify(timeline || {})),
-            image_paths: refPaths(),
-            settings: v3SettingsSnapshot(),
-        };
-        Object.assign(board, board.settings);
-        downloadJsonFile(board, safeBoardFilename("cine_filmmaker_v3"));
+    saveBtn.onclick = async () => {
+        try {
+            saveBtn.disabled = true;
+            writeTimeline({ force: true });
+            const timelineText = getWidget(node, "timeline_data")?.value || "";
+            const exportedTimeline = boardTimelineForExport(timelineText);
+            const timelinePayload = exportedTimeline.payload;
+            const promptText = exportedTimeline.text || timelineText || JSON.stringify(timeline || {});
+            console.log("[IAMCCS V3 BOARD SAVE]", {
+                kind: "board",
+                nodeId: node?.id,
+                containsCoastline: /\bcoastline\b/i.test(promptText),
+                firstPrompt: String(timelinePayload?.segments?.[0]?.prompt || timelinePayload?.rows?.[0]?.relay_prompt || "").replace(/\s+/g, " ").slice(0, 220),
+                settings: v3SettingsSnapshot(),
+            });
+            const board = {
+                metadata: { schema: "iamccs.cine.filmmaker_board", schema_version: 1, saved_at: new Date().toISOString(), node_type: nodeClassName(node) },
+                global_prompt: promptArea.value,
+                timeline_data: exportedTimeline.text,
+                timeline: timelinePayload,
+                image_paths: refPaths(),
+                settings: v3SettingsSnapshot(),
+            };
+            Object.assign(board, board.settings);
+            await saveBoardJsonAs(board, safeBoardFilename("cine_filmmaker_v3"), (message) => {
+                showTimelineNotice(message, message && /failed/i.test(message) ? "error" : "warn");
+            });
+        } catch (err) {
+            console.error("[IAMCCS Cine Shotboard V3] board save failed", err);
+            showTimelineNotice(`Save Board failed: ${err?.message || err}`, "error");
+        } finally {
+            saveBtn.disabled = false;
+        }
     };
     savePackageBtn.onclick = async () => {
         try {
             savePackageBtn.disabled = true;
             writeTimeline({ force: true });
             const timelineText = getWidget(node, "timeline_data")?.value || "";
-            let timelinePayload = null;
-            try { timelinePayload = JSON.parse(timelineText || "{}"); } catch {}
-            const promptText = timelineText || JSON.stringify(timeline || {});
+            const exportedTimeline = boardTimelineForExport(timelineText);
+            const timelinePayload = exportedTimeline.payload;
+            const promptText = exportedTimeline.text || timelineText || JSON.stringify(timeline || {});
             console.log("[IAMCCS V3 BOARD SAVE]", {
                 kind: "package",
                 nodeId: node?.id,
@@ -9455,15 +9968,18 @@ function renderShotboardV3(node) {
             const board = {
                 metadata: { schema: "iamccs.cine.filmmaker_board", schema_version: 1, saved_at: new Date().toISOString(), node_type: nodeClassName(node) },
                 global_prompt: promptArea.value,
-                timeline_data: timelineText,
-                timeline: timelinePayload || JSON.parse(JSON.stringify(timeline || {})),
+                timeline_data: exportedTimeline.text,
+                timeline: timelinePayload,
                 image_paths: refPaths(),
                 settings: v3SettingsSnapshot(),
             };
             Object.assign(board, board.settings);
-            await saveShotboardPackageFolder(board, "cine_filmmaker_v3", (message) => {
+            const builtPackage = await buildShotboardPackageJson(board, "cine_filmmaker_v3", "Save As package export", (message) => {
                 showTimelineNotice(message, message && /failed/i.test(message) ? "error" : "warn");
             });
+            await saveJsonAsFile(builtPackage.payload, builtPackage.filename, (message) => {
+                showTimelineNotice(message, message && /failed/i.test(message) ? "error" : "warn");
+            }, "IAMCCS Shotboard Package");
         } catch (err) {
             console.error("[IAMCCS Cine Shotboard V3] package save failed", err);
             showTimelineNotice(`Save Package failed: ${err?.message || err}`, "error");
@@ -9475,7 +9991,7 @@ function renderShotboardV3(node) {
         stopPlayback();
         promptArea.value = "";
         setWidgetValue(node, "global_prompt", "");
-        timeline = { schema: "iamccs.cine.filmmaker_timeline", schema_version: 2, segments: [], audioSegments: [], audioTrackCount: 2, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false };
+        timeline = { schema: "iamccs.cine.filmmaker_timeline", schema_version: 2, segments: [], audioSegments: [], audioTrackCount: 2, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
         selectedId = null;
         clearOwnReferencePaths(node);
         writeTimeline();
