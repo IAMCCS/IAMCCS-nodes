@@ -1341,6 +1341,93 @@ function timestampForPackageName() {
     return new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
 }
 
+function askShotboardPackageName(defaultName) {
+    return new Promise((resolve) => {
+        const initial = sanitizePackageComponent(defaultName || `cine_filmmaker_v3_${timestampForPackageName()}`);
+        const overlay = document.createElement("div");
+        overlay.style.cssText = `
+            position: fixed;
+            inset: 0;
+            z-index: ${CINE_REF_EDITOR_Z_INDEX};
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0,0,0,.42);
+            font-family: system-ui, -apple-system, Segoe UI, sans-serif;
+        `;
+        const panel = document.createElement("div");
+        panel.style.cssText = `
+            width: min(520px, calc(100vw - 40px));
+            border: 1px solid #8B6A32;
+            border-radius: 8px;
+            background: #24211E;
+            box-shadow: 0 18px 46px rgba(0,0,0,.48);
+            color: #F3E8D3;
+            padding: 16px;
+        `;
+        const title = document.createElement("div");
+        title.textContent = "Save Package";
+        title.style.cssText = "font-weight:800;font-size:15px;margin-bottom:6px;";
+        const note = document.createElement("div");
+        note.textContent = "Choose the package folder name. Then select an existing parent folder; IAMCCS will create this folder inside it.";
+        note.style.cssText = "font-size:12px;line-height:1.35;color:#CBB99C;margin-bottom:12px;";
+        const input = document.createElement("input");
+        input.value = initial;
+        input.style.cssText = `
+            width: 100%;
+            box-sizing: border-box;
+            border: 1px solid #D89B45;
+            border-radius: 5px;
+            background: #0F1112;
+            color: #FFF7EA;
+            padding: 9px 10px;
+            font-size: 13px;
+            outline: none;
+        `;
+        const actions = document.createElement("div");
+        actions.style.cssText = "display:flex;justify-content:flex-end;gap:8px;margin-top:14px;";
+        const cancel = document.createElement("button");
+        cancel.textContent = "Cancel";
+        cancel.style.cssText = "border:1px solid #6B6258;background:#302D29;color:#F3E8D3;border-radius:5px;padding:7px 12px;cursor:pointer;";
+        const confirm = document.createElement("button");
+        confirm.textContent = "Choose Parent Folder";
+        confirm.style.cssText = "border:1px solid #D89B45;background:#6A431B;color:#FFF7EA;border-radius:5px;padding:7px 12px;cursor:pointer;font-weight:700;";
+        actions.append(cancel, confirm);
+        panel.append(title, note, input, actions);
+        overlay.append(panel);
+
+        const cleanup = (value) => {
+            window.removeEventListener("keydown", onKeyDown, true);
+            overlay.remove();
+            resolve(value);
+        };
+        const submit = () => {
+            const clean = sanitizePackageComponent(input.value, initial);
+            cleanup(clean);
+        };
+        const onKeyDown = (event) => {
+            if (event.key === "Escape") {
+                event.preventDefault();
+                cleanup(null);
+            } else if (event.key === "Enter") {
+                event.preventDefault();
+                submit();
+            }
+        };
+        cancel.onclick = () => cleanup(null);
+        confirm.onclick = submit;
+        overlay.addEventListener("pointerdown", (event) => {
+            if (event.target === overlay) cleanup(null);
+        });
+        window.addEventListener("keydown", onKeyDown, true);
+        document.body.appendChild(overlay);
+        setTimeout(() => {
+            input.focus();
+            input.select();
+        }, 0);
+    });
+}
+
 function imageExtensionForPackage(path, contentType = "") {
     const fromPath = String(path || "").split(/[?#]/)[0].match(/\.([a-z0-9]{2,5})$/i)?.[1];
     if (fromPath) return fromPath.toLowerCase() === "jpeg" ? "jpg" : fromPath.toLowerCase();
@@ -1357,6 +1444,60 @@ function cineResizeMethodValue(value) {
     return ["crop", "pad", "keep proportion", "stretch"].includes(method) ? method : "crop";
 }
 
+function parsedTimelineSourcesForBoard(board) {
+    const sources = [];
+    const add = (source) => {
+        if (!source) return;
+        if (typeof source === "string") {
+            try {
+                const parsed = JSON.parse(source);
+                if (parsed && typeof parsed === "object") sources.push(parsed);
+            } catch {}
+            return;
+        }
+        if (typeof source === "object") sources.push(source);
+    };
+    add(board?.timeline);
+    add(board?.timeline_data);
+    add(Array.isArray(board?.segments) ? { segments: board.segments } : null);
+    add(Array.isArray(board?.rows) ? { rows: board.rows } : null);
+    return sources;
+}
+
+function collectActivePackageImagePaths(board) {
+    const referencePaths = splitReferencePaths(board?.image_paths);
+    const seen = new Set();
+    const paths = [];
+    const add = (value) => {
+        const clean = String(value || "").trim();
+        if (!clean || seen.has(clean)) return;
+        seen.add(clean);
+        paths.push(clean);
+    };
+    const addFromRef = (ref) => {
+        const index = Math.round(Number(ref || 0)) - 1;
+        if (index >= 0 && index < referencePaths.length) add(referencePaths[index]);
+    };
+    for (const data of parsedTimelineSourcesForBoard(board)) {
+        const segments = Array.isArray(data?.segments) ? data.segments : [];
+        for (const seg of segments) {
+            if (!seg || typeof seg !== "object") continue;
+            const type = String(seg.type || "image");
+            if (type === "text" || type === "audio" || seg.textPlaceholder || seg.placeholder) continue;
+            add(seg.imageFile || seg.image_file || seg.path);
+            if (!(seg.imageFile || seg.image_file || seg.path)) addFromRef(seg.ref);
+        }
+        const rows = Array.isArray(data?.rows) ? data.rows : [];
+        for (const row of rows) {
+            if (!row || typeof row !== "object") continue;
+            if (row.use_guide === false || Number(row.force ?? row.strength ?? row.guideStrength ?? 0) <= 0) continue;
+            add(row.imageFile || row.image_file || row.path);
+            if (!(row.imageFile || row.image_file || row.path)) addFromRef(row.ref);
+        }
+    }
+    return paths;
+}
+
 function collectPackageImagePaths(board) {
     const seen = new Set();
     const paths = [];
@@ -1366,16 +1507,13 @@ function collectPackageImagePaths(board) {
         seen.add(clean);
         paths.push(clean);
     };
+    for (const path of collectActivePackageImagePaths(board)) add(path);
+    if (paths.length) return paths;
     for (const path of splitReferencePaths(board?.image_paths)) add(path);
     if (Array.isArray(board?.images)) {
         for (const image of board.images) add(image?.path || image?.original_path || image?.filename || image?.name);
     }
-    const timelines = [board?.timeline, board?.timeline_data].filter(Boolean);
-    for (const source of timelines) {
-        let data = source;
-        if (typeof source === "string") {
-            try { data = JSON.parse(source); } catch { data = null; }
-        }
+    for (const data of parsedTimelineSourcesForBoard(board)) {
         const segments = Array.isArray(data?.segments) ? data.segments : [];
         for (const seg of segments) add(seg?.imageFile || seg?.image_file || seg?.path);
     }
@@ -1428,10 +1566,84 @@ function packagedReferencePaths(board) {
     return paths;
 }
 
-function rewritePackagedSegments(segments, pathMap) {
+function packageHintFromReferencePaths(paths) {
+    const list = Array.isArray(paths) ? paths : splitReferencePaths(paths);
+    for (const path of list) {
+        const clean = String(path || "").replace(/\\/g, "/").replace(/^\/+/, "");
+        const match = clean.match(/^([^/]+)\/images\/[^/]+$/i);
+        if (match?.[1]) {
+            return {
+                packageName: sanitizePackageComponent(match[1], ""),
+                imagesDir: "images",
+            };
+        }
+    }
+    return { packageName: "", imagesDir: "" };
+}
+
+function packageHintFromBoard(board) {
+    const explicitName = sanitizePackageComponent(board?.package?.name || board?.metadata?.package_name || "", "");
+    if (explicitName) return { packageName: explicitName, imagesDir: String(board?.package?.images_dir || "images") || "images" };
+    return packageHintFromReferencePaths(splitReferencePaths(board?.image_paths));
+}
+
+function boardLooksPackageLocal(board, paths) {
+    if (board?.package || board?.metadata?.package_name) return true;
+    if (Array.isArray(board?.images) && board.images.some((entry) => entry?.package_path || entry?.comfy_input_path)) return true;
+    return (paths || []).some((path) => /(^|\/)images\/[^/]+\.(png|jpe?g|webp|bmp|gif|tiff?|avif)$/i.test(String(path || "").replace(/\\/g, "/")));
+}
+
+function applyPackageLocalImageFallbacks(board) {
+    const paths = collectPackageImagePaths(board);
+    if (!boardLooksPackageLocal(board, paths)) return { changed: false, paths: [] };
+    const hint = packageHintFromBoard(board);
+    const pathMap = {};
+    for (const originalPath of paths) {
+        const normalized = String(originalPath || "").replace(/\\/g, "/").replace(/^\/+/, "").trim();
+        if (!normalized) continue;
+        const basename = normalized.split("/").filter(Boolean).pop() || "";
+        if (!basename || !looksLikeCompleteReferencePath(basename)) continue;
+        const target = hint.packageName
+            ? `${hint.packageName}/images/${basename}`
+            : `images/${basename}`;
+        if (target && target !== originalPath) pathMap[originalPath] = target;
+    }
+    if (!Object.keys(pathMap).length) return { changed: false, paths: [] };
+    rewriteBoardPackagedImagePaths(board, pathMap);
+    return { changed: true, paths: collectPackageImagePaths(board) };
+}
+
+function attachPackageHintToBoard(board) {
+    if (!board || typeof board !== "object") return board;
+    const hint = packageHintFromReferencePaths(splitReferencePaths(board.image_paths));
+    if (!hint.packageName) return board;
+    board.metadata = {
+        ...(board.metadata || {}),
+        package_name: board.metadata?.package_name || hint.packageName,
+    };
+    board.package = {
+        ...(board.package || {}),
+        name: board.package?.name || hint.packageName,
+        images_dir: board.package?.images_dir || "images",
+    };
+    return board;
+}
+
+function sourcePathForRef(ref, originalReferencePaths) {
+    const index = Math.round(Number(ref || 0)) - 1;
+    return index >= 0 && index < originalReferencePaths.length ? String(originalReferencePaths[index] || "").trim() : "";
+}
+
+function rewritePackagedSegments(segments, pathMap, refMap = {}, originalReferencePaths = []) {
     if (!Array.isArray(segments)) return;
     for (const seg of segments) {
         if (!seg || typeof seg !== "object") continue;
+        const explicitSource = String(seg.imageFile || seg.image_file || seg.path || "").trim();
+        const refSource = sourcePathForRef(seg.ref, originalReferencePaths);
+        const nextRef = refMap[explicitSource] || refMap[refSource];
+        if (nextRef && String(seg.type || "image") !== "text" && String(seg.type || "image") !== "audio") {
+            seg.ref = nextRef;
+        }
         for (const key of ["imageFile", "image_file", "path"]) {
             const value = String(seg[key] || "").trim();
             if (value && pathMap[value]) seg[key] = pathMap[value];
@@ -1439,9 +1651,27 @@ function rewritePackagedSegments(segments, pathMap) {
     }
 }
 
+function rewritePackagedRows(rows, refMap = {}, originalReferencePaths = []) {
+    if (!Array.isArray(rows)) return;
+    for (const row of rows) {
+        if (!row || typeof row !== "object") continue;
+        if (row.use_guide === false) continue;
+        const explicitSource = String(row.imageFile || row.image_file || row.path || "").trim();
+        const refSource = sourcePathForRef(row.ref, originalReferencePaths);
+        const nextRef = refMap[explicitSource] || refMap[refSource];
+        if (nextRef) row.ref = nextRef;
+    }
+}
+
 function rewriteBoardForPackage(board, orderedPaths, pathMap, manifestImages) {
     const packagedBoard = cloneJsonData(board);
     const packagedPaths = orderedPaths.map((path) => pathMap[path]).filter(Boolean);
+    const originalReferencePaths = splitReferencePaths(board?.image_paths);
+    const refMap = {};
+    orderedPaths.forEach((path, index) => {
+        const clean = String(path || "").trim();
+        if (clean) refMap[clean] = index + 1;
+    });
     if (packagedPaths.length) packagedBoard.image_paths = packagedPaths;
     packagedBoard.images = (manifestImages || []).map((entry, index) => ({
         ref: entry.ref || index + 1,
@@ -1456,17 +1686,20 @@ function rewriteBoardForPackage(board, orderedPaths, pathMap, manifestImages) {
         bytes: entry.bytes || 0,
         error: entry.error || undefined,
     }));
-    rewritePackagedSegments(packagedBoard.segments, pathMap);
+    rewritePackagedSegments(packagedBoard.segments, pathMap, refMap, originalReferencePaths);
+    rewritePackagedRows(packagedBoard.rows, refMap, originalReferencePaths);
     if (packagedBoard.timeline && typeof packagedBoard.timeline === "object") {
         if (packagedPaths.length) packagedBoard.timeline.image_paths = packagedPaths;
-        rewritePackagedSegments(packagedBoard.timeline.segments, pathMap);
+        rewritePackagedSegments(packagedBoard.timeline.segments, pathMap, refMap, originalReferencePaths);
+        rewritePackagedRows(packagedBoard.timeline.rows, refMap, originalReferencePaths);
     }
     if (typeof packagedBoard.timeline_data === "string" && packagedBoard.timeline_data.trim()) {
         try {
             const parsed = JSON.parse(packagedBoard.timeline_data);
             if (parsed && typeof parsed === "object") {
                 if (packagedPaths.length) parsed.image_paths = packagedPaths;
-                rewritePackagedSegments(parsed.segments, pathMap);
+                rewritePackagedSegments(parsed.segments, pathMap, refMap, originalReferencePaths);
+                rewritePackagedRows(parsed.rows, refMap, originalReferencePaths);
                 packagedBoard.timeline_data = JSON.stringify(parsed, null, 2);
             }
         } catch {}
@@ -1486,6 +1719,23 @@ async function writePackageBlobFile(directoryHandle, filename, blob) {
     const writable = await fileHandle.createWritable();
     await writable.write(blob);
     await writable.close();
+}
+
+async function clearPackageImageFolder(directoryHandle) {
+    if (!directoryHandle || typeof directoryHandle.entries !== "function" || typeof directoryHandle.removeEntry !== "function") return;
+    try {
+        for await (const [name, handle] of directoryHandle.entries()) {
+            if (handle?.kind !== "file") continue;
+            if (!/^ref_\d+\.(png|jpe?g|webp|gif|bmp|tiff?|avif)$/i.test(String(name || ""))) continue;
+            try {
+                await directoryHandle.removeEntry(name);
+            } catch (err) {
+                console.warn("[IAMCCS Cine Shotboard] package stale image cleanup failed", name, err);
+            }
+        }
+    } catch (err) {
+        console.warn("[IAMCCS Cine Shotboard] package image cleanup unavailable", err);
+    }
 }
 
 async function fetchReferenceBlobForPackage(path) {
@@ -1581,9 +1831,10 @@ async function saveShotboardPackageViaBackend(board, label, packageName, statusC
     return data;
 }
 
-async function saveShotboardPackageFolder(board, label, statusCallback = null, packageNameOverride = "") {
+async function saveShotboardPackageFolder(board, label, statusCallback = null, packageNameOverride = "", options = {}) {
     const imagePaths = collectPackageImagePaths(board);
-    const packageName = sanitizePackageComponent(packageNameOverride || `${sanitizePackageComponent(label)}_${timestampForPackageName()}`);
+    const useSelectedFolderAsPackage = Boolean(options?.useSelectedFolderAsPackage);
+    let packageName = sanitizePackageComponent(packageNameOverride || `${sanitizePackageComponent(label)}_${timestampForPackageName()}`);
     if (typeof window.showDirectoryPicker !== "function") {
         try {
             await saveShotboardPackageViaBackend(board, label, packageName, statusCallback);
@@ -1595,11 +1846,21 @@ async function saveShotboardPackageFolder(board, label, statusCallback = null, p
     }
 
     try {
-        statusCallback?.("Choose a folder for the shotboard package...");
-        const rootHandle = await window.showDirectoryPicker({ mode: "readwrite" });
-        const packageHandle = await rootHandle.getDirectoryHandle(packageName, { create: true });
+        statusCallback?.(useSelectedFolderAsPackage
+            ? "Choose an existing package folder, or create one with the New folder button..."
+            : "Choose the parent folder; IAMCCS will create the package folder inside it...");
+        const rootHandle = await window.showDirectoryPicker({
+            mode: "readwrite",
+            id: "iamccs-shotboard-package",
+            startIn: "documents",
+        });
+        const packageHandle = useSelectedFolderAsPackage ? rootHandle : await rootHandle.getDirectoryHandle(packageName, { create: true });
+        if (useSelectedFolderAsPackage) {
+            packageName = sanitizePackageComponent(rootHandle?.name || packageName);
+        }
         const imagesHandle = await packageHandle.getDirectoryHandle("images", { create: true });
         const pathMap = {};
+        const pendingImageWrites = [];
         const manifest = {
             metadata: {
                 schema: "iamccs.cine.shotboard.package",
@@ -1616,7 +1877,7 @@ async function saveShotboardPackageFolder(board, label, statusCallback = null, p
 
         for (let index = 0; index < imagePaths.length; index += 1) {
             const originalPath = imagePaths[index];
-            statusCallback?.(`Saving package image ${index + 1}/${imagePaths.length}...`);
+            statusCallback?.(`Reading package image ${index + 1}/${imagePaths.length}...`);
             const entry = {
                 ref: index + 1,
                 original_path: originalPath,
@@ -1626,7 +1887,6 @@ async function saveShotboardPackageFolder(board, label, statusCallback = null, p
                 const blob = await fetchReferenceBlobForPackage(originalPath);
                 const ext = imageExtensionForPackage(originalPath, blob.type);
                 const filename = `ref_${String(index + 1).padStart(3, "0")}.${ext}`;
-                await writePackageBlobFile(imagesHandle, filename, blob);
                 entry.package_path = `images/${filename}`;
                 entry.comfy_input_path = `${packageName}/images/${filename}`;
                 entry.path = entry.comfy_input_path;
@@ -1634,11 +1894,19 @@ async function saveShotboardPackageFolder(board, label, statusCallback = null, p
                 entry.bytes = blob.size || 0;
                 entry.data_url = await blobToDataUrl(blob);
                 pathMap[originalPath] = entry.path;
+                pendingImageWrites.push({ filename, blob });
             } catch (err) {
                 entry.error = String(err?.message || err);
                 console.warn("[IAMCCS Cine Shotboard] package image export failed", originalPath, err);
             }
             manifest.images.push(entry);
+        }
+
+        await clearPackageImageFolder(imagesHandle);
+        for (let index = 0; index < pendingImageWrites.length; index += 1) {
+            const item = pendingImageWrites[index];
+            statusCallback?.(`Writing package image ${index + 1}/${pendingImageWrites.length}...`);
+            await writePackageBlobFile(imagesHandle, item.filename, item.blob);
         }
 
         const packagedBoard = {
@@ -2063,6 +2331,11 @@ async function packagedReferencePathsForImport(board, statusCallback = null) {
     if (restored.paths.length) {
         rewriteBoardPackagedImagePaths(board, restored.pathMap);
         return restored.paths;
+    }
+    const packageLocal = applyPackageLocalImageFallbacks(board);
+    if (packageLocal.changed) {
+        statusCallback?.("Package images fallback applied: using images/ beside the board when names match.");
+        return packagedReferencePaths(board);
     }
     return packagedReferencePaths(board);
 }
@@ -4694,7 +4967,7 @@ function renderShotboardPro(node) {
         for (const name of settingNames) {
             settings[name] = getWidget(node, name)?.value ?? null;
         }
-        return {
+        return attachPackageHintToBoard({
             metadata: {
                 schema: "iamccs.cine.shotboard.board",
                 schema_version: 1,
@@ -4724,7 +4997,7 @@ function renderShotboardPro(node) {
                 path,
                 name: String(path).split(/[\\/]/).pop() || `ref_${index + 1}`,
             })),
-        };
+        });
     };
     const refreshBoardControls = () => {
         promptArea.value = String(getWidget(node, "global_prompt")?.value || "");
@@ -6099,6 +6372,72 @@ function renderShotboardV3(node) {
 
     let timeline = readTimeline();
     const refPaths = () => getConnectedReferencePaths(node);
+    const normalizeReferencePathKey = (value) => String(value || "").replace(/\\/g, "/").trim();
+    const referencePathBasename = (value) => normalizeReferencePathKey(value).split("/").pop();
+    const sameReferencePath = (a, b) => {
+        const left = normalizeReferencePathKey(a);
+        const right = normalizeReferencePathKey(b);
+        if (!left || !right) return false;
+        return left === right || referencePathBasename(left) === referencePathBasename(right);
+    };
+    const referenceIndexForPath = (path, paths = refPaths()) => {
+        const index = (paths || []).findIndex((item) => sameReferencePath(item, path));
+        return index >= 0 ? index + 1 : 0;
+    };
+    const setSegmentReference = (seg, refNumber, options = {}) => {
+        if (!isTimelineImageSegment(seg)) return;
+        const paths = refPaths();
+        const nextRef = Math.max(1, Math.round(Number(refNumber || 1)));
+        seg.ref = nextRef;
+        const nextPath = String(paths[nextRef - 1] || "").trim();
+        if (nextPath) {
+            seg.imageFile = nextPath;
+            delete seg.image_file;
+            if (options.updateAutoLabel !== false && /^ref_\d+$/i.test(String(seg.label || ""))) seg.label = `ref_${nextRef}`;
+        } else {
+            delete seg.imageFile;
+            delete seg.image_file;
+        }
+    };
+    const segmentReferencePath = (seg) => {
+        const explicitPath = String(seg?.imageFile || seg?.image_file || "").trim();
+        if (explicitPath) return explicitPath;
+        const refNumber = Math.max(1, Math.round(Number(seg?.ref || 0)));
+        return refNumber >= 1 ? String(refPaths()[refNumber - 1] || "") : "";
+    };
+    const normalizeTimelineSegmentReferences = () => {
+        const paths = refPaths();
+        let changed = false;
+        for (const seg of (timeline.segments || [])) {
+            if (!isTimelineImageSegment(seg)) continue;
+            const explicitPath = String(seg.imageFile || seg.image_file || "").trim();
+            if (explicitPath) {
+                const refFromPath = referenceIndexForPath(explicitPath, paths);
+                if (refFromPath && Math.round(Number(seg.ref || 0)) !== refFromPath) {
+                    console.warn("[IAMCCS V3 REF SYNC] imageFile/ref mismatch fixed", {
+                        segmentId: seg.id,
+                        label: seg.label,
+                        oldRef: seg.ref,
+                        newRef: refFromPath,
+                        imageFile: explicitPath,
+                        oldRefPath: paths[Math.max(0, Math.round(Number(seg.ref || 1)) - 1)] || "",
+                    });
+                    seg.ref = refFromPath;
+                    if (/^ref_\d+$/i.test(String(seg.label || ""))) seg.label = `ref_${refFromPath}`;
+                    changed = true;
+                }
+                continue;
+            }
+            const refNumber = Math.max(1, Math.round(Number(seg.ref || 1)));
+            const path = String(paths[refNumber - 1] || "").trim();
+            if (path) {
+                seg.imageFile = path;
+                delete seg.image_file;
+                changed = true;
+            }
+        }
+        return changed;
+    };
     const endOfSegments = (items) => (items || []).reduce((max, item) => Math.max(max, Number(item.start || 0) + Number(item.length || 1)), 0);
     const endOfVisualSegments = () => endOfSegments((timeline.segments || []).filter((seg) => String(seg.type || "image") !== "audio"));
     const showTimelineNotice = (message, tone = "warn") => {
@@ -6202,6 +6541,96 @@ function renderShotboardV3(node) {
             payload: cleanPayload,
             text: JSON.stringify(cleanPayload, null, 2),
         };
+    };
+    const compactV3BoardForPackageExport = (board) => {
+        const compact = cloneJsonData(board || {});
+        const sourceRefs = splitReferencePaths(board?.image_paths);
+        const activePaths = [];
+        const seen = new Set();
+        const addPath = (value) => {
+            const clean = String(value || "").trim();
+            if (!clean || seen.has(clean)) return;
+            seen.add(clean);
+            activePaths.push(clean);
+        };
+        const pathForRef = (ref) => {
+            const index = Math.round(Number(ref || 0)) - 1;
+            return index >= 0 && index < sourceRefs.length ? String(sourceRefs[index] || "").trim() : "";
+        };
+        const payloads = [];
+        if (compact.timeline && typeof compact.timeline === "object") payloads.push(compact.timeline);
+        if (typeof compact.timeline_data === "string" && compact.timeline_data.trim()) {
+            try {
+                const parsed = JSON.parse(compact.timeline_data);
+                if (parsed && typeof parsed === "object") payloads.push(parsed);
+            } catch {}
+        }
+        if (!payloads.length) payloads.push(timeline);
+        for (const payload of payloads) {
+            const segments = Array.isArray(payload?.segments) ? payload.segments : [];
+            for (const seg of segments) {
+                if (!isTimelineImageSegment(seg)) continue;
+                addPath(seg.imageFile || seg.image_file || seg.path || pathForRef(seg.ref));
+            }
+            if (activePaths.length) continue;
+            const rows = Array.isArray(payload?.rows) ? payload.rows : [];
+            for (const row of rows) {
+                if (!row || row.use_guide === false || Number(row.force ?? row.strength ?? row.guideStrength ?? 0) <= 0) continue;
+                addPath(row.imageFile || row.image_file || row.path || pathForRef(row.ref));
+            }
+        }
+        if (!activePaths.length) return compact;
+        const refMap = new Map(activePaths.map((path, index) => [path, index + 1]));
+        const rewriteSegmentsForCompact = (segments) => {
+            if (!Array.isArray(segments)) return;
+            for (const seg of segments) {
+                if (!isTimelineImageSegment(seg)) continue;
+                const source = String(seg.imageFile || seg.image_file || seg.path || pathForRef(seg.ref) || "").trim();
+                const nextRef = refMap.get(source);
+                if (!nextRef) continue;
+                seg.ref = nextRef;
+                seg.imageFile = source;
+                delete seg.image_file;
+                if (/^ref_\d+$/i.test(String(seg.label || ""))) seg.label = `ref_${nextRef}`;
+            }
+        };
+        const rewriteRowsForCompact = (rows) => {
+            if (!Array.isArray(rows)) return;
+            for (const row of rows) {
+                if (!row || row.use_guide === false) continue;
+                const source = String(row.imageFile || row.image_file || row.path || pathForRef(row.ref) || "").trim();
+                const nextRef = refMap.get(source);
+                if (nextRef) row.ref = nextRef;
+            }
+        };
+        compact.image_paths = activePaths;
+        compact.images = activePaths.map((path, index) => ({
+            ref: index + 1,
+            path,
+            name: String(path).split(/[\\/]/).pop() || `ref_${index + 1}`,
+        }));
+        if (compact.timeline && typeof compact.timeline === "object") {
+            compact.timeline.image_paths = activePaths;
+            rewriteSegmentsForCompact(compact.timeline.segments);
+            rewriteRowsForCompact(compact.timeline.rows);
+        }
+        if (typeof compact.timeline_data === "string" && compact.timeline_data.trim()) {
+            try {
+                const parsed = JSON.parse(compact.timeline_data);
+                if (parsed && typeof parsed === "object") {
+                    parsed.image_paths = activePaths;
+                    rewriteSegmentsForCompact(parsed.segments);
+                    rewriteRowsForCompact(parsed.rows);
+                    compact.timeline_data = JSON.stringify(parsed, null, 2);
+                }
+            } catch {}
+        }
+        console.log("[IAMCCS V3 PACKAGE EXPORT]", {
+            nodeId: node?.id,
+            activeImagePaths: activePaths,
+            oldImagePaths: sourceRefs,
+        });
+        return compact;
     };
     const segmentRangesOverlap = (aStart, aLength, bStart, bLength) => {
         const a0 = Math.max(0, Math.round(Number(aStart || 0)));
@@ -6395,6 +6824,7 @@ function renderShotboardV3(node) {
         enforceDurationMinimum();
         cleanupAudioPlaceholdersOverlappingMedia();
         magnetize();
+        normalizeTimelineSegmentReferences();
         const fps = getFps();
         const rows = timeline.segments.filter((seg) => !seg.placeholder).map(segmentToRow);
         const promptRelayEnabled = rows.some((row) => {
@@ -7972,8 +8402,7 @@ function renderShotboardV3(node) {
             block.appendChild(addAfter);
         };
         if (!isAudio && String(seg.type || "image") !== "text") {
-            const refNumber = Number(seg.ref || 0);
-            const path = refNumber >= 1 ? refPaths()[Math.max(0, refNumber - 1)] : "";
+            const path = segmentReferencePath(seg);
             if (path) {
                 const previewUrl = previewUrlForPath(path);
                 if (showDragStripes) {
@@ -8098,11 +8527,15 @@ function renderShotboardV3(node) {
             rail.append(
                 railBtn("E", "Open frame editor for this reference", () => {
                     selectedId = seg.id;
-                    const refIndex = Math.max(0, Number(seg.ref || 1) - 1);
-                    const path = refPaths()[refIndex];
+                    const currentPath = segmentReferencePath(seg);
+                    const currentRef = referenceIndexForPath(currentPath) || Math.max(1, Number(seg.ref || 1));
+                    const refIndex = Math.max(0, currentRef - 1);
+                    const path = currentPath || refPaths()[refIndex];
                     if (path) {
                         openReferenceFrameEditor(node, refIndex, path, (newPath) => {
                             replaceReferencePathAt(node, refIndex, newPath);
+                            setSegmentReference(seg, refIndex + 1);
+                            writeTimeline({ force: true });
                             draw();
                         });
                     } else {
@@ -8455,7 +8888,7 @@ function renderShotboardV3(node) {
                         const nextLength = Math.max(1, Math.round(Number(value || 1)));
                         timeline.segments = edgeDragPreview(timeline.segments, target.id, nextLength - Number(target.length || 1), "right", getTotalFrames());
                     }
-                    else if (key === "ref") target.ref = Math.max(1, Math.round(Number(value || 1)));
+                    else if (key === "ref") setSegmentReference(target, value);
                     else if (key === "guideStrength") {
                         const nextStrength = Math.max(0, Math.min(1, Number(value || 0)));
                         target.guideStrength = nextStrength;
@@ -8504,7 +8937,7 @@ function renderShotboardV3(node) {
                     shouldRedraw = true;
                 }
                 else if (key === "ref") {
-                    target.ref = Math.max(1, Math.round(Number(input.value || 1)));
+                    setSegmentReference(target, input.value);
                     shouldRedraw = true;
                 }
                 else if (key === "guideStrength") {
@@ -9940,6 +10373,7 @@ function renderShotboardV3(node) {
                 settings: v3SettingsSnapshot(),
             };
             Object.assign(board, board.settings);
+            attachPackageHintToBoard(board);
             await saveBoardJsonAs(board, safeBoardFilename("cine_filmmaker_v3"), (message) => {
                 showTimelineNotice(message, message && /failed/i.test(message) ? "error" : "warn");
             });
@@ -9974,12 +10408,15 @@ function renderShotboardV3(node) {
                 settings: v3SettingsSnapshot(),
             };
             Object.assign(board, board.settings);
-            const builtPackage = await buildShotboardPackageJson(board, "cine_filmmaker_v3", "Save As package export", (message) => {
+            const packageBoard = compactV3BoardForPackageExport(board);
+            const packageName = await askShotboardPackageName(`cine_filmmaker_v3_${timestampForPackageName()}`);
+            if (!packageName) {
+                showTimelineNotice("Save Package cancelled.", "warn");
+                return;
+            }
+            await saveShotboardPackageFolder(packageBoard, "cine_filmmaker_v3", (message) => {
                 showTimelineNotice(message, message && /failed/i.test(message) ? "error" : "warn");
-            });
-            await saveJsonAsFile(builtPackage.payload, builtPackage.filename, (message) => {
-                showTimelineNotice(message, message && /failed/i.test(message) ? "error" : "warn");
-            }, "IAMCCS Shotboard Package");
+            }, packageName);
         } catch (err) {
             console.error("[IAMCCS Cine Shotboard V3] package save failed", err);
             showTimelineNotice(`Save Package failed: ${err?.message || err}`, "error");
