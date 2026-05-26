@@ -16,8 +16,12 @@ def apply_iamccs_comfy_compat_patches():
         return
 
     if not getattr(loaded_model_cls, "_iamccs_tts_audio_suite_compat", False):
-        original_model_mmap_residency = loaded_model_cls.model_mmap_residency
-        original_is_dead = loaded_model_cls.is_dead
+        # Newer ComfyUI versions have dropped these methods from LoadedModel.
+        # Grab them defensively so the patch still installs the safe shims
+        # (which already cope with the underlying method being absent).
+        original_model_mmap_residency = getattr(
+            loaded_model_cls, "model_mmap_residency", None)
+        original_is_dead = getattr(loaded_model_cls, "is_dead", None)
 
         def safe_model_mmap_residency(self, free=False):
             model = getattr(self, "model", None)
