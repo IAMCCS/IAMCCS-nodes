@@ -1,10 +1,12 @@
 ﻿import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-const CINE_VERSION = "2026-05-22-v3-node-all-values-truth-1";
+console.info("[IAMCCS V3] Stable node UI mode active. AudioBoard UI is loaded directly by Comfy extension registry.");
+
+const CINE_VERSION = "2026-05-26-v3-perf-idle-sync";
 const SHOTBOARD_V3_RIGID_WIDTH = 1920;
 const SHOTBOARD_V3_OPEN_HEIGHT = 900;
-const SHOTBOARD_V3_COLLAPSED_HEIGHT = 560;
+const SHOTBOARD_V3_COLLAPSED_HEIGHT = 660; // increased to accommodate global prompt always visible in collapsed mode
 const SHOTBOARD_NODE_MIN_SIZE = [1500, 760];
 const SHOTBOARD_NODE_DEFAULT_SIZE = [1500, 780];
 const SHOTBOARD_ROW_GRID = "24px 108px 164px 188px 42px 42px minmax(430px,500px) minmax(280px,1fr) 28px";
@@ -505,7 +507,7 @@ function protectControlDrag(element) {
     for (const eventName of ["pointerdown", "pointermove", "mousedown", "mousemove", "touchstart", "touchmove", "wheel", "drag", "dragover", "drop"]) {
         element.addEventListener(eventName, (event) => {
             if ((eventName === "dragover" || eventName === "drop") && hasFileDrag(event)) return;
-            if ((eventName === "pointerdown" || eventName === "pointermove" || eventName === "mousedown" || eventName === "mousemove") && isNumericStepDragTarget(event)) return;
+            if (isNumericStepDragTarget(event) && /^(pointer|mouse|touch)/.test(eventName)) return;
             event.stopPropagation();
         }, { passive: false, capture: true });
     }
@@ -562,6 +564,10 @@ function tableShell(title, subtitle) {
         color: ${CINE_FILM_LAB.text};
         font-family: Arial, sans-serif;
         pointer-events: auto;
+        contain: layout paint style;
+        content-visibility: auto;
+        contain-intrinsic-size: 1500px 900px;
+        transform: translateZ(0);
     `;
 
     const head = document.createElement("div");
@@ -1209,6 +1215,51 @@ function parseShotboardTimelineString(value) {
     }
 }
 
+function parseTimelinePayloadForImport(value) {
+    if (typeof value !== "string" || !value.trim()) return null;
+    try {
+        const parsed = JSON.parse(value);
+        if (!parsed || typeof parsed !== "object") return null;
+        if (Array.isArray(parsed.segments) || Array.isArray(parsed.rows) || Array.isArray(parsed.audioSegments)) return parsed;
+        if (parsed.timeline && typeof parsed.timeline === "object") return parsed.timeline;
+        if (String(parsed.schema || "").includes("timeline") || String(parsed.schema || "").includes("shotboard")) return parsed;
+    } catch {}
+    return null;
+}
+
+function looksLikeReferencePathList(value) {
+    if (typeof value !== "string" || !value.trim()) return false;
+    if (parseTimelinePayloadForImport(value)) return false;
+    const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+    if (!lines.length) return false;
+    return lines.some((line) => /\.(png|jpe?g|webp|bmp|gif|tiff?|avif)(\?|$)/i.test(line) || line.includes("/") || line.includes("\\"));
+}
+
+function addReferencePathsFromValue(target, value) {
+    const seen = new Set(target.map((item) => String(item || "").trim()).filter(Boolean));
+    const add = (item) => {
+        const clean = String(item || "").trim();
+        if (!clean || seen.has(clean)) return;
+        seen.add(clean);
+        target.push(clean);
+    };
+    if (Array.isArray(value)) {
+        value.forEach(add);
+        return;
+    }
+    splitReferencePaths(value).forEach(add);
+}
+
+function workflowWidgetImagePaths(widgets, preferredIndex) {
+    const paths = [];
+    if (looksLikeReferencePathList(String(widgets?.[preferredIndex] || ""))) addReferencePathsFromValue(paths, widgets[preferredIndex]);
+    if (looksLikeReferencePathList(String(widgets?.[1] || ""))) addReferencePathsFromValue(paths, widgets[1]);
+    for (const value of widgets || []) {
+        if (looksLikeReferencePathList(String(value || ""))) addReferencePathsFromValue(paths, value);
+    }
+    return paths;
+}
+
 function boardFromWorkflowJson(data) {
     if (!Array.isArray(data?.nodes)) return null;
     const node = data.nodes.find((item) => {
@@ -1217,16 +1268,16 @@ function boardFromWorkflowJson(data) {
     });
     if (!node) return null;
     const widgets = Array.isArray(node.widgets_values) ? node.widgets_values : [];
-    const isLite = String(node?.type || node?.class_type || "") === "IAMCCS_CineShotboardLite";
-    return {
-        metadata: {
-            schema: "iamccs.cine.shotboard.board",
-            schema_version: 0,
-            imported_from: "comfy_workflow_shotplanner_node",
-            source_node_id: node.id,
-        },
-        global_prompt: String(widgets[0] || ""),
-        timeline_data: String(widgets[1] || ""),
+    const nodeType = String(node?.type || node?.class_type || "");
+    const isLite = nodeType === "IAMCCS_CineShotboardLite";
+    const backupTimelineText = String(node?.properties?.iamccs_v3_timeline_data_backup || "");
+    const widgetTimelineText = widgets.map((value) => String(value || "")).find((value) => parseTimelinePayloadForImport(value)) || "";
+    const timelineText = parseTimelinePayloadForImport(backupTimelineText) ? backupTimelineText : widgetTimelineText;
+    const timelinePayload = parseTimelinePayloadForImport(timelineText);
+    const imagePaths = [];
+    if (timelinePayload?.image_paths) addReferencePathsFromValue(imagePaths, timelinePayload.image_paths);
+    addReferencePathsFromValue(imagePaths, workflowWidgetImagePaths(widgets, isLite ? 8 : 10));
+    const settings = {
         duration_seconds: widgets[2],
         frame_rate: widgets[3],
         guide_policy: widgets[4],
@@ -1235,12 +1286,26 @@ function boardFromWorkflowJson(data) {
         default_force: widgets[7],
         promptrelay_epsilon: isLite ? 0.65 : widgets[8],
         ltx_round_mode: isLite ? "up_8n_plus_1" : widgets[9],
-        image_paths: String(widgets[isLite ? 8 : 10] || "").split(/\r?\n/).map((line) => line.trim()).filter(Boolean),
         image_width: widgets[isLite ? 9 : 11],
         image_height: widgets[isLite ? 10 : 12],
-        image_resize_method: cineResizeMethodValue(getWidget(node, "image_resize_method")?.value),
-        image_multiple_of: getWidget(node, "image_multiple_of")?.value,
-        img_compression: getWidget(node, "img_compression")?.value,
+        image_resize_method: isLite ? "crop" : cineResizeMethodValue(widgets[13]),
+        image_multiple_of: isLite ? 32 : widgets[14],
+        img_compression: isLite ? 0 : widgets[15],
+    };
+    return {
+        metadata: {
+            schema: "iamccs.cine.shotboard.board",
+            schema_version: 0,
+            imported_from: "comfy_workflow_shotplanner_node",
+            source_node_id: node.id,
+            source_node_type: nodeType,
+        },
+        global_prompt: String(widgets[0] || ""),
+        timeline_data: timelineText,
+        image_paths: imagePaths,
+        images: Array.isArray(data?.images) ? cloneJsonData(data.images) : [],
+        settings,
+        ...settings,
     };
 }
 
@@ -1464,6 +1529,43 @@ function parsedTimelineSourcesForBoard(board) {
     return sources;
 }
 
+const IAMCCS_IMAGE_TRUTH_KEYS = ["imageTruthPath", "image_truth_path", "imageFile", "image_file", "path"];
+
+function iamccsPathLookup(pathMap, value) {
+    const raw = String(value || "").trim();
+    if (!raw || !pathMap) return "";
+    if (pathMap[raw]) return pathMap[raw];
+    const normalized = raw.replace(/\\/g, "/").replace(/^\/+/, "");
+    if (pathMap[normalized]) return pathMap[normalized];
+    const basename = normalized.split("/").filter(Boolean).pop() || "";
+    if (basename && pathMap[basename]) return pathMap[basename];
+    const entries = Object.entries(pathMap);
+    const hit = entries.find(([key]) => {
+        const cleanKey = String(key || "").replace(/\\/g, "/").replace(/^\/+/, "");
+        return cleanKey === normalized || (basename && cleanKey.split("/").filter(Boolean).pop() === basename);
+    });
+    return hit ? hit[1] : "";
+}
+
+function iamccsPathBasename(value) {
+    return String(value || "").replace(/\\/g, "/").split("/").filter(Boolean).pop() || "";
+}
+
+function iamccsNameLookup(nameMap, value) {
+    const raw = String(value || "").trim();
+    if (!raw || !nameMap) return "";
+    if (nameMap[raw]) return nameMap[raw];
+    const normalized = raw.replace(/\\/g, "/").replace(/^\/+/, "");
+    if (nameMap[normalized]) return nameMap[normalized];
+    const basename = iamccsPathBasename(normalized);
+    if (basename && nameMap[basename]) return nameMap[basename];
+    const hit = Object.entries(nameMap).find(([key]) => {
+        const cleanKey = String(key || "").replace(/\\/g, "/").replace(/^\/+/, "");
+        return cleanKey === normalized || (basename && iamccsPathBasename(cleanKey) === basename);
+    });
+    return hit ? hit[1] : "";
+}
+
 function collectActivePackageImagePaths(board) {
     const referencePaths = splitReferencePaths(board?.image_paths);
     const seen = new Set();
@@ -1484,15 +1586,17 @@ function collectActivePackageImagePaths(board) {
             if (!seg || typeof seg !== "object") continue;
             const type = String(seg.type || "image");
             if (type === "text" || type === "audio" || seg.textPlaceholder || seg.placeholder) continue;
-            add(seg.imageFile || seg.image_file || seg.path);
-            if (!(seg.imageFile || seg.image_file || seg.path)) addFromRef(seg.ref);
+            const segPath = seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path;
+            add(segPath);
+            if (!segPath) addFromRef(seg.ref);
         }
         const rows = Array.isArray(data?.rows) ? data.rows : [];
         for (const row of rows) {
             if (!row || typeof row !== "object") continue;
             if (row.use_guide === false || Number(row.force ?? row.strength ?? row.guideStrength ?? 0) <= 0) continue;
-            add(row.imageFile || row.image_file || row.path);
-            if (!(row.imageFile || row.image_file || row.path)) addFromRef(row.ref);
+            const rowPath = row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path;
+            add(rowPath);
+            if (!rowPath) addFromRef(row.ref);
         }
     }
     return paths;
@@ -1515,10 +1619,10 @@ function collectPackageImagePaths(board) {
     }
     for (const data of parsedTimelineSourcesForBoard(board)) {
         const segments = Array.isArray(data?.segments) ? data.segments : [];
-        for (const seg of segments) add(seg?.imageFile || seg?.image_file || seg?.path);
+        for (const seg of segments) add(seg?.imageTruthPath || seg?.image_truth_path || seg?.imageFile || seg?.image_file || seg?.path);
     }
     if (Array.isArray(board?.segments)) {
-        for (const seg of board.segments) add(seg?.imageFile || seg?.image_file || seg?.path);
+        for (const seg of board.segments) add(seg?.imageTruthPath || seg?.image_truth_path || seg?.imageFile || seg?.image_file || seg?.path);
     }
     return paths;
 }
@@ -1609,7 +1713,7 @@ function applyPackageLocalImageFallbacks(board) {
         if (target && target !== originalPath) pathMap[originalPath] = target;
     }
     if (!Object.keys(pathMap).length) return { changed: false, paths: [] };
-    rewriteBoardPackagedImagePaths(board, pathMap);
+    rewriteBoardPackagedImagePaths(board, pathMap, {});
     return { changed: true, paths: collectPackageImagePaths(board) };
 }
 
@@ -1634,19 +1738,51 @@ function sourcePathForRef(ref, originalReferencePaths) {
     return index >= 0 && index < originalReferencePaths.length ? String(originalReferencePaths[index] || "").trim() : "";
 }
 
-function rewritePackagedSegments(segments, pathMap, refMap = {}, originalReferencePaths = []) {
+function rewritePackagedSegments(segments, pathMap, refMap = {}, originalReferencePaths = [], nameMap = {}) {
     if (!Array.isArray(segments)) return;
     for (const seg of segments) {
         if (!seg || typeof seg !== "object") continue;
-        const explicitSource = String(seg.imageFile || seg.image_file || seg.path || "").trim();
+        const type = String(seg.type || "image");
+        if (type === "text" || type === "audio") continue;
+        const explicitSource = String(seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path || "").trim();
         const refSource = sourcePathForRef(seg.ref, originalReferencePaths);
-        const nextRef = refMap[explicitSource] || refMap[refSource];
-        if (nextRef && String(seg.type || "image") !== "text" && String(seg.type || "image") !== "audio") {
+        const mappedExplicit = iamccsPathLookup(pathMap, explicitSource);
+        const mappedRef = iamccsPathLookup(pathMap, refSource);
+        const nextRef = refMap[explicitSource] || refMap[refSource] || refMap[mappedExplicit] || refMap[mappedRef];
+        const nextPath = mappedExplicit || mappedRef;
+        const nextName = iamccsNameLookup(nameMap, explicitSource) || iamccsNameLookup(nameMap, refSource) || iamccsPathBasename(nextPath);
+        if (nextRef) {
             seg.ref = nextRef;
+            seg.imageTruthRef = nextRef;
         }
-        for (const key of ["imageFile", "image_file", "path"]) {
+        if (nextPath) {
+            seg.imageFile = nextPath;
+            seg.path = nextPath;
+            seg.imageTruthPath = nextPath;
+            seg.imageTruthPinned = true;
+            seg.imageTruthSource = "package_import_remap";
+            if (nextName) {
+                seg.imageTruthName = nextName;
+                seg.imageName = nextName;
+                if (!String(seg.label || "").trim() || /^ref_?\d+$/i.test(String(seg.label || ""))) {
+                    seg.label = nextName.replace(/\.[^.]+$/, "");
+                }
+            }
+            delete seg.image_file;
+            delete seg.image_truth_path;
+            continue;
+        }
+        for (const key of IAMCCS_IMAGE_TRUTH_KEYS) {
             const value = String(seg[key] || "").trim();
-            if (value && pathMap[value]) seg[key] = pathMap[value];
+            const mapped = iamccsPathLookup(pathMap, value);
+            if (mapped) {
+                seg[key] = mapped;
+                const mappedName = iamccsNameLookup(nameMap, value) || iamccsPathBasename(mapped);
+                if (mappedName) {
+                    seg.imageTruthName = mappedName;
+                    seg.imageName = mappedName;
+                }
+            }
         }
     }
 }
@@ -1656,7 +1792,7 @@ function rewritePackagedRows(rows, refMap = {}, originalReferencePaths = []) {
     for (const row of rows) {
         if (!row || typeof row !== "object") continue;
         if (row.use_guide === false) continue;
-        const explicitSource = String(row.imageFile || row.image_file || row.path || "").trim();
+        const explicitSource = String(row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path || "").trim();
         const refSource = sourcePathForRef(row.ref, originalReferencePaths);
         const nextRef = refMap[explicitSource] || refMap[refSource];
         if (nextRef) row.ref = nextRef;
@@ -2173,6 +2309,26 @@ function replaceReferencePathAt(node, index, newPath) {
     return compact;
 }
 
+function appendReferencePath(node, newPath) {
+    const cleanPath = String(newPath || "").trim();
+    const current = getConnectedReferencePaths(node).slice();
+    const next = (current.length ? current : getOwnReferencePaths(node).slice())
+        .map((item) => String(item || "").trim())
+        .filter(Boolean);
+    if (!cleanPath) return { paths: next, refNumber: Math.max(1, next.length), appended: false };
+    const normalize = (value) => String(value || "").replace(/\\/g, "/").trim();
+    const existingIndex = next.findIndex((item) => normalize(item) === normalize(cleanPath));
+    if (existingIndex >= 0) {
+        setOwnReferencePaths(node, next);
+        try { node?.setDirtyCanvas?.(true, true); app?.graph?.setDirtyCanvas?.(true, true); } catch {}
+        return { paths: next, refNumber: existingIndex + 1, appended: false };
+    }
+    next.push(cleanPath);
+    setOwnReferencePaths(node, next);
+    try { node?.setDirtyCanvas?.(true, true); app?.graph?.setDirtyCanvas?.(true, true); } catch {}
+    return { paths: next, refNumber: next.length, appended: true };
+}
+
 function syncSegmentImageFileForReference(segments, refIndex, imagePath) {
     const refNumber = Math.max(1, Math.round(Number(refIndex || 0) + 1));
     const cleanPath = String(imagePath || "").trim();
@@ -2183,6 +2339,7 @@ function syncSegmentImageFileForReference(segments, refIndex, imagePath) {
         if (String(seg.type || "image") === "text" || String(seg.type || "image") === "audio") continue;
         if (Math.round(Number(seg.ref || 0)) !== refNumber) continue;
         seg.imageFile = cleanPath;
+        seg.path = cleanPath;
         delete seg.image_file;
         changed = true;
     }
@@ -2263,14 +2420,18 @@ async function restorePackagedImagesToComfyInput(board, statusCallback = null) {
         seen.add(key);
         entries.push(entry);
     }
-    if (!entries.length) return { paths: [], pathMap: {} };
+    if (!entries.length) return { paths: [], pathMap: {}, nameMap: {} };
     const packageName = sanitizePackageComponent(board?.package?.name || board?.metadata?.package_name || "", "");
     const files = [];
     for (let index = 0; index < entries.length; index += 1) {
         const entry = entries[index];
         const fallbackExt = imageExtensionForPackage(entry.filename || entry.original_name || entry.name || "", entry.content_type || "");
-        const rawName = entry.filename || entry.original_name || entry.name || `ref_${String(index + 1).padStart(3, "0")}.${fallbackExt}`;
-        const filename = sanitizePackageComponent(rawName, `ref_${String(index + 1).padStart(3, "0")}.${fallbackExt}`);
+        const refFallback = `ref_${String(index + 1).padStart(3, "0")}.${fallbackExt}`;
+        // Prefer package_path basename (ref_001.png) over original names so imported images keep the clean package naming
+        // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+        const packageBasename = iamccsPathBasename(String(entry.package_path || "").replace(/\\/g, "/"));
+        const rawName = packageBasename || entry.filename || refFallback;
+        const filename = sanitizePackageComponent(rawName, refFallback);
         statusCallback?.(`Restoring packaged image ${index + 1}/${entries.length}...`);
         try {
             files.push(await fileFromPackageDataUrl(entry.data_url, filename, entry.content_type || ""));
@@ -2280,45 +2441,64 @@ async function restorePackagedImagesToComfyInput(board, statusCallback = null) {
     }
     const uploaded = await uploadShotboardImages(files);
     const pathMap = {};
+    const nameMap = {};
     entries.forEach((entry, index) => {
         const uploadedPath = uploaded[index];
         if (!uploadedPath) return;
-        for (const key of ["path", "comfy_input_path", "package_path", "original_path", "filename", "name", "original_name"]) {
-            const value = String(entry?.[key] || "").trim();
-            if (value) pathMap[value] = uploadedPath;
-        }
+        const uploadedName = iamccsPathBasename(uploadedPath) || String(entry?.filename || entry?.original_name || entry?.name || "").trim();
+        const mapAlias = (value) => {
+            const clean = String(value || "").trim();
+            if (!clean) return;
+            pathMap[clean] = uploadedPath;
+            nameMap[clean] = uploadedName;
+            const normalized = clean.replace(/\\/g, "/").replace(/^\/+/, "");
+            if (normalized) {
+                pathMap[normalized] = uploadedPath;
+                nameMap[normalized] = uploadedName;
+            }
+            const base = iamccsPathBasename(normalized);
+            if (base) {
+                pathMap[base] = uploadedPath;
+                nameMap[base] = uploadedName;
+            }
+        };
+        for (const key of ["path", "comfy_input_path", "package_path", "original_path", "filename", "name", "original_name"]) mapAlias(entry?.[key]);
+        mapAlias(uploadedPath);
         const packagePath = String(entry.package_path || "").replace(/\\/g, "/").replace(/^\/+/, "");
-        if (packageName && packagePath) pathMap[`${packageName}/${packagePath}`] = uploadedPath;
+        if (packageName && packagePath) mapAlias(`${packageName}/${packagePath}`);
     });
-    return { paths: uploaded.filter(Boolean), pathMap };
+    return { paths: uploaded.filter(Boolean), pathMap, nameMap };
 }
 
 function rewriteReferencePathList(value, pathMap) {
     const paths = splitReferencePaths(value);
     if (!paths.length) return value;
-    return paths.map((path) => pathMap[path] || path);
+    return paths.map((path) => iamccsPathLookup(pathMap, path) || path);
 }
 
-function rewriteBoardPackagedImagePaths(board, pathMap) {
+function rewriteBoardPackagedImagePaths(board, pathMap, nameMap = {}) {
     if (!board || !pathMap || !Object.keys(pathMap).length) return board;
+    const originalReferencePaths = splitReferencePaths(board.image_paths);
     if (Object.prototype.hasOwnProperty.call(board, "image_paths")) {
         board.image_paths = rewriteReferencePathList(board.image_paths, pathMap);
     }
-    rewritePackagedSegments(board.segments, pathMap);
+    rewritePackagedSegments(board.segments, pathMap, {}, originalReferencePaths, nameMap);
     if (board.timeline && typeof board.timeline === "object") {
+        const timelineOriginalReferencePaths = splitReferencePaths(board.timeline.image_paths).length ? splitReferencePaths(board.timeline.image_paths) : originalReferencePaths;
         if (Object.prototype.hasOwnProperty.call(board.timeline, "image_paths")) {
             board.timeline.image_paths = rewriteReferencePathList(board.timeline.image_paths, pathMap);
         }
-        rewritePackagedSegments(board.timeline.segments, pathMap);
+        rewritePackagedSegments(board.timeline.segments, pathMap, {}, timelineOriginalReferencePaths, nameMap);
     }
     if (typeof board.timeline_data === "string" && board.timeline_data.trim()) {
         try {
             const parsed = JSON.parse(board.timeline_data);
             if (parsed && typeof parsed === "object") {
+                const parsedOriginalReferencePaths = splitReferencePaths(parsed.image_paths).length ? splitReferencePaths(parsed.image_paths) : originalReferencePaths;
                 if (Object.prototype.hasOwnProperty.call(parsed, "image_paths")) {
                     parsed.image_paths = rewriteReferencePathList(parsed.image_paths, pathMap);
                 }
-                rewritePackagedSegments(parsed.segments, pathMap);
+                rewritePackagedSegments(parsed.segments, pathMap, {}, parsedOriginalReferencePaths, nameMap);
                 board.timeline_data = JSON.stringify(parsed, null, 2);
             }
         } catch {}
@@ -2329,7 +2509,7 @@ function rewriteBoardPackagedImagePaths(board, pathMap) {
 async function packagedReferencePathsForImport(board, statusCallback = null) {
     const restored = await restorePackagedImagesToComfyInput(board, statusCallback);
     if (restored.paths.length) {
-        rewriteBoardPackagedImagePaths(board, restored.pathMap);
+        rewriteBoardPackagedImagePaths(board, restored.pathMap, restored.nameMap || {});
         return restored.paths;
     }
     const packageLocal = applyPackageLocalImageFallbacks(board);
@@ -2591,7 +2771,7 @@ function openReferenceFrameEditor(node, index, path, onApply) {
     cancel.onclick = () => overlay.remove();
     apply.onclick = async () => {
         apply.disabled = true;
-        status.textContent = "Saving new reference in IAMCCS_newimages...";
+        status.textContent = "Saving edited frame as a new project reference...";
         try {
             const data = await transformShotboardReference({
                 path,
@@ -2606,7 +2786,22 @@ function openReferenceFrameEditor(node, index, path, onApply) {
                 crop_box: previewCropBox,
                 crop_box_source: previewCropBox ? "ui_preview" : "backend_formula",
             });
-            const appliedPath = data?.path || data?.relative_path || data?.absolute_path || data?.filename || data?.name;
+            const appliedPath = data?.absolute_path || data?.path || data?.relative_path || data?.filename || data?.name;
+            console.info("[IAMCCS REF EDITOR] transform response", {
+                source: path,
+                appliedPath,
+                absolutePath: data?.absolute_path || "",
+                transform: data?.metadata?.transform || null,
+            });
+            // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+            // Bug #6 fix: removed strict same-path throw — the backend saves a new _cineedit_ file,
+            // but if timestamps collide or the user re-edits the same slot, we should still apply.
+            if (!appliedPath) {
+                throw new Error("Reference editor: transform API returned no output path.");
+            }
+            if (String(appliedPath) === String(path)) {
+                console.warn("[IAMCCS REF EDITOR] output path equals source — applying anyway (same-edit idempotent)");
+            }
             try {
                 onApply?.(appliedPath, data);
             } catch (applyErr) {
@@ -2969,13 +3164,14 @@ function attachVerticalStepDrag(element, getValue, applyValue, stepValue, option
     const maxValue = Number.isFinite(Number(options.max)) ? Number(options.max) : Infinity;
     const clamp = (value) => Math.min(maxValue, Math.max(minValue, Number(value) || 0));
     element.dataset.iamccsStepDrag = "true";
-    element.style.cursor = element.style.cursor || "ns-resize";
+    element.style.cursor = element.style.cursor || "ew-resize";
     element.addEventListener("pointerdown", (event) => {
         if (event.button !== 0) return;
         if (event.detail > 1 || element.dataset.iamccsNumberEditing === "true") return;
         event.preventDefault();
         event.stopPropagation();
-        const startY = event.clientY;
+        const startX = Number(event.clientX || 0);
+        const startY = Number(event.clientY || 0);
         let stepsApplied = 0;
         let dragging = true;
         element.setPointerCapture?.(event.pointerId);
@@ -2991,7 +3187,10 @@ function attachVerticalStepDrag(element, getValue, applyValue, stepValue, option
             if (!dragging || !(moveEvent.buttons & 1)) return;
             moveEvent.preventDefault();
             moveEvent.stopPropagation();
-            const nextSteps = Math.trunc((startY - moveEvent.clientY) / threshold);
+            const dx = Number(moveEvent.clientX || 0) - startX;
+            const dy = startY - Number(moveEvent.clientY || 0);
+            const dominantDelta = Math.abs(dx) >= Math.abs(dy) ? dx : dy;
+            const nextSteps = Math.trunc(dominantDelta / threshold);
             const deltaSteps = nextSteps - stepsApplied;
             if (!deltaSteps) return;
             stepsApplied = nextSteps;
@@ -3002,7 +3201,7 @@ function attachVerticalStepDrag(element, getValue, applyValue, stepValue, option
         window.addEventListener("pointermove", move, { passive: false, capture: true });
         window.addEventListener("pointerup", finish, { passive: false, capture: true });
         window.addEventListener("pointercancel", finish, { passive: false, capture: true });
-    }, { passive: false });
+    }, { passive: false, capture: true });
 }
 
 function numberStepperControl(value, step, min, max, onChange, options = {}) {
@@ -3020,7 +3219,7 @@ function numberStepperControl(value, step, min, max, onChange, options = {}) {
     input.inputMode = "decimal";
     input.readOnly = true;
     input.value = formatStepperValue(value, precision);
-    input.style.cssText = inputBase() + "height:30px;padding:4px 6px;text-align:center;font-variant-numeric:tabular-nums;cursor:ns-resize;";
+    input.style.cssText = inputBase() + "height:30px;padding:4px 6px;text-align:center;font-variant-numeric:tabular-nums;cursor:ew-resize;";
 
     const clamp = (raw) => Math.min(maxValue, Math.max(minValue, Number(raw)));
     const apply = (raw) => {
@@ -3052,7 +3251,7 @@ function numberStepperControl(value, step, min, max, onChange, options = {}) {
     const setEditing = (editing) => {
         input.dataset.iamccsNumberEditing = editing ? "true" : "false";
         input.readOnly = !editing;
-        input.style.cursor = editing ? "text" : "ns-resize";
+        input.style.cursor = editing ? "text" : "ew-resize";
     };
     input.ondblclick = (event) => {
         event.preventDefault();
@@ -4721,8 +4920,20 @@ function renderShotboardPro(node) {
                 };
                 stripeRail.append(
                     makeRailButton("E", "Open frame editor: crop, pan, zoom and save a new reference", () => {
-                        openReferenceFrameEditor(node, index, path, (newPath) => {
-                            replaceReferencePathAt(node, index, newPath);
+                        openReferenceFrameEditor(node, index, path, (newPath, data) => {
+                            const appended = appendReferencePath(node, newPath);
+                            const nextRef = Math.max(1, Number(appended?.refNumber || index + 1));
+                            refPreviewBusters.set(String(newPath), String(data?.cache_bust || Date.now()));
+                            console.info("[IAMCCS REF STRIP EDIT] saved candidate reference only; timeline truth unchanged", {
+                                oldRef: index + 1,
+                                newRef: nextRef,
+                                candidatePath: newPath,
+                                timelineTruthUnchanged: true,
+                                savedTo: data?.absolute_path || data?.path || "",
+                                appended: Boolean(appended?.appended),
+                            });
+                            showTimelineNotice(`Reference candidate saved as ref ${nextRef}. Timeline panels unchanged until edited/applied from the panel.`, "warn");
+                            writeTimeline({ force: true });
                             drawReferenceStrip();
                             draw();
                         });
@@ -5013,8 +5224,24 @@ function renderShotboardPro(node) {
     const applyBoard = async (data) => {
         const workflowBoard = boardFromWorkflowJson(data);
         const nestedBoard = data?.board && typeof data.board === "object" ? data.board : null;
-        const board = workflowBoard || nestedBoard || data || {};
+        const rootLooksLikeBoard = Boolean(
+            data?.timeline ||
+            data?.timeline_data ||
+            data?.image_paths ||
+            data?.package ||
+            Array.isArray(data?.images) ||
+            String(data?.metadata?.schema || data?.schema || "").includes("shotboard")
+        );
+        const board = (rootLooksLikeBoard ? (nestedBoard || data) : null) || workflowBoard || nestedBoard || data || {};
         if ((!Array.isArray(board.images) || !board.images.length) && Array.isArray(data?.images)) board.images = data.images;
+        console.log("[IAMCCS V3 BOARD IMPORT] board source selected", {
+            nodeId: node?.id,
+            source: rootLooksLikeBoard ? (nestedBoard ? "nested_package_board" : "root_package_board") : (workflowBoard ? "workflow_node" : "root_fallback"),
+            workflowNode: Boolean(workflowBoard),
+            hasPackage: Boolean(board?.package || data?.package),
+            images: Array.isArray(board?.images) ? board.images.length : 0,
+            imagePaths: splitReferencePaths(board?.image_paths).length,
+        });
         const metadata = board.metadata || data?.metadata || {};
         const settings = { ...(board.settings || {}) };
         for (const name of settingNames) {
@@ -5540,8 +5767,18 @@ function renderShotboardPro(node) {
                 thumbWidth: rowThumbWidth,
                 thumbHeight: rowThumbHeight,
                 onEdit: shotboardV2 ? (referenceIndex, path) => {
-                    openReferenceFrameEditor(node, referenceIndex, path, (newPath) => {
-                        replaceReferencePathAt(node, referenceIndex, newPath);
+                    openReferenceFrameEditor(node, referenceIndex, path, (newPath, data) => {
+                        const appended = appendReferencePath(node, newPath);
+                        const nextRef = Math.max(1, Number(appended?.refNumber || referenceIndex + 1));
+                        updateRow({ ref: nextRef });
+                        console.info("[IAMCCS ROW REF EDIT] applied edited reference", {
+                            row: index,
+                            oldRef: referenceIndex + 1,
+                            newRef: nextRef,
+                            path: newPath,
+                            savedTo: data?.absolute_path || data?.path || "",
+                            appended: Boolean(appended?.appended),
+                        });
                         drawReferenceStrip();
                         draw();
                     });
@@ -6180,6 +6417,10 @@ function renderShotboardV3(node) {
         "scrollbar-gutter:stable",
         `box-shadow:inset 0 1px 0 ${chrome.glow},0 0 0 1px rgba(0,0,0,.45)`,
         "pointer-events:auto",
+        "contain:layout paint style",
+        "content-visibility:auto",
+        "contain-intrinsic-size:1920px 900px",
+        "transform:translateZ(0)",
     ].join(";");
 
     const promptWidget = getWidget(node, "global_prompt");
@@ -6202,6 +6443,7 @@ function renderShotboardV3(node) {
         "frame_rate",
         "default_force",
         "promptrelay_epsilon",
+        "ltx_round_mode",
         "image_width",
         "image_height",
         "image_resize_method",
@@ -6242,6 +6484,9 @@ function renderShotboardV3(node) {
         ? Math.max(0.5, storedTimelineMeter)
         : Math.max(0.5, Number(durationWidget?.value || 20) || 20);
     let selectedId = null;
+    let timelineExtraH = 0; // extra px added by user timeline-height resize drag
+    let _tlResizeDragStartY = null; // pointer Y at drag start
+    let _tlResizeDragStartExtra = 0; // timelineExtraH value at drag start
     let pendingImageInsertFrame = null;
     let pendingImageTargetId = null;
     let timelineNotice = null;
@@ -6249,6 +6494,34 @@ function renderShotboardV3(node) {
     let lastDefaultForce = Math.max(0, Math.min(1, Number(defaultForceWidget?.value || 0.25)));
     let durationValueControl = null;
 
+    const positiveNumberOrNull = (value) => {
+        const parsed = Number(value);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+    };
+    const objectDurationTruth = (source) => {
+        if (!source || typeof source !== "object") return null;
+        const settings = source.settings && typeof source.settings === "object" ? source.settings : {};
+        return positiveNumberOrNull(
+            source.duration_seconds ??
+            source.durationSeconds ??
+            source.duration ??
+            settings.duration_seconds ??
+            settings.durationSeconds ??
+            settings.duration
+        );
+    };
+    const objectFpsTruth = (source) => {
+        if (!source || typeof source !== "object") return null;
+        const settings = source.settings && typeof source.settings === "object" ? source.settings : {};
+        return positiveNumberOrNull(
+            source.frame_rate ??
+            source.frameRate ??
+            source.fps ??
+            settings.frame_rate ??
+            settings.frameRate ??
+            settings.fps
+        );
+    };
     const getDuration = () => Math.max(0.1, Number(durationWidget?.value || 20));
     const getFps = () => Math.max(1, Math.round(Number(fpsWidget?.value || 24)));
     const getTotalFrames = () => Math.max(1, Math.round(getDuration() * getFps()));
@@ -6322,19 +6595,13 @@ function renderShotboardV3(node) {
                     candidates.push(backupCandidate);
                 } catch {}
             }
-            const selected = candidates.length
-                ? candidates.slice().sort((a, b) => {
-                    const revisionDelta = Number(b.revision || 0) - Number(a.revision || 0);
-                    if (revisionDelta) return revisionDelta;
-                    if (a.source === "widget.timeline_data") return -1;
-                    if (b.source === "widget.timeline_data") return 1;
-                    return 0;
-                })[0]
-                : { source: "empty", value: {}, revision: 0 };
+            // The visible workflow widget is the current board truth.
+            // The property backup is only a recovery fallback for empty/invalid widgets.
+            const selected = widgetCandidate || backupCandidate || { source: "empty", value: {}, revision: 0 };
             const data = selected.value;
             console.log("[IAMCCS V3 TIMELINE LOAD]", {
                 selected: selected.source,
-                truth: selected.source === "widget.timeline_data" ? "node.timeline_data" : selected.source === "properties.iamccs_v3_timeline_data_backup" ? "backup_revision_wins" : "empty",
+                truth: selected.source === "widget.timeline_data" ? "node.timeline_data_current_widget" : selected.source === "properties.iamccs_v3_timeline_data_backup" ? "backup_fallback_widget_empty_or_invalid" : "empty",
                 revision: Number(selected.revision || 0),
                 nodeId: node?.id,
                 candidates: candidates.map((candidate) => ({
@@ -6354,23 +6621,28 @@ function renderShotboardV3(node) {
                     schema: data.schema || "iamccs.cine.filmmaker_timeline",
                     schema_version: Number(data.schema_version || 1),
                     segments: Array.isArray(data.segments) ? data.segments : [],
+                    rows: Array.isArray(data.rows) ? data.rows : [],
                     audioSegments: Array.isArray(data.audioSegments) ? data.audioSegments : [],
                     audioTrackCount: Math.max(1, Number(data.audioTrackCount || 2)),
                     masterAudioGain: Math.max(0, Math.min(2, Number(data.masterAudioGain ?? data.master_audio_gain ?? 1) || 1)),
                     masterAudioNormalize: Boolean(data.masterAudioNormalize || data.master_audio_normalize),
+                    duration_seconds: objectDurationTruth(data),
+                    frame_rate: objectFpsTruth(data),
                     audioSyncMode: String(data.audioSyncMode || "timeline_audio"),
                     generationStrategy: String(data.generationStrategy || "single_timeline"),
                     flfrealMode: String(data.flfrealMode || data.flfreal_mode || "iamccs_enhanced"),
                     globalPromptOnly: Boolean(data.global_prompt_only || data.use_global_prompt_only),
                     verboseLog: data.verbose_log !== undefined ? Boolean(data.verbose_log) : data.verboseLog !== undefined ? Boolean(data.verboseLog) : true,
+                    multiGeneration: data.multiGeneration && typeof data.multiGeneration === "object" ? data.multiGeneration : {},
                     truthRevision: candidateRevision(data),
                 };
             }
         } catch {}
-        return { schema: "iamccs.cine.filmmaker_timeline", schema_version: 1, segments: [], audioSegments: [], audioTrackCount: 2, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
+        return { schema: "iamccs.cine.filmmaker_timeline", schema_version: 1, segments: [], rows: [], audioSegments: [], audioTrackCount: 2, duration_seconds: null, frame_rate: null, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
     }
 
     let timeline = readTimeline();
+    const refPreviewBusters = new Map();
     const refPaths = () => getConnectedReferencePaths(node);
     const normalizeReferencePathKey = (value) => String(value || "").replace(/\\/g, "/").trim();
     const referencePathBasename = (value) => normalizeReferencePathKey(value).split("/").pop();
@@ -6392,17 +6664,63 @@ function renderShotboardV3(node) {
         const nextPath = String(paths[nextRef - 1] || "").trim();
         if (nextPath) {
             seg.imageFile = nextPath;
+            seg.path = nextPath;
+            seg.imageTruthPath = nextPath;
+            seg.imageTruthRef = nextRef;
+            seg.imageTruthPinned = options.pinned !== false;
+            seg.imageTruthSource = options.truthSource || "set_segment_reference";
             delete seg.image_file;
+            delete seg.image_truth_path;
             if (options.updateAutoLabel !== false && /^ref_\d+$/i.test(String(seg.label || ""))) seg.label = `ref_${nextRef}`;
         } else {
             delete seg.imageFile;
             delete seg.image_file;
+            delete seg.path;
+            delete seg.imageTruthPath;
+            delete seg.image_truth_path;
+            delete seg.imageTruthRef;
+            delete seg.imageTruthPinned;
         }
     };
+    const applyEditedReferenceTruth = (seg, refNumber, newPath, options = {}) => {
+        if (!seg || !isTimelineImageSegment(seg)) return false;
+        setSegmentReference(seg, refNumber, { ...options, pinned: true, truthSource: options.truthSource || "timeline_panel_edit" });
+        const cleanPath = String(newPath || "").trim();
+        if (cleanPath) {
+            seg.imageFile = cleanPath;
+            seg.path = cleanPath;
+            seg.imageTruthPath = cleanPath;
+            seg.imageTruthRef = Math.max(1, Math.round(Number(refNumber || seg.ref || 1)));
+            seg.imageTruthPinned = true;
+            seg.imageTruthSource = options.truthSource || "timeline_panel_edit";
+            seg.imageTruthUpdatedAt = new Date().toISOString();
+            delete seg.image_file;
+            delete seg.image_truth_path;
+        }
+        return true;
+    };
+    const applyEditedReferenceToMatches = (oldRef, oldPath, newRef, newPath, options = {}) => {
+        const oldRefNumber = Math.max(1, Math.round(Number(oldRef || 1)));
+        const cleanOldPath = String(oldPath || "").trim();
+        let count = 0;
+        for (const item of (timeline.segments || [])) {
+            if (!isTimelineImageSegment(item)) continue;
+            const itemPath = segmentReferencePath(item);
+            const refMatches = Math.round(Number(item.ref || 0)) === oldRefNumber;
+            const pathMatches = cleanOldPath && sameReferencePath(itemPath, cleanOldPath);
+            if (refMatches || pathMatches) {
+                if (applyEditedReferenceTruth(item, newRef, newPath, options)) count += 1;
+            }
+        }
+        return count;
+    };
+    // Fix 2 (auto-fill): removed Math.max(1,...) clamping — ref:0 (new empty slots) now correctly returns "" instead of the first board image — By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     const segmentReferencePath = (seg) => {
-        const explicitPath = String(seg?.imageFile || seg?.image_file || "").trim();
+        const truthPath = String(seg?.imageTruthPath || seg?.image_truth_path || "").trim();
+        if (truthPath) return truthPath;
+        const explicitPath = String(seg?.imageFile || seg?.image_file || seg?.path || "").trim();
         if (explicitPath) return explicitPath;
-        const refNumber = Math.max(1, Math.round(Number(seg?.ref || 0)));
+        const refNumber = Math.round(Number(seg?.ref || 0));
         return refNumber >= 1 ? String(refPaths()[refNumber - 1] || "") : "";
     };
     const normalizeTimelineSegmentReferences = () => {
@@ -6410,20 +6728,31 @@ function renderShotboardV3(node) {
         let changed = false;
         for (const seg of (timeline.segments || [])) {
             if (!isTimelineImageSegment(seg)) continue;
-            const explicitPath = String(seg.imageFile || seg.image_file || "").trim();
+            const explicitPath = String(seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path || "").trim();
             if (explicitPath) {
                 const refFromPath = referenceIndexForPath(explicitPath, paths);
                 if (refFromPath && Math.round(Number(seg.ref || 0)) !== refFromPath) {
-                    console.warn("[IAMCCS V3 REF SYNC] imageFile/ref mismatch fixed", {
+                    console.warn("[IAMCCS V3 REF SYNC] image truth/ref mismatch fixed", {
                         segmentId: seg.id,
                         label: seg.label,
                         oldRef: seg.ref,
                         newRef: refFromPath,
-                        imageFile: explicitPath,
+                        imageTruthPath: explicitPath,
                         oldRefPath: paths[Math.max(0, Math.round(Number(seg.ref || 1)) - 1)] || "",
                     });
                     seg.ref = refFromPath;
                     if (/^ref_\d+$/i.test(String(seg.label || ""))) seg.label = `ref_${refFromPath}`;
+                    changed = true;
+                }
+                if (seg.imageFile !== explicitPath || seg.path !== explicitPath || seg.imageTruthPath !== explicitPath || !seg.imageTruthPinned) {
+                    seg.imageFile = explicitPath;
+                    seg.path = explicitPath;
+                    seg.imageTruthPath = explicitPath;
+                    seg.imageTruthRef = refFromPath || Math.max(1, Math.round(Number(seg.ref || 1)));
+                    seg.imageTruthPinned = true;
+                    seg.imageTruthSource = seg.imageTruthSource || "normalized_existing_segment";
+                    delete seg.image_file;
+                    delete seg.image_truth_path;
                     changed = true;
                 }
                 continue;
@@ -6432,7 +6761,13 @@ function renderShotboardV3(node) {
             const path = String(paths[refNumber - 1] || "").trim();
             if (path) {
                 seg.imageFile = path;
+                seg.path = path;
+                seg.imageTruthPath = path;
+                seg.imageTruthRef = refNumber;
+                seg.imageTruthPinned = true;
+                seg.imageTruthSource = seg.imageTruthSource || "normalized_ref_path";
                 delete seg.image_file;
+                delete seg.image_truth_path;
                 changed = true;
             }
         }
@@ -6449,12 +6784,30 @@ function renderShotboardV3(node) {
         timelineNotice.style.borderColor = tone === "error" ? purple.danger : purple.play;
         timelineNotice.style.color = tone === "error" ? "#FFE3DD" : "#FFF1BE";
     };
-    const setDurationSeconds = (seconds) => {
+    const setDurationSeconds = (seconds, reason = "manual") => {
         const next = Math.max(0.1, Number(seconds) || 0.1);
         if (durationWidget) durationWidget.value = next;
         setWidgetValue(node, "duration_seconds", next);
+        timeline.duration_seconds = next;
+        timelineMeterSeconds = clampTimelineMeterSeconds(timelineMeterSeconds);
         durationValueControl?._iamccsSetValue?.(next);
+        console.log("[IAMCCS V3 DURATION TRUTH]", { nodeId: node?.id, reason, duration_seconds: next, fps: getFps() });
     };
+    const setFrameRateValue = (fps, reason = "manual") => {
+        const next = Math.max(1, Math.round(Number(fps) || 24));
+        if (fpsWidget) fpsWidget.value = next;
+        setWidgetValue(node, "frame_rate", next);
+        timeline.frame_rate = next;
+        timelineMeterSeconds = clampTimelineMeterSeconds(timelineMeterSeconds);
+        console.log("[IAMCCS V3 FPS TRUTH]", { nodeId: node?.id, reason, frame_rate: next, duration_seconds: getDuration() });
+    };
+    const syncTimingWidgetsFromTimelineTruth = (reason = "timeline_truth") => {
+        const durationTruth = objectDurationTruth(timeline);
+        const fpsTruth = objectFpsTruth(timeline);
+        if (durationTruth !== null) setDurationSeconds(durationTruth, reason);
+        if (fpsTruth !== null) setFrameRateValue(fpsTruth, reason);
+    };
+    syncTimingWidgetsFromTimelineTruth("initial_timeline_load");
     const enforceDurationMinimum = () => {
         const fps = getFps();
         const minFrames = endOfVisualSegments();
@@ -6468,18 +6821,16 @@ function renderShotboardV3(node) {
             return false;
         }
         const minSeconds = Number((minFrames / fps).toFixed(3));
-        setDurationSeconds(minSeconds);
-        showTimelineNotice(`Duration too short: minimum is ${minSeconds}s for the current image timeline. Shorten image blocks first.`);
-        return true;
+        showTimelineNotice(`Timeline content reaches ${minSeconds}s, but board duration remains ${getDuration().toFixed(3)}s. Change Duration explicitly or shorten/ripple-delete the extra space.`);
+        return false;
     };
     const ensureDurationForFrames = (requiredFrames) => {
         const fps = getFps();
         const need = Math.max(1, Math.round(Number(requiredFrames || 1)));
         if (Math.round(getDuration() * fps) >= need) return false;
-        const nextSeconds = Number((need / fps).toFixed(3));
-        setDurationSeconds(nextSeconds);
-        showTimelineNotice(`Duration expanded to ${nextSeconds}s to fit the new timeline blocks.`);
-        return true;
+        const needSeconds = Number((need / fps).toFixed(3));
+        showTimelineNotice(`Timeline content reaches ${needSeconds}s. Duration is locked to ${getDuration().toFixed(3)}s until you change Duration explicitly.`);
+        return false;
     };
     const followsDefaultForce = (seg, previousDefault) => {
         if (!seg || String(seg.type || "image") === "text") return false;
@@ -6511,9 +6862,13 @@ function renderShotboardV3(node) {
         seg.start = Math.max(0, Math.min(Math.round(Number(seg.start || 0)), Math.max(0, total - 1)));
         if (seg.start + seg.length > total) seg.length = Math.max(1, total - seg.start);
         if (String(seg.type || "image") !== "text" && String(seg.type || "image") !== "audio") {
-            const strength = clampGuideStrength(seg.guideStrength ?? seg.force ?? defaultForceWidget?.value ?? 0.25);
+            const strength = clampGuideStrength(seg.guideStrength ?? seg.guide_strength ?? seg.force ?? seg.strength ?? defaultForceWidget?.value ?? 0.25);
             seg.guideStrength = strength;
-            seg.imageLockStrength = clampGuideStrength(seg.imageLockStrength ?? strength, strength);
+            seg.guide_strength = strength;
+            seg.force = strength;
+            seg.strength = strength;
+            seg.imageLockStrength = strength;
+            seg.image_lock_strength = strength;
             if (seg.defaultForceSource !== undefined) seg.defaultForceSource = clampGuideStrength(seg.defaultForceSource, strength);
         }
         return seg;
@@ -6537,6 +6892,25 @@ function renderShotboardV3(node) {
         let payload = null;
         try { payload = JSON.parse(String(timelineText || "{}")); } catch {}
         const cleanPayload = stripEmptyAudioForBoardExport(payload || timeline || {});
+        if (Array.isArray(cleanPayload.segments)) {
+            for (const seg of cleanPayload.segments) {
+                if (!isTimelineImageSegment(seg)) continue;
+                const truth = String(seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path || "").trim();
+                if (!truth) continue;
+                seg.imageFile = truth;
+                seg.path = truth;
+                seg.imageTruthPath = truth;
+                seg.imageTruthRef = Math.max(1, Math.round(Number(seg.ref || seg.imageTruthRef || 1)));
+                seg.imageTruthPinned = true;
+                seg.imageTruthSource = seg.imageTruthSource || "board_export";
+                delete seg.image_file;
+                delete seg.image_truth_path;
+            }
+        }
+        const settings = v3SettingsSnapshot();
+        Object.entries(settings).forEach(([key, value]) => {
+            if (cleanPayload[key] === undefined || cleanPayload[key] === null || cleanPayload[key] === "") cleanPayload[key] = value;
+        });
         return {
             payload: cleanPayload,
             text: JSON.stringify(cleanPayload, null, 2),
@@ -6570,13 +6944,13 @@ function renderShotboardV3(node) {
             const segments = Array.isArray(payload?.segments) ? payload.segments : [];
             for (const seg of segments) {
                 if (!isTimelineImageSegment(seg)) continue;
-                addPath(seg.imageFile || seg.image_file || seg.path || pathForRef(seg.ref));
+                addPath(seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path || pathForRef(seg.ref));
             }
             if (activePaths.length) continue;
             const rows = Array.isArray(payload?.rows) ? payload.rows : [];
             for (const row of rows) {
                 if (!row || row.use_guide === false || Number(row.force ?? row.strength ?? row.guideStrength ?? 0) <= 0) continue;
-                addPath(row.imageFile || row.image_file || row.path || pathForRef(row.ref));
+                addPath(row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path || pathForRef(row.ref));
             }
         }
         if (!activePaths.length) return compact;
@@ -6585,12 +6959,18 @@ function renderShotboardV3(node) {
             if (!Array.isArray(segments)) return;
             for (const seg of segments) {
                 if (!isTimelineImageSegment(seg)) continue;
-                const source = String(seg.imageFile || seg.image_file || seg.path || pathForRef(seg.ref) || "").trim();
+                const source = String(seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path || pathForRef(seg.ref) || "").trim();
                 const nextRef = refMap.get(source);
                 if (!nextRef) continue;
                 seg.ref = nextRef;
                 seg.imageFile = source;
+                seg.path = source;
+                seg.imageTruthPath = source;
+                seg.imageTruthRef = nextRef;
+                seg.imageTruthPinned = true;
+                seg.imageTruthSource = seg.imageTruthSource || "package_export";
                 delete seg.image_file;
+                delete seg.image_truth_path;
                 if (/^ref_\d+$/i.test(String(seg.label || ""))) seg.label = `ref_${nextRef}`;
             }
         };
@@ -6598,7 +6978,7 @@ function renderShotboardV3(node) {
             if (!Array.isArray(rows)) return;
             for (const row of rows) {
                 if (!row || row.use_guide === false) continue;
-                const source = String(row.imageFile || row.image_file || row.path || pathForRef(row.ref) || "").trim();
+                const source = String(row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path || pathForRef(row.ref) || "").trim();
                 const nextRef = refMap.get(source);
                 if (nextRef) row.ref = nextRef;
             }
@@ -6677,12 +7057,24 @@ function renderShotboardV3(node) {
     const segmentToRow = (seg, index) => {
         const fps = getFps();
         const isText = String(seg.type || "image") === "text";
+        const truthPath = isText ? "" : String(seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path || "").trim();
+        const singleStrength = isText ? 0 : Math.max(0, Math.min(1, Number(seg.guideStrength ?? seg.guide_strength ?? seg.force ?? seg.strength ?? defaultForceWidget?.value ?? 0.25)));
         return {
             second: Number((Number(seg.start || 0) / fps).toFixed(3)),
             frame: Math.round(Number(seg.start || 0)),
             ref: Math.max(1, Number(seg.ref || index + 1)),
-            force: isText ? 0 : Math.max(0, Math.min(1, Number(seg.guideStrength ?? defaultForceWidget?.value ?? 0.25))),
-            image_lock_strength: isText ? 0 : Math.max(0, Math.min(1, Number(seg.guideStrength ?? defaultForceWidget?.value ?? 0.25))),
+            imageFile: truthPath,
+            path: truthPath,
+            imageTruthPath: truthPath,
+            imageTruthRef: Math.max(1, Number(seg.imageTruthRef || seg.ref || index + 1)),
+            imageTruthPinned: !isText,
+            imageTruthSource: String(seg.imageTruthSource || "segment_to_row"),
+            force: singleStrength,
+            strength: singleStrength,
+            guide_strength: singleStrength,
+            guideStrength: singleStrength,
+            image_lock_strength: singleStrength,
+            imageLockStrength: singleStrength,
             label: String(seg.label || `${isText ? "text" : "shot"}_${index + 1}`),
             camera: String(seg.camera || "cinematic motion"),
             transition: String(seg.transition || "continuous_motion"),
@@ -6703,9 +7095,9 @@ function renderShotboardV3(node) {
             step_transition_prompt: "",
             step_transition_easing: String(seg.step_transition_easing || "ease_in_out"),
             step_transition_force_curve: String(seg.step_transition_force_curve || "late_target"),
-            step_transition_duration: Math.max(0, Number(seg.step_transition_duration || 0) || 0),
-            step_transition_arrival: String(seg.step_transition_arrival || "auto"),
-            step_transition_auto_fit: seg.step_transition_auto_fit !== false,
+            step_transition_duration: 0,
+            step_transition_arrival: "auto",
+            step_transition_auto_fit: true,
         };
     };
     let pendingTimelineCommit = 0;
@@ -6826,6 +7218,9 @@ function renderShotboardV3(node) {
         magnetize();
         normalizeTimelineSegmentReferences();
         const fps = getFps();
+        const effectiveDurationSeconds = getDuration();
+        timeline.duration_seconds = effectiveDurationSeconds;
+        timeline.frame_rate = fps;
         const rows = timeline.segments.filter((seg) => !seg.placeholder).map(segmentToRow);
         const promptRelayEnabled = rows.some((row) => {
             const hasPrompt = row.use_prompt && String(row.relay_prompt || "").trim();
@@ -6885,6 +7280,34 @@ function renderShotboardV3(node) {
         const effectiveDirectorPrompts = globalPromptOnly ? [] : directorPrompts;
         const effectiveDirectorLengths = globalPromptOnly ? [] : directorLengths;
         const effectivePromptRelayEnabled = globalPromptOnly ? false : promptRelayEnabled;
+        timeline.rows = rows;
+        const timelineRows = rows;
+        const multiGeneration = timeline.multiGeneration && typeof timeline.multiGeneration === "object"
+            ? JSON.parse(JSON.stringify(timeline.multiGeneration))
+            : {};
+        if (multiGeneration.activeTimelineId) {
+            const activeTimelineId = String(multiGeneration.activeTimelineId || "T01");
+            multiGeneration.visualTimelines = multiGeneration.visualTimelines && typeof multiGeneration.visualTimelines === "object"
+                ? multiGeneration.visualTimelines
+                : {};
+            multiGeneration.visualTimelines[activeTimelineId] = {
+                schema: "iamccs.multigeneration.visual_timeline",
+                schema_version: 1,
+                timeline_id: activeTimelineId,
+                saved_at: new Date().toISOString(),
+                duration_seconds: effectiveDurationSeconds,
+                frame_rate: fps,
+                image_paths: refPaths(),
+                segments: JSON.parse(JSON.stringify(timeline.segments || [])),
+                rows: JSON.parse(JSON.stringify(timelineRows)),
+                director_local_prompts: effectiveDirectorPrompts.join(" | "),
+                director_segment_lengths: effectiveDirectorLengths.join(","),
+                director_guide_strength: guideStrength,
+                local_prompts: effectiveDirectorPrompts.join(" | "),
+                segment_lengths: effectiveDirectorLengths.join(","),
+                guide_strength: guideStrength,
+            };
+        }
         node.properties = node.properties || {};
         const nextTruthRevision = Math.max(
             Number(node.properties.iamccs_v3_timeline_revision || 0),
@@ -6916,7 +7339,7 @@ function renderShotboardV3(node) {
             segment_lengths: effectiveDirectorLengths.join(","),
             guide_strength: guideStrength,
             audio_data: audioData,
-            duration_seconds: getDuration(),
+            duration_seconds: effectiveDurationSeconds,
             frame_rate: fps,
             image_paths: refPaths(),
             image_width: Number(imageWidthWidget?.value || 768),
@@ -6925,12 +7348,18 @@ function renderShotboardV3(node) {
             image_multiple_of: Number(getWidget(node, "image_multiple_of")?.value || 32),
             promptrelay_epsilon: Number(getWidget(node, "promptrelay_epsilon")?.value || 0.65),
             img_compression: Number(getWidget(node, "img_compression")?.value || 0),
+            default_force: Number(defaultForceWidget?.value || 0.25),
+            guide_policy: String(getWidget(node, "guide_policy")?.value || "every_checked_row"),
+            min_guide_gap_seconds: Number(getWidget(node, "min_guide_gap_seconds")?.value || 0),
+            max_guides: Number(getWidget(node, "max_guides")?.value || 50),
+            ltx_round_mode: String(getWidget(node, "ltx_round_mode")?.value || "up_8n_plus_1"),
             audioTrackCount: Math.max(1, Math.round(Number(timeline.audioTrackCount || 2))),
             masterAudioGain: Math.max(0, Math.min(2, Number(timeline.masterAudioGain ?? 1) || 1)),
             masterAudioNormalize: Boolean(timeline.masterAudioNormalize),
             segments: timeline.segments,
             audioSegments: timeline.audioSegments,
-            rows,
+            rows: timelineRows,
+            multiGeneration,
         };
         node.properties.iamccs_v3_timeline_revision = nextTruthRevision;
         node.properties.iamccs_v3_timeline_updated_at = truthUpdatedAt;
@@ -7014,6 +7443,192 @@ function renderShotboardV3(node) {
         };
         return btn;
     };
+    const cloneForMultiTimeline = (value, fallback) => {
+        try {
+            return JSON.parse(JSON.stringify(value ?? fallback));
+        } catch {
+            return fallback;
+        }
+    };
+    const multiTimelineId = (takeIndex) => `T${String(Math.max(1, Math.round(Number(takeIndex) || 1))).padStart(2, "0")}`;
+    const multiTimelineTakeFromId = (timelineId) => Math.max(1, Math.round(Number(String(timelineId || "T01").replace(/\D/g, "") || 1)));
+    const multiTargetDurationSeconds = () => {
+        const multi = timeline.multiGeneration && typeof timeline.multiGeneration === "object" ? timeline.multiGeneration : {};
+        const chunk = Math.max(0, Number(multi.chunkSeconds || 0));
+        return chunk > 0 ? chunk : getDuration();
+    };
+    const findMultiTimelineBridge = () => {
+        const nodes = Array.isArray(app?.graph?._nodes) ? app.graph._nodes : [];
+        return nodes.find((candidate) => {
+            const type = String(candidate?.type || candidate?.comfyClass || candidate?.constructor?.type || "");
+            return type === "IAMCCS_MultiTimelineBridge" || type.includes("MultiTimelineBridge");
+        });
+    };
+    const setBridgeTake = (takeIndex) => {
+        const bridge = findMultiTimelineBridge();
+        if (!bridge) return;
+        const widget = (bridge.widgets || []).find((item) => item?.name === "active_take");
+        if (!widget) return;
+        const take = Math.max(1, Math.round(Number(takeIndex) || 1));
+        widget.value = take;
+        try { widget.callback?.(take); } catch {}
+        try {
+            window.dispatchEvent(new CustomEvent("iamccs:multigeneration-active-take", {
+                detail: { nodeId: bridge.id, activeTake: take },
+            }));
+        } catch {}
+    };
+    const snapshotCurrentVisualTimeline = (timelineId) => ({
+        schema: "iamccs.multigeneration.visual_timeline",
+        schema_version: 1,
+        timeline_id: String(timelineId || "T01"),
+        saved_at: new Date().toISOString(),
+        duration_seconds: getDuration(),
+        frame_rate: getFps(),
+        image_paths: refPaths(),
+        segments: cloneForMultiTimeline(timeline.segments || [], []),
+        rows: cloneForMultiTimeline(timeline.rows || [], []),
+        guide_strength: Number(defaultForceWidget?.value || 0.3),
+    });
+    const defaultVisualTimeline = (timelineId) => ({
+        schema: "iamccs.multigeneration.visual_timeline",
+        schema_version: 1,
+        timeline_id: String(timelineId || "T01"),
+        created_at: new Date().toISOString(),
+        duration_seconds: multiTargetDurationSeconds(),
+        frame_rate: getFps(),
+        image_paths: [],
+        segments: [],
+        rows: [],
+        guide_strength: Number(defaultForceWidget?.value || 0.3),
+    });
+    const multiAudioSegmentsForTake = (multi, takeIndex) => {
+        const take = Math.max(1, Math.round(Number(takeIndex) || 1));
+        const timelineId = multiTimelineId(take);
+        const normalizeMultiTimelineId = (value, fallbackTake = take) => {
+            const raw = String(value || "").trim();
+            const normalizedTake = Math.max(1, Math.round(Number(raw.replace(/\D/g, "")) || Number(fallbackTake) || 1));
+            return multiTimelineId(normalizedTake);
+        };
+        const all = Array.isArray(multi?.audioSegmentsAll)
+            ? multi.audioSegmentsAll
+            : Array.isArray(multi?.allAudioSegments)
+                ? multi.allAudioSegments
+                : [];
+        if (!all.length) return [];
+        const matches = all.filter((seg) => {
+            const segTake = Math.max(0, Math.round(Number(seg?.multiTakeIndex || 0)));
+            const rawTimelineId = String(seg?.timelineId || "").trim();
+            const segTimelineId = rawTimelineId ? normalizeMultiTimelineId(rawTimelineId, segTake || take) : "";
+            const isMulti = Boolean(seg?.multiGenerationClip) || /^T\d+/i.test(rawTimelineId) || segTake > 0;
+            if (!isMulti) return false;
+            return segTimelineId === timelineId || segTake === take;
+        });
+        return matches.map((seg) => {
+            const localStart = Number(seg?.localStart);
+            const next = cloneForMultiTimeline(seg, {});
+            next.track = 0;
+            next.start = Number.isFinite(localStart)
+                ? Math.max(0, Math.round(localStart))
+                : 0;
+            next.timelineId = timelineId;
+            next.multiTakeIndex = take;
+            next.shotboardActiveTakeAudio = true;
+            next.sourceTrackOriginal = Math.max(0, Math.round(Number(seg?.track || seg?.sourceTrackOriginal || 0)));
+            return next;
+        });
+    };
+    const applyMultiAudioForTake = (multi, takeIndex) => {
+        const sourceAll = Array.isArray(multi?.audioSegmentsAll) || Array.isArray(multi?.allAudioSegments);
+        if (!sourceAll) return false;
+        timeline.audioSegments = multiAudioSegmentsForTake(multi, takeIndex);
+        timeline.audioTrackCount = 1;
+        timeline.audioBusMode = "shotboard_only_first";
+        timeline.onlyFirstTrack = true;
+        return true;
+    };
+    const switchMultiTimeline = (takeIndex) => {
+        const take = Math.max(1, Math.round(Number(takeIndex) || 1));
+        const nextId = multiTimelineId(take);
+        const multi = timeline.multiGeneration && typeof timeline.multiGeneration === "object"
+            ? cloneForMultiTimeline(timeline.multiGeneration, {})
+            : {};
+        const currentId = String(multi.activeTimelineId || multiTimelineId(multi.activeTake || 1));
+        const visualTimelines = multi.visualTimelines && typeof multi.visualTimelines === "object"
+            ? cloneForMultiTimeline(multi.visualTimelines, {})
+            : {};
+        visualTimelines[currentId] = snapshotCurrentVisualTimeline(currentId);
+        const selected = visualTimelines[nextId] || defaultVisualTimeline(nextId);
+        visualTimelines[nextId] = selected;
+        timeline.segments = cloneForMultiTimeline(selected.segments || [], []);
+        timeline.rows = cloneForMultiTimeline(selected.rows || [], []);
+        const selectedDuration = Math.max(0, Number(selected.duration_seconds || 0)) || multiTargetDurationSeconds();
+        if (durationWidget && selectedDuration > 0) durationWidget.value = Number(selectedDuration.toFixed(3));
+        if (fpsWidget && Number(selected.frame_rate) > 0) fpsWidget.value = Number(selected.frame_rate);
+        timeline.generationStrategy = "multigeneration_manual_take";
+        const nextMultiGeneration = {
+            ...multi,
+            enabled: true,
+            activeTake: take,
+            activeTimelineId: nextId,
+            timelineIds: Array.from(new Set([
+                ...(Array.isArray(multi.timelineIds) ? multi.timelineIds : []),
+                ...Object.keys(visualTimelines),
+                nextId,
+            ])).sort(),
+            visualTimelines,
+            updatedAt: new Date().toISOString(),
+        };
+        applyMultiAudioForTake(nextMultiGeneration, take);
+        timeline.multiGeneration = nextMultiGeneration;
+        setBridgeTake(take);
+        writeTimeline({ force: true });
+        showTimelineNotice(`Loaded ${nextId}. Visual boxes are independent for this generation.`, "info");
+        draw();
+    };
+    const makeMultiTimelineControl = () => {
+        const multi = timeline.multiGeneration && typeof timeline.multiGeneration === "object" ? timeline.multiGeneration : {};
+        const bridge = findMultiTimelineBridge();
+        const maxWidget = (bridge?.widgets || []).find((item) => item?.name === "max_takes");
+        const fixedWidget = (bridge?.widgets || []).find((item) => item?.name === "fixed_take_count");
+        const known = Math.max(
+            Array.isArray(multi.timelineIds) ? multi.timelineIds.length : 0,
+            multi.visualTimelines && typeof multi.visualTimelines === "object" ? Object.keys(multi.visualTimelines).length : 0,
+            0
+        );
+        const maxTakes = Math.max(2, Math.min(12, Math.round(Number(maxWidget?.value || fixedWidget?.value || known || 5))));
+        const activeTake = Math.max(1, Math.min(maxTakes, Math.round(Number(multi.activeTake || multiTimelineTakeFromId(multi.activeTimelineId) || 1))));
+        const wrap = document.createElement("div");
+        wrap.title = "Switch real Shotboard visual timelines for staged multigeneration.";
+        wrap.style.cssText = `display:flex;align-items:center;gap:4px;height:28px;padding:0 5px;border:1px solid ${purple.border};border-radius:5px;background:${purple.button};`;
+        const label = document.createElement("span");
+        label.textContent = "MULTI";
+        label.style.cssText = `color:#fff1ba;font-size:9px;font-weight:950;`;
+        const select = document.createElement("select");
+        select.style.cssText = `height:22px;min-width:112px;border:1px solid ${purple.border};border-radius:4px;background:${purple.valueBg};color:${purple.valueText};font-size:10px;font-weight:900;`;
+        for (let i = 1; i <= maxTakes; i += 1) {
+            const id = multiTimelineId(i);
+            const option = document.createElement("option");
+            option.value = String(i);
+            option.textContent = `${id} / gen ${i}`;
+            select.appendChild(option);
+        }
+        select.value = String(activeTake);
+        select.onchange = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            switchMultiTimeline(Number(select.value));
+        };
+        wrap.append(label, select);
+        if (String(multi.durationWarning || "").trim()) {
+            const warn = document.createElement("span");
+            warn.textContent = "DURATION";
+            warn.title = String(multi.durationWarning || "");
+            warn.style.cssText = "color:#ffdf8a;font-size:8px;font-weight:950;border-left:1px solid rgba(255,255,255,.16);padding-left:5px;";
+            wrap.appendChild(warn);
+        }
+        return protectControlDrag(wrap);
+    };
     const setFlfrealMode = (value) => {
         timeline.flfrealMode = ["flfreal_parity", "iamccs_enhanced"].includes(String(value)) ? String(value) : "iamccs_enhanced";
         writeTimeline({ force: true });
@@ -7083,6 +7698,7 @@ function renderShotboardV3(node) {
     const timelineMeterReadout = document.createElement("span");
     timelineMeterReadout.style.cssText = `min-width:50px;text-align:center;color:${purple.muted};font-size:9px;font-weight:900;`;
     timelineMeterWrap.append(timelineMeterButton("-", -0.5), timelineMeterReadout, timelineMeterButton("+", 0.5));
+    const multiTimelineControl = makeMultiTimelineControl();
     const addImageBtn = makeBtn("Add Image", "blue");
     const addTextBtn = makeBtn("Add Text", "violet");
     const addAudioBtn = makeBtn("Add Audio", "olive");
@@ -7093,7 +7709,7 @@ function renderShotboardV3(node) {
     const saveBtn = makeBtn("Save Board", "green");
     const savePackageBtn = makeBtn("Save Package", "gold");
     const clearBtn = makeBtn("Clear Board", "danger");
-    topActions.append(logBtn, globalOnlyBtn, promptSizeWrap, timelineMeterWrap, addImageBtn, addTextBtn, addAudioBtn, addTrackBtn, collapseBtn, openEditorBtn, importBoardBtn, saveBtn, savePackageBtn, clearBtn);
+    topActions.append(logBtn, globalOnlyBtn, multiTimelineControl, promptSizeWrap, timelineMeterWrap, addImageBtn, addTextBtn, addAudioBtn, addTrackBtn, collapseBtn, openEditorBtn, importBoardBtn, saveBtn, savePackageBtn, clearBtn);
     head.append(title, topActions);
     root.addEventListener("iamccs:cine-fullscreen", (event) => {
         openEditorBtn.textContent = event.detail?.open ? "Close Editor" : "Open Editor";
@@ -7130,8 +7746,12 @@ function renderShotboardV3(node) {
             const nextValue = name === "default_force" ? clampGuideStrength(value) : value;
             if (name === "default_force") applyDefaultForceToLinkedSegments(nextValue);
             setWidgetValue(node, name, nextValue);
-            if (name === "duration_seconds" && enforceDurationMinimum()) {
-                ctrl._iamccsSetValue?.(durationWidget?.value);
+            if (name === "duration_seconds") {
+                setDurationSeconds(nextValue, "duration_control");
+                enforceDurationMinimum();
+            }
+            if (name === "frame_rate") {
+                setFrameRateValue(nextValue, "fps_control");
             }
             writeTimeline();
             draw();
@@ -7232,14 +7852,25 @@ function renderShotboardV3(node) {
     ruler.style.cssText = `height:36px;position:relative;border:1px solid ${purple.border};border-bottom:0;background:linear-gradient(180deg,#3D3A36 0%,#2D2C2A 58%,#242423 100%);border-radius:6px 6px 0 0;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.10);`;
     const timelineBox = document.createElement("div");
     timelineBox.title = "Double click in the image timeline to import a reference at that frame.";
-    timelineBox.style.cssText = `position:relative;height:328px;border:1px solid ${purple.border};background:#242220;overflow:hidden;border-radius:0 0 6px 6px;margin-bottom:6px;box-shadow:inset 0 0 0 1px rgba(216,155,69,.08);`;
+    timelineBox.style.cssText = `position:relative;height:344px;border:1px solid ${purple.border};background:#242220;overflow:hidden;border-radius:0 0 6px 6px;margin-bottom:6px;box-shadow:inset 0 0 0 1px rgba(216,155,69,.08);`;
     const imageTrack = document.createElement("div");
-    imageTrack.style.cssText = `position:absolute;left:0;right:0;top:0;height:238px;border-bottom:1px solid ${purple.borderSoft};background:linear-gradient(180deg,rgba(85,184,178,.14),rgba(36,34,32,.16));`;
+    // imageTrack fills full width; endEdge marker overlays the last 4px so there is no dark gap at the right — By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    imageTrack.style.cssText = `position:absolute;left:0;right:0;top:0;height:254px;border-bottom:1px solid ${purple.borderSoft};background:linear-gradient(180deg,rgba(85,184,178,.14),rgba(36,34,32,.16));`;
     const actionTrack = document.createElement("div");
     actionTrack.style.cssText = "display:none;";
     const audioTracks = document.createElement("div");
-    audioTracks.style.cssText = "position:absolute;left:0;right:0;top:238px;bottom:0;";
+    // audioTracks also fills full width matching imageTrack — By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    audioTracks.style.cssText = "position:absolute;left:0;right:0;top:254px;bottom:0;";
     timelineBox.append(imageTrack, audioTracks);
+    // Timeline start/end edge markers — visible boundaries showing where the timeline begins and ends
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    const timelineStartEdge = document.createElement("div");
+    timelineStartEdge.title = "Timeline start (frame 0)";
+    timelineStartEdge.style.cssText = "position:absolute;left:0;top:0;bottom:0;width:4px;background:linear-gradient(180deg,#40DCCE,rgba(64,220,206,.45));pointer-events:none;z-index:25;border-radius:2px 0 0 2px;box-shadow:2px 0 10px rgba(64,220,206,.5),0 0 0 1px rgba(64,220,206,.22);";
+    const timelineEndEdge = document.createElement("div");
+    timelineEndEdge.title = "Timeline end";
+    timelineEndEdge.style.cssText = "position:absolute;right:0;top:0;bottom:0;width:4px;background:linear-gradient(180deg,#E09040,rgba(224,144,64,.45));pointer-events:none;z-index:25;border-radius:0 2px 2px 0;box-shadow:-2px 0 10px rgba(224,144,64,.5),0 0 0 1px rgba(224,144,64,.22);";
+    timelineBox.append(timelineStartEdge, timelineEndEdge);
     const playbar = document.createElement("div");
     playbar.style.cssText = `display:flex;align-items:center;gap:9px;margin-bottom:8px;padding:8px 9px;border:1px solid ${purple.border};background:linear-gradient(180deg,#3B3834 0%,#2B2926 100%);border-radius:7px;box-shadow:inset 0 1px 0 rgba(255,255,255,.10), inset 0 -10px 18px rgba(0,0,0,.18);`;
     const playBtn = makeBtn("Play");
@@ -7329,7 +7960,41 @@ function renderShotboardV3(node) {
     playbar.append(scrubStyle, playBtn, loopBtn, timeReadout, audioPlaybarControls, scrub);
     timelineCanvas.append(ruler, timelineBox);
     timelineViewport.appendChild(timelineCanvas);
-    root.append(timelineViewport, playbar);
+    // Timeline height resize handle — drag to expand/shrink timeline rows (slots + local prompts)
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    const timelineResizeHandle = document.createElement("div");
+    timelineResizeHandle.title = "Drag up/down to resize the timeline height (expands slots and local prompts)";
+    timelineResizeHandle.style.cssText = [
+        "display:flex", "align-items:center", "justify-content:center",
+        "height:10px", "margin:0 0 4px 0",
+        `border:1px solid ${purple.borderSoft}`,
+        "background:linear-gradient(180deg,rgba(108,101,90,.35),rgba(50,46,42,.35))",
+        "cursor:row-resize", "user-select:none", "box-sizing:border-box",
+        `color:${purple.muted}`, "font-size:9px", "letter-spacing:4px", "flex-shrink:0",
+    ].join(";");
+    timelineResizeHandle.innerHTML = `<span style="pointer-events:none;opacity:.45;">&bull;&bull;&bull;&bull;&bull;</span>`;
+    timelineResizeHandle.addEventListener("pointerdown", (e) => {
+        e.preventDefault(); e.stopPropagation();
+        _tlResizeDragStartY = e.clientY;
+        _tlResizeDragStartExtra = Math.max(0, Number(node.properties?.iamccs_v3_timeline_extra_height || 0));
+        timelineResizeHandle.setPointerCapture(e.pointerId);
+    });
+    timelineResizeHandle.addEventListener("pointermove", (e) => {
+        if (_tlResizeDragStartY === null) return;
+        e.preventDefault();
+        const delta = e.clientY - _tlResizeDragStartY;
+        const newExtra = Math.max(0, Math.min(600, Math.round(_tlResizeDragStartExtra + delta)));
+        node.properties = node.properties || {};
+        node.properties.iamccs_v3_timeline_extra_height = newExtra;
+        draw();
+    });
+    timelineResizeHandle.addEventListener("pointerup", () => {
+        if (_tlResizeDragStartY === null) return;
+        _tlResizeDragStartY = null;
+        writeTimeline({ force: true });
+    });
+    timelineResizeHandle.addEventListener("pointercancel", () => { _tlResizeDragStartY = null; });
+    root.append(timelineViewport, timelineResizeHandle, playbar);
 
     const inspector = document.createElement("div");
     inspector.style.cssText = `display:${collapsed ? "none" : "block"};`;
@@ -7967,6 +8632,48 @@ function renderShotboardV3(node) {
         draw();
     }
 
+
+    function splitImageSlotAfterSegment(seg) {
+        if (!seg) return;
+        const sorted = (timeline.segments || []).slice().sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
+        const index = sorted.findIndex((item) => item.id === seg.id);
+        if (index < 0) return;
+        const source = sorted[index];
+        const oldLength = Math.max(1, Math.round(Number(source.length || defaultLen())));
+        let slotLength = Math.max(1, Math.floor(oldLength / 2));
+        if (oldLength > 1) {
+            source.length = Math.max(1, oldLength - slotLength);
+        } else {
+            slotLength = 1;
+            for (let i = index + 1; i < sorted.length; i += 1) sorted[i].start = Math.round(Number(sorted[i].start || 0) + 1);
+            ensureDurationForFrames(endOfSegments(sorted) + 1);
+        }
+        const slot = {
+            id: newId("slot"),
+            type: "image",
+            placeholder: true,
+            start: Math.round(Number(source.start || 0) + Number(source.length || 1)),
+            length: slotLength,
+            ref: 0,
+            label: "empty_slot",
+            prompt: "",
+            note: "",
+            camera: "cut to",
+            transition: "hard_cut",
+            guideStrength: Number(defaultForceWidget?.value || 0.25),
+            imageLockStrength: Number(defaultForceWidget?.value || 0.25),
+            defaultForceSource: Number(defaultForceWidget?.value || 0.25),
+            forceCustom: false,
+            use_guide: false,
+            use_prompt: false,
+        };
+        sorted.splice(index + 1, 0, slot);
+        timeline.segments = sorted;
+        selectedId = slot.id;
+        writeTimeline({ force: true });
+        draw();
+    }
+
     function renderAudioWaveform(block, seg) {
         const peaks = Array.isArray(seg.waveformPeaks) ? seg.waveformPeaks : [];
         const shell = document.createElement("div");
@@ -8024,9 +8731,18 @@ function renderShotboardV3(node) {
             const count = 96;
             const top = [];
             const bottom = [];
+            const peakValue = (raw) => {
+                if (raw && typeof raw === "object") {
+                    const min = Math.abs(Number(raw.min) || 0);
+                    const max = Math.abs(Number(raw.max) || 0);
+                    const rms = Math.abs(Number(raw.rms) || 0);
+                    return Math.max(min, max, rms);
+                }
+                return Math.abs(Number(raw) || 0);
+            };
             for (let i = 0; i < count; i += 1) {
                 const idx = Math.min(peaks.length - 1, Math.floor((i / Math.max(1, count - 1)) * peaks.length));
-                const peak = Math.max(0.04, Math.min(1, Number(peaks[idx] || 0)));
+                const peak = Math.max(0.04, Math.min(1, peakValue(peaks[idx])));
                 const x = (i / Math.max(1, count - 1)) * 240;
                 const amp = 4 + peak * 22;
                 top.push(`${x.toFixed(2)} ${(32 - amp).toFixed(2)}`);
@@ -8056,6 +8772,9 @@ function renderShotboardV3(node) {
     function openAppendImagePicker(targetId = null) {
         pendingImageTargetId = targetId;
         pendingImageInsertFrame = null;
+        // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+        // Bug #5 fix: reset fileInput before triggering click so re-selecting the same file fires onchange.
+        try { fileInput.value = ""; } catch {}
         fileInput.click();
     }
 
@@ -8188,6 +8907,41 @@ function renderShotboardV3(node) {
             draw();
             return;
         }
+        // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+        // Bug #1 fix: when the source segment is the last one (no room to append after it),
+        // split it in half so the new slot is always visible on the timeline.
+        const total = getTotalFrames();
+        if (Math.round(start) >= total) {
+            const oldLength = Math.max(2, Math.round(Number(source.length || defaultLen())));
+            const splitLen = Math.max(1, Math.floor(oldLength / 2));
+            source.length = Math.max(1, oldLength - splitLen);
+            const splitStart = Math.round(Number(source.start || 0) + Number(source.length || 1));
+            const placeholder = kind === "text" ? textRelaySegment(splitStart, splitLen) : {
+                id: newId("slot"),
+                type: "image",
+                placeholder: true,
+                start: splitStart,
+                length: splitLen,
+                ref: 0,
+                label: "empty_slot",
+                prompt: "",
+                note: "",
+                camera: "continuous dolly-in",
+                transition: "continuous_motion",
+                guideStrength: Number(defaultForceWidget?.value || 0.25),
+                imageLockStrength: Number(defaultForceWidget?.value || 0.25),
+                defaultForceSource: Number(defaultForceWidget?.value || 0.25),
+                forceCustom: false,
+                use_guide: false,
+                use_prompt: false,
+            };
+            sorted.splice(index + 1, 0, placeholder);
+            timeline.segments = sorted;
+            selectedId = placeholder.id;
+            writeTimeline({ force: true });
+            draw();
+            return;
+        }
         const length = defaultLen();
         ensureDurationForFrames(endOfSegments(sorted) + length);
         for (let i = index + 1; i < sorted.length; i += 1) {
@@ -8273,7 +9027,7 @@ function renderShotboardV3(node) {
             else createTailTextPlaceholder();
         });
         addChoice("Image Slot", "Create or fill an image guide slot", () => {
-            if (seg) createPlaceholderAfterSegment(seg, "image");
+            if (seg) splitImageSlotAfterSegment(seg);
             else openAppendImagePicker(targetId);
         });
         addChoice("Audio", "Import audio at this timeline position", () => {
@@ -8309,7 +9063,7 @@ function renderShotboardV3(node) {
             `left:${left}%`,
             `width:${normalWidth}%`,
             "top:8px",
-            "height:222px",
+            "height:238px",
             "box-sizing:border-box",
             `border:1px dashed ${purple.border}`,
             "border-radius:4px",
@@ -8356,13 +9110,14 @@ function renderShotboardV3(node) {
         const left = (Number(seg.start || 0) / total) * 100;
         const width = Math.max(1, (Number(seg.length || 1) / total) * 100);
         const top = isAudio ? (Number(seg.track || 0) * 45 + 4) : 8;
-        const frameShellHeight = 128;
-        const height = isAudio ? 36 : 222;
+        const truthRailHeight = isAudio ? 0 : 16;
+        const frameShellHeight = isAudio ? 128 : 144;
+        const height = isAudio ? 36 : 238 + timelineExtraH; // grows with user timeline resize
         const imageHeight = 108;
-        const transitionLaneTop = 108;
+        const transitionLaneTop = truthRailHeight + imageHeight;
         const transitionLaneHeight = 20;
         const promptTop = frameShellHeight + 10;
-        const promptHeight = 74;
+        const promptHeight = isAudio ? 0 : 74 + timelineExtraH; // local prompt textarea grows with timeline height
         const selected = selectedId === seg.id;
         const showDragStripes = Boolean(dragState && !isAudio && dragState.targetId === seg.id && dragState.kind !== "center");
         const color = isAudio ? purple.audio : (String(seg.type) === "text" ? purple.textBlock : purple.image2);
@@ -8374,25 +9129,25 @@ function renderShotboardV3(node) {
             `top:${top}px`,
             `height:${height}px`,
             `background:${color}`,
-            `border:1px solid ${selected ? purple.accent : purple.borderSoft}`,
+            (selected ? "border:2px solid #F9C859" : `border:1px solid ${purple.borderSoft}`),
             "border-radius:4px",
             "box-sizing:border-box",
-            "overflow:hidden",
+            "overflow:visible",
             "cursor:grab",
-            "box-shadow:0 6px 16px rgba(0,0,0,.38), inset 0 1px 0 rgba(255,190,120,.08)",
+            (selected ? "box-shadow:0 0 0 2px rgba(249,200,89,.35),0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,190,120,.08)" : "box-shadow:0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,190,120,.08)"),
             "user-select:none",
             `z-index:${isAudio ? 14 : 4}`,
         ].join(";");
         const content = document.createElement("div");
         content.style.cssText = isAudio
             ? "position:absolute;left:8px;right:8px;bottom:2px;height:14px;display:flex;align-items:center;justify-content:center;text-align:center;color:#FFF2E4;font-size:10px;font-weight:800;text-shadow:0 1px 2px rgba(0,0,0,.75);padding:0;box-sizing:border-box;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
-            : `position:absolute;left:24px;right:0;top:0;height:${imageHeight}px;display:flex;align-items:center;justify-content:center;text-align:center;color:#fff;font-size:11px;font-weight:800;text-shadow:0 1px 2px rgba(0,0,0,.75);padding:8px;box-sizing:border-box;`;
+            : `position:absolute;left:24px;right:0;top:${truthRailHeight}px;height:${imageHeight}px;display:flex;align-items:center;justify-content:center;text-align:center;color:#fff;font-size:11px;font-weight:800;text-shadow:0 1px 2px rgba(0,0,0,.75);padding:8px;box-sizing:border-box;`;
         const appendAddAfterButton = () => {
             const addAfter = document.createElement("button");
             addAfter.type = "button";
             addAfter.textContent = "+";
             addAfter.title = "Add text, image or audio after this slot";
-            addAfter.style.cssText = `position:absolute;right:14px;top:8px;width:24px;height:24px;border:1px solid ${purple.border};border-radius:999px;background:${purple.valueBg};color:${purple.valueText};font-size:17px;font-weight:900;line-height:1;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,.45);z-index:9;`;
+            addAfter.style.cssText = `position:absolute;right:14px;top:${truthRailHeight + 8}px;width:24px;height:24px;border:1px solid ${purple.border};border-radius:999px;background:${purple.valueBg};color:${purple.valueText};font-size:17px;font-weight:900;line-height:1;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,.45);z-index:9;`;
             addAfter.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
             addAfter.onclick = (event) => {
                 event.preventDefault();
@@ -8404,29 +9159,24 @@ function renderShotboardV3(node) {
         if (!isAudio && String(seg.type || "image") !== "text") {
             const path = segmentReferencePath(seg);
             if (path) {
-                const previewUrl = previewUrlForPath(path);
-                if (showDragStripes) {
-                    const stripe = document.createElement("div");
-                    stripe.style.cssText = [
-                        "position:absolute",
-                        "left:24px",
-                        "right:0",
-                        "top:0",
-                        `height:${imageHeight}px`,
-                        `background-image:url("${previewUrl}")`,
-                        "background-size:132px 108px",
-                        "background-repeat:repeat-x",
-                        "background-position:left center",
-                        "opacity:.9",
-                        "box-shadow:inset 0 0 0 999px rgba(0,0,0,.08)",
-                    ].join(";");
-                    block.appendChild(stripe);
-                } else {
-                    const img = document.createElement("img");
-                    img.src = previewUrl;
-                    img.style.cssText = `position:absolute;left:24px;right:0;top:0;width:calc(100% - 24px);height:${imageHeight}px;object-fit:cover;opacity:.9;`;
-                    block.appendChild(img);
-                }
+                let previewUrl = previewUrlForPath(path);
+                const previewBust = refPreviewBusters.get(String(path)) || "";
+                if (previewBust) previewUrl += `${previewUrl.includes("?") ? "&" : "?"}v=${encodeURIComponent(previewBust)}`;
+                const stripe = document.createElement("div");
+                stripe.style.cssText = [
+                    "position:absolute",
+                    "left:24px",
+                    "right:8px",
+                    `top:${truthRailHeight}px`,
+                    `height:${imageHeight}px`,
+                    `background-image:url("${previewUrl}")`,
+                    "background-size:132px 108px",
+                    "background-repeat:repeat-x",
+                    "background-position:left center",
+                    `opacity:${showDragStripes ? ".96" : ".9"}`,
+                    "box-shadow:inset 0 0 0 999px rgba(0,0,0,.08)",
+                ].join(";");
+                block.appendChild(stripe);
                 const replaceImage = document.createElement("button");
                 replaceImage.type = "button";
                 replaceImage.textContent = "+";
@@ -8434,7 +9184,7 @@ function renderShotboardV3(node) {
                 replaceImage.style.cssText = [
                     "position:absolute",
                     "left:calc(50% + 12px)",
-                    "top:54px",
+                    `top:${truthRailHeight + 54}px`,
                     "transform:translate(-50%,-50%)",
                     "width:28px",
                     "height:28px",
@@ -8462,7 +9212,7 @@ function renderShotboardV3(node) {
                 plus.type = "button";
                 plus.textContent = "+";
                 plus.title = "Import image into this empty image slot";
-                plus.style.cssText = `position:absolute;left:calc(50% + 12px);top:44px;transform:translate(-50%,-50%);width:38px;height:38px;border:1px solid ${purple.border};border-radius:999px;background:${purple.valueBg};color:${purple.valueText};font-size:24px;font-weight:900;line-height:1;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.35);z-index:3;`;
+                plus.style.cssText = `position:absolute;left:calc(50% + 12px);top:${truthRailHeight + 44}px;transform:translate(-50%,-50%);width:38px;height:38px;border:1px solid ${purple.border};border-radius:999px;background:${purple.valueBg};color:${purple.valueText};font-size:24px;font-weight:900;line-height:1;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.35);z-index:3;`;
                 plus.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
                 plus.onclick = (event) => {
                     event.preventDefault();
@@ -8498,7 +9248,7 @@ function renderShotboardV3(node) {
             transitionLane.style.cssText = [
                 "position:absolute",
                 "left:24px",
-                "right:0",
+                "right:8px",
                 `top:${transitionLaneTop}px`,
                 `height:${transitionLaneHeight}px`,
                 "background:linear-gradient(180deg,rgba(0,0,0,.18),rgba(255,238,205,.12) 48%,rgba(0,0,0,.20))",
@@ -8532,9 +9282,23 @@ function renderShotboardV3(node) {
                     const refIndex = Math.max(0, currentRef - 1);
                     const path = currentPath || refPaths()[refIndex];
                     if (path) {
-                        openReferenceFrameEditor(node, refIndex, path, (newPath) => {
-                            replaceReferencePathAt(node, refIndex, newPath);
-                            setSegmentReference(seg, refIndex + 1);
+                        openReferenceFrameEditor(node, refIndex, path, (newPath, data) => {
+                            const appended = appendReferencePath(node, newPath);
+                            const nextRef = Math.max(1, Number(appended?.refNumber || refIndex + 1));
+                            const truthSeg = (timeline.segments || []).find((item) => String(item?.id || "") === String(seg.id || "")) || seg;
+                            applyEditedReferenceTruth(truthSeg, nextRef, newPath, { updateAutoLabel: false });
+                            if (truthSeg !== seg) applyEditedReferenceTruth(seg, nextRef, newPath, { updateAutoLabel: false });
+                            if (newPath) refPreviewBusters.set(String(newPath), String(data?.cache_bust || Date.now()));
+                            console.info("[IAMCCS V3 REF EDIT] applied edited reference to timeline truth", {
+                                segmentId: seg.id,
+                                truthSegmentFound: truthSeg !== seg,
+                                oldRef: refIndex + 1,
+                                newRef: nextRef,
+                                path: newPath,
+                                truthPath: truthSeg?.imageFile || truthSeg?.path || "",
+                                savedTo: data?.absolute_path || data?.path || "",
+                                appended: Boolean(appended?.appended),
+                            });
                             writeTimeline({ force: true });
                             draw();
                         });
@@ -8558,7 +9322,7 @@ function renderShotboardV3(node) {
             caption.spellcheck = false;
             caption.dataset.iamccsV3SegmentId = String(seg.id);
             caption.dataset.iamccsV3Key = "prompt";
-            caption.style.cssText = `position:absolute;left:8px;right:8px;top:${promptTop}px;width:calc(100% - 16px);height:${promptHeight}px;box-sizing:border-box;padding:7px 9px;background:${purple.valueBg};border:1px solid ${purple.border};border-radius:5px;color:${purple.valueText};font:${promptFontSize(10)}/1.28 monospace;font-weight:700;outline:none;resize:none;overflow-y:auto;overflow-x:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.66);`;
+            caption.style.cssText = `position:absolute;left:8px;right:16px;top:${promptTop}px;width:calc(100% - 24px);height:${promptHeight}px;box-sizing:border-box;padding:7px 9px;background:${purple.valueBg};border:1px solid ${purple.border};border-radius:5px;color:${purple.valueText};font:${promptFontSize(10)}/1.28 monospace;font-weight:700;outline:none;resize:none;overflow-y:auto;overflow-x:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.66);`;
             caption.onpointerdown = (event) => event.stopPropagation();
             caption.onclick = (event) => event.stopPropagation();
             caption.ondblclick = (event) => event.stopPropagation();
@@ -8613,58 +9377,92 @@ function renderShotboardV3(node) {
             block.appendChild(caption);
         }
         const label = document.createElement("div");
-        label.style.cssText = "position:absolute;left:30px;top:4px;right:26px;color:#fff;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px #000;";
+        label.style.cssText = `position:absolute;left:30px;top:${truthRailHeight + 4}px;right:26px;color:#fff;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px #000;`;
         label.textContent = `${frameLabel(seg.start)} - ${frameLabel(Number(seg.start || 0) + Number(seg.length || 0))}`;
         block.appendChild(label);
-        const resize = document.createElement("div");
-        resize.title = isAudio ? "Drag right edge to trim audio end" : "Drag right edge to resize this slot";
-        resize.style.cssText = [
-            "position:absolute",
-            "right:0",
-            "top:0",
-            `height:${isAudio ? 36 : frameShellHeight}px`,
-            `width:${isAudio ? 7 : 7}px`,
-            "cursor:ew-resize",
-            "z-index:18",
-            "background:rgba(255,255,255,.035)",
-            "border-left:1px solid rgba(244,229,196,.44)",
-            "box-shadow:inset 1px 0 0 rgba(0,0,0,.18)",
-        ].join(";");
-        const rightGrip = document.createElement("div");
-        rightGrip.style.cssText = "position:absolute;right:1px;top:50%;width:2px;height:36px;transform:translateY(-50%);border-radius:999px;background:rgba(244,229,196,.88);box-shadow:0 0 5px rgba(0,0,0,.45);opacity:.78;pointer-events:none;";
-        resize.appendChild(rightGrip);
-        block.appendChild(resize);
-        const resizeLeft = document.createElement("div");
-        resizeLeft.title = isAudio ? "Drag left edge to trim audio start" : "Drag left grip to move the start of this slot";
-        resizeLeft.style.cssText = [
-            "position:absolute",
-            "left:0",
-            "top:0",
-            `height:${isAudio ? 36 : frameShellHeight}px`,
-            `width:${isAudio ? 7 : 7}px`,
-            "cursor:ew-resize",
-            "z-index:18",
-            "background:rgba(255,255,255,.03)",
-            "border-right:1px solid rgba(143,208,204,.48)",
-            "box-shadow:inset -1px 0 0 rgba(0,0,0,.18)",
-        ].join(";");
-        const leftGrip = document.createElement("div");
-        leftGrip.style.cssText = "position:absolute;left:1px;top:50%;width:2px;height:36px;transform:translateY(-50%);border-radius:999px;background:rgba(143,208,204,.86);box-shadow:0 0 5px rgba(0,0,0,.45);opacity:.78;pointer-events:none;";
-        resizeLeft.appendChild(leftGrip);
-        block.appendChild(resizeLeft);
+        if (!isAudio && isTimelineImageSegment(seg) && String(seg.type || "image") !== "text") {
+            const truthPath = String(seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path || "").trim();
+            if (truthPath) {
+                const truthBadge = document.createElement("div");
+                const truthName = String(seg.imageTruthName || seg.imageName || "").trim() || truthPath.split(/[\\/]/).pop() || truthPath;
+                truthBadge.textContent = truthName;
+                truthBadge.title = `Backend guide truth: ${truthPath}`;
+                truthBadge.style.cssText = "position:absolute;left:30px;right:42px;top:3px;z-index:30;padding:0 4px;border-radius:3px;background:rgba(5,12,13,.28);border:0;color:#CDBB92;font:8px/1.15 monospace;font-weight:800;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;text-shadow:0 1px 2px #000;opacity:.78;";
+                block.appendChild(truthBadge);
+            }
+        }
+        let resize = null;
+        let resizeLeft = null;
+        if (isAudio) {
+            resize = document.createElement("div");
+            resize.title = "Drag right edge to trim audio end";
+            resize.style.cssText = [
+                "position:absolute",
+                "right:-5px",
+                "top:0",
+                "height:36px",
+                "width:12px",
+                "cursor:ew-resize",
+                "z-index:36",
+                "background:rgba(255,255,255,.055)",
+                "border-left:1px solid rgba(244,229,196,.50)",
+                "box-shadow:0 0 0 1px rgba(0,0,0,.22), inset 1px 0 0 rgba(0,0,0,.18)",
+            ].join(";");
+            const rightGrip = document.createElement("div");
+            rightGrip.style.cssText = "position:absolute;right:4px;top:50%;width:3px;height:30px;transform:translateY(-50%);border-radius:999px;background:rgba(244,229,196,.92);box-shadow:0 0 5px rgba(0,0,0,.45);opacity:.88;pointer-events:none;";
+            resize.appendChild(rightGrip);
+            block.appendChild(resize);
+            resizeLeft = document.createElement("div");
+            resizeLeft.title = "Drag left edge to trim audio start";
+            resizeLeft.style.cssText = [
+                "position:absolute",
+                "left:-5px",
+                "top:0",
+                "height:36px",
+                "width:12px",
+                "cursor:ew-resize",
+                "z-index:36",
+                "background:rgba(255,255,255,.045)",
+                "border-right:1px solid rgba(143,208,204,.56)",
+                "box-shadow:0 0 0 1px rgba(0,0,0,.22), inset -1px 0 0 rgba(0,0,0,.18)",
+            ].join(";");
+            const leftGrip = document.createElement("div");
+            leftGrip.style.cssText = "position:absolute;left:4px;top:50%;width:3px;height:30px;transform:translateY(-50%);border-radius:999px;background:rgba(143,208,204,.92);box-shadow:0 0 5px rgba(0,0,0,.45);opacity:.88;pointer-events:none;";
+            resizeLeft.appendChild(leftGrip);
+            block.appendChild(resizeLeft);
+        }
 
         block.onpointerdown = (event) => {
-            if (event.target === resize || resize.contains(event.target) || event.target === resizeLeft || resizeLeft.contains(event.target)) return;
+            if (resize && (event.target === resize || resize.contains(event.target))) return;
+            if (resizeLeft && (event.target === resizeLeft || resizeLeft.contains(event.target))) return;
+            if (isAudio && !event.target?.closest?.("textarea,input,select,button")) {
+                const rect = block.getBoundingClientRect();
+                const edgePx = 12;
+                if (event.clientX <= rect.left + edgePx) {
+                    startTimelineDrag(event, seg, isAudio, "left");
+                    return;
+                }
+                if (event.clientX >= rect.right - edgePx) {
+                    startTimelineDrag(event, seg, isAudio, "right");
+                    return;
+                }
+            }
             startTimelineDrag(event, seg, isAudio, "center");
         };
-        resize.onpointerdown = (event) => {
-            event.stopPropagation();
-            startTimelineDrag(event, seg, isAudio, "right");
-        };
-        resizeLeft.onpointerdown = (event) => {
-            event.stopPropagation();
-            startTimelineDrag(event, seg, isAudio, "left");
-        };
+        if (resize) {
+            resize.onpointerdown = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                startTimelineDrag(event, seg, isAudio, "right");
+            };
+        }
+        if (resizeLeft) {
+            resizeLeft.onpointerdown = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                startTimelineDrag(event, seg, isAudio, "left");
+            };
+        }
         if (!isAudio) {
             block.ondblclick = (event) => {
                 if (event.target?.tagName === "TEXTAREA") return;
@@ -8672,11 +9470,82 @@ function renderShotboardV3(node) {
                 event.stopPropagation();
                 if (String(seg.type || "image") === "text") openTimelineAddMenu(event, seg, null);
                 else if (seg.placeholder || Number(seg.ref || 0) < 1) openAppendImagePicker(seg.id);
-                else createPlaceholderAfterSegment(seg);
+                else splitImageSlotAfterSegment(seg);
             };
         }
         block.onclick = () => { selectedId = seg.id; draw(); };
         return block;
+    }
+
+    function appendVisualEdgeHandle(seg, edge, tone = "right") {
+        if (!seg || String(seg.type || "image") === "audio") return;
+        const total = Math.max(1, getTotalFrames());
+        const frame = edge === "left"
+            ? Math.max(0, Math.round(Number(seg.start || 0)))
+            : Math.max(0, Math.round(Number(seg.start || 0) + Number(seg.length || 1)));
+        const pct = Math.max(0, Math.min(100, (frame / total) * 100));
+        const handle = document.createElement("div");
+        handle.className = `iamccs-v3-solid-edge-handle iamccs-v3-solid-edge-${edge}`;
+        handle.title = edge === "left"
+            ? "Solid edge handle: drag to resize the start of this slot"
+            : "Solid edge handle: drag to resize this slot boundary";
+        const warm = tone === "left";
+        handle.style.cssText = [
+            "position:absolute",
+            `left:calc(${pct}% - 9px)`,
+            "top:8px",
+            "width:9px",
+            "height:222px",
+            "box-sizing:border-box",
+            "cursor:ew-resize",
+            "z-index:58",
+            "border-radius:4px",
+            `background:${warm ? "linear-gradient(180deg,#6ABDB9,#2C5E63)" : "linear-gradient(180deg,#F0CE78,#A66E32)"}`,
+            `border:1px solid ${warm ? "rgba(158,237,232,.88)" : "rgba(255,229,159,.92)"}`,
+            "box-shadow:0 0 0 1px rgba(0,0,0,.72),0 6px 14px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.36)",
+            "opacity:.94",
+        ].join(";");
+        const notch = document.createElement("div");
+        notch.style.cssText = [
+            "position:absolute",
+            "left:2px",
+            "right:2px",
+            "top:50%",
+            "height:48px",
+            "transform:translateY(-50%)",
+            "border-radius:999px",
+            "background:rgba(6,10,11,.42)",
+            "box-shadow:inset 0 1px 2px rgba(0,0,0,.55)",
+            "pointer-events:none",
+        ].join(";");
+        handle.appendChild(notch);
+        handle.onpointerdown = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            startTimelineDrag(event, seg, false, edge);
+        };
+        imageTrack.appendChild(handle);
+    }
+
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // Bug #2/#3 fix: include placeholder image segments so new "+" slots get resize handles.
+    // Bug #4 fix: skip left handle at timeline start (frame 0) and right handle at timeline end (totalFrames).
+    function drawVisualEdgeHandles(segments) {
+        const total = getTotalFrames();
+        const sorted = (segments || [])
+            .filter((seg) => seg && String(seg.type || "image") !== "audio")
+            .slice()
+            .sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
+        sorted.forEach((seg, index) => {
+            const start = Math.round(Number(seg.start || 0));
+            const end = Math.round(Number(seg.start || 0) + Number(seg.length || 1));
+            const prev = sorted[index - 1];
+            const prevEnd = prev ? Math.round(Number(prev.start || 0) + Number(prev.length || 1)) : -1;
+            // Skip left handle at the very start of the timeline — By IAMCCS
+            if (start > 0 && (!prev || Math.abs(prevEnd - start) > 1)) appendVisualEdgeHandle(seg, "left", "left");
+            // Skip right handle at the very end of the timeline — By IAMCCS
+            if (end < total) appendVisualEdgeHandle(seg, "right", "right");
+        });
     }
 
     function drawActionLaneSegments(segments) {
@@ -9292,10 +10161,10 @@ function renderShotboardV3(node) {
                 "align-items:stretch",
                 "margin:0 0 8px 46px",
                 "padding:8px 10px",
-                `border:1px solid ${selectedId === seg.id ? "rgba(143,208,204,.82)" : "rgba(143,208,204,.42)"}`,
+                (selectedId === seg.id ? "border:2px solid #F9C859" : "border:1px solid rgba(143,208,204,.42)"),
                 "border-radius:6px",
                 "background:linear-gradient(180deg,rgba(18,37,38,.88),rgba(37,35,31,.86))",
-                "box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 4px 10px rgba(0,0,0,.14)",
+                (selectedId === seg.id ? "box-shadow:0 0 0 2px rgba(249,200,89,.3),inset 0 1px 0 rgba(255,255,255,.08),0 4px 10px rgba(0,0,0,.14)" : "box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 4px 10px rgba(0,0,0,.14)"),
                 "box-sizing:border-box",
             ].join(";");
             const badge = document.createElement("button");
@@ -9409,10 +10278,10 @@ function renderShotboardV3(node) {
                 "margin-bottom:6px",
                 "padding:8px 9px",
                 "min-height:96px",
-                `border:1px solid ${selectedId === seg.id ? purple.border : purple.borderSoft}`,
+                (selectedId === seg.id ? "border:2px solid #F9C859" : `border:1px solid ${purple.borderSoft}`),
                 "border-radius:6px",
                 `background:${selectedId === seg.id ? "linear-gradient(180deg,#3E3B35,#34312D)" : "linear-gradient(180deg,rgba(51,54,55,.98),rgba(42,43,42,.98))"}`,
-                "box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 4px 10px rgba(0,0,0,.10)",
+                (selectedId === seg.id ? "box-shadow:0 0 0 2px rgba(249,200,89,.3),inset 0 1px 0 rgba(255,255,255,.06),0 4px 10px rgba(0,0,0,.10)" : "box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 4px 10px rgba(0,0,0,.10)"),
                 "box-sizing:border-box",
             ].join(";");
             const badge = document.createElement("button");
@@ -9789,8 +10658,14 @@ function renderShotboardV3(node) {
         ruler.style.width = "100%";
         timelineBox.style.width = "100%";
         timelineViewport.scrollLeft = Math.min(previousScrollLeft, Math.max(0, canvasWidth - Number(timelineViewport.clientWidth || 0)));
-        timelineBox.style.height = `${248 + Math.max(1, Number(timeline.audioTrackCount || 2)) * 45}px`;
-        audioTracks.style.height = `${Math.max(1, Number(timeline.audioTrackCount || 2)) * 45}px`;
+        // Read user timeline-height resize value, update all related heights
+        // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+        timelineExtraH = Math.max(0, Math.min(600, Math.round(Number(node.properties?.iamccs_v3_timeline_extra_height || 0))));
+        const _atCount = Math.max(1, Number(timeline.audioTrackCount || 2));
+        timelineBox.style.height = `${264 + _atCount * 45 + timelineExtraH}px`;
+        audioTracks.style.height = `${_atCount * 45}px`;
+        imageTrack.style.height = `${254 + timelineExtraH}px`;
+        audioTracks.style.top = `${254 + timelineExtraH}px`;
         for (let i = 0; i < Math.max(1, Number(timeline.audioTrackCount || 2)); i += 1) {
             const lane = document.createElement("div");
             lane.style.cssText = `position:absolute;left:0;right:0;top:${i * 45}px;height:45px;border-bottom:1px solid ${purple.borderSoft};background:${i % 2 ? "rgba(255,255,255,.025)" : "transparent"};`;
@@ -9840,27 +10715,38 @@ function renderShotboardV3(node) {
         }
         visualSegments.forEach((seg) => imageTrack.appendChild(makeBlock(seg, false)));
         if (!visualSegments.length) imageTrack.appendChild(makeImagePlaceholderBlock());
+        drawVisualEdgeHandles(visualSegments);
         audioSegmentsForDraw.forEach((seg) => audioTracks.appendChild(makeBlock(seg, true)));
         timelineBox.querySelectorAll(".iamccs-v3-playhead").forEach((item) => item.remove());
         const playhead = document.createElement("div");
         playhead.className = "iamccs-v3-playhead";
         playhead.style.cssText = `position:absolute;top:0;bottom:0;left:${(playFrame / Math.max(1, getTotalFrames())) * 100}%;width:2px;background:${purple.play};box-shadow:0 0 0 1px rgba(0,0,0,.55),0 0 12px rgba(214,182,93,.7);pointer-events:none;z-index:30;`;
         timelineBox.appendChild(playhead);
-        promptWrap.style.display = collapsed ? "none" : "block";
+        promptWrap.style.display = "block"; // always visible — global prompt shown in collapsed mode too — By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
         settings.style.display = collapsed ? "none" : "grid";
         timelineNotice.style.display = collapsed ? "none" : timelineNotice.style.display;
         inspector.style.display = collapsed ? "none" : "block";
         refsPanel.style.display = "none";
         collapseBtn.textContent = collapsed ? "Show Boxes" : "Collapse Boxes";
-        root.style.maxHeight = `${currentNodeHeight()}px`;
+        // In fullscreen editor mode, let root grow freely so panel can scroll vertically
+        // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+        if (root._iamccsFullscreenState) {
+            root.style.maxHeight = "none";
+            root.style.height = "auto";
+            root.style.overflow = "visible";
+        } else {
+            root.style.maxHeight = `${currentNodeHeight() + timelineExtraH}px`;
+        }
         boxList.style.maxHeight = collapsed ? "0" : "none";
         boxList.style.overflow = collapsed ? "hidden" : "visible";
         if (!collapsed && !dragState) drawBoxes();
-        const desiredHeight = currentNodeHeight();
+        const desiredHeight = currentNodeHeight() + timelineExtraH;
         node._iamccsCineMinSize = [SHOTBOARD_V3_RIGID_WIDTH, desiredHeight];
-        if (Math.abs(Number(node.size?.[1] || 0) - desiredHeight) > 18) {
-            if (typeof node.setSize === "function") node.setSize([SHOTBOARD_V3_RIGID_WIDTH, desiredHeight]);
-            else node.size = [SHOTBOARD_V3_RIGID_WIDTH, desiredHeight];
+        if (!root._iamccsFullscreenState) {
+            if (Math.abs(Number(node.size?.[1] || 0) - desiredHeight) > 18) {
+                if (typeof node.setSize === "function") node.setSize([SHOTBOARD_V3_RIGID_WIDTH, desiredHeight]);
+                else node.size = [SHOTBOARD_V3_RIGID_WIDTH, desiredHeight];
+            }
         }
         try { node.setDirtyCanvas?.(true, true); app.graph?.setDirtyCanvas?.(true, true); } catch {}
     }
@@ -9906,7 +10792,24 @@ function renderShotboardV3(node) {
             target.type = "image";
             target.placeholder = false;
             target.ref = current.length + 1;
+            // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+            // Bug #5 fix: clear all old truth/path fields before assigning the new image,
+            // so imported-board pins or stale values never shadow the replacement.
+            delete target.imageTruthPath;
+            delete target.image_truth_path;
+            delete target.imageTruthRef;
+            delete target.imageTruthPinned;
             target.imageFile = uploaded[0] || target.imageFile || "";
+            target.path = target.imageFile;
+            target.imageTruthPath = target.imageFile;
+            target.imageTruthName = target.imageFile.split(/[\\/]/).pop() || target.imageFile;
+            target.imageName = target.imageTruthName;
+            target.imageTruthRef = target.ref;
+            target.imageTruthPinned = true;
+            target.imageTruthSource = "upload_replace_slot";
+            delete target.image_file;
+            delete target.image_truth_path;
+            refPreviewBusters.set(String(target.imageFile), String(Date.now()));
             target.label = `ref_${current.length + 1}`;
                 target.use_guide = true;
                 target.guideStrength = Number(target.guideStrength ?? defaultForceWidget?.value ?? 0.25);
@@ -9930,6 +10833,13 @@ function renderShotboardV3(node) {
                 length,
                 ref: current.length + refOffset + i + 1,
                 imageFile,
+                path: imageFile,
+                imageTruthPath: imageFile,
+                imageTruthName: imageFile.split(/[\\/]/).pop() || imageFile,
+                imageName: imageFile.split(/[\\/]/).pop() || imageFile,
+                imageTruthRef: current.length + refOffset + i + 1,
+                imageTruthPinned: true,
+                imageTruthSource: "upload_new_slot",
                 label: `ref_${current.length + refOffset + i + 1}`,
                 prompt: "",
                 note: "",
@@ -9943,6 +10853,7 @@ function renderShotboardV3(node) {
             });
             cursor += length;
         });
+        uploaded.forEach((path) => refPreviewBusters.set(String(path), String(Date.now())));
         if (endOfSegments(timeline.segments) > getTotalFrames() || timeline.segments.some((seg) => Number(seg.length || 0) <= 1)) {
             spreadVisualSegmentsAcrossDuration();
         }
@@ -10159,6 +11070,8 @@ function renderShotboardV3(node) {
             const row = item.row;
             const prompt = String(row.relay_prompt ?? row.local_prompt ?? row.prompt ?? "").trim();
             const isText = String(row.type || "").toLowerCase() === "text" || Number(row.ref ?? row.image_ref ?? row.reference_index ?? 1) <= 0;
+            const rowTruthPath = isText ? "" : String(row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path || "").trim();
+            const rowTruthName = isText ? "" : (String(row.imageTruthName || row.imageName || row.name || row.filename || "").trim() || rowTruthPath.split(/[\\/]/).pop() || "");
             const defaultForceValue = Math.max(0, Math.min(1, Number(defaultForceWidget?.value ?? 0.25)));
             const rowForceValue = Math.max(0, Math.min(1, Number(row.force ?? row.strength ?? defaultForceValue)));
             const explicitForceCustom = typeof row.forceCustom === "boolean"
@@ -10172,14 +11085,26 @@ function renderShotboardV3(node) {
                 start,
                 length: Math.max(1, end - start),
                 ref: Math.max(1, Math.round(Number(row.ref ?? row.image_ref ?? row.reference_index ?? index + 1) || index + 1)),
-                label: String(row.label ?? row.shot_label ?? `${isText ? "text" : "shot"}_${index + 1}`),
+                imageFile: rowTruthPath,
+                path: rowTruthPath,
+                imageTruthPath: rowTruthPath,
+                imageTruthName: rowTruthName,
+                imageName: rowTruthName,
+                imageTruthPinned: Boolean(rowTruthPath),
+                imageTruthSource: rowTruthPath ? "row_import_truth" : "",
+                imageTruthRef: Math.max(1, Math.round(Number(row.ref ?? row.image_ref ?? row.reference_index ?? index + 1) || index + 1)),
+                label: String(row.label ?? row.shot_label ?? (rowTruthName ? rowTruthName.replace(/\.[^.]+$/, "") : `${isText ? "text" : "shot"}_${index + 1}`)),
                 prompt,
                 note: String(row.note ?? row.camera_note ?? ""),
                 camera: String(row.camera ?? row.camera_move ?? "cinematic motion"),
                 transition: String(row.transition ?? row.transition_intent ?? "continuous_motion"),
-            guideStrength: isText ? 0 : rowForceValue,
-            imageLockStrength: isText ? 0 : rowForceValue,
-            defaultForceSource: isText ? 0 : (explicitForceCustom ? rowForceValue : defaultForceValue),
+                guideStrength: isText ? 0 : rowForceValue,
+                guide_strength: isText ? 0 : rowForceValue,
+                force: isText ? 0 : rowForceValue,
+                strength: isText ? 0 : rowForceValue,
+                imageLockStrength: isText ? 0 : rowForceValue,
+                image_lock_strength: isText ? 0 : rowForceValue,
+                defaultForceSource: isText ? 0 : (explicitForceCustom ? rowForceValue : defaultForceValue),
                 forceCustom: Boolean(!isText && explicitForceCustom),
                 use_guide: !isText && row.use_guide !== false,
                 use_prompt: Boolean(prompt || row.dialogue_pin || row.dialoguePin || row.image_lock || row.imageLock || row.motion_boost || row.motionBoost),
@@ -10199,24 +11124,92 @@ function renderShotboardV3(node) {
         });
     }
     async function applyImportedBoard(data) {
-        const board = data?.board && typeof data.board === "object" ? data.board : data || {};
+        const workflowBoard = boardFromWorkflowJson(data);
+        const nestedBoard = data?.board && typeof data.board === "object" ? data.board : null;
+        const rootLooksLikeBoard = Boolean(
+            data?.timeline ||
+            data?.timeline_data ||
+            data?.image_paths ||
+            data?.package ||
+            Array.isArray(data?.images) ||
+            String(data?.metadata?.schema || data?.schema || "").includes("shotboard")
+        );
+        const board = (rootLooksLikeBoard ? (nestedBoard || data) : null) || workflowBoard || nestedBoard || data || {};
         if ((!Array.isArray(board.images) || !board.images.length) && Array.isArray(data?.images)) board.images = data.images;
+        console.log("[IAMCCS V3 BOARD IMPORT] board source selected", {
+            nodeId: node?.id,
+            source: rootLooksLikeBoard ? (nestedBoard ? "nested_package_board" : "root_package_board") : (workflowBoard ? "workflow_node" : "root_fallback"),
+            workflowNode: Boolean(workflowBoard),
+            hasPackage: Boolean(board?.package || data?.package),
+            images: Array.isArray(board?.images) ? board.images.length : 0,
+            imagePaths: splitReferencePaths(board?.image_paths).length,
+        });
+        let importedDefaultForceExplicit = false;
+        const validImportedValue = (value) => value !== undefined && value !== null && value !== "";
+        const applyImportedSettings = (source, sourceLabel = "settings") => {
+            if (!source || typeof source !== "object") return;
+            for (const name of v3SettingNames) {
+                if (!Object.prototype.hasOwnProperty.call(source, name) || !getWidget(node, name)) continue;
+                const value = name === "image_resize_method" ? cineResizeMethodValue(source[name]) : source[name];
+                if (!validImportedValue(value)) continue;
+                setWidgetValue(node, name, value);
+                if (name === "default_force") importedDefaultForceExplicit = true;
+            }
+            console.log("[IAMCCS V3 BOARD IMPORT] settings absorbed", {
+                nodeId: node?.id,
+                source: sourceLabel,
+                explicitDefaultForce: importedDefaultForceExplicit,
+                settings: v3SettingsSnapshot(),
+            });
+        };
+        const inferDefaultForceFromTimeline = (source) => {
+            const values = [];
+            const defaultSourceValues = [];
+            const add = (value, target = values) => {
+                const n = Number(value);
+                if (Number.isFinite(n) && n >= 0 && n <= 1) target.push(Math.round(n * 1000) / 1000);
+            };
+            const addSegment = (seg) => {
+                if (!seg || typeof seg !== "object" || seg.placeholder) return;
+                const type = String(seg.type || "image").toLowerCase();
+                if (type === "audio" || type === "text") return;
+                add(seg.defaultForceSource ?? seg.default_force_source, defaultSourceValues);
+                add(seg.guideStrength ?? seg.guide_strength ?? seg.force ?? seg.strength);
+            };
+            const addRow = (row) => {
+                if (!row || typeof row !== "object") return;
+                add(row.default_force ?? row.defaultForce ?? row.defaultForceSource, defaultSourceValues);
+                add(row.force ?? row.strength ?? row.guideStrength ?? row.guide_strength);
+            };
+            const visit = (item) => {
+                if (!item || typeof item !== "object") return;
+                if (Array.isArray(item.segments)) item.segments.forEach(addSegment);
+                if (Array.isArray(item.rows)) item.rows.forEach(addRow);
+                if (item.timeline && typeof item.timeline === "object") visit(item.timeline);
+                if (typeof item.timeline_data === "string" && item.timeline_data.trim()) {
+                    try { visit(JSON.parse(item.timeline_data)); } catch {}
+                }
+            };
+            visit(source);
+            const pickMode = (list) => {
+                if (!list.length) return null;
+                const counts = new Map();
+                list.forEach((value) => {
+                    const key = value.toFixed(3);
+                    counts.set(key, (counts.get(key) || 0) + 1);
+                });
+                return Number([...counts.entries()].sort((a, b) => b[1] - a[1] || Number(b[0]) - Number(a[0]))[0][0]);
+            };
+            return pickMode(defaultSourceValues) ?? pickMode(values);
+        };
         const settingsData = board.settings && typeof board.settings === "object" ? board.settings : {};
         const importedPrompt = board.global_prompt ?? board.prompt ?? board.globalPrompt;
         if (typeof importedPrompt === "string") {
             promptArea.value = importedPrompt;
             setWidgetValue(node, "global_prompt", importedPrompt);
         }
-        for (const [name, value] of Object.entries(settingsData)) {
-            if (getWidget(node, name)) setWidgetValue(node, name, name === "image_resize_method" ? cineResizeMethodValue(value) : value);
-        }
-        for (const name of v3SettingNames) {
-            if (Object.prototype.hasOwnProperty.call(board, name) && getWidget(node, name)) setWidgetValue(node, name, name === "image_resize_method" ? cineResizeMethodValue(board[name]) : board[name]);
-        }
-        console.log("[IAMCCS V3 BOARD IMPORT] settings absorbed into node widgets", {
-            nodeId: node?.id,
-            settings: v3SettingsSnapshot(),
-        });
+        applyImportedSettings(settingsData, "board.settings");
+        applyImportedSettings(board, workflowBoard ? "workflow.shotboard.widgets" : "board.root");
         const paths = await packagedReferencePathsForImport(board, (message) => {
             showTimelineNotice(message, /failed/i.test(String(message || "")) ? "error" : "warn");
         });
@@ -10263,14 +11256,50 @@ function renderShotboardV3(node) {
                         : String((candidate.value?.rows || []).find((row) => String(row?.relay_prompt ?? row?.local_prompt ?? row?.prompt ?? "").trim())?.relay_prompt || "").slice(0, 220),
                 })),
             });
+            applyImportedSettings(loadedTimeline.settings, `${loadedTimelineSource}.settings`);
+            applyImportedSettings(loadedTimeline, loadedTimelineSource);
+        }
+        if (!importedDefaultForceExplicit) {
+            const inferredDefaultForce = inferDefaultForceFromTimeline(loadedTimeline || board);
+            if (Number.isFinite(Number(inferredDefaultForce))) {
+                setWidgetValue(node, "default_force", Math.max(0, Math.min(1, Number(inferredDefaultForce))));
+                showTimelineNotice(`Default force inferred from imported board: ${Number(inferredDefaultForce).toFixed(3)}`, "warn");
+                console.log("[IAMCCS V3 BOARD IMPORT] default_force inferred", {
+                    nodeId: node?.id,
+                    value: Number(inferredDefaultForce),
+                    source: loadedTimelineSource || "board",
+                });
+            }
         }
         if (loadedTimeline && typeof loadedTimeline === "object" && Array.isArray(loadedTimeline.segments)) {
+            const baseTimeline = cloneJsonData(loadedTimeline);
+            let audioData = {};
+            if (typeof baseTimeline.audio_data === "string" && baseTimeline.audio_data.trim()) {
+                try { audioData = JSON.parse(baseTimeline.audio_data); } catch {}
+            } else if (baseTimeline.audio_data && typeof baseTimeline.audio_data === "object") {
+                audioData = baseTimeline.audio_data;
+            }
+            const importedAudioSegments = Array.isArray(baseTimeline.audioSegments)
+                ? baseTimeline.audioSegments
+                : Array.isArray(audioData.audioSegments)
+                    ? audioData.audioSegments
+                    : [];
             timeline = {
+                ...baseTimeline,
                 schema: "iamccs.cine.filmmaker_timeline",
-                schema_version: Number(loadedTimeline.schema_version || 1),
-                segments: loadedTimeline.segments.map((seg) => normalizeV3RelayOnlySegment({ ...seg, id: seg.id || newId(seg.type === "text" ? "text" : "seg") })),
-                audioSegments: Array.isArray(loadedTimeline.audioSegments) ? loadedTimeline.audioSegments.map((seg) => ({ ...seg, id: seg.id || newId("aud") })) : [],
-                audioTrackCount: Math.max(1, Number(loadedTimeline.audioTrackCount || 2)),
+                schema_version: Number(baseTimeline.schema_version || 1),
+                segments: baseTimeline.segments.map((seg) => normalizeV3RelayOnlySegment({ ...seg, id: seg.id || newId(seg.type === "text" ? "text" : "seg") })),
+                rows: Array.isArray(baseTimeline.rows) ? cloneJsonData(baseTimeline.rows) : [],
+                audioSegments: importedAudioSegments.map((seg) => ({ ...seg, id: seg.id || newId("aud") })),
+                audioTrackCount: Math.max(1, Number(baseTimeline.audioTrackCount || audioData.audioTrackCount || importedAudioSegments.length || 2)),
+                audioSyncMode: String(baseTimeline.audioSyncMode || audioData.audioSyncMode || "timeline_audio"),
+                generationStrategy: String(baseTimeline.generationStrategy || "single_timeline"),
+                flfrealMode: String(baseTimeline.flfrealMode || baseTimeline.flfreal_mode || "iamccs_enhanced"),
+                globalPromptOnly: Boolean(baseTimeline.globalPromptOnly ?? baseTimeline.global_prompt_only ?? baseTimeline.use_global_prompt_only ?? false),
+                verboseLog: baseTimeline.verboseLog ?? baseTimeline.verbose_log ?? true,
+                masterAudioGain: Number(baseTimeline.masterAudioGain ?? audioData.masterAudioGain ?? 1),
+                masterAudioNormalize: Boolean(baseTimeline.masterAudioNormalize ?? audioData.masterAudioNormalize ?? false),
+                multiGeneration: baseTimeline.multiGeneration && typeof baseTimeline.multiGeneration === "object" ? cloneJsonData(baseTimeline.multiGeneration) : {},
             };
         } else {
             const rows = Array.isArray(board.rows)
@@ -10291,6 +11320,18 @@ function renderShotboardV3(node) {
                 };
             }
         }
+        const importedDurationTruth = objectDurationTruth(timeline) ?? objectDurationTruth(loadedTimeline) ?? objectDurationTruth(board) ?? objectDurationTruth(settingsData) ?? objectDurationTruth(data);
+        const importedFpsTruth = objectFpsTruth(timeline) ?? objectFpsTruth(loadedTimeline) ?? objectFpsTruth(board) ?? objectFpsTruth(settingsData) ?? objectFpsTruth(data);
+        if (importedDurationTruth !== null) setDurationSeconds(importedDurationTruth, `import:${loadedTimelineSource || "board"}`);
+        if (importedFpsTruth !== null) setFrameRateValue(importedFpsTruth, `import:${loadedTimelineSource || "board"}`);
+        console.log("[IAMCCS V3 BOARD IMPORT] timing truth applied", {
+            nodeId: node?.id,
+            source: loadedTimelineSource || "board",
+            duration_seconds: getDuration(),
+            frame_rate: getFps(),
+            timelineDuration: objectDurationTruth(timeline),
+            timelineFps: objectFpsTruth(timeline),
+        });
         showTimelineNotice(`Imported board timeline source: ${loadedTimelineSource || "rows/timeline_data"}`, "warn");
         selectedId = timeline.segments?.[0]?.id || null;
         clearV3BoardTransientState();
@@ -11613,11 +12654,20 @@ function renderForNode(node) {
     }
 }
 
-function scheduleRender(node) {
+function scheduleRender(node, options = {}) {
     const klass = nodeClassName(node);
     if (klass !== "IAMCCS_CineLTXSequencer" && klass !== "IAMCCS_CinePromptRelayLatentShapeSync" && klass !== "IAMCCS_CinePromptRelayTimeline" && klass !== "IAMCCS_CineShotboardLite" && klass !== "IAMCCS_CineShotboardTimelinePro" && klass !== "IAMCCS_CineShotboardPlannerPro" && klass !== "IAMCCS_CineShotboardPlannerProV2" && klass !== "IAMCCS_CineShotboardPlannerV3" && klass !== "IAMCCS_CineShotboardPlannerProLegacy" && klass !== "IAMCCS_CineFLFEngineSimple" && klass !== "IAMCCS_CineInfo" && klass !== "IAMCCS_CinePromptArchitect" && klass !== "IAMCCS_BoardMaker" && klass !== "IAMCCS_CineMusicVideoPlanner") return;
-    setTimeout(() => renderForNode(node), 80);
-    setTimeout(() => renderForNode(node), 450);
+    if (Array.isArray(node._iamccsCineRenderTimers)) {
+        node._iamccsCineRenderTimers.forEach((timer) => window.clearTimeout(timer));
+    }
+    const delay = Math.max(0, Number(options.delay ?? 80));
+    const secondPass = options.secondPass !== false;
+    node._iamccsCineRenderTimers = [
+        window.setTimeout(() => renderForNode(node), delay),
+    ];
+    if (secondPass) {
+        node._iamccsCineRenderTimers.push(window.setTimeout(() => renderForNode(node), Math.max(delay + 220, Number(options.secondDelay ?? 450))));
+    }
 }
 
 function flushAllShotboardV3Timelines(reason = "flush") {
@@ -11693,6 +12743,7 @@ app.registerExtension({
 document.addEventListener("iamccs:planner_rows_updated", (ev) => {
     const nodeId = ev?.detail?.node_id;
     if (!nodeId) return;
+    if (ev?.detail?.render === false) return;
     const plannerNode = app.graph?.getNodeById(nodeId);
     if (!plannerNode) return;
     const klass = String(plannerNode?.comfyClass || plannerNode?.type || "");
@@ -11703,7 +12754,10 @@ document.addEventListener("iamccs:planner_rows_updated", (ev) => {
     plannerNode._iamccsCineShotboardLiteReady = false;
     plannerNode._iamccsCineShotboardV3Ready = false;
     plannerNode._iamccsCineShotboardV3Version = "";
-    scheduleRender(plannerNode);
+    const fromAudioBoard = ev?.detail?.source === "IAMCCS_AudioBoardArranger";
+    scheduleRender(plannerNode, fromAudioBoard ? { delay: 180, secondPass: false } : {});
 });
+
+
 
 

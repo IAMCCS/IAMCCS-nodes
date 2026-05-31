@@ -546,7 +546,7 @@ class IAMCCS_CineReferenceBoard:
     def load_ltx_style_image(self, source, width, height, resize_method="crop", multiple_of=32, img_compression=0):
         image = None
         if isinstance(source, dict):
-            image_file = str(source.get("imageFile", source.get("image_file", "")) or "").strip()
+            image_file = str(source.get("imageTruthPath") or source.get("image_truth_path") or source.get("imageFile") or source.get("image_file") or source.get("path") or "").strip()
             image_b64 = str(source.get("imageB64", source.get("image_b64", "")) or "").strip()
             if image_file:
                 full_path = image_file
@@ -588,11 +588,30 @@ class IAMCCS_CineReferenceBoard:
 
     def load_ltx_style_images(self, image_paths, width, height, resize_method="crop", multiple_of=32, img_compression=0):
         results = []
+        missing_paths = []
+        failed_paths = []
         for path in _cine_reference_paths_from_text(image_paths):
             try:
                 results.append(self.load_ltx_style_image(path, width, height, resize_method, multiple_of, img_compression))
+            except FileNotFoundError:
+                missing_paths.append(str(path))
             except Exception as exc:
-                print(f"IAMCCS Cine Shotboard warning: could not load internal guide image {path}: {exc}")
+                failed_paths.append((str(path), str(exc)))
+        if missing_paths and results:
+            print(
+                "IAMCCS Cine Shotboard warning: skipped "
+                f"{len(missing_paths)} stale/missing internal guide image path(s); "
+                f"using {len(results)} valid reference image(s)."
+            )
+        elif missing_paths:
+            for path in missing_paths[:12]:
+                print(f"IAMCCS Cine Shotboard warning: could not load internal guide image {path}: image source not found")
+            if len(missing_paths) > 12:
+                print(f"IAMCCS Cine Shotboard warning: {len(missing_paths) - 12} additional missing guide image path(s) suppressed.")
+        for path, exc in failed_paths[:12]:
+            print(f"IAMCCS Cine Shotboard warning: could not load internal guide image {path}: {exc}")
+        if len(failed_paths) > 12:
+            print(f"IAMCCS Cine Shotboard warning: {len(failed_paths) - 12} additional failed guide image path(s) suppressed.")
         if results:
             first_shape = results[0].shape
             batch_safe = []
@@ -2435,7 +2454,14 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                 continue
             start_frame = max(0, _safe_int(seg.get("start", seg.get("frame", 0)), 0))
             second = start_frame / fps
-            if second >= float(duration_seconds):
+            # Fix 3 (slot-9 consistency): use frame-based boundary identical to _compile_flfreal_timeline
+            # so segments starting exactly at the last frame (e.g. frame 528 of 529) are NOT excluded.
+            # Old: second >= duration_seconds (excluded frame 528 when 528/24 == 22.0 == duration_seconds)
+            # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+            _target_frames = max(1, int(round(float(duration_seconds) * fps)))
+            _ltx_mode = str(data.get("ltx_round_mode", "up_8n_plus_1") if isinstance(data, dict) else "up_8n_plus_1")
+            _max_frames = int(cls._round_frames(_target_frames, _ltx_mode))
+            if start_frame >= _max_frames:
                 continue
             is_text = seg_type == "text"
             if not is_text:
@@ -2603,6 +2629,88 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
 
     def execute(self, global_prompt, timeline_data, duration_seconds, frame_rate, guide_policy, min_guide_gap_seconds, max_guides, default_force, promptrelay_epsilon, ltx_round_mode, image_paths, image_width, image_height, image_resize_method="crop", image_multiple_of=32, img_compression=0, cine_linx=None):
         upstream_cine_linx = cine_linx
+        upstream_resources = self._input_linx_resources(upstream_cine_linx)
+        upstream_mode = str(upstream_cine_linx.get("mode", "") if isinstance(upstream_cine_linx, dict) else "")
+        widget_duration_seconds = _safe_float(duration_seconds, 20.0)
+        widget_frame_rate = _safe_int(frame_rate, 24)
+
+        def _positive_float_or_none(value):
+            try:
+                parsed = float(value)
+                return parsed if parsed > 0 and parsed == parsed else None
+            except Exception:
+                return None
+
+        def _positive_int_or_none(value):
+            try:
+                parsed = int(round(float(value)))
+                return parsed if parsed > 0 else None
+            except Exception:
+                return None
+
+        # V3 truth-source guard: V3's own widget data is ALWAYS the source of truth.
+        # Upstream CineLinX board data is only a fallback when V3 has no segments of its own
+        # (e.g. a BoardMaker feeding a blank V3). Once the user has configured V3 (imported a
+        # board and made changes), upstream board data must NEVER overwrite those changes.
+        # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+        _v3_own_parsed = _safe_json_loads(str(timeline_data or "{}"), {})
+        _v3_has_own_segments = (
+            isinstance(_v3_own_parsed, dict)
+            and isinstance(_v3_own_parsed.get("segments"), list)
+            and len(_v3_own_parsed.get("segments", [])) > 0
+        )
+        if upstream_resources:
+            upstream_timeline = upstream_resources.get("cine_board_timeline_data")
+            # Only adopt upstream timeline when V3 has no own segments - so user changes
+            # (images, prompts, values) made after importing a board are preserved
+            # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+            if isinstance(upstream_timeline, str) and upstream_timeline.strip() and not _v3_has_own_segments:
+                timeline_data = upstream_timeline
+            upstream_prompt = upstream_resources.get("cine_global_prompt")
+            if isinstance(upstream_prompt, str) and upstream_prompt.strip() and not str(global_prompt or "").strip():
+                global_prompt = upstream_prompt
+
+        timeline_meta_for_timing = _safe_json_loads(str(timeline_data or "{}"), {})
+        timeline_duration_seconds = None
+        timeline_frame_rate = None
+        if isinstance(timeline_meta_for_timing, dict):
+            settings_meta = timeline_meta_for_timing.get("settings") if isinstance(timeline_meta_for_timing.get("settings"), dict) else {}
+            timeline_duration_seconds = _positive_float_or_none(
+                timeline_meta_for_timing.get("duration_seconds",
+                    timeline_meta_for_timing.get("durationSeconds",
+                        timeline_meta_for_timing.get("duration",
+                            settings_meta.get("duration_seconds", settings_meta.get("durationSeconds", settings_meta.get("duration"))))))
+            )
+            timeline_frame_rate = _positive_int_or_none(
+                timeline_meta_for_timing.get("frame_rate",
+                    timeline_meta_for_timing.get("frameRate",
+                        timeline_meta_for_timing.get("fps",
+                            settings_meta.get("frame_rate", settings_meta.get("frameRate", settings_meta.get("fps"))))))
+            )
+        upstream_duration_seconds = _positive_float_or_none(upstream_resources.get("cine_duration_seconds")) if upstream_resources else None
+        upstream_frame_rate = _positive_int_or_none(upstream_resources.get("cine_frame_rate")) if upstream_resources else None
+        duration_truth_source = "widget"
+        frame_rate_truth_source = "widget"
+        if timeline_duration_seconds is not None:
+            duration_seconds = timeline_duration_seconds
+            duration_truth_source = "timeline_data"
+        elif upstream_duration_seconds is not None and upstream_mode != "iamccs_audio_board_arranger":
+            duration_seconds = upstream_duration_seconds
+            duration_truth_source = "upstream_cine_linx"
+        if timeline_frame_rate is not None:
+            frame_rate = timeline_frame_rate
+            frame_rate_truth_source = "timeline_data"
+        elif upstream_frame_rate is not None:
+            frame_rate = upstream_frame_rate
+            frame_rate_truth_source = "upstream_cine_linx"
+        if upstream_resources:
+            # Guard: only adopt upstream image dimensions when V3 has no own segments
+            # so user-set resolution in V3 is never silently replaced by board/upstream values
+            # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+            if upstream_resources.get("cine_image_width") is not None and not _v3_has_own_segments:
+                image_width = _safe_int(upstream_resources.get("cine_image_width"), image_width)
+            if upstream_resources.get("cine_image_height") is not None and not _v3_has_own_segments:
+                image_height = _safe_int(upstream_resources.get("cine_image_height"), image_height)
         multi_input = self._multi_input_from_cine_linx(upstream_cine_linx)
         (cine_linx,) = super().execute(
             global_prompt,
@@ -2640,8 +2748,10 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                 if seg_type not in {"text", "audio"} and not self._as_bool(item.get("placeholder", False), False):
                     image_order += 1
                     ref = max(1, _safe_int(item.get("ref", item.get("reference_index", item.get("image_ref", image_order))), image_order))
-                    if not str(item.get("imageFile", item.get("image_file", "")) or "").strip() and ref <= len(reference_paths):
+                    if not str(item.get("imageTruthPath") or item.get("image_truth_path") or item.get("imageFile") or item.get("image_file") or item.get("path") or "").strip() and ref <= len(reference_paths):
                         item["imageFile"] = reference_paths[ref - 1]
+                    elif str(item.get("path") or "").strip() and not str(item.get("imageFile") or item.get("image_file") or "").strip():
+                        item["imageFile"] = str(item.get("path") or "").strip()
                 enriched_segments.append(item)
             visual_segments = enriched_segments
         flfreal_mode = str(data.get("flfrealMode", data.get("flfreal_mode", "iamccs_enhanced")) if isinstance(data, dict) else "iamccs_enhanced").strip()
@@ -2654,6 +2764,15 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
         global_prompt_only = bool(_safe_bool(data.get("global_prompt_only", data.get("use_global_prompt_only", False)), False)) if isinstance(data, dict) else False
         verbose_log = bool(_safe_bool(data.get("verbose_log", data.get("verboseLog", True)), True)) if isinstance(data, dict) else True
         fps = max(1, _safe_int(frame_rate, 24))
+        if verbose_log:
+            target_frames = int(round(float(_safe_float(duration_seconds, widget_duration_seconds)) * fps))
+            rounded_frames = _round_ltx_frames(target_frames, str(ltx_round_mode or "up_8n_plus_1"))
+            print(
+                "[IAMCCS ShotboardPlannerV3] "
+                f"DURATION_TRUTH source={duration_truth_source} duration_passed={float(_safe_float(duration_seconds, widget_duration_seconds)):.3f}s "
+                f"fps_source={frame_rate_truth_source} fps_passed={int(fps)} target_frames={int(target_frames)} rounded_max_frames={int(rounded_frames)} "
+                f"widget_duration={float(widget_duration_seconds):.3f}s timeline_duration={timeline_duration_seconds} upstream_duration={upstream_duration_seconds}"
+            )
         promptrelay_requested = False
         if isinstance(data, dict):
             promptrelay_requested = self._as_bool(data.get("promptrelay_enabled", data.get("enable_promptrelay", False)), False)
@@ -3889,6 +4008,29 @@ class IAMCCS_CineFilmmakerBackend:
         audio_segments = data if isinstance(data, list) else data.get("audioSegments", []) if isinstance(data, dict) else []
         return any(isinstance(seg, dict) and (seg.get("audioFile") or seg.get("audioB64")) for seg in audio_segments)
 
+    @staticmethod
+    def _timeline_end_frames(timeline_json: Any, key: str = "") -> int:
+        data = _safe_json_loads(str(timeline_json or "[]"), [])
+        if isinstance(data, dict):
+            if key and isinstance(data.get(key), list):
+                data = data.get(key, [])
+            elif isinstance(data.get("audioSegments"), list):
+                data = data.get("audioSegments", [])
+            elif isinstance(data.get("segments"), list):
+                data = data.get("segments", [])
+            else:
+                data = []
+        if not isinstance(data, list):
+            return 0
+        end_frame = 0
+        for seg in data:
+            if not isinstance(seg, dict):
+                continue
+            start = _safe_int(seg.get("start", seg.get("frame", 0)), 0)
+            length = _safe_int(seg.get("length", seg.get("len", 1)), 1)
+            end_frame = max(end_frame, start + max(1, length))
+        return int(max(0, end_frame))
+
     @classmethod
     def _build_combined_audio(cls, audio_timeline_json: str, pixel_frames: int, frame_rate: float) -> Dict[str, Any]:
         target_sr = 44100
@@ -4086,9 +4228,11 @@ class IAMCCS_CineFilmmakerBackend:
                 continue
             img_tensor = None
             source = dict(seg)
-            if not str(source.get("imageFile", source.get("image_file", "")) or "").strip() and ref <= len(reference_paths):
+            if not str(source.get("imageTruthPath") or source.get("image_truth_path") or source.get("imageFile") or source.get("image_file") or source.get("path") or "").strip() and ref <= len(reference_paths):
                 source["imageFile"] = reference_paths[ref - 1]
-            if str(source.get("imageFile", source.get("image_file", "")) or "").strip() or str(source.get("imageB64", source.get("image_b64", "")) or "").strip():
+            elif str(source.get("path") or "").strip() and not str(source.get("imageFile") or source.get("image_file") or "").strip():
+                source["imageFile"] = str(source.get("path") or "").strip()
+            if str(source.get("imageTruthPath") or source.get("image_truth_path") or source.get("imageFile") or source.get("image_file") or source.get("path") or "").strip() or str(source.get("imageB64", source.get("image_b64", "")) or "").strip():
                 try:
                     img_tensor = loader.load_ltx_style_image(
                         source,
@@ -4112,7 +4256,7 @@ class IAMCCS_CineFilmmakerBackend:
             guide_data["reference_indices"].append(int(ref))
             guide_data.setdefault("motion_forces", []).append(float(_safe_float(seg.get("guideStrength", seg.get("motion_force", seg.get("force", 0.0))), 0.0)))
             guide_data.setdefault("image_lock_strengths", []).append(float(strength))
-            guide_data.setdefault("image_sources", []).append(str(source.get("imageFile", "")) or f"multi_output[{ref}]")
+            guide_data.setdefault("image_sources", []).append(str(source.get("imageTruthPath") or source.get("image_truth_path") or source.get("imageFile") or source.get("image_file") or source.get("path") or "") or f"multi_output[{ref}]")
         return guide_data
 
     @staticmethod
@@ -4143,6 +4287,7 @@ class IAMCCS_CineFilmmakerBackend:
         flf_timeline = str(resources.get("cine_flf_timeline", outputs.get("flf_timeline", payload.get("flf_timeline", ""))) or "")
         audio_timeline_json = str(resources.get("cine_audio_timeline_json", outputs.get("audio_timeline_json", payload.get("audioSegments", "[]"))) or "[]")
         image_paths = str(resources.get("cine_image_paths", payload.get("image_paths", "")) or "")
+        visual_segments_json = resources.get("cine_visual_segments_json", "")
         duration_seconds = _safe_float(resources.get("cine_duration_seconds", outputs.get("duration_seconds", payload.get("duration_seconds", 20.0))), 20.0)
         frame_rate = _safe_int(resources.get("cine_frame_rate", outputs.get("frame_rate", payload.get("frame_rate", 24))), 24)
         width = _safe_int(resources.get("cine_image_width", outputs.get("width", payload.get("image_width", 768))), 768)
@@ -4153,6 +4298,31 @@ class IAMCCS_CineFilmmakerBackend:
         max_frames = _safe_int(resources.get("cine_max_frames", outputs.get("max_frames", payload.get("max_frames", 0))), 0)
         if max_frames <= 0:
             max_frames = _round_ltx_frames(int(round(duration_seconds * max(1, frame_rate))), str(payload.get("ltx_round_mode", "up_8n_plus_1")))
+        timeline_end_frames = max(
+            self._timeline_end_frames(audio_timeline_json, "audioSegments"),
+            self._timeline_end_frames(visual_segments_json, "segments"),
+        )
+        duration_target_frames = int(round(float(duration_seconds) * max(1, int(frame_rate))))
+        duration_clamp_applied = False
+        if timeline_end_frames > 0:
+            rounded_timeline_frames = _round_ltx_frames(timeline_end_frames, str(payload.get("ltx_round_mode", "up_8n_plus_1")))
+            runaway_threshold = max(rounded_timeline_frames + max(16, int(frame_rate) * 2), int(rounded_timeline_frames * 1.35))
+            if max_frames > runaway_threshold:
+                print(
+                    "[IAMCCS FilmmakerBackend] "
+                    f"Duration clamp: cine_linx requested max_frames={int(max_frames)} "
+                    f"but timeline ends at {int(timeline_end_frames)} frames; using {int(rounded_timeline_frames)}."
+                )
+                max_frames = int(rounded_timeline_frames)
+                duration_seconds = float(timeline_end_frames) / max(1.0, float(frame_rate))
+                duration_clamp_applied = True
+        if verbose_log:
+            print(
+                "[IAMCCS FilmmakerBackend] "
+                f"DURATION_EFFECTIVE source=cine_linx duration={float(duration_seconds):.3f}s fps={int(frame_rate)} "
+                f"target_frames={int(duration_target_frames)} max_frames={int(max_frames)} "
+                f"timeline_end_frames={int(timeline_end_frames)} clamp_applied={bool(duration_clamp_applied)}"
+            )
         epsilon = _safe_float(resources.get("cine_promptrelay_epsilon", outputs.get("promptrelay_epsilon", payload.get("promptrelay_epsilon", 0.65))), 0.65)
 
         latent = optional_latent if isinstance(optional_latent, dict) else self._empty_latent(width, height, max_frames)
@@ -4254,7 +4424,6 @@ class IAMCCS_CineFilmmakerBackend:
         if not torch.is_tensor(multi_output):
             multi_output = torch.zeros((1, max(64, int(height)), max(64, int(width)), 3))
         default_force = _safe_float(resources.get("cine_default_force", payload.get("default_force", 0.25)), 0.25)
-        visual_segments_json = resources.get("cine_visual_segments_json", "")
         guide_data = self._guide_data_from_visual_segments(
             visual_segments_json,
             multi_output,
@@ -4310,9 +4479,10 @@ class IAMCCS_CineFilmmakerBackend:
                 prompt = str(seg.get("prompt", seg.get("local_prompt", seg.get("relay_prompt", ""))) or "").replace("\n", " ")
                 if len(prompt) > 260:
                     prompt = prompt[:257] + "..."
-                image_file = str(seg.get("imageFile", seg.get("image_file", "")) or "")
+                image_file = str(seg.get("imageTruthPath") or seg.get("image_truth_path") or seg.get("imageFile") or seg.get("image_file") or seg.get("path") or "")
                 if len(image_file) > 180:
                     image_file = "..." + image_file[-177:]
+                canonical_strength = _wdc_image_guide_strength(seg, _safe_float(seg.get("guideStrength", seg.get("force", default_force)), float(default_force)))
                 print(
                     "[IAMCCS FilmmakerBackend] "
                     f"segment[{idx:02d}] "
@@ -4321,8 +4491,9 @@ class IAMCCS_CineFilmmakerBackend:
                     f"length={_safe_int(seg.get('length', seg.get('len', 0)), 0)} "
                     f"ref={_safe_int(seg.get('ref', seg.get('reference_index', seg.get('image_ref', 0))), 0)} "
                     f"use_guide={bool(_safe_bool(seg.get('use_guide', seg.get('guide', True)), True))} "
-                    f"guideStrength={float(_safe_float(seg.get('guideStrength', seg.get('force', default_force)), float(default_force))):.4f} "
-                    f"imageLockStrength={float(_safe_float(seg.get('imageLockStrength', seg.get('image_lock_strength', seg.get('guideStrength', default_force))), float(default_force))):.4f} "
+                    f"guideStrength={float(canonical_strength):.4f} "
+                    f"imageLockStrength={float(canonical_strength):.4f} "
+                    f"singleStrengthSource='guideStrength' "
                     f"label={str(seg.get('label', ''))!r} "
                     f"imageFile={image_file!r} "
                     f"prompt={prompt!r}"

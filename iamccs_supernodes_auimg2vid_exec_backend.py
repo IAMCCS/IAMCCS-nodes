@@ -206,6 +206,56 @@ def _audio_duration_seconds(audio):
     return float(total_samples) / float(sample_rate)
 
 
+def _empty_preview_image():
+    return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
+
+
+def _limit_video_latent_for_preview(video_latent, vae, max_preview_frames):
+    if not isinstance(video_latent, dict):
+        return video_latent
+    samples = video_latent.get("samples")
+    if not isinstance(samples, torch.Tensor) or samples.ndim != 5:
+        return video_latent
+    max_frames = int(max(0, max_preview_frames or 0))
+    if max_frames <= 0:
+        return video_latent
+    temporal_compression = 8
+    try:
+        if hasattr(vae, "temporal_compression_decode"):
+            temporal_compression = max(1, int(vae.temporal_compression_decode()))
+    except Exception:
+        temporal_compression = 8
+    latent_frames = max(1, int(math.ceil(max(0, max_frames - 1) / float(temporal_compression))) + 1)
+    latent_frames = min(int(samples.shape[2]), int(latent_frames))
+    preview_latent = dict(video_latent)
+    preview_latent["samples"] = samples[:, :, :latent_frames, :, :]
+    return preview_latent
+
+
+def _decode_taeltx_preview(taeltx_vae, video_latent, enabled=False, max_preview_frames=17):
+    if not bool(enabled):
+        return _empty_preview_image(), "taeltx_preview=off", False
+    if taeltx_vae is None:
+        return _empty_preview_image(), "taeltx_preview=off(no_taeltx_vae)", False
+    if video_latent is None:
+        return _empty_preview_image(), "taeltx_preview=off(no_video_latent)", False
+    try:
+        preview_latent = _limit_video_latent_for_preview(video_latent, taeltx_vae, max_preview_frames)
+        images = comfy_nodes.VAEDecode().decode(taeltx_vae, preview_latent)[0]
+        if torch.is_tensor(images) and images.ndim == 4 and images.shape[0] > 0:
+            max_frames = int(max(0, max_preview_frames or 0))
+            if max_frames and images.shape[0] > max_frames:
+                images = images[:max_frames]
+            report = (
+                f"taeltx_preview=on | frames={int(images.shape[0])} | "
+                f"shape={tuple(int(v) for v in images.shape)} | max_frames={int(max_preview_frames or 0)}"
+            )
+            return images, report, True
+        return _empty_preview_image(), f"taeltx_preview=failed(unexpected_output={type(images).__name__})", False
+    except Exception as exc:
+        return _empty_preview_image(), f"taeltx_preview=failed({type(exc).__name__}: {str(exc)[:180]})", False
+
+
 def _sanitize_audio_for_ffmpeg(audio):
     if audio is None:
         return None, "audio_sanitize=off(no_audio)"
@@ -701,7 +751,7 @@ def _linx_models_only(existing_linx):
     source_resources = existing_linx.get("resources") or {}
     if not isinstance(source_resources, dict):
         source_resources = {}
-    keep_keys = ("model", "clip", "vae", "audio_vae", "second_stage_model")
+    keep_keys = ("model", "clip", "vae", "audio_vae", "taeltx_vae", "second_stage_model")
     resources = {
         key: source_resources.get(key)
         for key in keep_keys
@@ -2006,8 +2056,8 @@ class IAMCCS_GC_AUIMG2VIDExecutablePlanner:
 class IAMCCS_GC_AUIMG2VIDExecutableRender:
     CATEGORY = "IAMCCS/GoyAIcanvas/TestBackends"
     FUNCTION = "render"
-    RETURN_TYPES = ("STRING", "STRING", "INT", "FLOAT", SUPERNODE_LINX_TYPE, "STRING")
-    RETURN_NAMES = ("frames_dir", "start_dir", "segments_rendered", "estimated_duration_seconds", "linx", "report")
+    RETURN_TYPES = ("STRING", "STRING", "INT", "FLOAT", SUPERNODE_LINX_TYPE, "STRING", "IMAGE")
+    RETURN_NAMES = ("frames_dir", "start_dir", "segments_rendered", "estimated_duration_seconds", "linx", "report", "taeltx_preview")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -2062,6 +2112,8 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 "media_mode": (_MEDIA_MODES, {"default": "auto_from_generation_mode"}),
                 "vram_flush": ("BOOLEAN", {"default": False}),
                 "motion_intensity": ("FLOAT", {"default": 1.0, "min": 0.25, "max": 4.0, "step": 0.05}),
+                "taeltx_preview": ("BOOLEAN", {"default": False}),
+                "taeltx_preview_max_frames": ("INT", {"default": 17, "min": 1, "max": 257, "step": 1}),
             },
             "optional": {
                 "image": ("IMAGE", {"lazy": True}),
@@ -2075,6 +2127,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 "refresh_image": ("IMAGE", {"lazy": True}),
                 "second_stage_linx": (SUPERNODE_LINX_TYPE,),
                 "stage2_model": ("MODEL",),
+                "taeltx_vae": ("VAE", {"lazy": True}),
                 "show_manual_sigmas": ("BOOLEAN", {"default": False}),
                 "debug_verbose": ("BOOLEAN", {"default": False}),
             },
@@ -2244,6 +2297,9 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
         refresh_image=None,
         second_stage_linx=None,
         stage2_model=None,
+        taeltx_vae=None,
+        taeltx_preview=False,
+        taeltx_preview_max_frames=17,
         unique_id=None,
     ):
         debug_verbose = _debug_verbose_enabled(debug_verbose, linx)
@@ -2300,6 +2356,11 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
         clip = _require_runtime_value(_input_or_linx(clip, linx, "clip"), "clip")
         vae = _require_runtime_value(_input_or_linx(vae, linx, "vae"), "vae")
         audio_vae = _require_runtime_value(_input_or_linx(audio_vae, linx, "audio_vae"), "audio_vae")
+        taeltx_vae = _input_or_linx(taeltx_vae, linx, "taeltx_vae")
+        taeltx_preview_enabled = bool(taeltx_preview)
+        taeltx_preview_max_frames = max(1, int(taeltx_preview_max_frames or 17))
+        taeltx_preview_images = _empty_preview_image()
+        taeltx_preview_report = "taeltx_preview=off"
         uses_input_audio_probe = bool(media_probe["uses_input_audio"])
         fps_default = _REFERENCE_AUDIO_IMG2VID_FPS if reference_audio_img2vid else (24.0 if uses_input_audio_probe else float(generated_media_fps or 25.0))
         fps_value = float(linx_resource(linx, "fps", fps_default) or fps_default) if uses_input_audio_probe else max(1.0, float(generated_media_fps or fps_default))
@@ -2310,6 +2371,9 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
             clip=clip,
             vae=vae,
             audio_vae=audio_vae,
+            taeltx_vae_connected=taeltx_vae is not None,
+            taeltx_preview=taeltx_preview_enabled,
+            taeltx_preview_max_frames=taeltx_preview_max_frames,
             fps=fps_value,
             fps_source="planner_linx" if uses_input_audio_probe else "render_widget",
         )
@@ -3033,6 +3097,20 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 sampled_video=sampled_video,
                 sampled_audio_latent=sampled_audio_latent,
             )
+            taeltx_preview_images, taeltx_preview_report, taeltx_preview_ok = _decode_taeltx_preview(
+                taeltx_vae,
+                sampled_video,
+                taeltx_preview_enabled,
+                taeltx_preview_max_frames,
+            )
+            _pipeline_debug_step(
+                pipeline_debug,
+                "single_taeltx_preview",
+                enabled=taeltx_preview_enabled,
+                ok=taeltx_preview_ok,
+                report=taeltx_preview_report,
+                preview_images=taeltx_preview_images,
+            )
 
             stage2_model_active = _resolve_stage2_model(model, second_stage_model, second_stage_payload)
             stage2_data = _parse_payload(second_stage_payload)
@@ -3176,6 +3254,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 f"Single duration protection. planner_total={int(planner_total_frames)}f | audio_total_with_tail={int(audio_total_frames_with_tail)}f | chosen_total={int(total_frames)}f\n"
                 f"Audio preprocess. {audio_preprocess_report}\n"
                 f"Single route details. sampler={effective_sampler} | cfg={float(effective_cfg_value):.3f} | sigmas={sigmas_report} | sampler_node={sampler_node_name} | cleanup_before_sampling=soft_cleanup | model_sampling={model_sampling_report} | motion_intensity={'ignored_strict_reference' if reference_audio_img2vid else f'{motion_intensity:.2f}'} | vram_flush={'on' if bool(vram_flush) else 'off'} | vae_frame_align={'off_official_audio_img2vid' if disable_vae_frame_align else 'on'} | {route_extra_report}\n"
+                f"TAELTX preview. {taeltx_preview_report}\n"
                 f"Executable AU+IMG2VID render completed. single generation backend={'ti2v_incremental_advanced' if ti2v_incremental_backend else ('legacy_single' if legacy_audio_img2vid_backend else ('strict_workflow1_canvas_reference' if reference_audio_img2vid else 'workflow1_best'))} | latent handed to VAE stage"
             )
             report = _append_debug_report(report, single_debug_report)
@@ -3195,6 +3274,8 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                   "generated_media_fps": float(fps_value),
                   "generation_type": str(generation_type),
                     "debug_verbose": bool(debug_verbose),
+                    "taeltx_preview": bool(taeltx_preview_enabled),
+                    "taeltx_preview_report": str(taeltx_preview_report),
                     "target_frame_count": int(total_frames),
                     "target_frame_count_source": "render_single_planner_audio" if uses_input_audio else "render_single_generated_duration",
                     "disable_vae_frame_align": disable_vae_frame_align,
@@ -3240,6 +3321,8 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                     "disable_vae_frame_align": disable_vae_frame_align,
                     "pipeline_debug": list(pipeline_debug.get("lines") or []),
                     "debug_verbose": bool(debug_verbose),
+                    "taeltx_preview": bool(taeltx_preview_enabled),
+                    "taeltx_preview_report": str(taeltx_preview_report),
                 },
                 resources={
                     "audio": rendered_audio if exports_audio else None,
@@ -3247,6 +3330,9 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                     "clip": clip,
                     "vae": vae,
                     "audio_vae": audio_vae,
+                    "taeltx_vae": taeltx_vae,
+                    "taeltx_first_stage_preview_images": taeltx_preview_images if taeltx_preview_enabled else None,
+                    "taeltx_first_stage_preview_report": str(taeltx_preview_report),
                     "fps": float(fps_value),
                     "decode_mode": str(modular_decode),
                     "output_root": str(output_root),
@@ -3263,7 +3349,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                     "second_stage_payload": second_stage_payload,
                 },
             )
-            return ("", "", 1, float(total_duration_seconds), render_linx, report)
+            return ("", "", 1, float(total_duration_seconds), render_linx, report, taeltx_preview_images)
 
         extension_node_mem = _node_class("IAMCCS_LTX2_ExtensionModule")() if use_in_memory_loop else None
         start_inject_images_node = _node_class("IAMCCS_StartImagesToVideoLatent")() if use_in_memory_loop else None
@@ -3718,6 +3804,21 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 sampled_video=sampled_video,
                 sampled_audio_latent=sampled_audio_latent,
             )
+            if taeltx_preview_enabled:
+                taeltx_preview_images, taeltx_preview_report, taeltx_preview_ok = _decode_taeltx_preview(
+                    taeltx_vae,
+                    sampled_video,
+                    True,
+                    taeltx_preview_max_frames,
+                )
+                _pipeline_debug_step(
+                    pipeline_debug,
+                    f"segment_{segment_index}_taeltx_preview",
+                    enabled=True,
+                    ok=taeltx_preview_ok,
+                    report=taeltx_preview_report,
+                    preview_images=taeltx_preview_images,
+                )
 
             stage_mode = str(second_stage_mode)
             stage2_applied = False
@@ -4061,6 +4162,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
             + f"Prompt route. positive=\"{prompt_excerpt}\"\n"
             + f"Audio preprocess. melband_enabled={melband_enabled} | {audio_preprocess_report}\n"
             + f"Render route. backend_requested={requested_backend_mode} | backend_resolved={backend_mode} | media_mode={effective_media_mode} | decode_mode={modular_decode} | generation_mode={generation_mode} | sampler={effective_sampler} | cfg={float(effective_cfg_value):.3f} | sigmas={sigmas_report} | audio_export={'yes' if rendered_audio is not None else 'no'} | audio_export_note={loop_audio_export_note} | motion_intensity={motion_intensity:.2f} | vram_flush={'on' if bool(vram_flush) else 'off'} | vae_frame_align={'off_iamccs_audio_img2vid' if disable_vae_frame_align else 'on'}\n"
+            + f"TAELTX preview. {taeltx_preview_report}\n"
             + f"Executable AU+IMG2VID render completed. segments_rendered={rendered_segments}/{segment_count} | "
             f"frames_dir={final_report_hint} | start_dir={final_start_dir or '(in-memory start_images)'}\n"
             + "\n".join(segment_reports)
@@ -4091,6 +4193,8 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
               "disable_vae_frame_align": disable_vae_frame_align,
               "vram_flush": bool(vram_flush),
               "debug_verbose": bool(debug_verbose),
+              "taeltx_preview": bool(taeltx_preview_enabled),
+              "taeltx_preview_report": str(taeltx_preview_report),
                 "second_stage_mode": str(second_stage_mode),
                 "second_stage_scale_mode": str(second_stage_scale_mode),
                 "second_stage_upscale_model_name": str(second_stage_upscale_model_name),
@@ -4145,6 +4249,8 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 "disable_vae_frame_align": disable_vae_frame_align,
                 "pipeline_debug": list(pipeline_debug.get("lines") or []),
                 "debug_verbose": bool(debug_verbose),
+                "taeltx_preview": bool(taeltx_preview_enabled),
+                "taeltx_preview_report": str(taeltx_preview_report),
             },
             resources={
                 "audio": rendered_audio if exports_audio else None,
@@ -4152,6 +4258,9 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 "clip": clip,
                 "vae": vae,
                 "audio_vae": audio_vae,
+                "taeltx_vae": taeltx_vae,
+                "taeltx_first_stage_preview_images": taeltx_preview_images if taeltx_preview_enabled else None,
+                "taeltx_first_stage_preview_report": str(taeltx_preview_report),
                 "fps": float(fps_value),
                 "decode_mode": str(modular_decode),
                 "output_root": str(output_root),
@@ -4169,7 +4278,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 "start_images": current_start_images if use_in_memory_loop else None,
             },
         )
-        return (final_frames_dir, final_start_dir, int(rendered_segments), float(total_duration_seconds), render_linx, report)
+        return (final_frames_dir, final_start_dir, int(rendered_segments), float(total_duration_seconds), render_linx, report, taeltx_preview_images)
 
 
 class IAMCCS_GC_AUIMG2VIDExecutableFinalize:

@@ -259,6 +259,29 @@ from .iamccs_audio_extender import (
     IAMCCS_AudioTimelineGate,
 )
 
+from .iamccs_cine_audio_dialogue import (
+    IAMCCS_CineSpeech1PromptCompiler,
+    IAMCCS_CineVideoToWooshInputs,
+    IAMCCS_CineTimelineAudioMixer,
+    IAMCCS_AudioBoardArranger,
+    IAMCCS_CineDialogueLineRouter,
+    IAMCCS_CineInfo3,
+    IAMCCS_BoardMaker_DialogueFoley,
+    IAMCCS_CineSpeechLength,
+    IAMCCS_CineDialogueDurationPlanner,
+    IAMCCS_CineAudioDurationProbe,
+    IAMCCS_CineDialogueTimingReconciler,
+    IAMCCS_CineWooshFoleyChunkPlanner,
+    IAMCCS_CineFinalAudioMixer,
+    IAMCCS_CineEmotionButtons,
+    IAMCCS_CineDialoguePromptKit,
+)
+# [1.4.7] au_tools excluded from this release — will be re-enabled in 1.4.8
+# from .au_tools.audio_bus_out import IAMCCS_BusOut
+# from .au_tools.audio_board_mixer import IAMCCS_AudioBoardMixer
+# from .au_tools.audio_control_efx import IAMCCS_ControlAudEfx
+# from .au_tools.dialogue_script_planner import IAMCCS_DialogueScriptPlanner
+
 from .iamccs_ltx2_segment_queue import (
     IAMCCS_LTX2_BlendLatentBridge,
     IAMCCS_LTX2_LastFrameBridgeLoad,
@@ -512,6 +535,26 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_AudioExtender": IAMCCS_AudioExtender,
     "IAMCCS_AudioTimelineAssembler": IAMCCS_AudioTimelineAssembler,
     "IAMCCS_AudioTimelineGate": IAMCCS_AudioTimelineGate,
+    "IAMCCS_BoardMaker_DialogueFoley": IAMCCS_BoardMaker_DialogueFoley,
+    "IAMCCS_CineInfo3": IAMCCS_CineInfo3,
+    "IAMCCS_CineDialogueLineRouter": IAMCCS_CineDialogueLineRouter,
+    "IAMCCS_CineTimelineAudioMixer": IAMCCS_CineTimelineAudioMixer,
+    "IAMCCS_AudioBoardArranger": IAMCCS_AudioBoardArranger,
+    # [1.4.7] au_tools excluded — re-enable in 1.4.8
+    # "IAMCCS_BusOut": IAMCCS_BusOut,
+    # "IAMCCS_AudioBoardMixer": IAMCCS_AudioBoardMixer,
+    # "IAMCCS_ControlAudEfx": IAMCCS_ControlAudEfx,
+    # "IAMCCS_DialogueScriptPlanner": IAMCCS_DialogueScriptPlanner,
+    "IAMCCS_CineVideoToWooshInputs": IAMCCS_CineVideoToWooshInputs,
+    "IAMCCS_CineSpeech1PromptCompiler": IAMCCS_CineSpeech1PromptCompiler,
+    "IAMCCS_CineSpeechLength": IAMCCS_CineSpeechLength,
+    "IAMCCS_CineDialogueDurationPlanner": IAMCCS_CineDialogueDurationPlanner,
+    "IAMCCS_CineAudioDurationProbe": IAMCCS_CineAudioDurationProbe,
+    "IAMCCS_CineDialogueTimingReconciler": IAMCCS_CineDialogueTimingReconciler,
+    "IAMCCS_CineWooshFoleyChunkPlanner": IAMCCS_CineWooshFoleyChunkPlanner,
+    "IAMCCS_CineFinalAudioMixer": IAMCCS_CineFinalAudioMixer,
+    "IAMCCS_CineEmotionButtons": IAMCCS_CineEmotionButtons,
+    "IAMCCS_CineDialoguePromptKit": IAMCCS_CineDialoguePromptKit,
     "IAMCCS_LTX2_LastFrameBridgeSave": IAMCCS_LTX2_LastFrameBridgeSave,
     "IAMCCS_LTX2_BlendLatentBridge": IAMCCS_LTX2_BlendLatentBridge,
     "IAMCCS_LTX2_LastFrameBridgeLoad": IAMCCS_LTX2_LastFrameBridgeLoad,
@@ -775,6 +818,26 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_AudioExtender": "Audio Extender (segment + overlap)",
     "IAMCCS_AudioTimelineAssembler": "Audio Timeline Assembler (full track)",
     "IAMCCS_AudioTimelineGate": "Audio Timeline Gate (continue/stop)",
+    "IAMCCS_BoardMaker_DialogueFoley": "IAMCCS BoardMaker Dialogue Foley",
+    "IAMCCS_CineInfo3": "IAMCCS Cine Info 3",
+    "IAMCCS_CineDialogueLineRouter": "IAMCCS Dialogue Line Router",
+    "IAMCCS_CineTimelineAudioMixer": "IAMCCS Timeline Audio Mixer",
+    "IAMCCS_AudioBoardArranger": "IAMCCS AudioBoard Arranger",
+    # [1.4.7] au_tools excluded — re-enable in 1.4.8
+    # "IAMCCS_BusOut": "IAMCCS BusOut",
+    # "IAMCCS_AudioBoardMixer": "IAMCCS AudioBoard Mixer",
+    # "IAMCCS_ControlAudEfx": "IAMCCS ControlAudEfx",
+    # "IAMCCS_DialogueScriptPlanner": "IAMCCS DialogueScript Planner",
+    "IAMCCS_CineVideoToWooshInputs": "IAMCCS Video To Woosh Inputs",
+    "IAMCCS_CineSpeech1PromptCompiler": "IAMCCS Speech1 Prompt Compiler",
+    "IAMCCS_CineSpeechLength": "IAMCCS Speech Length Calculator",
+    "IAMCCS_CineDialogueDurationPlanner": "IAMCCS Dialogue Duration Planner",
+    "IAMCCS_CineAudioDurationProbe": "IAMCCS Audio Duration Probe",
+    "IAMCCS_CineDialogueTimingReconciler": "IAMCCS Dialogue Timing Reconciler",
+    "IAMCCS_CineWooshFoleyChunkPlanner": "IAMCCS Woosh Foley Chunk Planner",
+    "IAMCCS_CineFinalAudioMixer": "IAMCCS Final Audio Mixer",
+    "IAMCCS_CineEmotionButtons": "IAMCCS Emotion Buttons",
+    "IAMCCS_CineDialoguePromptKit": "IAMCCS Dialogue Prompt Kit",
     "IAMCCS_LTX2_LastFrameBridgeSave": "LTX-2 Last Frame Bridge Save 🖼️💾",
     "IAMCCS_LTX2_BlendLatentBridge": "LTX-2 Blend Latent Bridge 🎚️",
     "IAMCCS_LTX2_LastFrameBridgeLoad": "LTX-2 Last Frame Bridge Load 🖼️",
@@ -792,6 +855,28 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     } if IAMCCS_QWEN_VL_FLF is not None else {}),
 
 }
+
+# [1.4.7] cine_wan_edition_beta excluded from this release — will be re-enabled in 1.4.8
+# try:
+#     from .cine_wan_edition_beta import (
+#         NODE_CLASS_MAPPINGS as _IAMCCS_WAN_BETA_NODE_CLASS_MAPPINGS,
+#         NODE_DISPLAY_NAME_MAPPINGS as _IAMCCS_WAN_BETA_NODE_DISPLAY_NAME_MAPPINGS,
+#     )
+#     NODE_CLASS_MAPPINGS.update(_IAMCCS_WAN_BETA_NODE_CLASS_MAPPINGS)
+#     NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_WAN_BETA_NODE_DISPLAY_NAME_MAPPINGS)
+# except Exception as _iamccs_wan_beta_error:
+#     print(f"[IAMCCS WAN BETA] optional module not loaded: {_iamccs_wan_beta_error}")
+
+# [1.4.7] cine_multigeneration excluded from this release — will be re-enabled in 1.4.8
+# try:
+#     from .cine_multigeneration import (
+#         NODE_CLASS_MAPPINGS as _IAMCCS_MULTIGENERATION_NODE_CLASS_MAPPINGS,
+#         NODE_DISPLAY_NAME_MAPPINGS as _IAMCCS_MULTIGENERATION_NODE_DISPLAY_NAME_MAPPINGS,
+#     )
+#     NODE_CLASS_MAPPINGS.update(_IAMCCS_MULTIGENERATION_NODE_CLASS_MAPPINGS)
+#     NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_MULTIGENERATION_NODE_DISPLAY_NAME_MAPPINGS)
+# except Exception as _iamccs_multigeneration_error:
+#     print(f"[IAMCCS Multigeneration] optional module not loaded: {_iamccs_multigeneration_error}")
 
 WEB_DIRECTORY = "./web"
 
@@ -857,7 +942,11 @@ def setup_api_routes() -> None:
                     return web.Response(status=400, text="Unsupported image extension")
                 if not os.path.exists(path) or not os.path.isfile(path):
                     return web.Response(status=404, text="Image not found")
-                return web.FileResponse(path)
+                response = web.FileResponse(path)
+                response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+                response.headers["Pragma"] = "no-cache"
+                response.headers["Expires"] = "0"
+                return response
             except Exception as e:
                 return web.Response(status=500, text=str(e))
 
@@ -882,13 +971,46 @@ def setup_api_routes() -> None:
                     except Exception:
                         return int(default)
 
+                def _inside_dir(path, root):
+                    try:
+                        rel = os.path.relpath(os.path.abspath(path), os.path.abspath(root))
+                        return rel != os.pardir and not rel.startswith(os.pardir + os.sep) and not os.path.isabs(rel)
+                    except Exception:
+                        return False
+
+                def _input_relative(path, input_root):
+                    try:
+                        if not _inside_dir(path, input_root):
+                            return None
+                        return os.path.relpath(os.path.abspath(path), os.path.abspath(input_root)).replace(os.sep, "/")
+                    except Exception:
+                        return None
+
+                def _safe_paste(canvas, layer, x, y):
+                    x = int(round(x))
+                    y = int(round(y))
+                    src_l = max(0, -x)
+                    src_t = max(0, -y)
+                    dst_l = max(0, x)
+                    dst_t = max(0, y)
+                    w = min(layer.size[0] - src_l, canvas.size[0] - dst_l)
+                    h = min(layer.size[1] - src_t, canvas.size[1] - dst_t)
+                    if w <= 0 or h <= 0:
+                        return
+                    crop = layer.crop((src_l, src_t, src_l + w, src_t + h))
+                    if crop.mode == "RGBA":
+                        canvas.paste(crop.convert("RGB"), (dst_l, dst_t), crop.getchannel("A"))
+                    else:
+                        canvas.paste(crop.convert("RGB"), (dst_l, dst_t))
+
                 data = await request.json()
                 source = str(data.get("path") or data.get("source_path") or "").strip()
                 if not source:
                     return web.json_response({"error": "Missing source path"}, status=400)
 
                 input_dir = folder_paths.get_input_directory()
-                if os.path.isabs(source):
+                source_is_absolute = os.path.isabs(source)
+                if source_is_absolute:
                     source_path = os.path.abspath(os.path.expanduser(source))
                 else:
                     source_path = os.path.abspath(os.path.join(input_dir, source.replace("/", os.sep)))
@@ -913,16 +1035,16 @@ def setup_api_routes() -> None:
                     "lanczos": Image.Resampling.LANCZOS,
                 }.get(resample_name, Image.Resampling.LANCZOS)
 
+                crop_box = None
+                transform_mode = "composite"
                 with Image.open(source_path) as im:
-                    im = ImageOps.exif_transpose(im).convert("RGB")
-                    if abs(rotation) > 0.001:
-                        fill = tuple(int(v) for v in im.resize((1, 1), Image.Resampling.BILINEAR).getpixel((0, 0)))
-                        im = im.rotate(-rotation, resample=Image.Resampling.BICUBIC, expand=True, fillcolor=fill)
+                    im = ImageOps.exif_transpose(im).convert("RGBA")
                     src_w, src_h = im.size
-                    crop_box = None
+                    fill = tuple(int(v) for v in im.convert("RGB").resize((1, 1), Image.Resampling.BILINEAR).getpixel((0, 0)))
+
                     preview_crop_box = None
                     raw_crop_box = data.get("crop_box")
-                    if isinstance(raw_crop_box, (list, tuple)) and len(raw_crop_box) >= 4:
+                    if abs(rotation) < 0.001 and isinstance(raw_crop_box, (list, tuple)) and len(raw_crop_box) >= 4:
                         try:
                             l = max(0.0, min(float(src_w - 1), float(raw_crop_box[0])))
                             t = max(0.0, min(float(src_h - 1), float(raw_crop_box[1])))
@@ -935,48 +1057,75 @@ def setup_api_routes() -> None:
                             preview_crop_box = (left_i, top_i, right_i, bottom_i)
                         except Exception:
                             preview_crop_box = None
+
                     if preview_crop_box is not None:
                         crop_box = preview_crop_box
-                        out = im.crop(crop_box).resize((target_w, target_h), resampling)
-                    elif fit_mode == "contain":
-                        bg = Image.new("RGB", (target_w, target_h), tuple(int(v) for v in im.resize((1, 1), Image.Resampling.BILINEAR).getpixel((0, 0))))
-                        fitted = ImageOps.contain(im, (target_w, target_h), method=resampling)
-                        paste_x = int(round((target_w - fitted.size[0]) / 2.0))
-                        paste_y = int(round((target_h - fitted.size[1]) / 2.0))
-                        bg.paste(fitted, (paste_x, paste_y))
-                        out = bg
+                        out = im.crop(crop_box).convert("RGB").resize((target_w, target_h), resampling)
+                        transform_mode = "ui_preview_crop"
                     else:
-                        aspect = target_w / float(target_h)
-                        if src_w / float(src_h) >= aspect:
-                            base_h = src_h
-                            base_w = base_h * aspect
-                        else:
-                            base_w = src_w
-                            base_h = base_w / aspect
-                        crop_w = max(1.0, min(src_w, base_w / zoom))
-                        crop_h = max(1.0, min(src_h, base_h / zoom))
-                        max_shift_x = max(0.0, (src_w - crop_w) / 2.0)
-                        max_shift_y = max(0.0, (src_h - crop_h) / 2.0)
-                        center_x = src_w / 2.0 + pan_x * max_shift_x
-                        center_y = src_h / 2.0 + pan_y * max_shift_y
-                        left = max(0.0, min(src_w - crop_w, center_x - crop_w / 2.0))
-                        top = max(0.0, min(src_h - crop_h, center_y - crop_h / 2.0))
-                        crop_box = (int(round(left)), int(round(top)), int(round(left + crop_w)), int(round(top + crop_h)))
-                        out = im.crop(crop_box).resize((target_w, target_h), resampling)
+                        fit_scale = min(target_w / float(src_w), target_h / float(src_h)) if fit_mode == "contain" else max(target_w / float(src_w), target_h / float(src_h))
+                        scale = max(0.0001, fit_scale * zoom)
+                        display_w = max(1, int(round(src_w * scale)))
+                        display_h = max(1, int(round(src_h * scale)))
+                        max_shift_x = max(0.0, (display_w - target_w) / 2.0)
+                        max_shift_y = max(0.0, (display_h - target_h) / 2.0)
+                        left = (target_w - display_w) / 2.0 + pan_x * max_shift_x
+                        top = (target_h - display_h) / 2.0 + pan_y * max_shift_y
+                        layer = im.resize((display_w, display_h), resampling)
+                        if abs(rotation) > 0.001:
+                            center_x = left + display_w / 2.0
+                            center_y = top + display_h / 2.0
+                            layer = layer.rotate(-rotation, resample=Image.Resampling.BICUBIC, expand=True, fillcolor=(0, 0, 0, 0))
+                            left = center_x - layer.size[0] / 2.0
+                            top = center_y - layer.size[1] / 2.0
+                        out = Image.new("RGB", (target_w, target_h), fill)
+                        _safe_paste(out, layer, left, top)
+                        crop_box = {
+                            "display_left": left,
+                            "display_top": top,
+                            "display_width": layer.size[0],
+                            "display_height": layer.size[1],
+                            "source_width": src_w,
+                            "source_height": src_h,
+                        }
 
-                out_dir = os.path.join(input_dir, "IAMCCS_newimages")
-                os.makedirs(out_dir, exist_ok=True)
+                source_dir = os.path.dirname(source_path)
+                fallback_dir = os.path.join(input_dir, "IAMCCS_newimages")
+                source_subdir = os.path.dirname(source.replace("/", os.sep)) if not source_is_absolute else ""
+                if source_dir and os.path.isdir(source_dir):
+                    out_dir = source_dir
+                elif source_subdir:
+                    out_dir = os.path.join(input_dir, source_subdir)
+                else:
+                    out_dir = fallback_dir
+                try:
+                    os.makedirs(out_dir, exist_ok=True)
+                    test_path = os.path.join(out_dir, ".iamccs_write_test")
+                    with open(test_path, "w", encoding="utf-8") as test_file:
+                        test_file.write("ok")
+                    try:
+                        os.remove(test_path)
+                    except Exception:
+                        pass
+                except Exception:
+                    out_dir = fallback_dir
+                    os.makedirs(out_dir, exist_ok=True)
+
                 stem = os.path.splitext(os.path.basename(source_path))[0]
                 stem = re.sub(r"[^A-Za-z0-9_.-]+", "_", stem).strip("._")[:60] or "cine_ref"
-                filename = f"{stem}_cinecrop_{int(time.time() * 1000)}.png"
-                out_path = os.path.join(out_dir, filename)
+                filename = f"{stem}_cineedit_{int(time.time() * 1000)}.png"
+                out_path = os.path.abspath(os.path.join(out_dir, filename))
                 out.save(out_path, "PNG", optimize=True)
 
-                rel_path = "IAMCCS_newimages/" + filename
+                rel_path = _input_relative(out_path, input_dir)
+                ui_path = out_path
                 metadata = {
                     "source_path": source_path,
                     "edited_path": out_path,
+                    "path": out_path,
+                    "display_path": out_path,
                     "relative_path": rel_path,
+                    "project_adjacent": os.path.abspath(out_dir) == os.path.abspath(source_dir),
                     "transform": {
                         "width": target_w,
                         "height": target_h,
@@ -986,8 +1135,9 @@ def setup_api_routes() -> None:
                         "pan_y": pan_y,
                         "rotation": rotation,
                         "resample": resample_name,
-                        "crop_box_after_rotation": crop_box,
-                        "crop_box_source": data.get("crop_box_source") or ("ui_preview" if preview_crop_box is not None else "backend_formula"),
+                        "mode": transform_mode,
+                        "crop_box": crop_box,
+                        "crop_box_source": data.get("crop_box_source") or ("ui_preview" if transform_mode == "ui_preview_crop" else "backend_composite"),
                     },
                 }
                 with open(out_path + ".json", "w", encoding="utf-8") as meta_file:
@@ -995,8 +1145,11 @@ def setup_api_routes() -> None:
 
                 return web.json_response({
                     "ok": True,
-                    "path": rel_path,
+                    "path": out_path,
+                    "display_path": out_path,
+                    "relative_path": rel_path,
                     "absolute_path": out_path,
+                    "cache_bust": int(time.time() * 1000),
                     "metadata": metadata,
                 })
             except Exception as e:

@@ -9,6 +9,8 @@
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows + general nodes 4 ComfyUI
 
+## Version: 1.4.7 (New functions, utilities and bug fixed)
+
 ## Version: 1.4.6 (Shotboard planner v2 and v3 added)
 
 Version: 1.4.5 (Cine nodes added)
