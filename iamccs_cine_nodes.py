@@ -110,21 +110,21 @@ def _clamp(value: Any, lo: float, hi: float, default: float = 0.0) -> float:
     return max(float(lo), min(float(hi), number))
 
 
-def _wdc_image_guide_strength(row: Dict[str, Any], fallback: float = 1.0) -> float:
-    """Single LTX guide strength.
+# By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+def _cine_guide_strength(row: Dict[str, Any], fallback: float = 1.0) -> float:
+    """Single LTX guide strength for a guide frame.
 
-    Mirrors LTX Director semantics: one per-image guide strength controls the
-    keyframe conditioning mask. IAMCCS no longer treats Image Lock as a second
-    stronger override.
+    New boards use force / guideStrength. Legacy lock-named fields are read
+    only as fallback when no canonical force value exists.
     """
     for key in (
-        "guide_strength",
-        "guideStrength",
-        "strength",
         "force",
         "motion_force",
-        "wdc_guide_strength",
-        "wdcGuideStrength",
+        "guideStrength",
+        "guide_strength",
+        "strength",
+        "image_lock_strength",
+        "imageLockStrength",
     ):
         if isinstance(row, dict) and row.get(key) is not None:
             return _clamp(row.get(key), 0.0, 1.0, fallback)
@@ -689,7 +689,7 @@ class IAMCCS_CineLTXSequencer:
                             continue
                         second = _safe_float(row.get("second", row.get("time", row.get("seconds", 0.0))), 0.0)
                         ref = _safe_int(row.get("ref", row.get("reference", row.get("reference_index", idx + 1))), idx + 1)
-                        strength = _wdc_image_guide_strength(row, _safe_float(row.get("strength", 1.0), 1.0))
+                        strength = _cine_guide_strength(row, _safe_float(row.get("strength", 1.0), 1.0))
                         motion_force = _safe_float(row.get("motion_force", row.get("force", fallback_strength)), fallback_strength)
                         keyframes.append({
                             "second": second,
@@ -760,9 +760,9 @@ class IAMCCS_CineLTXSequencer:
                 "second": second,
                 "frame": frame,
                 "reference_index": max(1, min(MAX_CINE_ITEMS, _safe_int(row.get("reference_index"), idx + 1))),
-                "strength": _wdc_image_guide_strength(row, _safe_float(row.get("strength", 1.0), 1.0)),
-                "guide_strength": _wdc_image_guide_strength(row, _safe_float(row.get("strength", 1.0), 1.0)),
-                "image_lock_strength": _wdc_image_guide_strength(row, _safe_float(row.get("strength", 1.0), 1.0)),
+                "strength": _cine_guide_strength(row, _safe_float(row.get("strength", 1.0), 1.0)),
+                "guide_strength": _cine_guide_strength(row, _safe_float(row.get("strength", 1.0), 1.0)),
+                "image_lock_strength": _cine_guide_strength(row, _safe_float(row.get("strength", 1.0), 1.0)),
                 "motion_force": _safe_float(row.get("motion_force", row.get("force", fallback_strength)), fallback_strength),
                 "force": _safe_float(row.get("motion_force", row.get("force", fallback_strength)), fallback_strength),
                 "label": _normalise_label(str(row.get("label", "")), f"key_{idx + 1}"),
@@ -1198,15 +1198,13 @@ class IAMCCS_CineShotboardTimelinePro:
                 second = _safe_float(row.get("second", row.get("time", row.get("seconds", 0.0))), 0.0)
                 raw_frame = row.get("frame", row.get("insert_frame", None))
                 ref = _safe_int(row.get("ref", row.get("image_ref", row.get("reference_index", idx + 1))), idx + 1)
-                force = _clamp(row.get("force", row.get("strength", default_force)), 0.0, 1.0, default_force)
-                image_lock_strength = _wdc_image_guide_strength(row, _safe_float(row.get("strength", 1.0), 1.0))
+                # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+                motion_force = _clamp(row.get("motion_force", row.get("force", row.get("strength", default_force))), 0.0, 1.0, default_force)
+                image_lock_strength = _cine_guide_strength(row, motion_force)
                 note = str(row.get("note", row.get("camera_note", row.get("prompt", "")))).strip()
                 camera = str(row.get("camera", row.get("camera_move", "cinematic motion"))).strip()
                 transition = str(row.get("transition", row.get("transition_intent", "continuous_motion"))).strip() or "continuous_motion"
                 label = _normalise_label(str(row.get("label", row.get("shot_label", ""))), f"shot_{idx + 1}")
-                legacy_modifiers = cls._as_bool(row.get("use_relay_modifiers", row.get("use_camera_transition_in_relay", row.get("relay_modifiers", False))), False)
-                camera_relay_mode = str(row.get("camera_relay_mode", row.get("camera_prompt_mode", "before" if legacy_modifiers else "off")) or "off").strip()
-                transition_relay_mode = str(row.get("transition_relay_mode", row.get("transition_prompt_mode", "safe_only" if legacy_modifiers else "off")) or "off").strip()
                 # Relay text must come from explicit local-prompt fields only.
                 # Notes are private/technical shot notes and must not silently
                 # become PromptRelay segments when the Relay toggles are enabled.
@@ -1216,35 +1214,22 @@ class IAMCCS_CineShotboardTimelinePro:
                     True,
                 )
                 step_transition_enabled = cls._as_bool(row.get("step_transition_enabled", row.get("stepTransitionEnabled", False)), False)
-                option_relay_enabled = any(
-                    cls._as_bool(row.get(key, row.get(alias, False)), False)
-                    for key, alias in (
-                        ("dialogue_pin", "dialoguePin"),
-                        ("image_lock", "imageLock"),
-                        ("motion_boost", "motionBoost"),
-                    )
-                )
-                modifier_relay_enabled = camera_relay_mode != "off" or transition_relay_mode != "off"
                 rows.append({
                     "second": max(0.0, second),
                     "frame": _safe_int(raw_frame, int(round(max(0.0, second) * 24))) if raw_frame is not None else None,
                     "ref": max(1, min(MAX_CINE_ITEMS, ref)),
-                    "force": force,
-                    "motion_force": force,
+                    "force": motion_force,
+                    "motion_force": motion_force,
                     "image_lock_strength": image_lock_strength,
                     "guide_strength": image_lock_strength,
+                    "strength": image_lock_strength,
                     "label": label,
                     "camera": camera,
                     "transition": transition,
                     "note": note,
                     "use_guide": cls._as_bool(row.get("use_guide", row.get("guide", True)), True),
-                    "use_prompt": bool((prompt_requested and relay_prompt) or step_transition_enabled or option_relay_enabled or modifier_relay_enabled),
+                    "use_prompt": bool((prompt_requested and relay_prompt) or step_transition_enabled),
                     "relay_prompt": relay_prompt,
-                    "use_relay_modifiers": legacy_modifiers,
-                    "camera_relay_mode": camera_relay_mode,
-                    "transition_relay_mode": transition_relay_mode,
-                    "relay_addon_position": str(row.get("relay_addon_position", row.get("addon_position", "after")) or "after").strip(),
-                    "relay_modifier_text": str(row.get("relay_modifier_text", row.get("modifier_text", row.get("relay_addon", ""))) or "").strip(),
                     "dialogue_pin": cls._as_bool(row.get("dialogue_pin", row.get("dialoguePin", False)), False),
                     "image_lock": cls._as_bool(row.get("image_lock", row.get("imageLock", False)), False),
                     "motion_boost": cls._as_bool(row.get("motion_boost", row.get("motionBoost", False)), False),
@@ -1280,11 +1265,6 @@ class IAMCCS_CineShotboardTimelinePro:
                     "use_guide": True,
                     "use_prompt": bool(note.strip()),
                     "relay_prompt": note.strip(),
-                    "use_relay_modifiers": False,
-                    "camera_relay_mode": "off",
-                    "transition_relay_mode": "off",
-                    "relay_addon_position": "after",
-                    "relay_modifier_text": "",
                     "dialogue_pin": False,
                     "image_lock": False,
                     "motion_boost": False,
@@ -1301,9 +1281,9 @@ class IAMCCS_CineShotboardTimelinePro:
 
         if not rows:
             rows = [
-                {"second": 0.0, "ref": 1, "force": 0.78, "label": "opening_ref", "camera": "slow push-in", "transition": "continuous_motion", "note": "start from the first reference", "use_guide": True, "use_prompt": False, "relay_prompt": "", "use_relay_modifiers": False, "camera_relay_mode": "off", "transition_relay_mode": "off", "relay_addon_position": "after", "relay_modifier_text": ""},
-                {"second": max(0.1, duration_seconds * 0.55), "ref": 2, "force": default_force, "label": "middle_ref", "camera": "continuous dolly-in", "transition": "continuous_motion", "note": "midpoint visual target", "use_guide": True, "use_prompt": False, "relay_prompt": "", "use_relay_modifiers": False, "camera_relay_mode": "off", "transition_relay_mode": "off", "relay_addon_position": "after", "relay_modifier_text": ""},
-                {"second": max(0.2, duration_seconds - 0.4), "ref": 3, "force": default_force, "label": "ending_ref", "camera": "slow push-in", "transition": "continuous_motion", "note": "last visual target", "use_guide": True, "use_prompt": False, "relay_prompt": "", "use_relay_modifiers": False, "camera_relay_mode": "off", "transition_relay_mode": "off", "relay_addon_position": "after", "relay_modifier_text": ""},
+                {"second": 0.0, "ref": 1, "force": 0.78, "label": "opening_ref", "camera": "slow push-in", "transition": "continuous_motion", "note": "start from the first reference", "use_guide": True, "use_prompt": False, "relay_prompt": ""},
+                {"second": max(0.1, duration_seconds * 0.55), "ref": 2, "force": default_force, "label": "middle_ref", "camera": "continuous dolly-in", "transition": "continuous_motion", "note": "midpoint visual target", "use_guide": True, "use_prompt": False, "relay_prompt": ""},
+                {"second": max(0.2, duration_seconds - 0.4), "ref": 3, "force": default_force, "label": "ending_ref", "camera": "slow push-in", "transition": "continuous_motion", "note": "last visual target", "use_guide": True, "use_prompt": False, "relay_prompt": ""},
             ]
 
         rows = sorted(rows[:MAX_CINE_ITEMS], key=lambda item: (float(item["second"]), int(item["ref"])))
@@ -1354,35 +1334,6 @@ class IAMCCS_CineShotboardTimelinePro:
             "wide reveal": "wide reveal, expanding composition and environmental context",
         }
         return camera_phrases.get(camera, "")
-
-    @staticmethod
-    def _transition_modifier_parts(row: Dict[str, Any], next_row: Optional[Dict[str, Any]] = None, include_hard: bool = False) -> List[str]:
-        parts: List[str] = []
-        transition = str(row.get("transition", "continuous_motion") or "continuous_motion").strip()
-        if transition == "hard_cut":
-            if include_hard:
-                parts.append("hard cut staging with clean separated shot identity and stable subject form")
-            return parts
-        elif transition == "match_cut":
-            parts.append("match movement continuity through shape and camera direction")
-        elif transition == "soft_morph":
-            parts.append("single continuous transformation with a feathered optical blend")
-        else:
-            parts.append("continuous physical camera movement with stable parallax and connected spatial motion")
-
-        if next_row is not None and transition != "hard_cut":
-            nxt = str(next_row.get("label", "next target")).replace("_", " ")
-            parts.append(f"move toward {nxt} through one steady camera path")
-        return parts
-
-    @classmethod
-    def _relay_modifier_parts(cls, row: Dict[str, Any], next_row: Optional[Dict[str, Any]] = None) -> List[str]:
-        parts: List[str] = []
-        camera = cls._camera_modifier_part(row)
-        if camera:
-            parts.append(camera)
-        parts.extend(cls._transition_modifier_parts(row, next_row, include_hard=True))
-        return parts
 
     @classmethod
     def _option_modifier_parts(cls, row: Dict[str, Any]) -> List[str]:
@@ -1465,34 +1416,10 @@ class IAMCCS_CineShotboardTimelinePro:
     @classmethod
     def _row_prompt(cls, row: Dict[str, Any], next_row: Optional[Dict[str, Any]] = None) -> str:
         relay_prompt = str(row.get("relay_prompt", "") or "").strip()
-        before_parts: List[str] = []
-        after_parts: List[str] = []
         base_parts: List[str] = [relay_prompt] if relay_prompt else []
-
-        legacy_modifiers = bool(row.get("use_relay_modifiers", False))
-        camera_mode = cls._normalise_mode(row.get("camera_relay_mode", "before" if legacy_modifiers else "off"), {"off", "before", "after"}, "off")
-        transition_mode = cls._normalise_mode(row.get("transition_relay_mode", "safe_only" if legacy_modifiers else "off"), {"off", "safe_only", "append"}, "off")
-        addon_position = cls._normalise_mode(row.get("relay_addon_position", "after"), {"before", "after"}, "after")
-
-        camera_text = cls._camera_modifier_part(row)
-        if camera_text and camera_mode == "before":
-            before_parts.append(camera_text)
-        elif camera_text and camera_mode == "after":
-            after_parts.append(camera_text)
-
-        if transition_mode != "off":
-            after_parts.extend(cls._transition_modifier_parts(row, next_row, include_hard=(transition_mode == "append")))
-        after_parts.extend(cls._option_modifier_parts(row))
+        after_parts: List[str] = []
         after_parts.extend(cls._step_transition_parts(row, next_row))
-
-        modifier_text = str(row.get("relay_modifier_text", "") or "").strip()
-        if modifier_text:
-            if addon_position == "before":
-                before_parts.append(modifier_text)
-            else:
-                after_parts.append(modifier_text)
-
-        parts = before_parts + base_parts + after_parts
+        parts = base_parts + after_parts
         return ", ".join(part for part in parts if part)
 
     @classmethod
@@ -1724,8 +1651,9 @@ class IAMCCS_CineShotboardTimelinePro:
     ) -> str:
         keyframes = []
         for row in rows:
-            motion_force = float(row.get("force", row.get("motion_force", 0.0)))
-            guide_strength = _wdc_image_guide_strength(row, 1.0)
+            # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+            motion_force = float(row.get("motion_force", row.get("force", 0.0)))
+            guide_strength = _cine_guide_strength(row, 1.0)
             item = {
                 "second": float(row.get("second", 0.0)),
                 "ref": int(row.get("ref", 1)),
@@ -1824,9 +1752,6 @@ class IAMCCS_CineShotboardTimelinePro:
                 warnings.append(f"Row '{row['label']}' uses a strong FLFreal anchor; keep it intentional and avoid overcrowded guides.")
             if str(row.get("transition")) == "hard_cut" and str(guide_policy) != "prompt_only":
                 warnings.append(f"Row '{row['label']}' is marked hard_cut; multigen is usually cleaner than one continuous FLF shot.")
-            if str(row.get("transition")) == "hard_cut" and self._normalise_mode(row.get("transition_relay_mode"), {"off", "safe_only", "append"}, "off") == "append":
-                warnings.append(f"Row '{row['label']}' appends hard_cut text into PromptRelay; this can create morphing or visual confusion.")
-
         report = _json_report({
             "node": "IAMCCS_CineShotboardTimelinePro",
             "mode": "shotboard_pro",
@@ -1953,8 +1878,8 @@ class IAMCCS_CineShotboardPlannerPro(IAMCCS_CineShotboardTimelinePro):
                 "prompt": str(row.get("relay_prompt", "")),
                 "camera": str(row.get("camera", "")),
                 "transition": str(row.get("transition", "continuous_motion")),
-                "guideStrength": float(_safe_float(row.get("motion_force", row.get("force", default_force)), default_force)),
-                "imageLockStrength": float(_safe_float(row.get("motion_force", row.get("force", default_force)), default_force)),
+                "guideStrength": float(_cine_guide_strength(row, _safe_float(row.get("motion_force", row.get("force", default_force)), default_force))),
+                "imageLockStrength": float(_cine_guide_strength(row, _safe_float(row.get("motion_force", row.get("force", default_force)), default_force))),
                 "use_guide": bool(row.get("use_guide", True)),
                 "use_prompt": bool(row.get("use_prompt", False)),
                 "step_transition_enabled": bool(row.get("step_transition_enabled", False)),
@@ -2468,7 +2393,7 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                 image_order += 1
             ref = max(1, _safe_int(seg.get("ref", seg.get("reference_index", seg.get("image_ref", image_order or idx + 1))), image_order or idx + 1))
             strength = _clamp(seg.get("guideStrength", seg.get("guide_strength", seg.get("strength", default_force))), 0.0, 1.0, default_force)
-            guide_strength = _wdc_image_guide_strength(seg, strength)
+            guide_strength = _cine_guide_strength(seg, strength)
             prompt = str(seg.get("prompt", seg.get("local_prompt", "")) or "").strip()
             prompt_enabled = cls._v3_segment_prompt_enabled(seg, prompt)
             label = _normalise_label(str(seg.get("label", seg.get("name", "")) or ""), f"{'text' if is_text else 'shot'}_{idx + 1}")
@@ -2487,11 +2412,6 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                 "use_guide": (not is_text) and cls._as_bool(seg.get("use_guide", seg.get("guide", True)), True),
                 "use_prompt": bool(prompt_enabled),
                 "relay_prompt": prompt,
-                "use_relay_modifiers": cls._as_bool(seg.get("use_relay_modifiers", False), False),
-                "camera_relay_mode": str(seg.get("camera_relay_mode", "off") or "off").strip(),
-                "transition_relay_mode": str(seg.get("transition_relay_mode", "off") or "off").strip(),
-                "relay_addon_position": str(seg.get("relay_addon_position", "after") or "after").strip(),
-                "relay_modifier_text": str(seg.get("relay_modifier_text", "") or "").strip(),
                 "step_transition_enabled": False,
                 "step_transition_type": "off",
                 "step_transition_prompt": "",
@@ -2711,6 +2631,17 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                 image_width = _safe_int(upstream_resources.get("cine_image_width"), image_width)
             if upstream_resources.get("cine_image_height") is not None and not _v3_has_own_segments:
                 image_height = _safe_int(upstream_resources.get("cine_image_height"), image_height)
+        if upstream_resources:
+            upstream_dialogue_timeline = upstream_resources.get("cine_board_timeline_data") or upstream_resources.get("cine_dialogue_shotboard_timeline_json")
+            parsed_upstream_dialogue_timeline = _safe_json_loads(str(upstream_dialogue_timeline or "{}"), {})
+            if isinstance(parsed_upstream_dialogue_timeline, dict) and isinstance(parsed_upstream_dialogue_timeline.get("segments"), list) and parsed_upstream_dialogue_timeline.get("segments"):
+                timeline_data = json.dumps(parsed_upstream_dialogue_timeline, ensure_ascii=False)
+                duration_seconds = float(_safe_float(parsed_upstream_dialogue_timeline.get("duration_seconds", duration_seconds), duration_seconds))
+                frame_rate = float(_safe_float(parsed_upstream_dialogue_timeline.get("frame_rate", frame_rate), frame_rate))
+                upstream_global_prompt = str(upstream_resources.get("cine_global_prompt", parsed_upstream_dialogue_timeline.get("global_prompt", "")) or "").strip()
+                if upstream_global_prompt:
+                    global_prompt = upstream_global_prompt
+                print(f"[IAMCCS ShotboardPlannerV3] UPSTREAM_DIALOGUE_TIMELINE segments={len(parsed_upstream_dialogue_timeline.get('segments', []))} global_prompt={bool(str(global_prompt).strip())}")
         multi_input = self._multi_input_from_cine_linx(upstream_cine_linx)
         (cine_linx,) = super().execute(
             global_prompt,
@@ -2734,6 +2665,45 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
         self._merge_upstream_helper_layers(cine_linx, upstream_cine_linx)
         data = _safe_json_loads(str(timeline_data or "{}"), {})
         audio_segments = data.get("audioSegments", []) if isinstance(data, dict) else []
+        if isinstance(cine_linx, dict):
+            upstream_resources_for_audio = cine_linx.get("resources", {}) if isinstance(cine_linx.get("resources"), dict) else {}
+            upstream_outputs_for_audio = cine_linx.get("outputs", {}) if isinstance(cine_linx.get("outputs"), dict) else {}
+            upstream_tracks_for_audio = upstream_resources_for_audio.get("cine_audio_tracks")
+            upstream_audio_segments = []
+            if isinstance(upstream_tracks_for_audio, dict):
+                for key in ("shotboard_segments", "segments", "all_segments"):
+                    value = upstream_tracks_for_audio.get(key)
+                    if isinstance(value, list) and value:
+                        upstream_audio_segments = value
+                        break
+            if not upstream_audio_segments:
+                parsed_audio = _safe_json_loads(
+                    upstream_resources_for_audio.get("cine_audio_timeline_json", upstream_outputs_for_audio.get("audio_timeline_json", "[]")),
+                    [],
+                )
+                if isinstance(parsed_audio, dict):
+                    upstream_audio_segments = parsed_audio.get("audioSegments", [])
+                elif isinstance(parsed_audio, list):
+                    upstream_audio_segments = parsed_audio
+            upstream_has_media = any(
+                isinstance(seg, dict) and (str(seg.get("audioFile", "")).strip() or str(seg.get("audioB64", "")).strip())
+                for seg in (upstream_audio_segments if isinstance(upstream_audio_segments, list) else [])
+            )
+            if upstream_has_media:
+                audio_segments = [dict(seg) for seg in upstream_audio_segments if isinstance(seg, dict)]
+                if isinstance(data, dict):
+                    data["audioSegments"] = audio_segments
+                    data["audioTrackCount"] = max(1, max([_safe_int(seg.get("track", 0), 0) for seg in audio_segments] or [0]) + 1)
+                    data["audioSyncMode"] = "timeline_audio"
+                    data["use_custom_audio"] = True
+                    data["audio_data"] = json.dumps({
+                        "audioSegments": audio_segments,
+                        "audioTrackCount": data["audioTrackCount"],
+                        "use_custom_audio": True,
+                        "audioSyncMode": "timeline_audio",
+                    }, ensure_ascii=False)
+                    timeline_data = json.dumps(data, ensure_ascii=False)
+                print(f"[IAMCCS ShotboardPlannerV3] UPSTREAM_AUDIO_MERGE segments={len(audio_segments)} custom_audio=True")
         visual_segments = data.get("segments", []) if isinstance(data, dict) else []
         if isinstance(visual_segments, list):
             reference_paths = _cine_reference_paths_from_text(image_paths)
@@ -3010,11 +2980,14 @@ class IAMCCS_CineShotboardLite(IAMCCS_CineShotboardPlannerPro):
             item = dict(row)
             item["use_prompt"] = False
             item["relay_prompt"] = ""
-            item["use_relay_modifiers"] = False
-            item["camera_relay_mode"] = "off"
-            item["transition_relay_mode"] = "off"
-            item["relay_addon_position"] = "after"
-            item["relay_modifier_text"] = ""
+            for legacy_key in (
+                "use_" + "relay_modifiers",
+                "camera_" + "relay_mode",
+                "transition_" + "relay_mode",
+                "relay_" + "addon_position",
+                "relay_" + "modifier_text",
+            ):
+                item.pop(legacy_key, None)
             if not str(item.get("camera", "")).strip():
                 item["camera"] = "continuous dolly-in"
             if not str(item.get("transition", "")).strip():
@@ -3429,7 +3402,7 @@ class IAMCCS_CineInfoV2(IAMCCS_CineInfo):
         for order, key in enumerate(keyframes):
             ref = max(1, int(key.get("reference_index", order + 1)))
             frame = int(key.get("frame", int(round(float(key.get("second", 0.0)) * fps))))
-            guide_strength = _wdc_image_guide_strength(key, _safe_float(key.get("strength", 1.0), 1.0))
+            guide_strength = _cine_guide_strength(key, _safe_float(key.get("strength", 1.0), 1.0))
             motion_force = _safe_float(key.get("motion_force", key.get("force", default_force)), default_force)
             item = {
                 "order": int(order + 1),
@@ -3518,7 +3491,7 @@ class IAMCCS_CineInfoV2(IAMCCS_CineInfo):
             ref = max(1, _safe_int(guide.get("ref", guide.get("reference_index", idx + 1)), idx + 1))
             if ref > batch_size:
                 continue
-            strength = _wdc_image_guide_strength(guide, _safe_float(guide.get("strength", 1.0), 1.0))
+            strength = _cine_guide_strength(guide, _safe_float(guide.get("strength", 1.0), 1.0))
             if strength <= 0:
                 continue
             frame = _safe_int(
@@ -3533,7 +3506,6 @@ class IAMCCS_CineInfoV2(IAMCCS_CineInfo):
             guide_data.setdefault("motion_forces", []).append(
                 float(_safe_float(guide.get("motion_force", guide.get("force", 0.0)), 0.0))
             )
-            guide_data.setdefault("image_lock_strengths", []).append(float(strength))
             step_type = str(guide.get("step_transition_type", "off") or "off").strip().lower()
             guide_data.setdefault("step_transition_sources", []).append(
                 bool(_safe_bool(guide.get("step_transition_enabled"), False) and step_type != "off")
@@ -3669,7 +3641,7 @@ class IAMCCS_CineFLFProductor:
                     "reference_index": int(key.get("reference_index", idx + 1)),
                     "second": float(key.get("second", 0.0)),
                     "frame": int(key.get("frame", 0)),
-                    "strength": float(_wdc_image_guide_strength(key, _safe_float(key.get("strength", 1.0), 1.0))),
+                    "strength": float(_cine_guide_strength(key, _safe_float(key.get("strength", 1.0), 1.0))),
                     "motion_force": float(_safe_float(key.get("motion_force", key.get("force", 0.0)), 0.0)),
                     "camera": str(key.get("camera", "")),
                 }
@@ -3688,7 +3660,7 @@ class IAMCCS_CineFLFProductor:
                 continue
             ref = max(1, _safe_int(item.get("ref", item.get("reference_index", idx + 1)), idx + 1))
             frame = _safe_int(item.get("frame", int(round(_safe_float(item.get("second", 0.0), 0.0) * _safe_int(plan.get("frame_rate", 24), 24)))), 0)
-            strength = _clamp(_wdc_image_guide_strength(item, _safe_float(item.get("strength", 1.0), 1.0)) * float(strength_scale), 0.0, 1.0, 1.0)
+            strength = _clamp(_cine_guide_strength(item, _safe_float(item.get("strength", 1.0), 1.0)) * float(strength_scale), 0.0, 1.0, 1.0)
             if strength <= 0:
                 continue
             motion_force = _safe_float(item.get("motion_force", item.get("force", 0.0)), 0.0)
@@ -3817,7 +3789,6 @@ class IAMCCS_CineFLFProductor:
             guide_data["labels"].append(str(guide.get("label", f"guide_{idx + 1}")))
             guide_data["reference_indices"].append(int(ref))
             guide_data.setdefault("motion_forces", []).append(float(_safe_float(guide.get("motion_force", guide.get("force", 0.0)), 0.0)))
-            guide_data.setdefault("image_lock_strengths", []).append(float(guide.get("strength", 1.0)))
             step_type = str(guide.get("step_transition_type", "off") or "off").strip().lower()
             is_step_source = bool(_safe_bool(guide.get("step_transition_enabled"), False) and step_type != "off")
             prev_step_type = str(guides[idx - 1].get("step_transition_type", "off") or "off").strip().lower() if idx > 0 else "off"
@@ -4223,7 +4194,7 @@ class IAMCCS_CineFilmmakerBackend:
                 continue
             ref = max(1, _safe_int(seg.get("ref", seg.get("reference_index", seg.get("image_ref", image_order))), image_order))
             fallback_strength = _safe_float(seg.get("guideStrength", seg.get("guide_strength", seg.get("strength", 1.0))), 1.0)
-            strength = _wdc_image_guide_strength(seg, fallback_strength)
+            strength = _cine_guide_strength(seg, fallback_strength)
             if strength <= 0:
                 continue
             img_tensor = None
@@ -4255,7 +4226,6 @@ class IAMCCS_CineFilmmakerBackend:
             guide_data["labels"].append(str(seg.get("label", f"guide_{idx + 1}")))
             guide_data["reference_indices"].append(int(ref))
             guide_data.setdefault("motion_forces", []).append(float(_safe_float(seg.get("guideStrength", seg.get("motion_force", seg.get("force", 0.0))), 0.0)))
-            guide_data.setdefault("image_lock_strengths", []).append(float(strength))
             guide_data.setdefault("image_sources", []).append(str(source.get("imageTruthPath") or source.get("image_truth_path") or source.get("imageFile") or source.get("image_file") or source.get("path") or "") or f"multi_output[{ref}]")
         return guide_data
 
@@ -4468,7 +4438,7 @@ class IAMCCS_CineFilmmakerBackend:
                 f"refs={guide_data.get('reference_indices', [])} "
                 f"labels={guide_data.get('labels', [])} "
                 f"motion_forces={guide_data.get('motion_forces', [])} "
-                f"image_lock_strengths={guide_data.get('image_lock_strengths', [])}"
+                f"guide_strengths={guide_data.get('strengths', [])}"
             )
             image_sources_for_log = guide_data.get("image_sources", [])
             if image_sources_for_log:
@@ -4482,7 +4452,7 @@ class IAMCCS_CineFilmmakerBackend:
                 image_file = str(seg.get("imageTruthPath") or seg.get("image_truth_path") or seg.get("imageFile") or seg.get("image_file") or seg.get("path") or "")
                 if len(image_file) > 180:
                     image_file = "..." + image_file[-177:]
-                canonical_strength = _wdc_image_guide_strength(seg, _safe_float(seg.get("guideStrength", seg.get("force", default_force)), float(default_force)))
+                canonical_strength = _cine_guide_strength(seg, _safe_float(seg.get("force", seg.get("guideStrength", default_force)), float(default_force)))
                 print(
                     "[IAMCCS FilmmakerBackend] "
                     f"segment[{idx:02d}] "
@@ -4491,9 +4461,9 @@ class IAMCCS_CineFilmmakerBackend:
                     f"length={_safe_int(seg.get('length', seg.get('len', 0)), 0)} "
                     f"ref={_safe_int(seg.get('ref', seg.get('reference_index', seg.get('image_ref', 0))), 0)} "
                     f"use_guide={bool(_safe_bool(seg.get('use_guide', seg.get('guide', True)), True))} "
+                    f"force={float(canonical_strength):.4f} "
                     f"guideStrength={float(canonical_strength):.4f} "
-                    f"imageLockStrength={float(canonical_strength):.4f} "
-                    f"singleStrengthSource='guideStrength' "
+                    f"singleStrengthSource='force' "
                     f"label={str(seg.get('label', ''))!r} "
                     f"imageFile={image_file!r} "
                     f"prompt={prompt!r}"
@@ -4779,10 +4749,9 @@ class IAMCCS_CineFilmmakerGuide(IAMCCS_CineFLFProductor):
 class IAMCCS_CineFilmmakerGuide1to1:
     """IAMCCS guide applicator matching the LTX Director Guide behavior 1:1.
 
-    This node intentionally does not call or wrap the WhatDreamsCost node. It
-    implements the same guide-data contract directly inside IAMCCS so subgraph
-    backends can stay fully IAMCCS-owned while preserving LTX Director guide
-    semantics.
+    This node intentionally keeps the guide-data contract implemented directly
+    inside IAMCCS so subgraph backends stay fully IAMCCS-owned while preserving
+    the expected LTX Director guide semantics.
     """
 
     @classmethod
@@ -5830,10 +5799,6 @@ class IAMCCS_CinePromptArchitect:
                 "transition": "prompt_relay_text",
                 "note": str(beat.get("image_role", "")),
                 "relay_prompt": prompt,
-                "camera_relay_mode": "off",
-                "transition_relay_mode": "off",
-                "relay_addon_position": "after",
-                "relay_modifier_text": "",
                 "step_transition_enabled": bool(bridge and index < len(beats) - 1),
                 "step_transition_type": "action_beat" if bridge and index < len(beats) - 1 else "off",
                 "step_transition_prompt": bridge if index < len(beats) - 1 else "",
@@ -6045,11 +6010,6 @@ class IAMCCS_BoardMaker:
                 "transition": str(item.get("transition", "continuous_motion") or "continuous_motion").strip(),
                 "note": bridge,
                 "relay_prompt": local_prompt,
-                "use_relay_modifiers": False,
-                "camera_relay_mode": str(item.get("camera_relay_mode", "off") or "off").strip(),
-                "transition_relay_mode": str(item.get("transition_relay_mode", "off") or "off").strip(),
-                "relay_addon_position": str(item.get("relay_addon_position", "after") or "after").strip(),
-                "relay_modifier_text": str(item.get("relay_modifier_text", "") or "").strip(),
                 "step_transition_enabled": bool(bridge and transition_type != "off"),
                 "step_transition_type": transition_type,
                 "step_transition_prompt": bridge,

@@ -51,7 +51,7 @@ const NODE_GROUPS = {
         { key: "prompts", label: "Prompting", color: "#9a6b2f", widgets: ["positive_text", "negative_text"] },
         { key: "video", label: "Video", color: "#3f6fb0", widgets: ["width", "height"] },
         { key: "sampling", label: "Sampling", color: "#8352a6", widgets: ["steps", "cfg", "sampler_name", "seed", "max_shift", "base_shift", "sigma_terminal", "show_manual_sigmas", "manual_sigmas", "image_strength", "image_compression"] },
-        { key: "taeltx_preview", label: "TAELTX Preview", color: "#4e7c9b", widgets: ["taeltx_preview", "taeltx_preview_max_frames"] },
+        { key: "taeltx_preview", label: "TAELTX Preview", color: "#4e7c9b", widgets: ["taeltx_preview", "taeltx_preview_max_frames", "taeltx_preview_fps"] },
         { key: "transition", label: "Transition / Stitch", color: "#7a7040", widgets: ["stitch_preset", "overlap_side", "overlap_mode", "start_frames_rule", "color_match_mode", "color_match_strength"] },
         { key: "audio_context", label: "Audio Context", color: "#477c7a", widgets: ["audio_context_mode", "audio_left_context_s", "audio_right_context_s"] },
         { key: "latent_refresh", label: "Latent Refresh (beta)", color: "#b35c5c", widgets: ["continuity_anchor_mode", "anchor_refresh_interval", "anchor_image_strength", "anti_drift_mode", "anti_drift_strength", "identity_persistence_strength"] },
@@ -130,6 +130,7 @@ const COMMON_GENERATION_DEFAULTS = {
     show_manual_sigmas: false,
     taeltx_preview: false,
     taeltx_preview_max_frames: 17,
+    taeltx_preview_fps: 8,
 };
 // Regression guard: these sampling defaults are the contract for the
 // generation_type switch. They are applied only when the type changes; after
@@ -432,7 +433,7 @@ const RENDER_LEGACY_WIDGET_ORDER_PRE_ADVANCED_MANUAL_SIGMAS = [
     "continuity_anchor_mode", "anchor_refresh_interval", "anchor_image_strength", "anti_drift_mode", "anti_drift_strength", "identity_persistence_strength",
     "vae_mode", "downstream_stage_mode", "output_root", "segment_overlay_mode", "segment_overlay_text",
     "second_stage_mode", "stage2_model_policy", "second_stage_upscale_model", "second_stage_reinject_strength", "second_stage_cfg", "second_stage_manual_sigmas",
-    "media_mode", "vram_flush", "motion_intensity", "debug_verbose", "ui_preset", "generated_media_duration_seconds", "generation_type", "taeltx_preview", "taeltx_preview_max_frames",
+    "media_mode", "vram_flush", "motion_intensity", "debug_verbose", "ui_preset", "generated_media_duration_seconds", "generation_type", "taeltx_preview", "taeltx_preview_max_frames", "taeltx_preview_fps",
 ];
 const RENDER_LEGACY_WIDGET_ORDER = [
     "generation_mode", "backend_mode", "positive_text", "negative_text", "width", "height", "steps", "cfg", "sampler_name", "seed", "control_after_generate",
@@ -442,7 +443,7 @@ const RENDER_LEGACY_WIDGET_ORDER = [
     "continuity_anchor_mode", "anchor_refresh_interval", "anchor_image_strength", "anti_drift_mode", "anti_drift_strength", "identity_persistence_strength",
     "vae_mode", "downstream_stage_mode", "output_root", "segment_overlay_mode", "segment_overlay_text",
     "second_stage_mode", "stage2_model_policy", "second_stage_upscale_model", "second_stage_reinject_strength", "second_stage_cfg", "second_stage_manual_sigmas",
-    "media_mode", "vram_flush", "motion_intensity", "debug_verbose", "ui_preset", "generated_media_duration_seconds", "generation_type", "taeltx_preview", "taeltx_preview_max_frames",
+    "media_mode", "vram_flush", "motion_intensity", "debug_verbose", "ui_preset", "generated_media_duration_seconds", "generation_type", "taeltx_preview", "taeltx_preview_max_frames", "taeltx_preview_fps",
 ];
 const RENDER_CURRENT_WIDGET_ORDER_PRE_GENERATED_FPS_PRE_ADVANCED_MANUAL_SIGMAS = [
     "generation_type", "ui_preset", "generated_media_duration_seconds", "generation_mode", "backend_mode", "positive_text", "negative_text",
@@ -453,7 +454,7 @@ const RENDER_CURRENT_WIDGET_ORDER_PRE_GENERATED_FPS_PRE_ADVANCED_MANUAL_SIGMAS =
     "continuity_anchor_mode", "anchor_refresh_interval", "anchor_image_strength", "anti_drift_mode", "anti_drift_strength", "identity_persistence_strength",
     "vae_mode", "downstream_stage_mode", "output_root", "segment_overlay_mode", "segment_overlay_text",
     "second_stage_mode", "stage2_model_policy", "second_stage_upscale_model", "second_stage_reinject_strength", "second_stage_cfg", "second_stage_manual_sigmas",
-    "media_mode", "vram_flush", "motion_intensity", "debug_verbose", "taeltx_preview", "taeltx_preview_max_frames",
+    "media_mode", "vram_flush", "motion_intensity", "debug_verbose", "taeltx_preview", "taeltx_preview_max_frames", "taeltx_preview_fps",
 ];
 const RENDER_CURRENT_WIDGET_ORDER_PRE_GENERATED_FPS = [
     "generation_type", "ui_preset", "generated_media_duration_seconds", "generation_mode", "backend_mode", "positive_text", "negative_text",
@@ -464,7 +465,7 @@ const RENDER_CURRENT_WIDGET_ORDER_PRE_GENERATED_FPS = [
     "continuity_anchor_mode", "anchor_refresh_interval", "anchor_image_strength", "anti_drift_mode", "anti_drift_strength", "identity_persistence_strength",
     "vae_mode", "downstream_stage_mode", "output_root", "segment_overlay_mode", "segment_overlay_text",
     "second_stage_mode", "stage2_model_policy", "second_stage_upscale_model", "second_stage_reinject_strength", "second_stage_cfg", "second_stage_manual_sigmas",
-    "media_mode", "vram_flush", "motion_intensity", "debug_verbose", "taeltx_preview", "taeltx_preview_max_frames",
+    "media_mode", "vram_flush", "motion_intensity", "debug_verbose", "taeltx_preview", "taeltx_preview_max_frames", "taeltx_preview_fps",
 ];
 const RENDER_CURRENT_WIDGET_ORDER_PRE_ADVANCED_MANUAL_SIGMAS = [
     "generation_type", "ui_preset", "generated_media_duration_seconds", "generated_media_fps", "generation_mode", "backend_mode", "positive_text", "negative_text",
@@ -475,7 +476,7 @@ const RENDER_CURRENT_WIDGET_ORDER_PRE_ADVANCED_MANUAL_SIGMAS = [
     "continuity_anchor_mode", "anchor_refresh_interval", "anchor_image_strength", "anti_drift_mode", "anti_drift_strength", "identity_persistence_strength",
     "vae_mode", "downstream_stage_mode", "output_root", "segment_overlay_mode", "segment_overlay_text",
     "second_stage_mode", "stage2_model_policy", "second_stage_upscale_model", "second_stage_reinject_strength", "second_stage_cfg", "second_stage_manual_sigmas",
-    "media_mode", "vram_flush", "motion_intensity", "debug_verbose", "taeltx_preview", "taeltx_preview_max_frames",
+    "media_mode", "vram_flush", "motion_intensity", "debug_verbose", "taeltx_preview", "taeltx_preview_max_frames", "taeltx_preview_fps",
 ];
 const RENDER_CURRENT_WIDGET_ORDER = [
     "generation_type", "ui_preset", "generated_media_duration_seconds", "generated_media_fps", "generation_mode", "backend_mode", "positive_text", "negative_text",
@@ -486,7 +487,7 @@ const RENDER_CURRENT_WIDGET_ORDER = [
     "continuity_anchor_mode", "anchor_refresh_interval", "anchor_image_strength", "anti_drift_mode", "anti_drift_strength", "identity_persistence_strength",
     "vae_mode", "downstream_stage_mode", "output_root", "segment_overlay_mode", "segment_overlay_text",
     "second_stage_mode", "stage2_model_policy", "second_stage_upscale_model", "second_stage_reinject_strength", "second_stage_cfg", "second_stage_manual_sigmas",
-    "media_mode", "vram_flush", "motion_intensity", "debug_verbose", "taeltx_preview", "taeltx_preview_max_frames",
+    "media_mode", "vram_flush", "motion_intensity", "debug_verbose", "taeltx_preview", "taeltx_preview_max_frames", "taeltx_preview_fps",
 ];
 const VAE_LEGACY_WIDGET_ORDER = [
     "frame_rate", "decode_mode", "tiled_tile_size", "tiled_overlap", "frames_subdir", "image_format", "jpg_quality",
@@ -923,7 +924,7 @@ function normalizeRenderWidgetOrder(node) {
     moveWidgetsAfter(node, "sigma_terminal", ["show_manual_sigmas", "manual_sigmas"]);
     moveWidgetsAfter(node, "start_frames_rule", ["color_match_mode", "color_match_strength"]);
     moveWidgetsAfter(node, "second_stage_mode", ["stage2_model_policy", "second_stage_upscale_model", "second_stage_reinject_strength", "second_stage_cfg", "second_stage_manual_sigmas"]);
-    moveWidgetsAfter(node, "debug_verbose", ["taeltx_preview", "taeltx_preview_max_frames"]);
+    moveWidgetsAfter(node, "debug_verbose", ["taeltx_preview", "taeltx_preview_max_frames", "taeltx_preview_fps"]);
 }
 
 function normalizeVaeWidgetOrder(node) {
@@ -1723,10 +1724,13 @@ function applyRenderTaeltxPreviewVisibility(node) {
     const previewExpanded = !!node.properties?.iamccs_section_taeltx_preview;
     const enabledWidget = findWidget(node, "taeltx_preview");
     const maxFramesWidget = findWidget(node, "taeltx_preview_max_frames");
+    const fpsWidget = findWidget(node, "taeltx_preview_fps");
     setWidgetLabel(node, "taeltx_preview", "TAELTX Preview");
     setWidgetLabel(node, "taeltx_preview_max_frames", "Preview Frames");
+    setWidgetLabel(node, "taeltx_preview_fps", "Preview FPS");
     setWidgetVisibility(enabledWidget, previewExpanded);
     setWidgetVisibility(maxFramesWidget, previewExpanded && enabledWidget?.value === true);
+    setWidgetVisibility(fpsWidget, previewExpanded && enabledWidget?.value === true);
     fitNodeToWidgets(node);
 }
 
@@ -2050,6 +2054,9 @@ function readRenderSerializedValues(cleanValues) {
         valuesByName.taeltx_preview_max_frames = Number.isFinite(Number(valuesByName.taeltx_preview_max_frames))
             ? Number(valuesByName.taeltx_preview_max_frames)
             : 17;
+        valuesByName.taeltx_preview_fps = Number.isFinite(Number(valuesByName.taeltx_preview_fps))
+            ? Number(valuesByName.taeltx_preview_fps)
+            : 8;
         return normalizeReferenceAudioImg2VidValues(valuesByName);
     }
     if (["img2vid", "t2v"].includes(String(cleanValues[0] || ""))) {
@@ -2080,6 +2087,9 @@ function readRenderSerializedValues(cleanValues) {
         valuesByName.taeltx_preview_max_frames = Number.isFinite(Number(valuesByName.taeltx_preview_max_frames))
             ? Number(valuesByName.taeltx_preview_max_frames)
             : 17;
+        valuesByName.taeltx_preview_fps = Number.isFinite(Number(valuesByName.taeltx_preview_fps))
+            ? Number(valuesByName.taeltx_preview_fps)
+            : 8;
         return normalizeReferenceAudioImg2VidValues(valuesByName);
     }
     return null;
@@ -2250,6 +2260,7 @@ function sanitizeRenderWidgetValues(node) {
     sanitizeRenderNumber(node, "second_stage_cfg", 1.0);
     sanitizeRenderNumber(node, "motion_intensity", 1.0);
     sanitizeRenderNumber(node, "taeltx_preview_max_frames", 17);
+    sanitizeRenderNumber(node, "taeltx_preview_fps", 8);
     sanitizeBooleanWidget(node, "show_manual_sigmas", false);
     sanitizeBooleanWidget(node, "taeltx_preview", false);
     sanitizeBooleanWidget(node, "debug_verbose", false);

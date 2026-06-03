@@ -246,7 +246,7 @@ class IAMCCS_CineFLFProductorDyno(IAMCCS_CineFLFProductor):
             )
             report = _json_report({
                 "node": "IAMCCS_CineFLFProductorDyno",
-                "mode": "wdc_guide_data_compatible_dyno",
+                "mode": "cine_guide_data_compatible_dyno",
                 "guide_count": len(guide_data.get("images", [])),
                 "applied_count": len(guide_data_report.get("applied_guides", [])),
                 "skipped_count": len(guide_data_report.get("skipped_guides", [])),

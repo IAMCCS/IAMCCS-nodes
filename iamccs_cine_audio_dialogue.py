@@ -1657,8 +1657,8 @@ class IAMCCS_CineTimelineAudioMixer:
 
 
 
-from .au_tools.audio_board_arranger import IAMCCS_AudioBoardArranger
-from .au_tools.audio_bus_out import IAMCCS_BusOut
+from .audio.audio_board_arranger import IAMCCS_AudioBoardArranger
+from .audio.audio_bus_out import IAMCCS_BusOut
 class IAMCCS_CineVideoToWooshInputs:
     """Convert a generated Comfy VIDEO to IMAGE frames and WOOSH_VIDEO for foley generation."""
 

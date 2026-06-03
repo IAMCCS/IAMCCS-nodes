@@ -216,6 +216,28 @@ function normalizeRow(row, kind) {
     return out;
 }
 
+// By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+// By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+// By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+// By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+// By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+
+function splitSingleRowForInsert(rows, config) {
+    if (!Array.isArray(rows) || rows.length !== 1) return false;
+    const only = rows[0];
+    const currentSeconds = Number(only?.seconds || 0);
+    if (!Number.isFinite(currentSeconds) || currentSeconds <= 0.02) return false;
+    const halfSeconds = Math.max(0.01, currentSeconds / 2);
+    const normalizedHalf = String(Number(halfSeconds.toFixed(2)));
+    only.seconds = normalizedHalf;
+    rows.push(normalizeRow({
+        ...only,
+        seconds: normalizedHalf,
+        label: `${only.label || "shot"}_2`,
+    }, config.kind));
+    return true;
+}
+
 function rowToLine(row, config) {
     const prompt = buildPromptWithFraming(row);
     if (config.kind === "v2v") {
@@ -772,8 +794,10 @@ function openTimelineEditor(node, config, options = {}) {
         updatePreview();
     });
     const addRow = button("Add row", () => {
-        const base = rows[rows.length - 1] || (config.kind === "v2v" ? presetRows("v2v_single")[0] : presetRows("multigen_monologue")[0]);
-        rows.push({ ...base, label: `${base.label || "shot"}_${rows.length + 1}` });
+        if (!splitSingleRowForInsert(rows, config)) {
+            const base = rows[rows.length - 1] || (config.kind === "v2v" ? presetRows("v2v_single")[0] : presetRows("multigen_monologue")[0]);
+            rows.push(normalizeRow({ ...base, label: `${base.label || "shot"}_${rows.length + 1}` }, config.kind));
+        }
         renderRows();
         updatePreview();
     });

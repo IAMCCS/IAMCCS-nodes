@@ -212,6 +212,13 @@ function setWidgetValue(node, name, value) {
     return true;
 }
 
+function firstUiValue(message, key) {
+    if (!message || typeof message !== "object") return "";
+    const value = message[key];
+    if (Array.isArray(value)) return String(value[0] || "");
+    return String(value || "");
+}
+
 function addText(parent, className, text, tag = "div") {
     const el = document.createElement(tag);
     el.className = className;
@@ -902,14 +909,27 @@ function ensureAudioBoardArrangerStyles() {
             border-radius: 8px;
             font: 11px/1.25 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         }
+        .iamccs-audio-board.is-tool-cut .iamccs-audio-board-track,
+        .iamccs-audio-board.is-tool-cut .iamccs-audio-clip {
+            cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24'%3E%3Cpath fill='%23f4d49e' stroke='%230d1114' stroke-width='1.25' d='M9.2 7.4a2.6 2.6 0 1 1-5.2 0a2.6 2.6 0 0 1 5.2 0Zm0 9.2a2.6 2.6 0 1 1-5.2 0a2.6 2.6 0 0 1 5.2 0ZM9 8.6l10.4-4.2l.6 1.5l-7.7 4.4l7.7 7.8l-1.1 1.1l-8.8-6.7l-1.2.8l-.8-1.3l1.1-.8l-.7-.5l.8-1.3l.9.5l7.4-4.3l-8 3.2Z'/%3E%3C/svg%3E") 4 4, crosshair;
+        }
+        .iamccs-audio-board.is-tool-trim .iamccs-audio-board-track,
+        .iamccs-audio-board.is-tool-trim .iamccs-audio-clip {
+            cursor: ew-resize;
+        }
         .iamccs-audio-board.is-fullscreen {
+            display: flex;
+            flex-direction: column;
             min-height: calc(100vh - 96px);
             height: calc(100vh - 96px);
+            padding: 4px 8px 4px !important;
             border: 0;
             box-shadow: none;
         }
         .iamccs-audio-board.is-fullscreen .iamccs-audio-board-dynamic {
-            height: calc(100vh - 118px);
+            flex: 1 1 0;
+            height: auto;
+            min-height: 0;
             display: flex;
             flex-direction: column;
             min-width: 0;
@@ -1094,10 +1114,10 @@ function ensureAudioBoardArrangerStyles() {
         .iamccs-audio-board-timeline {
             position: relative;
             margin-top: 8px;
-            height: 360px;
-            overflow: auto;
+            height: auto;
+            overflow-x: auto;
+            overflow-y: hidden;
             min-width: 0;
-            contain: strict;
             border: 1px solid rgba(255,255,255,.10);
             border-radius: 7px;
             background: #0a0e11;
@@ -1154,36 +1174,41 @@ function ensureAudioBoardArrangerStyles() {
             border-color: rgba(210,147,52,.75);
         }
         .iamccs-audio-board.is-fullscreen .iamccs-audio-board-timeline {
-            flex: 0 0 min(38vh, 410px);
-            height: min(38vh, 410px);
+            flex: 1 1 0;
+            height: auto !important;
+            min-height: 220px;
+            overflow-y: auto !important;
         }
         .iamccs-audio-board-track {
             position: relative;
-            height: var(--iamccs-track-height, 72px);
+            height: var(--iamccs-track-height, 168px);
             border-bottom: 2px solid rgba(255,255,255,.10);
             background-image:
+                linear-gradient(180deg, var(--iamccs-track-fill, rgba(255,255,255,.02)), rgba(0,0,0,.02)),
                 linear-gradient(180deg, rgba(255,255,255,.018), rgba(0,0,0,.10)),
                 linear-gradient(90deg, rgba(244,212,158,.10) 1px, transparent 1px),
                 linear-gradient(90deg, rgba(255,255,255,.035) 1px, transparent 1px);
-            background-size: 100% 100%, calc(var(--iamccs-px-per-frame, 2px) * 24) 100%, calc(var(--iamccs-px-per-frame, 2px) * 6) 100%;
-            background-position: 0 0, 224px 0, 224px 0;
+            background-size: 100% 100%, 100% 100%, calc(var(--iamccs-px-per-frame, 2px) * 24) 100%, calc(var(--iamccs-px-per-frame, 2px) * 6) 100%;
+            background-position: 0 0, 0 0, 246px 0, 246px 0;
         }
         .iamccs-audio-board-track:nth-child(even) { background-color: rgba(255,255,255,.012); }
         .iamccs-audio-board-track-label {
             position: sticky;
             left: 0;
-            z-index: 7;
-            width: 224px;
-            height: var(--iamccs-track-height, 144px);
+            z-index: 15;
+            width: 246px;
+            height: var(--iamccs-track-height, 168px);
+            box-sizing: border-box;
             display: grid;
-            grid-template-rows: 21px 26px 40px 25px;
+            grid-template-rows: 21px 26px minmax(48px, 1fr) 28px;
             align-content: start;
-            gap: 4px;
+            gap: 5px;
             padding: 8px 11px;
             color: #f3e2c0;
             background:
-                linear-gradient(90deg, rgba(244,212,158,.12), transparent 34%),
+                linear-gradient(90deg, var(--iamccs-track-glow, rgba(244,212,158,.18)), transparent 38%),
                 linear-gradient(180deg, rgba(31,39,37,.99), rgba(9,13,15,.99));
+            background-color: #0e1518;
             border-right: 2px solid rgba(244,212,158,.28);
             border-bottom: 1px solid rgba(244,212,158,.12);
             box-shadow: inset -10px 0 18px rgba(0,0,0,.22);
@@ -1201,7 +1226,24 @@ function ensureAudioBoardArrangerStyles() {
                 linear-gradient(90deg, rgba(205,151,76,.32), transparent 45%),
                 linear-gradient(180deg, rgba(68,48,26,.98), rgba(11,13,14,.99));
             border-right-color: rgba(255,218,151,.82);
-            outline: 1px solid rgba(255,218,151,.30);
+            box-shadow: inset -10px 0 18px rgba(0,0,0,.22), inset 0 0 0 1px rgba(255,218,151,.30);
+        }
+        .iamccs-audio-board-track:has(.iamccs-audio-board-track-label.is-selected),
+        .iamccs-audio-board-track.is-selected {
+            background-image:
+                linear-gradient(180deg, rgba(244,212,158,.09), rgba(180,140,60,.05)),
+                linear-gradient(180deg, rgba(255,255,255,.018), rgba(0,0,0,.10)),
+                linear-gradient(90deg, rgba(244,212,158,.22) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,.07) 1px, transparent 1px);
+            border-bottom: 2px solid rgba(244,212,158,.55);
+            outline: 1px solid rgba(244,212,158,.28);
+            outline-offset: -1px;
+        }
+        .iamccs-audio-board-track-label.is-muted {
+            filter: saturate(.82) brightness(.86);
+        }
+        .iamccs-audio-board-track-label.is-locked {
+            box-shadow: inset -10px 0 18px rgba(0,0,0,.22), inset 0 0 0 1px rgba(130,182,214,.18);
         }
         .iamccs-track-strip-top,
         .iamccs-track-strip-controls,
@@ -1210,6 +1252,9 @@ function ensureAudioBoardArrangerStyles() {
             align-items: center;
             gap: 5px;
             min-width: 0;
+        }
+        .iamccs-track-strip-bottom {
+            margin-top: 2px;
         }
         .iamccs-track-strip-top {
             justify-content: space-between;
@@ -1243,6 +1288,7 @@ function ensureAudioBoardArrangerStyles() {
             display: grid;
             grid-template-columns: repeat(6, 1fr);
             gap: 4px;
+            margin-top: 1px;
         }
         .iamccs-track-mini {
             min-width: 0;
@@ -1257,11 +1303,20 @@ function ensureAudioBoardArrangerStyles() {
             box-shadow: inset 0 1px 0 rgba(255,255,255,.08), inset 0 -8px 12px rgba(0,0,0,.18);
             font: 950 9px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
             cursor: pointer;
+            transition: background .12s ease, border-color .12s ease, color .12s ease, box-shadow .12s ease, transform .08s ease;
+        }
+        .iamccs-track-mini:hover {
+            border-color: rgba(191,236,233,.52);
+            background: linear-gradient(180deg, #23454a, #13282d);
         }
         .iamccs-track-mini.is-active {
             color: #161109;
             border-color: #ffe0a4;
-            background: linear-gradient(180deg, #f3d99b, #b98343);
+            background: linear-gradient(180deg, #f7e3b2, #c78d43);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,.26), 0 0 0 1px rgba(255,224,164,.18), 0 0 12px rgba(255,205,126,.16);
+        }
+        .iamccs-track-mini:active {
+            transform: translateY(1px);
         }
         .iamccs-track-color-chip {
             min-width: 0;
@@ -1284,8 +1339,8 @@ function ensureAudioBoardArrangerStyles() {
             z-index: 20;
             width: 100%;
             min-width: 0;
-            height: 25px;
-            min-height: 25px;
+            height: 28px;
+            min-height: 28px;
             padding: 0 8px;
             border: 1px solid rgba(143,208,204,.38);
             border-radius: 6px;
@@ -1296,6 +1351,11 @@ function ensureAudioBoardArrangerStyles() {
         .iamccs-audio-board-meter,
         .iamccs-master-meter {
             position: relative;
+            display: grid;
+            grid-template-rows: 1fr;
+            gap: 1px;
+            padding: 1px;
+            box-sizing: border-box;
             height: 9px;
             border: 1px solid rgba(255,255,255,.18);
             border-radius: 999px;
@@ -1304,6 +1364,8 @@ function ensureAudioBoardArrangerStyles() {
         }
         .iamccs-audio-board-meter { width: 50px; }
         .iamccs-master-meter { width: 180px; height: 12px; }
+        .iamccs-audio-board-meter.is-stereo { height: 14px; grid-template-rows: repeat(2, 1fr); }
+        .iamccs-master-meter.is-stereo { height: 16px; grid-template-rows: repeat(2, 1fr); }
         .iamccs-audio-board-master > .iamccs-master-meter { flex: 0 0 180px; }
         .iamccs-audio-board-master {
             min-height: 58px;
@@ -1356,7 +1418,7 @@ function ensureAudioBoardArrangerStyles() {
         .iamccs-master-meter > i {
             display: block;
             width: 0%;
-            height: 100%;
+            height: auto;
             background: linear-gradient(90deg, #55c7b9 0%, #cfe37c 58%, #f0b857 78%, #dc5c42 100%);
             transition: width .045s linear;
         }
@@ -1388,6 +1450,7 @@ function ensureAudioBoardArrangerStyles() {
         .iamccs-audio-clip {
             position: absolute;
             top: 14px;
+            z-index: 1;
             height: calc(var(--iamccs-track-height, 72px) - 28px);
             min-width: 18px;
             border: 1px solid rgba(143, 208, 204, .56);
@@ -1574,21 +1637,36 @@ function ensureAudioBoardArrangerStyles() {
             grid-template-columns: minmax(280px, .36fr) minmax(900px, 1.64fr);
             gap: 8px;
             margin: 8px 0 12px;
-            flex: 0 0 390px;
-            height: 390px;
+            flex: 0 0 var(--iamccs-lower-height, 430px);
+            width: 100%;
+            max-width: 100%;
+            height: var(--iamccs-lower-height, 430px);
             min-height: 0;
             min-width: 0;
+            box-sizing: border-box;
             overflow: hidden;
+        }
+        .iamccs-audio-board-lower-handle {
+            height: 10px;
+            margin: 8px 0 4px;
+            border-radius: 999px;
+            border: 1px solid rgba(255,226,168,.18);
+            background:
+                linear-gradient(180deg, rgba(77,97,92,.82), rgba(18,24,26,.94)),
+                repeating-linear-gradient(90deg, rgba(255,255,255,.12) 0 10px, transparent 10px 20px);
+            box-shadow: inset 0 1px 0 rgba(255,255,255,.08);
+            cursor: ns-resize;
         }
         .iamccs-audio-board-lower.no-monitor { grid-template-columns: 1fr; }
         .iamccs-audio-board.is-fullscreen .iamccs-audio-board-lower {
-            flex: 1 1 auto;
-            height: auto;
-            min-height: 0;
+            flex: 0 0 var(--iamccs-lower-height, 360px);
+            height: var(--iamccs-lower-height, 360px);
+            min-height: 200px;
             overflow: hidden;
         }
         .iamccs-event-console,
         .iamccs-inline-efx {
+            width: 100%;
             min-width: 0;
             min-height: 0;
             border: 1px solid rgba(244,212,158,.16);
@@ -1601,6 +1679,8 @@ function ensureAudioBoardArrangerStyles() {
         }
         .iamccs-audio-board.is-fullscreen .iamccs-inline-efx,
         .iamccs-audio-board.is-fullscreen .iamccs-event-console {
+            display: flex;
+            flex-direction: column;
             height: 100%;
         }
         .iamccs-event-console-head,
@@ -1632,53 +1712,80 @@ function ensureAudioBoardArrangerStyles() {
             display: block;
             padding: 8px;
             min-width: 0;
+            width: 100%;
             height: calc(100% - 24px);
-            overflow: hidden;
+            box-sizing: border-box;
+            overflow-x: auto;
+            overflow-y: auto;
+        }
+        .iamccs-audio-board.is-fullscreen .iamccs-inline-efx-grid {
+            flex: 1 1 auto;
+            height: auto;
+            min-height: 360px;
         }
         .iamccs-device-chain {
             min-width: 0;
-            width: 100%;
-            height: 100%;
+            width: max-content;
+            min-width: 100%;
+            height: auto;
+            min-height: 100%;
             display: flex;
             gap: 7px;
             overflow-x: auto;
-            overflow-y: hidden;
+            overflow-y: visible;
             padding-bottom: 8px;
-            align-items: stretch;
+            align-items: flex-start;
             contain: layout paint;
+            box-sizing: border-box;
+        }
+        .iamccs-audio-board.is-fullscreen .iamccs-device-chain {
+            min-height: 100%;
         }
         .iamccs-device-module {
-            flex: 0 0 780px;
-            min-width: 780px;
+            flex: 0 0 816px;
+            min-width: 816px;
+            min-height: 0;
+            height: auto;
             display: flex;
             gap: 9px;
-            align-items: stretch;
+            align-items: flex-start;
+        }
+        .iamccs-audio-board.is-fullscreen .iamccs-device-module {
+            min-height: 0;
         }
         .iamccs-audio-device {
             flex: 0 0 330px;
-            min-height: 340px;
-            padding: 9px;
+            min-height: 320px;
+            height: auto;
+            padding: 8px 9px 8px;
             border: 1px solid rgba(244,212,158,.24);
             border-radius: 7px;
+            display: grid;
+            grid-template-rows: auto 1fr;
+            align-content: start;
             background:
                 radial-gradient(circle at 26px 20px, rgba(255,224,164,.20), transparent 22px),
                 linear-gradient(180deg, var(--device-hi, #5a3c29), var(--device-mid, #2c261f) 56%, var(--device-lo, #0b0d0c));
             box-shadow: inset 0 1px 0 rgba(255,255,255,.08), 0 5px 14px rgba(0,0,0,.24);
             color: #f7e6be;
         }
+        .iamccs-audio-board.is-fullscreen .iamccs-audio-device {
+            min-height: 356px;
+        }
         .iamccs-audio-device.iamccs-device-eq {
-            flex-basis: 350px;
+            flex-basis: 384px;
         }
         .iamccs-audio-device.iamccs-device-eq .iamccs-device-knobs {
-            grid-template-columns: repeat(4, minmax(0, 1fr));
-            gap: 6px;
+            grid-template-columns: repeat(4, minmax(66px, 1fr));
+            gap: 10px 8px;
         }
         .iamccs-audio-device.iamccs-device-eq .iamccs-device-knob i {
-            width: 34px;
-            height: 34px;
+            width: 40px;
+            height: 40px;
         }
         .iamccs-audio-device.iamccs-device-eq .iamccs-device-knob input[type="range"] {
-            width: 58px;
+            width: 72px;
+            max-width: 100%;
         }
         .iamccs-device-head {
             display: flex;
@@ -1738,6 +1845,40 @@ function ensureAudioBoardArrangerStyles() {
             gap: 8px;
             align-items: center;
             min-height: 42px;
+        }
+        .iamccs-track-effect-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            min-height: 56px;
+            align-content: flex-start;
+            margin-top: 7px;
+            padding-top: 6px;
+            border-top: 1px solid rgba(255,255,255,.08);
+            overflow: hidden;
+        }
+        .iamccs-track-effect-chip {
+            display: inline-flex;
+            align-items: center;
+            min-height: 20px;
+            padding: 0 7px;
+            border-radius: 999px;
+            border: 1px solid rgba(255,226,168,.22);
+            background: linear-gradient(180deg, rgba(29,38,41,.92), rgba(8,11,12,.96));
+            color: #cfe0e4;
+            font: 900 8px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+            letter-spacing: .02em;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+        .iamccs-track-effect-chip.is-empty {
+            color: #7f9498;
+            border-style: dashed;
+        }
+        .iamccs-track-effect-chip.is-active {
+            color: #1d1610;
+            border-color: rgba(255,226,168,.52);
+            background: linear-gradient(180deg, #f2d79a, #b9823f);
         }
         .iamccs-track-knob-wrap {
             display: grid;
@@ -1817,15 +1958,20 @@ function ensureAudioBoardArrangerStyles() {
         .iamccs-device-knobs {
             display: grid;
             grid-template-columns: repeat(2, 1fr);
-            gap: 7px 9px;
+            gap: 14px 11px;
+            align-content: start;
+            padding-top: 4px;
+            padding-bottom: 10px;
         }
         .iamccs-device-knob {
             display: grid;
+            grid-template-rows: auto auto auto auto;
             justify-items: center;
-            gap: 3px;
+            gap: 5px;
             color: #c9b890;
             font: 800 8px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
             text-transform: uppercase;
+            min-width: 0;
         }
         .iamccs-device-knob i {
             display: block;
@@ -1854,7 +2000,7 @@ function ensureAudioBoardArrangerStyles() {
             font-size: 8px;
         }
         .iamccs-inline-efx-panel {
-            flex: 0 0 435px;
+            flex: 1 1 435px;
             min-width: 435px;
             border: 1px solid rgba(255,255,255,.09);
             border-radius: 6px;
@@ -1889,8 +2035,8 @@ function ensureAudioBoardArrangerStyles() {
         .iamccs-audio-board.is-fullscreen .iamccs-efx-placeholder { height: 340px; }
         .iamccs-audio-board-track-label.is-selected {
             border-right-color: #ffe2a8;
-            box-shadow: inset 0 0 0 1px rgba(244,212,158,.38), 0 0 16px rgba(244,212,158,.12);
-            background: linear-gradient(180deg, rgba(65,52,35,.99), rgba(13,15,15,.99));
+            box-shadow: inset 0 0 0 1px rgba(244,212,158,.55), 0 0 22px rgba(244,212,158,.22);
+            background: linear-gradient(90deg, rgba(120,90,40,.70) 0px, rgba(65,52,35,.99) 40px, rgba(13,15,15,.99));
         }
         @media (max-width: 980px) {
             .iamccs-audio-board-lower { grid-template-columns: 1fr; }
@@ -1901,23 +2047,107 @@ function ensureAudioBoardArrangerStyles() {
 }
 
 const IAMCCS_AUDIO_BOARD_FIXED_WIDTH = 1880;
-const IAMCCS_AUDIO_BOARD_FIXED_HEIGHT = 1290;
+const IAMCCS_AUDIO_BOARD_FIXED_HEIGHT = 1650;
+const IAMCCS_AUDIO_BOARD_MIN_HEIGHT = 560;
+// By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+const TRACK_COLORS = ["#315f8f", "#2f7f71", "#7a5a34", "#6b4c80", "#8a4b45", "#556b36", "#3c6478", "#7a6738"];
+const normalizeTrackColor = (color, index = 0) => /^#[0-9a-f]{6}$/i.test(String(color || "")) ? String(color) : TRACK_COLORS[index % TRACK_COLORS.length];
+// By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+const trackColorWithAlpha = (color, alpha = .14, index = 0) => {
+    const hex = normalizeTrackColor(color, index).replace("#", "");
+    const red = parseInt(hex.slice(0, 2), 16);
+    const green = parseInt(hex.slice(2, 4), 16);
+    const blue = parseInt(hex.slice(4, 6), 16);
+    return `rgba(${red}, ${green}, ${blue}, ${Math.max(0, Math.min(1, Number(alpha || 0)))})`;
+};
+const nextTrackColor = (color, index = 0) => {
+    const current = normalizeTrackColor(color, index);
+    const pos = TRACK_COLORS.findIndex((item) => item.toLowerCase() === current.toLowerCase());
+    return TRACK_COLORS[((pos >= 0 ? pos : index) + 1) % TRACK_COLORS.length];
+};
+// By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+const EFFECT_CHOICES = [
+    ["eq", "EQ"],
+    ["compressor", "Compressor"],
+    ["limiter", "Limiter"],
+    ["gate", "Gate"],
+    ["reverb", "Reverb"],
+    ["delay", "Delay"],
+    ["saturator", "Saturator"],
+    ["utility", "Utility"],
+    ["stereo", "Stereo"],
+    ["deesser", "De-esser"],
+    ["transient", "Transient"],
+    ["tape", "Tape"],
+    ["chorus", "Chorus"],
+];
+// By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+
+function iamccsAudioBoardFixedSizeFromValue(rawValue) {
+    let data = {};
+    try { data = JSON.parse(String(rawValue || "{}")); } catch {}
+    const trackCount = Math.max(5, Number(data?.audioTrackCount || 5));
+    const visibleTrackCount = Math.min(trackCount, 5);
+    const trackHeight = Math.max(120, Math.min(220, Number(data?.view?.trackHeight || 168) || 168));
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // Compute height from actual UI sections to prevent bottom overflow:
+    // toolbars (~148px) + ruler+tracks + resize bar + lower FX panel
+    const lowerPanelHeight = Math.max(250, Math.min(760, Number(data?.lowerPanelHeight || 390) || 390));
+    const toolbarsH = 148;  // top toolbar ~42 + transport ~32 + master ~38 + padding ~36
+    const timelineH = 28 + visibleTrackCount * trackHeight; // ruler row (28) + track rows
+    const resizeBarH = 18;  // resize divider handle
+    const desiredHeight = Math.max(
+        IAMCCS_AUDIO_BOARD_MIN_HEIGHT,
+        Math.min(IAMCCS_AUDIO_BOARD_FIXED_HEIGHT, Math.round(toolbarsH + timelineH + resizeBarH + lowerPanelHeight))
+    );
+    return [IAMCCS_AUDIO_BOARD_FIXED_WIDTH, desiredHeight];
+}
+
+function iamccsAudioBoardFixedSizeFromDom(root, rawValue) {
+    const base = iamccsAudioBoardFixedSizeFromValue(rawValue);
+    const measuredHeight = Math.max(0, Math.ceil(Number(root?.scrollHeight || root?.offsetHeight || 0)));
+    if (!measuredHeight) return base;
+    // LiteGraph places the DOM widget starting at y≈34px (title 30 + margin 4) from the node top.
+    // node.size[1] must be >= measuredHeight + 34 + bottom_buffer so the element stays inside the border.
+    // Using +50 gives ~16px clearance between element bottom and node border.
+    // However the Arranger node has 3 output slots (cine_linx, audio_timeline_json, report) each adding
+    // ~20px (LiteGraph.NODE_SLOT_HEIGHT), pushing the widget start down by ~60px.
+    // Effective y-start ≈ 30 (title) + 60 (3 output slots) + 4 (margin) ≈ 94px.
+    // Therefore offset must be >= 94px to contain the element. Using +110 for 16px bottom clearance.
+    return [
+        base[0],
+        Math.max(IAMCCS_AUDIO_BOARD_MIN_HEIGHT, Math.min(IAMCCS_AUDIO_BOARD_FIXED_HEIGHT, measuredHeight + 110)),
+    ];
+}
 
 function renderAudioBoardArranger(node) {
     ensureAudioBoardArrangerStyles();
     if (node._iamccsAudioBoardReady) {
-        const fixed = [IAMCCS_AUDIO_BOARD_FIXED_WIDTH, IAMCCS_AUDIO_BOARD_FIXED_HEIGHT];
+        const runtimeWidget = findWidget(node, "arranger_data");
+        let runtimeValue = String(runtimeWidget?.value || "").trim();
+        // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+        // If widget value is still empty/default after load, try localStorage backup
+        if (!runtimeValue || runtimeValue === "{}") {
+            try {
+                const lsRaw = localStorage.getItem(`iamccs_audioboard_${node.id}`);
+                if (lsRaw) { const lsParsed = JSON.parse(lsRaw); if (lsParsed?.audioSegments?.length) runtimeValue = lsRaw; }
+            } catch {}
+        }
+        if (runtimeValue && typeof node._iamccsAudioBoardApplyRuntimeTimeline === "function") {
+            try { node._iamccsAudioBoardApplyRuntimeTimeline(runtimeValue, "rerender_ready_sync"); } catch {}
+        }
+        const domWidget = (node.widgets || []).find((w) => w?.type === "iamccs_audio_board_arranger" || w?.name === "AudioBoard Arranger");
+        const existingRoot = domWidget?.element || domWidget?.inputEl || null;
+        const fixed = iamccsAudioBoardFixedSizeFromDom(existingRoot, runtimeValue);
         node._iamccsAudioBoardFixedSize = fixed;
         node.resizable = false;
         node.resizeable = false;
         node.flags = { ...(node.flags || {}), resizable: false };
         node.min_size = fixed.slice();
-        const domWidget = (node.widgets || []).find((w) => w?.type === "iamccs_audio_board_arranger" || w?.name === "AudioBoard Arranger");
-        const existingRoot = domWidget?.element || domWidget?.inputEl || null;
         if (domWidget) {
             domWidget.computeSize = () => existingRoot?._iamccsAudioFullscreenState
                 ? [IAMCCS_AUDIO_BOARD_FIXED_WIDTH, 24]
-                : [IAMCCS_AUDIO_BOARD_FIXED_WIDTH, IAMCCS_AUDIO_BOARD_FIXED_HEIGHT - 70];
+                : [fixed[0], Math.max(24, fixed[1] - 70)];
         }
         if (Number(node.size?.[0] || 0) !== fixed[0] || Number(node.size?.[1] || 0) !== fixed[1]) {
             if (typeof node.setSize === "function") node.setSize(fixed.slice());
@@ -1949,38 +2179,66 @@ function renderAudioBoardArranger(node) {
     root.tabIndex = 0;
     const fileInput = document.createElement("input");
     fileInput.type = "file";
-    fileInput.accept = "audio/*";
+    fileInput.accept = "audio/*,.wav,.mp3,.m4a,.flac,.ogg,.aac,.aif,.aiff,.wma";
     fileInput.multiple = true;
     fileInput.style.display = "none";
     root.appendChild(fileInput);
+    const audioBoardInput = document.createElement("input");
+    audioBoardInput.type = "file";
+    audioBoardInput.accept = ".json,application/json";
+    audioBoardInput.multiple = false;
+    audioBoardInput.style.display = "none";
+    root.appendChild(audioBoardInput);
 
-    const LABEL_W = 224;
+    const LABEL_W = 246;
     const VIEWPORT_SECONDS = 26;
     const DEFAULT_SECONDS = VIEWPORT_SECONDS;
     const AUDIO_BOARD_FIXED_WIDTH = IAMCCS_AUDIO_BOARD_FIXED_WIDTH;
     const AUDIO_BOARD_FIXED_HEIGHT = IAMCCS_AUDIO_BOARD_FIXED_HEIGHT;
-    const EFFECT_CHOICES = [
-        ["eq", "EQ"],
-        ["compressor", "Compressor"],
-        ["limiter", "Limiter"],
-        ["gate", "Gate"],
-        ["reverb", "Reverb"],
-        ["delay", "Delay"],
-        ["saturator", "Saturator"],
-        ["utility", "Utility"],
-        ["stereo", "Stereo"],
-        ["deesser", "De-esser"],
-        ["transient", "Transient"],
-        ["tape", "Tape"],
-        ["chorus", "Chorus"],
-    ];
-    const TRACK_COLORS = ["#315f8f", "#2f7f71", "#7a5a34", "#6b4c80", "#8a4b45", "#556b36", "#3c6478", "#7a6738"];
-    const normalizeTrackColor = (color, index = 0) => /^#[0-9a-f]{6}$/i.test(String(color || "")) ? String(color) : TRACK_COLORS[index % TRACK_COLORS.length];
-    const nextTrackColor = (color, index = 0) => {
-        const current = normalizeTrackColor(color, index);
-        const pos = TRACK_COLORS.findIndex((item) => item.toLowerCase() === current.toLowerCase());
-        return TRACK_COLORS[((pos >= 0 ? pos : index) + 1) % TRACK_COLORS.length];
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    const floatingTrackColorInput = document.createElement("input");
+    floatingTrackColorInput.type = "color";
+    floatingTrackColorInput.style.cssText = "position:fixed;left:-9999px;top:-9999px;opacity:0;pointer-events:none;z-index:999999;";
+    root.appendChild(floatingTrackColorInput);
+    let floatingTrackColorTarget = null;
+    const openTrackColorPicker = (track, event = null) => {
+        const trackIndex = Math.max(0, Number(track || 0));
+        const trackState = trackSettings(trackIndex);
+        floatingTrackColorTarget = trackIndex;
+        floatingTrackColorInput.value = normalizeTrackColor(trackState.color, trackIndex);
+        if (event && Number.isFinite(event.clientX) && Number.isFinite(event.clientY)) {
+            floatingTrackColorInput.style.left = `${Math.max(8, Math.round(event.clientX) - 18)}px`;
+            floatingTrackColorInput.style.top = `${Math.max(8, Math.round(event.clientY) - 18)}px`;
+        }
+        floatingTrackColorInput.click();
     };
+    floatingTrackColorInput.addEventListener("input", () => {
+        if (floatingTrackColorTarget == null) return;
+        const trackIndex = Math.max(0, Number(floatingTrackColorTarget || 0));
+        trackSettings(trackIndex).color = normalizeTrackColor(floatingTrackColorInput.value, trackIndex);
+        noteTrackMixLocalState(trackIndex, "color", 1, "color_live");
+        scheduleSilentStateWrite("track_color_live");
+        scheduleShotboardSync("track_color_live");
+        draw();
+    });
+    floatingTrackColorInput.addEventListener("change", () => {
+        if (floatingTrackColorTarget == null) return;
+        const trackIndex = Math.max(0, Number(floatingTrackColorTarget || 0));
+        trackSettings(trackIndex).color = normalizeTrackColor(floatingTrackColorInput.value, trackIndex);
+        noteTrackMixLocalState(trackIndex, "color", 1, "color");
+        addEdit(`A${trackIndex + 1} color changed.`);
+        writeState("track_color");
+        floatingTrackColorTarget = null;
+    });
+    floatingTrackColorInput.addEventListener("blur", () => {
+        floatingTrackColorTarget = null;
+        floatingTrackColorInput.style.left = "-9999px";
+        floatingTrackColorInput.style.top = "-9999px";
+    });
     const DEFAULT_MASTER_CHAIN = [
         { id: "master_eq", type: "eq", enabled: true, amount: .5, params: { low: 0, mid: 0, high: 0, q: 1.2 } },
         { id: "master_comp", type: "compressor", enabled: true, amount: .45, params: { threshold: -18, ratio: 4, attack: 6, release: 180, knee: 12, makeup: 0 } },
@@ -1989,10 +2247,31 @@ function renderAudioBoardArranger(node) {
     const audioBuffers = new Map();
     const audioUrls = new Map();
     const waveformLoading = new Set();
+    const contextMenuEl = document.createElement("div");
+    contextMenuEl.className = "iamccs-audio-context-menu";
+    contextMenuEl.style.display = "none";
+    document.body.appendChild(contextMenuEl);
     let selectedId = "";
     let audioContext = null;
     let shotboardSyncTimer = 0;
     let liveStateWriteTimer = 0;
+    let graphChangeTimer = 0;
+    let trackMixDebugAt = 0;
+    let lastTrackMixLocalAt = 0;
+    const TRACK_MIX_LOCAL_GUARD_MS = 1800;
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    const ARRANGER_LS_KEY = `iamccs_audioboard_${node.id}`;
+    const saveToLocalStorage = (json) => {
+        try { localStorage.setItem(ARRANGER_LS_KEY, String(json || "")); } catch {}
+    };
+    const loadFromLocalStorage = () => {
+        try {
+            const raw = localStorage.getItem(ARRANGER_LS_KEY);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            return parsed && typeof parsed === "object" ? parsed : null;
+        } catch { return null; }
+    };
     const shotboardSyncSignatures = new Map();
     let transport = {
         playing: false,
@@ -2000,7 +2279,10 @@ function renderAudioBoardArranger(node) {
         startedAt: 0,
         sources: [],
         analysers: new Map(),
+        trackMixNodes: new Map(),
         masterAnalyser: null,
+        masterGainNode: null,
+        audioContext: null,
         lastMeterSnapshot: { tracks: {}, master: { peak: 0, rms: 0 }, playing: false, playhead: 0 },
         raf: 0,
         efxFrame: 0,
@@ -2016,6 +2298,31 @@ function renderAudioBoardArranger(node) {
         } catch {}
     };
     const isLiveSyncReason = (reason) => /^(live_|fx_|eq_point|compressor_point)/.test(String(reason || ""));
+    const finiteNumber = (value, fallback = 0) => {
+        const next = Number(value);
+        return Number.isFinite(next) ? next : fallback;
+    };
+    const smoothAudioParam = (param, value) => {
+        if (!param) return;
+        const ctx = audioContext;
+        const next = Number(value);
+        if (!Number.isFinite(next)) return;
+        try {
+            if (ctx?.currentTime != null && typeof param.cancelScheduledValues === "function") {
+                param.cancelScheduledValues(ctx.currentTime);
+                param.setTargetAtTime(next, ctx.currentTime, 0.015);
+            } else {
+                param.value = next;
+            }
+        } catch {
+            try { param.value = next; } catch {}
+        }
+    };
+    const restartPlaybackIfNeeded = (reason = "live_fx_restart") => {
+        if (!transport.playing) return;
+        transport.helper = `Live FX rebuild: ${reason}`;
+        void playPlayback();
+    };
     const scheduleSilentStateWrite = (reason = "live") => {
         if (liveStateWriteTimer) window.clearTimeout(liveStateWriteTimer);
         liveStateWriteTimer = window.setTimeout(() => {
@@ -2081,32 +2388,67 @@ function renderAudioBoardArranger(node) {
         const hundredths = Math.floor((total - Math.floor(total)) * 100);
         return `${minutes}:${String(seconds).padStart(2, "0")}.${String(hundredths).padStart(2, "0")}`;
     };
+    const closeContextMenu = () => {
+        contextMenuEl.style.display = "none";
+        contextMenuEl.innerHTML = "";
+    };
+    const setTool = (tool, helper = "") => {
+        view().tool = tool;
+        if (helper) transport.helper = helper;
+        addEdit(`Tool: ${tool}.`);
+        writeState("tool", false);
+        draw();
+    };
     const parseState = () => {
         const fallback = {
             schema: "iamccs.audio_board_arranger",
             schema_version: 1,
             audioSegments: [],
-            audioTrackCount: 4,
+            audioTrackCount: 5,
             masterAudioGain: 1,
             masterAudioNormalize: false,
+            masterMono: false,
             masterBus: { limiter: true, ceilingDb: -1, compressor: .45, width: 1, reverbSend: 0, delaySend: 0, effectChain: JSON.parse(JSON.stringify(DEFAULT_MASTER_CHAIN)) },
             duration_seconds: DEFAULT_SECONDS,
             frame_rate: Number(fpsWidget?.value || 24),
             status: { edits: [] },
-            view: { timeZoom: 1, trackHeight: 144, tool: "cursor", visibleSeconds: VIEWPORT_SECONDS },
+            view: { timeZoom: 1, trackHeight: 168, tool: "cursor", visibleSeconds: VIEWPORT_SECONDS },
             showEventMonitor: false,
             showClipValues: false,
             showMultiGeneration: false,
+            fullscreenShowDevices: false,
+            shotboardAutoSyncEnabled: false,
+            lowerPanelHeight: 390,
             trackSettings: [],
             audioBusMode: "all_tracks",
             onlyFirstTrack: false,
             loopEnabled: false,
             loopInFrame: 0,
             loopOutFrame: 0,
-            selectedMixer: { type: "master", track: 0 },
+            selectedMixer: { type: "track", track: 0 },
         };
         try {
-            const data = JSON.parse(String(dataWidget?.value || ""));
+            let rawWidgetValue = String(dataWidget?.value || "").trim();
+            // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+            // If the widget has no segments (empty or default), check localStorage backup
+            if (!rawWidgetValue || rawWidgetValue === "{}") {
+                const lsData = loadFromLocalStorage();
+                if (lsData && Array.isArray(lsData.audioSegments) && lsData.audioSegments.length > 0) {
+                    rawWidgetValue = JSON.stringify(lsData);
+                }
+            } else {
+                // Peek at segments count without full parse to decide on LS merge
+                try {
+                    const peek = JSON.parse(rawWidgetValue);
+                    if (Array.isArray(peek.audioSegments) && peek.audioSegments.length === 0) {
+                        const lsData = loadFromLocalStorage();
+                        if (lsData && Array.isArray(lsData.audioSegments) && lsData.audioSegments.length > 0) {
+                            rawWidgetValue = JSON.stringify(lsData);
+                        }
+                    }
+                } catch {}
+            }
+            const data = JSON.parse(rawWidgetValue);
             const out = { ...fallback, ...(data && typeof data === "object" ? data : {}) };
             const storedDuration = Math.max(0, Number(out.duration_seconds || 0));
             const storedFps = Math.max(1, Number(out.frame_rate || fallback.frame_rate || 24) || 24);
@@ -2118,7 +2460,7 @@ function renderAudioBoardArranger(node) {
             out.duration_seconds = storedDuration > 0 && storedDuration <= computedDuration * 1.35
                 ? Math.max(VIEWPORT_SECONDS, storedDuration)
                 : computedDuration;
-            out.audioTrackCount = Math.max(1, Number(out.audioTrackCount || 4));
+            out.audioTrackCount = Math.max(5, Number(out.audioTrackCount || 5));
             out.masterBus = { ...fallback.masterBus, ...(out.masterBus && typeof out.masterBus === "object" ? out.masterBus : {}) };
             out.masterBus.effectChain = Array.isArray(out.masterBus.effectChain)
                 ? out.masterBus.effectChain
@@ -2126,19 +2468,160 @@ function renderAudioBoardArranger(node) {
             out.trackSettings = Array.isArray(out.trackSettings) ? out.trackSettings : [];
             out.audioBusMode = (out.audioBusMode === "only_first" || out.onlyFirstTrack) ? "only_first" : "all_tracks";
             out.onlyFirstTrack = out.audioBusMode === "only_first";
+            out.masterMono = Boolean(out.masterMono);
             out.loopEnabled = Boolean(out.loopEnabled);
             out.loopInFrame = Math.max(0, Math.round(Number(out.loopInFrame || 0)));
             out.loopOutFrame = Math.max(0, Math.round(Number(out.loopOutFrame || 0)));
             out.selectedMixer = out.selectedMixer && typeof out.selectedMixer === "object" ? out.selectedMixer : fallback.selectedMixer;
+            out.selectedMixer.track = Math.max(0, Math.min(out.audioTrackCount - 1, Number(out.selectedMixer.track || 0)));
             out.showEventMonitor = Boolean(out.showEventMonitor);
             out.showClipValues = Boolean(out.showClipValues);
             out.showMultiGeneration = Boolean(out.showMultiGeneration);
+            out.fullscreenShowDevices = Boolean(out.fullscreenShowDevices);
+            out.shotboardAutoSyncEnabled = Boolean(out.shotboardAutoSyncEnabled);
+            out.lowerPanelHeight = Math.max(250, Math.min(760, Number(out.lowerPanelHeight || 390) || 390));
             return out;
         } catch {
             return fallback;
         }
     };
     let state = parseState();
+    const patchIncomingTrackMixState = (rawValue, reason = "runtime_sync") => {
+        const protectLocalTrackMix = /(runtime_sync|rerender_ready_sync|onExecuted|history_sync)/.test(String(reason || ""))
+            || Date.now() - lastTrackMixLocalAt < TRACK_MIX_LOCAL_GUARD_MS;
+        if (!protectLocalTrackMix) return rawValue;
+        try {
+            let currentWidgetTrackSettings = [];
+            try {
+                const currentWidgetData = JSON.parse(String(dataWidget?.value || "{}"));
+                currentWidgetTrackSettings = Array.isArray(currentWidgetData?.trackSettings) ? currentWidgetData.trackSettings : [];
+            } catch {}
+            const localTrackSettings = Array.isArray(currentWidgetTrackSettings) && currentWidgetTrackSettings.length
+                ? currentWidgetTrackSettings
+                : state.trackSettings;
+            if (!Array.isArray(localTrackSettings) || !localTrackSettings.length) return rawValue;
+            const data = JSON.parse(String(rawValue || "{}"));
+            data.trackSettings = Array.isArray(data.trackSettings) ? data.trackSettings : [];
+            if (!data.trackSettings.length) {
+                data.trackSettings = JSON.parse(JSON.stringify(localTrackSettings || []));
+                return JSON.stringify(data, null, 2);
+            }
+            let merged = 0;
+            const protectedKeys = ["volume", "pan", "mute", "solo", "normalize", "reverb", "reverbSend", "lock", "color", "effectChain", "noAutoEq"];
+            const sameValue = (left, right) => {
+                try { return JSON.stringify(left) === JSON.stringify(right); }
+                catch { return left === right; }
+            };
+            const cloneValue = (value) => {
+                if (value == null || typeof value !== "object") return value;
+                try { return JSON.parse(JSON.stringify(value)); }
+                catch { return value; }
+            };
+            for (let trackIndex = 0; trackIndex < localTrackSettings.length; trackIndex += 1) {
+                const localTrack = localTrackSettings[trackIndex];
+                if (!localTrack || typeof localTrack !== "object") continue;
+                const incoming = data.trackSettings[trackIndex] && typeof data.trackSettings[trackIndex] === "object" ? data.trackSettings[trackIndex] : {};
+                const nextTrack = { ...incoming };
+                let changed = false;
+                for (const key of protectedKeys) {
+                    if (!Object.prototype.hasOwnProperty.call(localTrack, key)) continue;
+                    let localValue = cloneValue(localTrack[key]);
+                    if (key === "volume") localValue = Math.max(0, Math.min(2, finiteNumber(localValue, 1)));
+                    if (key === "pan") localValue = Math.max(-1, Math.min(1, finiteNumber(localValue, 0)));
+                    if (["mute", "solo", "normalize", "reverb", "lock", "noAutoEq"].includes(key)) localValue = Boolean(localValue);
+                    if (key === "reverbSend") localValue = Math.max(0, Math.min(1, finiteNumber(localValue, 0)));
+                    if (!sameValue(nextTrack[key], localValue)) changed = true;
+                    nextTrack[key] = localValue;
+                }
+                if (!changed) continue;
+                data.trackSettings[trackIndex] = nextTrack;
+                merged += 1;
+            }
+            if (merged && Date.now() - trackMixDebugAt > 220) {
+                trackMixDebugAt = Date.now();
+                addEdit(`[debug] preserved local track mix over ${reason} on ${merged} track${merged === 1 ? "" : "s"}`);
+            }
+            return merged ? JSON.stringify(data, null, 2) : rawValue;
+        } catch {
+            return rawValue;
+        }
+    };
+    const applyRuntimeTimeline = (rawValue, reason = "runtime_sync") => {
+        const nextValue = String(patchIncomingTrackMixState(rawValue, reason) || "").trim();
+        if (!nextValue) return false;
+        if (!setWidgetValue(node, "arranger_data", nextValue)) return false;
+        state = parseState();
+        if (!segments().some((seg) => String(seg?.id || "") === String(selectedId || ""))) {
+            selectedId = segments()[0]?.id || "";
+        }
+        if (typeof node._iamccsAudioBoardLastRuntimeReason !== "string") {
+            node._iamccsAudioBoardLastRuntimeReason = "";
+        }
+        node._iamccsAudioBoardLastRuntimeReason = String(reason || "runtime_sync");
+        draw();
+        markCanvasDirty(true);
+        return true;
+    };
+    node._iamccsAudioBoardApplyRuntimeTimeline = applyRuntimeTimeline;
+    const historySyncTimestamp = (entry) => {
+        const messages = Array.isArray(entry?.status?.messages) ? entry.status.messages : [];
+        for (let index = messages.length - 1; index >= 0; index -= 1) {
+            const detail = messages[index]?.[1];
+            const timestamp = Number(detail?.timestamp || 0);
+            if (timestamp > 0) return timestamp;
+        }
+        return 0;
+    };
+    const loadLatestRuntimeTimelineFromHistory = async () => {
+        const response = await api.fetchApi("/history");
+        if (!response?.ok) return null;
+        const history = await response.json();
+        const entries = Object.entries(history || {}).sort((left, right) => historySyncTimestamp(right[1]) - historySyncTimestamp(left[1]));
+        for (const [promptId, entry] of entries) {
+            const output = entry?.outputs?.[String(node.id)];
+            const rawValue = firstUiValue(output, "iamccs_audio_board");
+            if (rawValue) return { promptId, rawValue };
+        }
+        return null;
+    };
+    const scheduleHistoryRuntimeSync = (reason = "history_sync") => {
+        if (node._iamccsAudioBoardHistorySyncTimer) {
+            window.clearTimeout(node._iamccsAudioBoardHistorySyncTimer);
+        }
+        node._iamccsAudioBoardHistorySyncTimer = window.setTimeout(async () => {
+            node._iamccsAudioBoardHistorySyncTimer = 0;
+            if (node._iamccsAudioBoardHistorySyncInFlight) return;
+            node._iamccsAudioBoardHistorySyncInFlight = true;
+            try {
+                const latest = await loadLatestRuntimeTimelineFromHistory();
+                if (!latest || latest.promptId === node._iamccsAudioBoardLastHistoryPromptId) return;
+                const applied = applyRuntimeTimeline(latest.rawValue, reason);
+                if (!applied) return;
+                node._iamccsAudioBoardLastHistoryPromptId = latest.promptId;
+                node.properties = node.properties || {};
+                node.properties.iamccsAudioBoardRuntimeSyncAt = new Date().toISOString();
+                renderIamccsAudioDialogueNode(node, reason);
+            } catch (err) {
+                console.warn("[IAMCCS AudioBoardArranger] history runtime sync failed", err);
+            } finally {
+                node._iamccsAudioBoardHistorySyncInFlight = false;
+            }
+        }, 90);
+    };
+    if (!node._iamccsAudioBoardStatusListenerBound && typeof api?.addEventListener === "function") {
+        node._iamccsAudioBoardStatusListenerBound = true;
+        api.addEventListener("status", (event) => {
+            const detail = event?.detail || {};
+            const queueRemaining = Number(detail?.exec_info?.queue_remaining ?? detail?.status?.exec_info?.queue_remaining ?? -1);
+            if (queueRemaining === 0) scheduleHistoryRuntimeSync("status_idle_history_sync");
+        });
+    }
+    scheduleHistoryRuntimeSync("render_bootstrap_history_sync");
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     const segments = () => Array.isArray(state.audioSegments) ? state.audioSegments : (state.audioSegments = []);
     const trackSettings = (track) => {
         state.trackSettings = Array.isArray(state.trackSettings) ? state.trackSettings : [];
@@ -2153,18 +2636,19 @@ function renderAudioBoardArranger(node) {
             pan: 0,
             color: normalizeTrackColor("", index),
             lock: false,
-            effectChain: [{ id: `track_${index}_eq`, type: "eq", enabled: true, amount: .5, params: { low: 0, mid: 0, high: 0, q: 1.2 } }],
+            noAutoEq: true,
+            effectChain: [],
             ...(state.trackSettings[index] && typeof state.trackSettings[index] === "object" ? state.trackSettings[index] : {}),
         };
         state.trackSettings[index].effectChain = Array.isArray(state.trackSettings[index].effectChain)
             ? state.trackSettings[index].effectChain
-            : [{ id: `track_${index}_eq`, type: "eq", enabled: true, amount: .5, params: { low: 0, mid: 0, high: 0, q: 1.2 } }];
+            : [];
         return state.trackSettings[index];
     };
     const selectedMixer = () => {
-        state.selectedMixer = state.selectedMixer && typeof state.selectedMixer === "object" ? state.selectedMixer : { type: "master", track: 0 };
+        state.selectedMixer = state.selectedMixer && typeof state.selectedMixer === "object" ? state.selectedMixer : { type: "track", track: 0 };
         state.selectedMixer.type = state.selectedMixer.type === "track" ? "track" : "master";
-        state.selectedMixer.track = Math.max(0, Number(state.selectedMixer.track || 0));
+        state.selectedMixer.track = Math.max(0, Math.min(Math.max(0, Number(state.audioTrackCount || 1) - 1), Number(state.selectedMixer.track || 0)));
         return state.selectedMixer;
     };
     const effectParamSpecs = (type) => ({
@@ -2270,6 +2754,11 @@ function renderAudioBoardArranger(node) {
         if (out.type === "eq") {
             out.params.lowCut = Boolean(out.params.lowCut);
             out.params.highCut = Boolean(out.params.highCut);
+            out.params.lowFreq = Math.max(40, Math.min(600, Number(out.params.lowFreq || 140)));
+            out.params.midFreq = Math.max(300, Math.min(5000, Number(out.params.midFreq || 1200)));
+            out.params.highFreq = Math.max(2000, Math.min(16000, Number(out.params.highFreq || 6200)));
+            if (out.params.lowFreq >= out.params.midFreq) out.params.midFreq = Math.min(5000, out.params.lowFreq + 160);
+            if (out.params.midFreq >= out.params.highFreq) out.params.highFreq = Math.min(16000, out.params.midFreq + 500);
             out.params.lowCutFreq = Math.max(20, Math.min(400, Number(out.params.lowCutFreq || 80)));
             out.params.highCutFreq = Math.max(2000, Math.min(22000, Number(out.params.highCutFreq || 12000)));
             out.params.lowCutLevel = Math.max(-48, Math.min(0, Number(out.params.lowCutLevel ?? -30)));
@@ -2278,11 +2767,48 @@ function renderAudioBoardArranger(node) {
         out.amount = Math.max(0, Math.min(1, Number(out.amount ?? .5)));
         return out;
     };
+    const eqBandFrequencies = (fx) => {
+        normalizeEffect(fx);
+        return {
+            low: Number(fx?.params?.lowFreq || 140),
+            mid: Number(fx?.params?.midFreq || 1200),
+            high: Number(fx?.params?.highFreq || 6200),
+        };
+    };
+    const eqVisualRatioForFreq = (hz) => {
+        const value = Math.max(20, Math.min(22000, Number(hz || 20)));
+        const bands = [
+            [20, 250],
+            [250, 4000],
+            [4000, 22000],
+        ];
+        for (let index = 0; index < bands.length; index += 1) {
+            const [minHz, maxHz] = bands[index];
+            if (value <= maxHz || index === bands.length - 1) {
+                const local = (Math.log10(value) - Math.log10(minHz)) / Math.max(.0001, Math.log10(maxHz) - Math.log10(minHz));
+                return Math.max(0, Math.min(1, (index + local) / bands.length));
+            }
+        }
+        return .5;
+    };
+    const eqFreqForVisualRatio = (ratio) => {
+        const bands = [
+            [20, 250],
+            [250, 4000],
+            [4000, 22000],
+        ];
+        const clamped = Math.max(0, Math.min(0.999999, Number(ratio || 0)));
+        const scaled = clamped * bands.length;
+        const index = Math.max(0, Math.min(bands.length - 1, Math.floor(scaled)));
+        const [minHz, maxHz] = bands[index];
+        const local = scaled - index;
+        return Math.round(Math.pow(10, Math.log10(minHz) + local * (Math.log10(maxHz) - Math.log10(minHz))));
+    };
+    const eqVisualX = (hz, width) => Math.max(0, Math.min(Number(width || 0), eqVisualRatioForFreq(hz) * Number(width || 0)));
     const chainForTarget = () => {
         const target = selectedMixer();
         if (target.type === "track") {
             const chain = trackSettings(target.track).effectChain;
-            if (!trackSettings(target.track).noAutoEq && !chain.some((fx) => fx.type === "eq")) chain.unshift({ id: `track_${target.track}_eq`, type: "eq", enabled: true, amount: .5, params: { low: 0, mid: 0, high: 0, q: 1.2, lowCut: false, highCut: false } });
             chain.forEach(normalizeEffect);
             return chain;
         }
@@ -2290,9 +2816,15 @@ function renderAudioBoardArranger(node) {
         state.masterBus.effectChain = Array.isArray(state.masterBus.effectChain)
             ? state.masterBus.effectChain
             : JSON.parse(JSON.stringify(DEFAULT_MASTER_CHAIN));
-        if (!state.masterBus.noAutoEq && !state.masterBus.effectChain.some((fx) => fx.type === "eq")) state.masterBus.effectChain.unshift({ id: "master_eq", type: "eq", enabled: true, amount: .5, params: { low: 0, mid: 0, high: 0, q: 1.2, lowCut: false, highCut: false } });
         state.masterBus.effectChain.forEach(normalizeEffect);
         return state.masterBus.effectChain;
+    };
+    const masterEffectByType = (type) => chainForTarget().find((fx) => String(fx?.type || "") === String(type || "")) || null;
+    const syncMasterFlagsFromChain = () => {
+        const compFx = masterEffectByType("compressor");
+        const limiterFx = masterEffectByType("limiter");
+        state.masterBus.compressor = compFx && compFx.enabled !== false ? Math.max(0.01, Number(state.masterBus?.compressor || compFx.amount || .45)) : 0;
+        state.masterBus.limiter = Boolean(limiterFx && limiterFx.enabled !== false);
     };
     const addEffectToChain = (type, target = selectedMixer()) => {
         const cleanType = String(type || "").trim();
@@ -2302,9 +2834,11 @@ function renderAudioBoardArranger(node) {
         if (target.type === "master") {
             if (cleanType === "compressor") state.masterBus.compressor = Math.max(.45, Number(state.masterBus.compressor || 0));
             if (cleanType === "limiter") state.masterBus.limiter = true;
+            syncMasterFlagsFromChain();
         }
         addEdit(`Inserted ${cleanType} on ${target.type === "track" ? `A${target.track + 1}` : "Master"}.`);
         writeState("insert_effect");
+        restartPlaybackIfNeeded(`insert_${cleanType}`);
         draw();
     };
     const removeEffectFromChain = (fx, target = selectedMixer()) => {
@@ -2316,12 +2850,34 @@ function renderAudioBoardArranger(node) {
             if (target.type === "track") trackSettings(target.track).noAutoEq = true;
             else state.masterBus.noAutoEq = true;
         }
+        if (target.type === "master") syncMasterFlagsFromChain();
         addEdit(`Removed ${String(removed?.type || "device")} from ${target.type === "track" ? `A${target.track + 1}` : "Master"}.`);
         writeState("remove_effect");
+        restartPlaybackIfNeeded(`remove_${String(removed?.type || "fx")}`);
         draw();
     };
     const hasMedia = (seg) => Boolean(seg && (String(seg.audioFile || "").trim() || String(seg.audioB64 || "").trim()));
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    const isDialogueInjectPlaceholder = (seg) => Boolean(
+        seg
+        && (
+            seg.pendingTTS === true
+            || String(seg.purpose || "").trim() === "dialogue_pending_tts"
+            || String(seg.source || "").trim() === "IAMCCS_DialogueTagEditor_UI_Inject"
+        )
+    );
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    const stripDialogueInjectPlaceholders = (items, options = {}) => {
+        const list = Array.isArray(items) ? items : [];
+        const hasConcreteMedia = list.some((seg) => !isDialogueInjectPlaceholder(seg) && hasMedia(seg) && !seg?.mute);
+        if (!options.force && !hasConcreteMedia) return { segments: list, removed: 0, hasConcreteMedia };
+        const segments = list.filter((seg) => !isDialogueInjectPlaceholder(seg));
+        return { segments, removed: Math.max(0, list.length - segments.length), hasConcreteMedia };
+    };
     const effectiveGain = (seg) => Math.max(0, Math.min(4, Number(seg?.gain ?? 1) || 1));
+    const effectiveDisplayGain = (seg) => Math.max(.1, Math.min(4, effectiveGain(seg)));
+    const isStereoSegment = (seg) => String(seg?.channelMode || "").toLowerCase() === "stereo" || Number(seg?.channelCount || 1) > 1 || Math.abs(Number(seg?.stereoWidth ?? 1) - 1) > .05;
+    const trackHasStereoContent = (track) => segments().some((seg) => Number(seg?.track || 0) === Number(track || 0) && isStereoSegment(seg));
     const peakFor = (seg) => {
         const peaks = Array.isArray(seg?.waveformPeaks) ? seg.waveformPeaks.map((item) => {
             if (item && typeof item === "object") return Math.max(Math.abs(Number(item.min) || 0), Math.abs(Number(item.max) || 0));
@@ -2330,16 +2886,84 @@ function renderAudioBoardArranger(node) {
         return peaks.length ? Math.min(1, Math.max(...peaks) * effectiveGain(seg)) : 0;
     };
     const linkedShotboardNodes = () => {
-        const out = [];
-        for (const output of node.outputs || []) {
-            for (const linkId of output.links || []) {
-                const link = app.graph?.links?.[linkId];
-                const target = link ? app.graph?.getNodeById?.(link.target_id) : null;
-                const type = String(target?.comfyClass || target?.type || "");
-                if (target && type === "IAMCCS_CineShotboardPlannerV3") out.push(target);
+        const found = [];
+        const foundIds = new Set();
+        const visited = new Set();
+        const queue = [node];
+        while (queue.length) {
+            const current = queue.shift();
+            const currentId = Number(current?.id || 0);
+            if (!current || !currentId || visited.has(currentId)) continue;
+            visited.add(currentId);
+            for (const output of current.outputs || []) {
+                for (const linkId of output.links || []) {
+                    const link = app.graph?.links?.[linkId];
+                    const target = link ? app.graph?.getNodeById?.(link.target_id) : null;
+                    const targetId = Number(target?.id || 0);
+                    const type = String(target?.comfyClass || target?.type || "");
+                    if (!target || !targetId) continue;
+                    if (type === "IAMCCS_CineShotboardPlannerV3") {
+                        if (!foundIds.has(targetId)) {
+                            foundIds.add(targetId);
+                            found.push(target);
+                        }
+                        continue;
+                    }
+                    queue.push(target);
+                }
             }
         }
-        return out;
+        return found;
+    };
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    const upstreamDialogueTagEditor = () => {
+        const visited = new Set();
+        const queue = [node];
+        while (queue.length) {
+            const current = queue.shift();
+            const currentId = Number(current?.id || 0);
+            if (!current || !currentId || visited.has(currentId)) continue;
+            visited.add(currentId);
+            for (const input of current.inputs || []) {
+                const link = input?.link != null ? app.graph?.links?.[input.link] : null;
+                const origin = link ? app.graph?.getNodeById?.(link.origin_id) : null;
+                const originId = Number(origin?.id || 0);
+                const type = String(origin?.comfyClass || origin?.type || "");
+                if (!origin || !originId || visited.has(originId)) continue;
+                if (type === "IAMCCS_DialogueTagEditor") return origin;
+                queue.push(origin);
+            }
+        }
+        return null;
+    };
+    const dialoguePromptSyncSource = () => {
+        const source = upstreamDialogueTagEditor();
+        const widget = source ? findWidget(source, "dialogue_data") : null;
+        try {
+            const data = JSON.parse(String(widget?.value || "{}"));
+            const lines = Array.isArray(data?.lines) ? data.lines : [];
+            const localPrompts = lines
+                .map((line) => String(line?.local_prompt || line?.shot_prompt || "").trim())
+                .filter(Boolean);
+            return {
+                source,
+                globalPrompt: String(data?.global_prompt || data?.prompt || "").trim(),
+                localPrompts,
+                promptRelayEnabled: localPrompts.length > 0,
+            };
+        } catch {
+            return null;
+        }
+    };
+    const dialoguePromptSyncLabel = () => {
+        const source = dialoguePromptSyncSource();
+        if (!source) return "Prompt sync: OFF";
+        const sourceName = String(source?.title || source?.type || "DialogueTagEditor").trim() || "DialogueTagEditor";
+        return `Prompt sync: ON (${sourceName})`;
     };
     const shotboardDurationFrames = () => {
         let maxFrames = 0;
@@ -2361,15 +2985,21 @@ function renderAudioBoardArranger(node) {
     };
     const view = () => {
         state.view = state.view && typeof state.view === "object" ? state.view : {};
-        state.view.timeZoom = Math.max(0.35, Math.min(8, Number(state.view.timeZoom || 1)));
-        state.view.trackHeight = Math.max(144, Math.min(200, Number(state.view.trackHeight || 144)));
+        // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+        // Allow zoom down to 0.05 so long clips (5+ min) can be shown fully at low zoom
+        state.view.timeZoom = Math.max(0.05, Math.min(8, Number(state.view.timeZoom || 1)));
+        state.view.trackHeight = Math.max(120, Math.min(220, Number(state.view.trackHeight || 160)));
         state.view.tool = String(state.view.tool || "cursor");
         if (!["cursor", "move", "trim", "cut"].includes(state.view.tool)) state.view.tool = "cursor";
         state.view.visibleSeconds = VIEWPORT_SECONDS;
         return state.view;
     };
     const visibleTimelineWidth = () => Math.max(820, Math.round((root.clientWidth || 1280) - LABEL_W - 48));
-    const pxPerFrame = () => Math.max(0.08, (visibleTimelineWidth() / Math.max(1, secondsToFrames(VIEWPORT_SECONDS))) * view().timeZoom);
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // effectiveViewSeconds: auto-expands to fit actual clip content at zoom=1 (20% extra padding beyond last clip)
+    // This eliminates the black dead-space after clips and supports timelines of any duration (5 min etc.)
+    const effectiveViewSeconds = () => Math.max(VIEWPORT_SECONDS, Math.ceil(framesToSeconds(totalFrames()) * 1.2));
+    const pxPerFrame = () => Math.max(0.01, (visibleTimelineWidth() / Math.max(1, secondsToFrames(effectiveViewSeconds()))) * view().timeZoom);
     const contentWidth = () => LABEL_W + Math.max(visibleTimelineWidth(), Math.ceil(totalFrames() * pxPerFrame())) + 8;
     const frameToX = (frame) => LABEL_W + Math.round(Math.max(0, Number(frame || 0)) * pxPerFrame());
     const xToFrame = (x) => Math.max(0, Math.round((Number(x || 0) - LABEL_W) / pxPerFrame()));
@@ -2407,10 +3037,10 @@ function renderAudioBoardArranger(node) {
         const trackBars = new Map();
         root.querySelectorAll(".iamccs-track-meter").forEach((meter) => {
             const track = Number(meter.dataset.track || 0);
-            const fill = meter.querySelector("i");
-            if (!fill) return;
+            const fills = Array.from(meter.querySelectorAll("i"));
+            if (!fills.length) return;
             if (!trackBars.has(track)) trackBars.set(track, []);
-            trackBars.get(track).push(fill);
+            fills.forEach((fill) => trackBars.get(track).push(fill));
         });
         transport.dom = {
             playheads: Array.from(root.querySelectorAll(".iamccs-playhead")),
@@ -2427,6 +3057,20 @@ function renderAudioBoardArranger(node) {
         state.status.edits = state.status.edits.slice(0, 14);
         transport.helper = text;
     };
+    const noteTrackMixLocalState = (track, key, value, phase = "local") => {
+        const trackIndex = Math.max(0, Number(track || 0));
+        lastTrackMixLocalAt = Date.now();
+        if (phase === "end" || Date.now() - trackMixDebugAt > 220) {
+            trackMixDebugAt = Date.now();
+            addEdit(`[debug] A${trackIndex + 1} ${String(key || "mix")} ${phase}: ${typeof value === "number" ? value.toFixed(3) : value}`);
+        }
+    };
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    const pushArrangerTrackToggle = (track, key, enabled) => node._iamccsAudioBoardTransport?.setTrackToggle?.(track, key, enabled) === true;
     const visualOptions = () => {
         const board = linkedShotboardNodes()[0];
         const widget = board ? findWidget(board, "timeline_data") : null;
@@ -2481,6 +3125,7 @@ function renderAudioBoardArranger(node) {
         const renderTarget = options.render !== false && !liveSync;
         const callbackTarget = options.callback !== false && !liveSync;
         const boards = linkedShotboardNodes();
+        const promptSource = dialoguePromptSyncSource();
         for (const board of boards) {
             const widget = findWidget(board, "timeline_data");
             if (!widget) continue;
@@ -2489,11 +3134,45 @@ function renderAudioBoardArranger(node) {
             if (!data || typeof data !== "object") data = {};
             data.schema = data.schema || "iamccs.cine.filmmaker_timeline";
             data.schema_version = Math.max(2, Number(data.schema_version || 2));
+            if (promptSource) {
+                const globalPromptWidget = findWidget(board, "global_prompt");
+                if (promptSource.globalPrompt) {
+                    data.global_prompt = promptSource.globalPrompt;
+                    data.prompt = promptSource.globalPrompt;
+                    if (globalPromptWidget) {
+                        globalPromptWidget.value = promptSource.globalPrompt;
+                        if (callbackTarget) {
+                            try { globalPromptWidget.callback?.(globalPromptWidget.value); } catch {}
+                        }
+                    }
+                }
+                if (promptSource.localPrompts.length) {
+                    const visualSegments = Array.isArray(data.segments) ? data.segments : [];
+                    const promptTargets = visualSegments.filter((seg) => String(seg?.type || "image").toLowerCase() !== "audio" && !seg?.placeholder);
+                    promptTargets.forEach((seg, index) => {
+                        const nextPrompt = String(promptSource.localPrompts[index] || "").trim();
+                        if (!nextPrompt) return;
+                        seg.prompt = nextPrompt;
+                        seg.local_prompt = nextPrompt;
+                        seg.use_prompt = true;
+                    });
+                    const syncedPrompts = promptTargets
+                        .map((seg) => String(seg?.prompt || seg?.local_prompt || "").trim())
+                        .filter(Boolean);
+                    if (syncedPrompts.length) {
+                        data.director_local_prompts = syncedPrompts.join(" | ");
+                        data.local_prompts = syncedPrompts.join(" | ");
+                        data.promptrelay_enabled = Boolean(promptSource.promptRelayEnabled);
+                    }
+                }
+            }
             const allAudioSegments = JSON.parse(JSON.stringify(segments()));
             const shotboardOnlyFirst = state.audioBusMode === "only_first" || state.onlyFirstTrack;
             let nextShotboardAudioSegments = shotboardOnlyFirst
                 ? allAudioSegments.filter((seg) => Number(seg.track || 0) === 0)
                 : allAudioSegments;
+            const publishCleanup = stripDialogueInjectPlaceholders(nextShotboardAudioSegments, { force: reason === "manual_publish" });
+            if (publishCleanup.removed > 0) nextShotboardAudioSegments = publishCleanup.segments;
             data.audioTrackCount = shotboardOnlyFirst ? 1 : Math.max(1, Number(state.audioTrackCount || 4));
             data.masterAudioGain = Math.max(0, Math.min(2, Number(state.masterAudioGain ?? 1) || 1));
             data.masterAudioNormalize = Boolean(state.masterAudioNormalize);
@@ -2546,6 +3225,25 @@ function renderAudioBoardArranger(node) {
                 data.multiGeneration = boardMulti;
             }
             data.audioSegments = nextShotboardAudioSegments;
+
+            // Only publish tracks that have at least one clip — strip empty tracks.
+            // Build the compacted index: active track indices in ascending order.
+            const activeTrackIndices = [...new Set(data.audioSegments.map((seg) => Number(seg.track || 0)))].sort((a, b) => a - b);
+            const activeTrackIndexSet = new Set(activeTrackIndices);
+            // Remap segment .track values to a dense 0-based index so downstream
+            // consumers see contiguous track numbers (0, 1, 2 …) with no gaps.
+            const remapTrack = (oldTrack) => {
+                const pos = activeTrackIndices.indexOf(Number(oldTrack || 0));
+                return pos >= 0 ? pos : 0;
+            };
+            data.audioSegments = data.audioSegments.map((seg) => ({ ...seg, track: remapTrack(seg.track) }));
+            // Keep only the trackSettings entries that correspond to active tracks.
+            const compactedTrackSettings = activeTrackIndices.map((idx) => allTrackSettings[idx] || {});
+            if (!shotboardOnlyFirst && activeTrackIndices.length > 0 && activeTrackIndices.length < Number(state.audioTrackCount || 4)) {
+                data.audioTrackCount = activeTrackIndices.length;
+                data.trackSettings = compactedTrackSettings;
+            }
+
             data.use_custom_audio = data.audioSegments.some((seg) => hasMedia(seg) && !seg.mute);
             data.audio_data = JSON.stringify({
                 audioSegments: data.audioSegments,
@@ -2558,6 +3256,7 @@ function renderAudioBoardArranger(node) {
                 audioBusMode: data.audioBusMode,
                 onlyFirstTrack: data.onlyFirstTrack,
                 audioSyncMode: data.audioSyncMode,
+                duration_seconds: data.duration_seconds,
             });
             const syncSignature = JSON.stringify({
                 audioSegments: data.audioSegments,
@@ -2573,7 +3272,7 @@ function renderAudioBoardArranger(node) {
                 multiGeneration: data.multiGeneration || {},
             });
             const cacheKey = `${board.id || "board"}:${renderTarget ? "render" : "silent"}`;
-            if (shotboardSyncSignatures.get(cacheKey) === syncSignature && reason !== "manual_sync") continue;
+            if (shotboardSyncSignatures.get(cacheKey) === syncSignature && reason !== "manual_sync" && reason !== "manual_publish") continue;
             shotboardSyncSignatures.set(cacheKey, syncSignature);
             const boardDurationWidget = findWidget(board, "duration_seconds");
             const boardWidgetDuration = Math.max(0, Number(boardDurationWidget?.value || 0));
@@ -2634,6 +3333,7 @@ function renderAudioBoardArranger(node) {
         }
     };
     const scheduleShotboardSync = (reason = "live") => {
+        if (!state.shotboardAutoSyncEnabled) return;
         if (shotboardSyncTimer) window.clearTimeout(shotboardSyncTimer);
         shotboardSyncTimer = window.setTimeout(() => {
             shotboardSyncTimer = 0;
@@ -2668,10 +3368,46 @@ function renderAudioBoardArranger(node) {
             dataWidget.value = JSON.stringify(state, null, 2);
             if (!options.quiet) dataWidget.callback?.(dataWidget.value);
         }
-        if (sync) syncToShotboard(reason);
+        // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+        // Persist to localStorage as backup (survives refresh and workspace tab switch)
+        if (!options.quiet) saveToLocalStorage(dataWidget?.value || "");
+        // Trigger ComfyUI graph change so its autosave captures updated widget values
+        if (!options.quiet) {
+            if (graphChangeTimer) window.clearTimeout(graphChangeTimer);
+            graphChangeTimer = window.setTimeout(() => {
+                graphChangeTimer = 0;
+                try { app.graph?.change?.(); } catch {}
+            }, 400);
+        }
+        if (sync && state.shotboardAutoSyncEnabled) syncToShotboard(reason);
+        document.dispatchEvent(new CustomEvent("iamccs:audio_arranger_state_changed", {
+            detail: {
+                node_id: node.id,
+                reason,
+                selectedMixer: JSON.parse(JSON.stringify(state.selectedMixer || { type: "track", track: 0 })),
+            },
+        }));
         if (!options.quiet) {
             markCanvasDirty(false);
         }
+    };
+    const publishToShotboard = () => {
+        const boards = linkedShotboardNodes();
+        if (!boards.length) {
+            addEdit("Publish skipped: no connected Shotboard V3.");
+            draw();
+            return;
+        }
+        // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+        const cleanup = stripDialogueInjectPlaceholders(segments(), { force: false });
+        if (cleanup.removed > 0) {
+            state.audioSegments = cleanup.segments;
+            writeState("publish_placeholder_cleanup", false);
+            addEdit(`Removed ${cleanup.removed} Inject UI placeholder clip${cleanup.removed === 1 ? "" : "s"} before Publish.`);
+        }
+        syncToShotboard("manual_publish");
+        addEdit(`Published ${segments().length} audio clip${segments().length === 1 ? "" : "s"} to connected Shotboard V3.`);
+        draw();
     };
     const pullFromShotboard = () => {
         const board = linkedShotboardNodes()[0];
@@ -2698,6 +3434,68 @@ function renderAudioBoardArranger(node) {
         if (!audioContext) audioContext = new AudioContextClass();
         if (audioContext.state === "suspended") await audioContext.resume();
         return audioContext;
+    };
+    let saveAudioBoardInFlight = false;
+    const defaultAudioBoardPackageName = () => `audioboard_${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
+    const cleanAudioBoardPackageName = (value) => String(value || "").trim().replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, "_").slice(0, 120);
+    const saveAudioBoardPackage = async (options = {}) => {
+        if (saveAudioBoardInFlight) {
+            transport.helper = "Save AudioBoard already running...";
+            draw();
+            return;
+        }
+        saveAudioBoardInFlight = true;
+        const requestedLabel = cleanAudioBoardPackageName(options.packageName || state.audioBoardPackageName || "");
+        const label = requestedLabel || defaultAudioBoardPackageName();
+        state.audioBoardPackageName = label;
+        try {
+            console.info("[IAMCCS AudioBoardArranger] Save AudioBoard clicked", { label, nodeId: node.id || null });
+            addEdit(`Saving AudioBoard package: ${label}`);
+            transport.helper = `Saving AudioBoard package: ${label}`;
+            draw();
+            writeState("save_audioboard_prepare", false, { quiet: true });
+            const response = await api.fetchApi("/api/iamccs/audio/save_audioboard_package", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    package_name: label,
+                    board: JSON.parse(JSON.stringify(state)),
+                    workflow_node_id: node.id || null,
+                }),
+            });
+            let result = {};
+            try { result = await response.json(); }
+            catch { result = { error: `save failed: ${response.status}` }; }
+            if (!response.ok || !result?.ok) throw new Error(result?.error || `save failed: ${response.status}`);
+            state.audioBoardPackageName = result.package_name || label;
+            addEdit(`Saved AudioBoard package: ${result.package_name}`);
+            transport.helper = `Saved AudioBoard package: ${result.package_dir}`;
+            console.info("[IAMCCS AudioBoardArranger] Save AudioBoard complete", result);
+            writeState("save_audioboard_done", false, { quiet: true });
+        } catch (err) {
+            console.warn("[IAMCCS AudioBoardArranger] save package failed", err);
+            addEdit(`Save AudioBoard failed: ${err?.message || err}`);
+            transport.helper = `Save AudioBoard failed: ${err?.message || err}`;
+        } finally {
+            saveAudioBoardInFlight = false;
+            draw();
+        }
+    };
+    const saveAudioBoardPackageAs = () => {
+        const proposed = state.audioBoardPackageName || defaultAudioBoardPackageName();
+        const chosen = window.prompt("Save AudioBoard package as", proposed);
+        if (chosen == null) {
+            transport.helper = "Save As cancelled.";
+            draw();
+            return;
+        }
+        const label = cleanAudioBoardPackageName(chosen);
+        if (!label) {
+            transport.helper = "Save As cancelled: empty package name.";
+            draw();
+            return;
+        }
+        saveAudioBoardPackage({ packageName: label });
     };
     const uploadAudioFile = async (file) => {
         const body = new FormData();
@@ -2783,10 +3581,37 @@ function renderAudioBoardArranger(node) {
         const arrayBuffer = await file.arrayBuffer();
         const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
         const peaks = peaksFromBuffer(decoded, Math.max(900, Math.min(2200, Math.round(decoded.duration * 70))));
-        return { durationFrames: Math.max(1, Math.round(decoded.duration * fps())), peaks, buffer: decoded };
+        return {
+            durationFrames: Math.max(1, Math.round(decoded.duration * fps())),
+            peaks,
+            buffer: decoded,
+            channelCount: Math.max(1, Number(decoded.numberOfChannels || 1)),
+        };
+    };
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    const isProbablyAudioFile = (file) => {
+        if (!file) return false;
+        const mime = String(file.type || "").toLowerCase();
+        if (mime.startsWith("audio/")) return true;
+        if (mime === "application/ogg") return true;
+        const name = String(file.name || "").toLowerCase();
+        return /\.(wav|wave|mp3|m4a|flac|ogg|aac|aif|aiff|wma|opus)$/i.test(name);
     };
     const importFiles = async (files) => {
-        const list = Array.from(files || []).filter((file) => String(file.type || "").startsWith("audio/"));
+        const offeredFiles = Array.from(files || []);
+        const list = offeredFiles.filter((file) => isProbablyAudioFile(file));
+        if (!list.length) {
+            const skipped = offeredFiles.map((file) => String(file?.name || "file")).filter(Boolean);
+            const detail = skipped.length ? ` No supported audio detected in: ${skipped.join(", ")}.` : "";
+            addEdit(`Import skipped.${detail}`);
+            transport.helper = `Import skipped.${detail}`;
+            draw();
+            return;
+        }
         const firstVisual = visualOptions()[0] || null;
         let cursor = firstVisual ? Number(firstVisual.start || 0) : Math.max(0, ...segments().map((seg) => Number(seg.start || 0) + Number(seg.length || 1)));
         for (const file of list) {
@@ -2810,6 +3635,8 @@ function renderAudioBoardArranger(node) {
                     size: file.size,
                     waveformPeaks: info.peaks,
                     waveformReal: true,
+                    channelCount: Math.max(1, Number(info.channelCount || 1)),
+                    channelMode: Number(info.channelCount || 1) > 1 ? "stereo" : "mono",
                     purpose: "dialogue_or_music",
                     gain: 1,
                     pan: 0,
@@ -2844,16 +3671,55 @@ function renderAudioBoardArranger(node) {
                 if (!firstVisual) cursor += info.durationFrames;
                 addEdit(`Imported ${file.name} (${framesToSeconds(info.durationFrames).toFixed(2)}s).`);
             } catch (err) {
-                addEdit(`Import failed: ${file.name}`);
+                addEdit(`Import failed: ${file.name} (${err?.message || err})`);
                 console.warn("[IAMCCS AudioBoardArranger] import failed", err);
             }
         }
         writeState("import");
         draw();
     };
+    const importAudioBoardPackageFile = async (file) => {
+        if (!file) return;
+        try {
+            const raw = await file.text();
+            const parsed = JSON.parse(raw);
+            const board = parsed?.board && typeof parsed.board === "object" ? parsed.board : parsed;
+            if (!board || typeof board !== "object" || !Array.isArray(board.audioSegments)) {
+                throw new Error("Invalid AudioBoard package: audioSegments missing");
+            }
+            stopPlayback(false);
+            const next = {
+                ...parseState(),
+                ...board,
+                schema: "iamccs.audio_board_arranger",
+                schema_version: Math.max(1, Number(board.schema_version || 1) || 1),
+                audioBoardPackageName: board.audioBoardPackageName || parsed.package_name || file.name.replace(/\.json$/i, ""),
+            };
+            next.audioSegments = Array.isArray(next.audioSegments) ? next.audioSegments : [];
+            next.audioTrackCount = Math.max(1, Number(next.audioTrackCount || 1) || 1);
+            next.duration_seconds = Math.max(DEFAULT_SECONDS, Number(next.duration_seconds || DEFAULT_SECONDS) || DEFAULT_SECONDS);
+            next.view = { ...parseState().view, ...(board.view || {}) };
+            next.status = { edits: Array.isArray(board.status?.edits) ? board.status.edits.slice(-80) : [] };
+            state = next;
+            selectedId = segments()[0]?.id || "";
+            addEdit(`Imported AudioBoard package: ${file.name}`);
+            transport.helper = `Imported AudioBoard package: ${file.name}`;
+            writeState("import_audioboard");
+            draw();
+        } catch (err) {
+            console.warn("[IAMCCS AudioBoardArranger] import AudioBoard failed", err);
+            addEdit(`Import AudioBoard failed: ${err?.message || err}`);
+            transport.helper = `Import AudioBoard failed: ${err?.message || err}`;
+            draw();
+        }
+    };
     fileInput.onchange = async (event) => {
         await importFiles(event.target.files || []);
         fileInput.value = "";
+    };
+    audioBoardInput.onchange = async (event) => {
+        await importAudioBoardPackageFile((event.target.files || [])[0]);
+        audioBoardInput.value = "";
     };
     const setPlayhead = (frame, redraw = false) => {
         transport.playhead = Math.max(0, Math.min(totalFrames(), Math.round(Number(frame || 0))));
@@ -2872,7 +3738,9 @@ function renderAudioBoardArranger(node) {
         transport.sources = [];
         transport.playing = false;
         transport.analysers = new Map();
+        transport.trackMixNodes = new Map();
         transport.masterAnalyser = null;
+        transport.masterGainNode = null;
         transport.lastMeterSnapshot = { tracks: {}, master: { peak: 0, rms: 0 }, playing: false, playhead: transport.playhead };
         transport.efxFrame = 0;
         transport.lastMeterAt = 0;
@@ -2930,6 +3798,12 @@ function renderAudioBoardArranger(node) {
             const fx = canvas._iamccsFx?.type === "eq" ? canvas._iamccsFx : null;
             const freq = new Uint8Array(analyser.frequencyBinCount);
             analyser.getByteFrequencyData(freq);
+            ctx.fillStyle = "rgba(255,255,255,.03)";
+            ctx.fillRect(0, 0, w / 3, h);
+            ctx.fillStyle = "rgba(255,255,255,.02)";
+            ctx.fillRect(w / 3, 0, w / 3, h);
+            ctx.fillStyle = "rgba(255,255,255,.03)";
+            ctx.fillRect((w / 3) * 2, 0, w / 3, h);
             const bars = 88;
             for (let i = 0; i < bars; i += 1) {
                 const t = i / Math.max(1, bars - 1);
@@ -2950,10 +3824,7 @@ function renderAudioBoardArranger(node) {
             const lowCutLevel = Math.max(-48, Math.min(0, Number(fx?.params?.lowCutLevel ?? -30)));
             const highCutLevel = Math.max(-48, Math.min(0, Number(fx?.params?.highCutLevel ?? -30)));
             const center = h * .5;
-            const freqToX = (hz) => {
-                const t = (Math.log10(Math.max(20, Math.min(22000, Number(hz || 20)))) - Math.log10(20)) / (Math.log10(22000) - Math.log10(20));
-                return Math.max(0, Math.min(w, t * w));
-            };
+            const freqToX = (hz) => eqVisualX(hz, w);
             const yFromDb = (db) => center - (Math.max(-24, Math.min(24, Number(db || 0))) / 48) * h;
             const yCutFromDb = (db) => center - (Math.max(-48, Math.min(0, Number(db || 0))) / 72) * h;
             const drawSmooth = (points, stroke, width = 2.2) => {
@@ -2979,9 +3850,31 @@ function renderAudioBoardArranger(node) {
                 });
                 ctx.stroke();
             };
-            const lowX = freqToX(140);
-            const midX = freqToX(1200);
-            const highX = freqToX(6200);
+            const eqFreq = eqBandFrequencies(fx);
+            [-24, -12, 0, 12, 24].forEach((db) => {
+                const y = yFromDb(db);
+                ctx.strokeStyle = db === 0 ? "rgba(255,255,255,.14)" : "rgba(255,255,255,.06)";
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(w, y);
+                ctx.stroke();
+            });
+            [60, 250, 1000, 4000, 12000].forEach((hz) => {
+                const x = freqToX(hz);
+                ctx.strokeStyle = (hz === 250 || hz === 4000) ? "rgba(255,255,255,.14)" : "rgba(255,255,255,.08)";
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, h);
+                ctx.stroke();
+            });
+            ctx.fillStyle = "rgba(255,226,168,.72)";
+            ctx.font = "900 9px ui-monospace, Consolas, monospace";
+            ctx.fillText("LOW", 8, 12);
+            ctx.fillText("MID", Math.max(8, w * .5 - 10), 12);
+            ctx.fillText("HIGH", Math.max(8, w - 34), 12);
+            const lowX = freqToX(eqFreq.low);
+            const midX = freqToX(eqFreq.mid);
+            const highX = freqToX(eqFreq.high);
             const lowCutX = freqToX(hpf || 20);
             const highCutX = freqToX(lpf || 22000);
             if (hpf > 20) {
@@ -3001,9 +3894,8 @@ function renderAudioBoardArranger(node) {
                 ...(lpf < 22000 ? [[highCutX, center]] : []),
                 [w, lpf < 22000 ? yCutFromDb(highCutLevel) : center],
             ].sort((a, b) => a[0] - b[0]), "#f5d08e", 2.4);
-            ctx.fillStyle = "#ffe2a8";
+            ctx.fillStyle = "#ffc67f";
             ctx.font = "900 9px ui-monospace, Consolas, monospace";
-            ctx.fillText(`LOW ${low.toFixed(1)}  MID ${midDb.toFixed(1)}  HIGH ${high.toFixed(1)}`, 8, 14);
             if (hpf > 20) ctx.fillText(`LC ${Math.round(hpf)}Hz ${Math.round(lowCutLevel)}dB`, 8, h - 9);
             if (lpf < 22000) ctx.fillText(`HC ${(lpf / 1000).toFixed(1)}k ${Math.round(highCutLevel)}dB`, Math.max(8, w - 116), h - 9);
             return true;
@@ -3132,6 +4024,141 @@ function renderAudioBoardArranger(node) {
     const playPlayback = async () => {
         stopPlayback(false);
         const ctx = await ensureAudioContext();
+        transport.audioContext = ctx;
+        const impulseCache = new Map();
+        const buildImpulse = (seconds = 1.8, damp = .35) => {
+            const key = `${Number(seconds || 1.8).toFixed(2)}:${Number(damp || .35).toFixed(2)}:${ctx.sampleRate}`;
+            if (impulseCache.has(key)) return impulseCache.get(key);
+            const length = Math.max(1, Math.round(ctx.sampleRate * Math.max(.1, Math.min(8, Number(seconds || 1.8)))));
+            const impulse = ctx.createBuffer(2, length, ctx.sampleRate);
+            for (let channel = 0; channel < impulse.numberOfChannels; channel += 1) {
+                const data = impulse.getChannelData(channel);
+                for (let i = 0; i < length; i += 1) {
+                    const decay = Math.pow(1 - i / length, 1 + Math.max(0, Math.min(1, Number(damp || .35))) * 5);
+                    data[i] = (Math.random() * 2 - 1) * decay;
+                }
+            }
+            impulseCache.set(key, impulse);
+            return impulse;
+        };
+        const applyWetDryInsert = (inputNode, mixValue, buildWetChain) => {
+            const mix = Math.max(0, Math.min(1, Number(mixValue || 0)));
+            if (mix <= 0.0001) return inputNode;
+            const dry = ctx.createGain();
+            const wetInput = ctx.createGain();
+            const wetGain = ctx.createGain();
+            const output = ctx.createGain();
+            dry.gain.value = Math.sqrt(Math.max(0, 1 - mix));
+            wetGain.gain.value = Math.sqrt(mix);
+            inputNode.connect(dry);
+            dry.connect(output);
+            inputNode.connect(wetInput);
+            const wetTail = buildWetChain(wetInput) || wetInput;
+            wetTail.connect(wetGain);
+            wetGain.connect(output);
+            return output;
+        };
+        const applyStereoFieldStage = (inputNode, options = {}) => {
+            const widthValue = Math.max(0, Math.min(1, Number(options.width ?? 1)));
+            const monoValue = Number(options.mono || 0) >= 0.5;
+            const mixValue = options.mix == null ? 1 : Math.max(0, Math.min(1, Number(options.mix || 0)));
+            const panValue = Math.max(-1, Math.min(1, Number(options.pan || 0) + (Number(options.angle || 0) / 45)));
+            if (monoValue || Math.abs(widthValue - 1) > 0.001) {
+                if (ctx.createChannelSplitter && ctx.createChannelMerger) {
+                    inputNode = applyWetDryInsert(inputNode, mixValue, (entry) => {
+                        const width = monoValue ? 0 : widthValue;
+                        const splitter = ctx.createChannelSplitter(2);
+                        const merger = ctx.createChannelMerger(2);
+                        const leftToLeft = ctx.createGain();
+                        const rightToLeft = ctx.createGain();
+                        const leftToRight = ctx.createGain();
+                        const rightToRight = ctx.createGain();
+                        leftToLeft.gain.value = 0.5 * (1 + width);
+                        rightToLeft.gain.value = 0.5 * (1 - width);
+                        leftToRight.gain.value = 0.5 * (1 - width);
+                        rightToRight.gain.value = 0.5 * (1 + width);
+                        entry.connect(splitter);
+                        splitter.connect(leftToLeft, 0);
+                        splitter.connect(rightToLeft, 1);
+                        splitter.connect(leftToRight, 0);
+                        splitter.connect(rightToRight, 1);
+                        leftToLeft.connect(merger, 0, 0);
+                        rightToLeft.connect(merger, 0, 0);
+                        leftToRight.connect(merger, 0, 1);
+                        rightToRight.connect(merger, 0, 1);
+                        return merger;
+                    });
+                }
+            }
+            if (Math.abs(panValue) > 0.001 && ctx.createStereoPanner) {
+                const panNode = ctx.createStereoPanner();
+                panNode.pan.value = panValue;
+                inputNode.connect(panNode);
+                return panNode;
+            }
+            return inputNode;
+        };
+        const applyMasterInsertFx = (inputNode, fx) => {
+            const kind = String(fx?.type || "");
+            if (kind === "reverb" && ctx.createConvolver) {
+                return applyWetDryInsert(inputNode, fx?.params?.mix ?? .18, (entry) => {
+                    const convolver = ctx.createConvolver();
+                    convolver.normalize = true;
+                    convolver.buffer = buildImpulse(fx?.params?.decay ?? 1.8, fx?.params?.damp ?? .35);
+                    entry.connect(convolver);
+                    return convolver;
+                });
+            }
+            if (kind === "delay") {
+                return applyWetDryInsert(inputNode, fx?.params?.mix ?? .2, (entry) => {
+                    const delay = ctx.createDelay(2.5);
+                    const feedback = ctx.createGain();
+                    const tone = ctx.createBiquadFilter();
+                    delay.delayTime.value = Math.max(.03, Math.min(1.5, Number(fx?.params?.time ?? .18)));
+                    feedback.gain.value = Math.max(0, Math.min(.9, Number(fx?.params?.feedback ?? .28)));
+                    tone.type = "lowpass";
+                    tone.frequency.value = Math.max(200, Math.min(12000, Number(fx?.params?.filter ?? 4200)));
+                    entry.connect(delay);
+                    delay.connect(tone);
+                    tone.connect(feedback);
+                    feedback.connect(delay);
+                    return tone;
+                });
+            }
+            if (kind === "utility") return applyStereoFieldStage(inputNode, {
+                width: fx?.params?.width ?? 1,
+                mono: fx?.params?.mono ?? 0,
+                pan: fx?.params?.pan ?? 0,
+                mix: 1,
+            });
+            if (kind === "stereo") return applyStereoFieldStage(inputNode, {
+                width: fx?.params?.width ?? 1.15,
+                angle: fx?.params?.angle ?? 0,
+                mix: fx?.params?.mix ?? .5,
+            });
+            return inputNode;
+        };
+        const applyTrackInsertFx = (inputNode, fx) => {
+            const kind = String(fx?.type || "");
+            if (kind === "utility") {
+                const gainNode = ctx.createGain();
+                gainNode.gain.value = Math.pow(10, Math.max(-24, Math.min(24, Number(fx?.params?.gain ?? 0))) / 20);
+                inputNode.connect(gainNode);
+                return applyStereoFieldStage(gainNode, {
+                    width: fx?.params?.width ?? 1,
+                    mono: fx?.params?.mono ?? 0,
+                    pan: fx?.params?.pan ?? 0,
+                    mix: 1,
+                });
+            }
+            if (kind === "stereo") return applyStereoFieldStage(inputNode, {
+                width: fx?.params?.width ?? 1.15,
+                angle: fx?.params?.angle ?? 0,
+                mix: fx?.params?.mix ?? .5,
+            });
+            if (kind === "reverb" || kind === "delay") return applyMasterInsertFx(inputNode, fx);
+            return inputNode;
+        };
         const soloed = segments().some((seg) => seg.solo);
         const trackSoloed = Array.from({ length: Math.max(1, Number(state.audioTrackCount || 4)) }, (_, index) => trackSettings(index)).some((item) => item.solo);
         const range = loopRange();
@@ -3140,6 +4167,7 @@ function renderAudioBoardArranger(node) {
         }
         const masterGain = ctx.createGain();
         masterGain.gain.value = Math.max(0, Math.min(2, Number(state.masterAudioGain ?? 1) || 1));
+        transport.masterGainNode = masterGain;
         const masterAnalyser = ctx.createAnalyser();
         masterAnalyser.fftSize = 256;
         let masterLast = masterGain;
@@ -3158,11 +4186,22 @@ function renderAudioBoardArranger(node) {
             masterLast = filter;
         };
         if (masterEqFx) {
+            const masterEqFreq = eqBandFrequencies(masterEqFx);
             if (masterEqFx.params?.lowCut) addMasterBiquad("highpass", masterEqFx.params.lowCutFreq || 80);
-            if (Number(masterEqFx.params?.low || 0)) addMasterBiquad("lowshelf", 140, masterEqFx.params.low, .7);
-            if (Number(masterEqFx.params?.mid || 0)) addMasterBiquad("peaking", 1200, masterEqFx.params.mid, Math.max(.2, Number(masterEqFx.params?.q || 1.2)));
-            if (Number(masterEqFx.params?.high || 0)) addMasterBiquad("highshelf", 6200, masterEqFx.params.high, .7);
+            if (Number(masterEqFx.params?.low || 0)) addMasterBiquad("lowshelf", masterEqFreq.low, masterEqFx.params.low, .7);
+            if (Number(masterEqFx.params?.mid || 0)) addMasterBiquad("peaking", masterEqFreq.mid, masterEqFx.params.mid, Math.max(.2, Number(masterEqFx.params?.q || 1.2)));
+            if (Number(masterEqFx.params?.high || 0)) addMasterBiquad("highshelf", masterEqFreq.high, masterEqFx.params.high, .7);
             if (masterEqFx.params?.highCut) addMasterBiquad("lowpass", masterEqFx.params.highCutFreq || 12000);
+        }
+        if (state.masterAudioNormalize && ctx.createDynamicsCompressor) {
+            const normalizer = ctx.createDynamicsCompressor();
+            normalizer.threshold.value = -24;
+            normalizer.knee.value = 18;
+            normalizer.ratio.value = 3.5;
+            normalizer.attack.value = .004;
+            normalizer.release.value = .14;
+            masterLast.connect(normalizer);
+            masterLast = normalizer;
         }
         const masterCompAmount = masterCompFx ? Math.max(.01, Math.min(1, Math.abs(Number(masterCompFx.params?.threshold ?? -18)) / 60)) : Math.max(0, Math.min(1, Number(state.masterBus?.compressor || 0)));
         if ((masterLimFx || state.masterBus?.limiter || masterCompAmount > 0) && ctx.createDynamicsCompressor) {
@@ -3175,6 +4214,28 @@ function renderAudioBoardArranger(node) {
             masterLast.connect(comp);
             masterLast = comp;
         }
+        for (const fx of masterChain) {
+            if (!fx || fx.enabled === false || !["reverb", "delay"].includes(String(fx.type || ""))) continue;
+            masterLast = applyMasterInsertFx(masterLast, fx);
+        }
+        if (!masterChain.some((fx) => fx?.enabled !== false && fx?.type === "reverb") && Number(state.masterBus?.reverbSend || 0) > 0) {
+            masterLast = applyMasterInsertFx(masterLast, { type: "reverb", params: { decay: .9 + Number(state.masterBus?.reverbSend || 0) * 3.5, damp: .28 + Number(state.masterBus?.reverbSend || 0) * .45, mix: Math.min(.8, Math.max(.04, Number(state.masterBus?.reverbSend || 0) * .7)) } });
+        }
+        if (!masterChain.some((fx) => fx?.enabled !== false && fx?.type === "delay") && Number(state.masterBus?.delaySend || 0) > 0) {
+            masterLast = applyMasterInsertFx(masterLast, { type: "delay", params: { time: .18, feedback: Math.min(.55, Number(state.masterBus?.delaySend || 0) * .45), filter: 4200, mix: Math.min(.7, Number(state.masterBus?.delaySend || 0)) } });
+        }
+        if (state.masterMono && ctx.createChannelSplitter && ctx.createChannelMerger) {
+            const splitter = ctx.createChannelSplitter(2);
+            const mono = ctx.createGain();
+            const merger = ctx.createChannelMerger(2);
+            mono.gain.value = .5;
+            masterLast.connect(splitter);
+            splitter.connect(mono, 0);
+            splitter.connect(mono, 1);
+            mono.connect(merger, 0, 0);
+            mono.connect(merger, 0, 1);
+            masterLast = merger;
+        }
         masterLast.connect(masterAnalyser);
         masterAnalyser.connect(ctx.destination);
         const trackNodes = new Map();
@@ -3184,17 +4245,42 @@ function renderAudioBoardArranger(node) {
             const gain = ctx.createGain();
             gain.gain.value = Math.max(0, Math.min(2, Number(trackState.volume ?? 1)));
             let last = gain;
+            const liveTrackNodes = { gainNode: gain, panNode: null };
             if (ctx.createStereoPanner) {
                 const trackPan = ctx.createStereoPanner();
                 trackPan.pan.value = Math.max(-1, Math.min(1, Number(trackState.pan || 0)));
                 last.connect(trackPan);
                 last = trackPan;
+                liveTrackNodes.panNode = trackPan;
+            }
+            if (trackState.normalize && ctx.createDynamicsCompressor) {
+                const normalizer = ctx.createDynamicsCompressor();
+                normalizer.threshold.value = -24;
+                normalizer.knee.value = 18;
+                normalizer.ratio.value = 3.5;
+                normalizer.attack.value = .004;
+                normalizer.release.value = .14;
+                last.connect(normalizer);
+                last = normalizer;
             }
             const analyser = ctx.createAnalyser();
             analyser.fftSize = 256;
             last.connect(analyser);
+            if (trackState.reverb && ctx.createConvolver) {
+                const send = ctx.createGain();
+                const convolver = ctx.createConvolver();
+                const wet = ctx.createGain();
+                send.gain.value = .2;
+                wet.gain.value = .18;
+                convolver.buffer = buildImpulse(2.4, .36);
+                last.connect(send);
+                send.connect(convolver);
+                convolver.connect(wet);
+                wet.connect(masterGain);
+            }
             analyser.connect(masterGain);
             trackNodes.set(track, gain);
+            transport.trackMixNodes.set(track, liveTrackNodes);
             transport.analysers.set(track, analyser);
             return gain;
         };
@@ -3243,10 +4329,11 @@ function renderAudioBoardArranger(node) {
                 if (Number(seg.eqHighDb || 0)) addBiquad("highshelf", 6200, seg.eqHighDb, .7);
                 const trackEq = trackState.effectChain.find((fx) => fx.enabled !== false && fx.type === "eq");
                 if (trackEq) {
+                    const trackEqFreq = eqBandFrequencies(trackEq);
                     if (trackEq.params?.lowCut) addBiquad("highpass", trackEq.params.lowCutFreq || 80, 0, .7);
-                    if (Number(trackEq.params?.low || 0)) addBiquad("lowshelf", 140, trackEq.params.low, .7);
-                    if (Number(trackEq.params?.mid || 0)) addBiquad("peaking", 1200, trackEq.params.mid, Math.max(.2, Number(trackEq.params?.q || 1.2)));
-                    if (Number(trackEq.params?.high || 0)) addBiquad("highshelf", 6200, trackEq.params.high, .7);
+                    if (Number(trackEq.params?.low || 0)) addBiquad("lowshelf", trackEqFreq.low, trackEq.params.low, .7);
+                    if (Number(trackEq.params?.mid || 0)) addBiquad("peaking", trackEqFreq.mid, trackEq.params.mid, Math.max(.2, Number(trackEq.params?.q || 1.2)));
+                    if (Number(trackEq.params?.high || 0)) addBiquad("highshelf", trackEqFreq.high, trackEq.params.high, .7);
                     if (trackEq.params?.highCut) addBiquad("lowpass", trackEq.params.highCutFreq || 12000, 0, .7);
                 }
                 if (Number(seg.compressor || 0) > 0 && ctx.createDynamicsCompressor) {
@@ -3275,6 +4362,15 @@ function renderAudioBoardArranger(node) {
                     last.connect(node);
                     last = node;
                 }
+                const trackInsertChain = Array.isArray(trackState.effectChain)
+                    ? trackState.effectChain.map(normalizeEffect).filter((fx) => fx.enabled !== false && ["reverb", "delay", "utility"].includes(String(fx.type || "")))
+                    : [];
+                for (const fx of trackInsertChain) {
+                    last = applyTrackInsertFx(last, fx);
+                }
+                if (Number(seg.stereoWidth ?? 1) !== 1 && Number(buffer?.numberOfChannels || 1) > 1) {
+                    last = applyStereoFieldStage(last, { width: seg.stereoWidth ?? 1, mix: 1 });
+                }
                 if (ctx.createStereoPanner) {
                     const pan = ctx.createStereoPanner();
                     pan.pan.value = Math.max(-1, Math.min(1, Number(seg.pan || 0)));
@@ -3293,6 +4389,18 @@ function renderAudioBoardArranger(node) {
                     delay.connect(feedback);
                     feedback.connect(delay);
                     delay.connect(getTrack(trackIndex));
+                }
+                if (Number(seg.reverbSend || 0) > 0 && ctx.createConvolver) {
+                    const convolver = ctx.createConvolver();
+                    const send = ctx.createGain();
+                    const wet = ctx.createGain();
+                    convolver.buffer = buildImpulse(.9 + Number(seg.reverbSend || 0) * 3.5, .28 + Number(seg.reverbSend || 0) * .45);
+                    send.gain.value = Math.min(.85, Math.max(.04, Number(seg.reverbSend || 0) * .75));
+                    wet.gain.value = Math.min(.8, Math.max(.04, Number(seg.reverbSend || 0) * .7));
+                    last.connect(send);
+                    send.connect(convolver);
+                    convolver.connect(wet);
+                    wet.connect(getTrack(trackIndex));
                 }
                 last.connect(getTrack(trackIndex));
                 source.start(ctx.currentTime + when, offset, dur);
@@ -3316,6 +4424,37 @@ function renderAudioBoardArranger(node) {
                 setPlayhead(0, true);
             },
             setPlayhead: (frame, redraw = false) => setPlayhead(frame, redraw),
+            setTrackVolume: (track, value) => {
+                trackSettings(track).volume = Math.max(0, Math.min(2, Number(value ?? 1) || 1));
+                const live = transport.trackMixNodes.get(Math.max(0, Number(track || 0)));
+                if (!live?.gainNode) return false;
+                smoothAudioParam(live.gainNode.gain, trackSettings(track).volume);
+                return true;
+            },
+            setTrackPan: (track, value) => {
+                trackSettings(track).pan = Math.max(-1, Math.min(1, Number(value ?? 0) || 0));
+                const live = transport.trackMixNodes.get(Math.max(0, Number(track || 0)));
+                if (!live?.panNode?.pan) return false;
+                smoothAudioParam(live.panNode.pan, trackSettings(track).pan);
+                return true;
+            },
+            setTrackToggle: (track, key, enabled) => {
+                const cleanKey = ["mute", "solo", "normalize", "reverb", "lock"].includes(String(key || "")) ? String(key) : "";
+                if (!cleanKey) return false;
+                trackSettings(track)[cleanKey] = Boolean(enabled);
+                restartPlaybackIfNeeded(`track_${cleanKey}_external`);
+                return true;
+            },
+            setMasterGain: (value) => {
+                state.masterAudioGain = Math.max(0, Math.min(2, Number(value ?? 1) || 1));
+                if (!transport.masterGainNode?.gain) return false;
+                smoothAudioParam(transport.masterGainNode.gain, state.masterAudioGain);
+                return true;
+            },
+            rebuildFx: (reason = "transport_rebuild") => {
+                restartPlaybackIfNeeded(reason);
+                return true;
+            },
             snapshot: () => ({
                 playing: Boolean(transport.playing),
                 playhead: Math.max(0, Math.round(Number(transport.playhead || 0))),
@@ -3483,6 +4622,16 @@ function renderAudioBoardArranger(node) {
             drawWave(clip, seg);
         }
     };
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    const refreshTrackClipVisuals = (trackIndex) => {
+        const track = Math.max(0, Number(trackIndex || 0));
+        root.querySelectorAll(".iamccs-audio-clip[data-seg-id]").forEach((clipEl) => {
+            const seg = segments().find((item) => String(item.id || "") === String(clipEl.dataset.segId || ""));
+            if (!seg || Math.max(0, Number(seg.track || 0)) !== track) return;
+            clipEl.dataset.waveKey = "";
+            updateClipStyle(clipEl, seg);
+        });
+    };
     const attachClipPointer = (clip, seg) => {
         const beginDrag = (event, forcedMode = "") => {
             if (seg.lock || trackSettings(seg.track).lock) return;
@@ -3495,8 +4644,17 @@ function renderAudioBoardArranger(node) {
             const tool = view().tool;
             const pickedMode = forcedMode || "move";
             if (pickedMode === "cut" || (!forcedMode && tool === "cut")) {
-                const laneX = event.clientX - rect.left + Number(seg.start || 0) * pxPerFrame();
-                const frame = Math.max(Number(seg.start || 0), Math.min(Number(seg.start || 0) + Number(seg.length || 1), Math.round(laneX / pxPerFrame())));
+                // scaleX converts screen-pixels (getBoundingClientRect) to CSS-pixels
+                // necessary because LiteGraph applies a CSS transform scale to the widget.
+                const scaleX = Math.max(0.001, clip.offsetWidth / Math.max(1, rect.width));
+                const clickInClip = (event.clientX - rect.left) * scaleX; // CSS px from clip left
+                const frame = Math.max(
+                    Number(seg.start || 0),
+                    Math.min(
+                        Number(seg.start || 0) + Number(seg.length || 1),
+                        Math.round(Number(seg.start || 0) + clickInClip / pxPerFrame())
+                    )
+                );
                 setPlayhead(frame, false);
                 splitSelectedAtPlayhead();
                 return;
@@ -3531,6 +4689,7 @@ function renderAudioBoardArranger(node) {
                 } else {
                     seg.start = Math.max(0, start + delta);
                     seg.track = Math.max(0, Math.min(Math.max(1, Number(state.audioTrackCount || 4)) - 1, track + trackDelta));
+                    clip.style.transform = `translateY(${trackDelta * Math.max(1, view().trackHeight)}px)`;
                 }
                 transport.helper = `${mode.replace("_", " ")} | ${fmtTime(seg.start)} - ${fmtTime(Number(seg.start || 0) + Number(seg.length || 1))} | source +${fmtTime(seg.trimStart || 0)}`;
                 updateClipStyle(clip, seg);
@@ -3548,6 +4707,7 @@ function renderAudioBoardArranger(node) {
                 }
                 try { clip.releasePointerCapture?.(upEvent.pointerId); } catch {}
                 clip.classList.remove("is-trimming", "is-moving");
+                clip.style.transform = "";
                 const marker = clip.querySelector(".iamccs-clip-source-marker");
                 if (marker) marker.style.display = "none";
                 if (shotboardSyncTimer) {
@@ -3583,6 +4743,28 @@ function renderAudioBoardArranger(node) {
             event.stopPropagation();
             setPlayhead(Number(seg.start || 0), false);
             selectedId = seg.id;
+            draw();
+        };
+        clip.oncontextmenu = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            selectedId = seg.id;
+            state.selectedMixer = { type: "track", track: Math.max(0, Number(seg.track || 0)) };
+            const frameAtClick = Number(seg.start || 0) + Math.round((event.clientX - clip.getBoundingClientRect().left) / Math.max(1, pxPerFrame()));
+            setPlayhead(Math.max(Number(seg.start || 0), Math.min(Number(seg.start || 0) + Number(seg.length || 1), frameAtClick)), false);
+            const actions = [
+                { label: "Cut Here", run: () => splitSelectedAtPlayhead() },
+                { label: "Trim In To Cursor", run: () => trimStartToPlayhead() },
+                { label: "Trim Out To Cursor", run: () => trimEndToPlayhead() },
+            ];
+            for (let laneIndex = 0; laneIndex < Math.max(1, Number(state.audioTrackCount || 4)); laneIndex += 1) {
+                if (laneIndex === Number(seg.track || 0)) continue;
+                actions.push({ label: `Move To A${laneIndex + 1}`, run: () => moveSelectedClipToTrack(laneIndex) });
+            }
+            actions.push({ label: "Convert To Mono", run: () => applySelectedChannelMode("mono") });
+            actions.push({ label: "Convert To Stereo", run: () => applySelectedChannelMode("stereo") });
+            actions.push({ label: "Delete Clip", run: () => deleteSelectedClip(), klass: "danger" });
+            showContextMenu(String(seg.name || seg.fileName || `Clip A${Number(seg.track || 0) + 1}`), event.clientX, event.clientY, actions);
             draw();
         };
     };
@@ -3635,45 +4817,7 @@ function renderAudioBoardArranger(node) {
         draw();
     };
     const makeDraggableNumber = (input, options = {}) => {
-        input.title = `${input.title || ""} Drag horizontally to change value.`.trim();
-        let startX = 0;
-        let startValue = 0;
-        let dragging = false;
-        let changed = false;
-        input.addEventListener("pointerdown", (event) => {
-            if (event.button !== 0 || event.altKey || event.ctrlKey || event.metaKey) return;
-            startX = event.clientX;
-            startValue = Number(input.value || 0);
-            dragging = false;
-            changed = false;
-            const step = Number(options.step ?? input.step ?? 1) || 1;
-            input.setPointerCapture?.(event.pointerId);
-            const move = (moveEvent) => {
-                const dx = moveEvent.clientX - startX;
-                if (Math.abs(dx) < 3 && !dragging) return;
-                dragging = true;
-                changed = true;
-                const multiplier = moveEvent.shiftKey ? 10 : moveEvent.altKey ? .1 : 1;
-                let next = startValue + Math.round(dx / 6) * step * multiplier;
-                if (options.min != null) next = Math.max(Number(options.min), next);
-                if (options.max != null) next = Math.min(Number(options.max), next);
-                input.value = String(Number(next.toFixed(4)));
-                input.dispatchEvent(new Event("input", { bubbles: true }));
-                moveEvent.preventDefault();
-            };
-            const up = (upEvent) => {
-                window.removeEventListener("pointermove", move);
-                window.removeEventListener("pointerup", up);
-                try { input.releasePointerCapture?.(upEvent.pointerId); } catch {}
-                if (changed) input.dispatchEvent(new Event("change", { bubbles: true }));
-            };
-            window.addEventListener("pointermove", move);
-            window.addEventListener("pointerup", up, { once: true });
-            event.preventDefault();
-        });
-        input.addEventListener("click", (event) => {
-            if (dragging) event.preventDefault();
-        });
+        void options;
         return input;
     };
     root.addEventListener("keydown", (event) => {
@@ -3703,7 +4847,12 @@ function renderAudioBoardArranger(node) {
             return;
         }
         if (event.key === "c" || event.key === "C") {
-            splitSelectedAtPlayhead();
+            setTool("cut", "Tool: cut. Click a clip to split at the clicked frame.");
+            event.preventDefault();
+            return;
+        }
+        if (event.key === "t" || event.key === "T") {
+            setTool("trim", "Tool: trim. Drag a clip edge to trim.");
             event.preventDefault();
             return;
         }
@@ -3739,6 +4888,91 @@ function renderAudioBoardArranger(node) {
         parent.appendChild(btn);
         return btn;
     };
+    const deleteSelectedClip = () => {
+        const selected = selectedClip();
+        if (!selected) return;
+        state.audioSegments = segments().filter((seg) => seg.id !== selected.id);
+        selectedId = segments()[0]?.id || "";
+        addEdit("Deleted selected clip.");
+        writeState("delete");
+        draw();
+    };
+    const moveSelectedClipToTrack = (track) => {
+        const selected = selectedClip();
+        if (!selected) return;
+        selected.track = Math.max(0, Math.min(Math.max(1, Number(state.audioTrackCount || 4)) - 1, Number(track || 0)));
+        state.selectedMixer = { type: "track", track: Number(selected.track || 0) };
+        addEdit(`Moved selected clip to A${Number(selected.track || 0) + 1}.`);
+        writeState("move_track");
+        draw();
+    };
+    const applySelectedChannelMode = (mode) => {
+        const selected = selectedClip();
+        if (!selected) return;
+        const nextMode = String(mode || "mono").toLowerCase() === "stereo" ? "stereo" : "mono";
+        selected.channelMode = nextMode;
+        selected.channelCount = nextMode === "stereo" ? 2 : 1;
+        selected.stereoWidth = nextMode === "stereo" ? Math.max(.85, Number(selected.stereoWidth || 1)) : 0;
+        selected.forceMono = nextMode === "mono";
+        addEdit(`${String(selected.name || selected.fileName || "clip")} -> ${nextMode}.`);
+        writeState(`channel_mode_${nextMode}`);
+        draw();
+    };
+    const showContextMenu = (title, x, y, actions) => {
+        contextMenuEl.innerHTML = "";
+        const titleEl = document.createElement("div");
+        titleEl.className = "iamccs-audio-context-menu-title";
+        titleEl.textContent = title;
+        contextMenuEl.appendChild(titleEl);
+        actions.filter(Boolean).forEach((action) => {
+            const btn = document.createElement("button");
+            btn.type = "button";
+            btn.textContent = action.label;
+            if (action.klass) btn.className = action.klass;
+            btn.onclick = () => {
+                closeContextMenu();
+                action.run();
+            };
+            contextMenuEl.appendChild(btn);
+        });
+        contextMenuEl.style.display = "grid";
+        const vw = window.innerWidth || 0;
+        const vh = window.innerHeight || 0;
+        const rect = contextMenuEl.getBoundingClientRect();
+        contextMenuEl.style.left = `${Math.max(8, Math.min(x, vw - rect.width - 8))}px`;
+        contextMenuEl.style.top = `${Math.max(8, Math.min(y, vh - rect.height - 8))}px`;
+    };
+    const openTrackContextMenu = (track, event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        state.selectedMixer = { type: "track", track };
+        const trackCount = Math.max(1, Number(state.audioTrackCount || 4));
+        const actions = [
+            {
+                label: `Select A${track + 1}`,
+                run: () => {
+                    state.selectedMixer = { type: "track", track };
+                    transport.helper = `Selected A${track + 1} device chain.`;
+                    writeState("select_track", false);
+                    draw();
+                },
+            },
+            { label: `Color A${track + 1}`, run: () => openTrackColorPicker(track, event) },
+        ];
+        const selected = selectedClip();
+        if (selected) {
+            actions.push({ label: "Delete selected clip", run: () => deleteSelectedClip(), klass: "danger" });
+            for (let laneIndex = 0; laneIndex < trackCount; laneIndex += 1) {
+                if (laneIndex === Number(selected.track || 0)) continue;
+                actions.push({ label: `Move selected clip to A${laneIndex + 1}`, run: () => moveSelectedClipToTrack(laneIndex) });
+            }
+        }
+        showContextMenu(`Track A${track + 1}`, event.clientX, event.clientY, actions);
+    };
+    window.addEventListener("pointerdown", (event) => {
+        if (!contextMenuEl.contains(event.target)) closeContextMenu();
+    });
+    window.addEventListener("blur", closeContextMenu);
     const multiGenerationClips = () => segments().filter((seg) => Boolean(seg.multiGenerationClip) || String(seg.timelineId || "").startsWith("T"));
     const multiGenerationMapText = () => {
         const clips = multiGenerationClips()
@@ -3933,6 +5167,40 @@ function renderAudioBoardArranger(node) {
         strip.append(title, chunk.wrap, customLabel, takes.wrap, source.wrap, dest.wrap, startMode.wrap, split, clear, map);
         parent.appendChild(strip);
     };
+    const syncInlineFxControls = (fx) => {
+        const syncers = Array.isArray(fx?._iamccsInlineControlSync) ? fx._iamccsInlineControlSync : [];
+        syncers.forEach((syncer) => {
+            try { syncer?.(); } catch {}
+        });
+    };
+    const registerInlineFxControl = (fx, syncer) => {
+        if (!fx) return;
+        fx._iamccsInlineControlSync = Array.isArray(fx._iamccsInlineControlSync) ? fx._iamccsInlineControlSync : [];
+        fx._iamccsInlineControlSync.push(syncer);
+    };
+    const mirrorDynamicsFxToState = (fx, target) => {
+        if (!fx || target?.type !== "master") return;
+        if (fx.type === "compressor") state.masterBus.compressor = Math.max(.01, Math.min(1, (Math.abs(Number(fx.params?.threshold || -18)) / 60) + .15));
+        if (fx.type === "limiter") {
+            state.masterBus.limiter = true;
+            state.masterBus.ceilingDb = Number(fx.params?.ceiling ?? state.masterBus.ceilingDb ?? -1);
+        }
+    };
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    const paintInlineCanvasDeferred = (canvas, kind, seg, staticPeak = 0) => {
+        if (!canvas) return;
+        canvas._iamccsInlinePaintState = { kind, seg, staticPeak };
+        const run = () => {
+            const live = canvas._iamccsInlinePaintState || { kind, seg, staticPeak };
+            paintInlineCanvas(canvas, live.kind, live.seg, live.staticPeak);
+        };
+        requestAnimationFrame(run);
+        window.setTimeout(run, 48);
+        if (!canvas._iamccsInlineResizeObserver && typeof ResizeObserver !== "undefined") {
+            canvas._iamccsInlineResizeObserver = new ResizeObserver(() => requestAnimationFrame(run));
+            try { canvas._iamccsInlineResizeObserver.observe(canvas); } catch {}
+        }
+    };
     const paintInlineCanvas = (canvas, kind, seg, staticPeak = 0) => {
         const rect = canvas.getBoundingClientRect();
         const w = Math.max(180, Math.round(rect.width || 260));
@@ -4010,10 +5278,7 @@ function renderAudioBoardArranger(node) {
             const clampDb = (db) => Math.max(-24, Math.min(24, Number(db || 0)));
             const yFromDb = (db) => center - (clampDb(db) / 48) * h;
             const yCutFromDb = (db) => center - (Math.max(-48, Math.min(0, Number(db || 0))) / 72) * h;
-            const freqToX = (hz) => {
-                const t = (Math.log10(Math.max(20, Math.min(22000, Number(hz || 20)))) - Math.log10(20)) / (Math.log10(22000) - Math.log10(20));
-                return Math.max(0, Math.min(w, t * w));
-            };
+            const freqToX = (hz) => eqVisualX(hz, w);
             const drawSmooth = (points, stroke, width = 2.2) => {
                 ctx.strokeStyle = stroke;
                 ctx.lineWidth = width;
@@ -4034,9 +5299,32 @@ function renderAudioBoardArranger(node) {
                 });
                 ctx.stroke();
             };
-            const lowX = freqToX(140);
-            const midX = freqToX(1200);
-            const highX = freqToX(6200);
+            const eqFreq = eqBandFrequencies(eqFx || seg || {});
+            [-24, -12, 0, 12, 24].forEach((db) => {
+                const y = yFromDb(db);
+                ctx.strokeStyle = db === 0 ? "rgba(255,255,255,.14)" : "rgba(255,255,255,.06)";
+                ctx.beginPath();
+                ctx.moveTo(0, y);
+                ctx.lineTo(w, y);
+                ctx.stroke();
+            });
+            ctx.fillStyle = "rgba(255,255,255,.03)";
+            ctx.fillRect(0, 0, w / 3, h);
+            ctx.fillStyle = "rgba(255,255,255,.02)";
+            ctx.fillRect(w / 3, 0, w / 3, h);
+            ctx.fillStyle = "rgba(255,255,255,.03)";
+            ctx.fillRect((w / 3) * 2, 0, w / 3, h);
+            [60, 250, 1000, 4000, 12000].forEach((hz) => {
+                const x = freqToX(hz);
+                ctx.strokeStyle = (hz === 250 || hz === 4000) ? "rgba(255,255,255,.14)" : "rgba(255,255,255,.08)";
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, h);
+                ctx.stroke();
+            });
+            const lowX = freqToX(eqFreq.low);
+            const midX = freqToX(eqFreq.mid);
+            const highX = freqToX(eqFreq.high);
             const lowCutX = freqToX(hpf || 20);
             const highCutX = freqToX(lpf || 22000);
             if (hpf > 20) {
@@ -4080,12 +5368,11 @@ function renderAudioBoardArranger(node) {
                 ctx.fill();
             }
             const points = [
-                [lowX / Math.max(1, w), low, "#d6a75e", "L"],
-                [midX / Math.max(1, w), midDb, "#55c7b9", "M"],
-                [highX / Math.max(1, w), high, "#d08963", "H"],
+                [lowX / Math.max(1, w), low, "#d6a75e"],
+                [midX / Math.max(1, w), midDb, "#55c7b9"],
+                [highX / Math.max(1, w), high, "#d08963"],
             ];
-            ctx.font = "900 10px ui-monospace, Consolas, monospace";
-            for (const [tx, db, color, label] of points) {
+            for (const [tx, db, color] of points) {
                 const x = tx * w;
                 const y = yFromDb(db);
                 ctx.fillStyle = color;
@@ -4094,9 +5381,12 @@ function renderAudioBoardArranger(node) {
                 ctx.fill();
                 ctx.strokeStyle = "rgba(0,0,0,.72)";
                 ctx.stroke();
-                ctx.fillStyle = "#fff2cf";
-                ctx.fillText(label, x + 8, y - 8);
             }
+            ctx.fillStyle = "rgba(255,226,168,.72)";
+            ctx.font = "900 9px ui-monospace, Consolas, monospace";
+            ctx.fillText("LOW", 8, 12);
+            ctx.fillText("MID", Math.max(8, w * .5 - 10), 12);
+            ctx.fillText("HIGH", Math.max(8, w - 34), 12);
             ctx.fillStyle = "#ffc67f";
             ctx.font = "900 9px ui-monospace, Consolas, monospace";
             if (hpf > 20) ctx.fillText(`LC ${Math.round(hpf)}Hz ${Math.round(lowCutLevel)}dB`, 8, h - 9);
@@ -4105,6 +5395,96 @@ function renderAudioBoardArranger(node) {
         }
         const currentFx = canvas._iamccsFx || null;
         const activeFx = currentFx || chainForTarget().find((fx) => fx.enabled !== false && (fx.type === "compressor" || fx.type === "limiter"));
+        if (["reverb", "delay", "stereo", "utility", "saturator", "chorus", "tape"].includes(String(activeFx?.type || ""))) {
+            normalizeEffect(activeFx);
+            const meter = Math.max(0, Math.min(1, staticPeak));
+            const drawLabel = (text, x = 8, y = 14, color = "#ffe2a8") => {
+                ctx.fillStyle = color;
+                ctx.font = "900 10px ui-monospace, Consolas, monospace";
+                ctx.fillText(text, x, y);
+            };
+            if (activeFx.type === "reverb") {
+                const size = Math.max(0, Math.min(1, Number(activeFx.params?.size ?? .45)));
+                const decay = Math.max(.1, Math.min(8, Number(activeFx.params?.decay ?? 1.8)));
+                const mix = Math.max(0, Math.min(1, Number(activeFx.params?.mix ?? .18)));
+                const damp = Math.max(0, Math.min(1, Number(activeFx.params?.damp ?? .35)));
+                ctx.strokeStyle = "rgba(85,199,185,.95)";
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (let x = 0; x < w; x += 1) {
+                    const t = x / Math.max(1, w - 1);
+                    const env = Math.exp(-t * (1.2 + decay * 1.6));
+                    const ripple = Math.sin((t * (12 + size * 22)) * Math.PI) * env * (1 - damp * .7);
+                    const y = h * .22 + ripple * h * (.18 + mix * .24) + env * h * (.18 + size * .14);
+                    if (x === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                ctx.stroke();
+                ctx.fillStyle = "rgba(85,199,185,.16)";
+                ctx.fillRect(8, h - 18, Math.max(8, mix * (w - 16)), 8);
+                ctx.fillStyle = "rgba(240,184,87,.26)";
+                ctx.fillRect(8, h - 30, Math.max(8, size * (w - 16)), 7);
+                drawLabel(`REV size ${size.toFixed(2)} decay ${decay.toFixed(2)} mix ${mix.toFixed(2)}`);
+                return;
+            }
+            if (activeFx.type === "delay") {
+                const time = Math.max(.03, Math.min(1.5, Number(activeFx.params?.time ?? .18)));
+                const feedback = Math.max(0, Math.min(.9, Number(activeFx.params?.feedback ?? .28)));
+                const mix = Math.max(0, Math.min(1, Number(activeFx.params?.mix ?? .2)));
+                const taps = 6;
+                for (let i = 0; i < taps; i += 1) {
+                    const t = Math.min(1, ((i + 1) / taps) * (time / 1.5) * 1.9);
+                    const x = 12 + t * (w - 24);
+                    const height = Math.max(8, (1 - i / taps) * (feedback * .9 + .2) * h * .56);
+                    ctx.fillStyle = `rgba(240,184,87,${Math.max(.18, .72 - i * .1)})`;
+                    ctx.fillRect(x - 4, h * .62 - height, 8, height);
+                }
+                ctx.fillStyle = "rgba(85,199,185,.28)";
+                ctx.fillRect(8, h - 16, Math.max(8, mix * (w - 16)), 8);
+                drawLabel(`DLY ${time.toFixed(2)}s fb ${feedback.toFixed(2)} mix ${mix.toFixed(2)}`);
+                return;
+            }
+            if (activeFx.type === "stereo" || activeFx.type === "utility") {
+                const width = Math.max(0, Math.min(2, Number(activeFx.params?.width ?? 1)));
+                const pan = Math.max(-1, Math.min(1, Number(activeFx.params?.pan ?? 0)));
+                const mono = Number(activeFx.params?.mono ?? 0) >= .5;
+                const spread = mono ? 0 : Math.min(.44, width / 2.4);
+                const centerX = w * (.5 + pan * .24);
+                ctx.strokeStyle = "rgba(255,255,255,.14)";
+                ctx.beginPath();
+                ctx.moveTo(w * .5, 0);
+                ctx.lineTo(w * .5, h);
+                ctx.stroke();
+                ctx.fillStyle = "rgba(85,199,185,.24)";
+                ctx.fillRect(centerX - spread * w, h * .2, spread * w * 2, h * .56);
+                ctx.strokeStyle = mono ? "#f0b857" : "#55c7b9";
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(centerX - spread * w, h * .28);
+                ctx.lineTo(centerX + spread * w, h * .28);
+                ctx.moveTo(centerX - spread * w, h * .72);
+                ctx.lineTo(centerX + spread * w, h * .72);
+                ctx.stroke();
+                drawLabel(`${String(activeFx.type).toUpperCase()} width ${width.toFixed(2)} pan ${pan.toFixed(2)}${mono ? " mono" : " stereo"}`);
+                ctx.fillStyle = mono ? "rgba(240,184,87,.82)" : "rgba(85,199,185,.82)";
+                ctx.fillRect(8, h - 14, Math.max(8, meter * (w - 16)), 6);
+                return;
+            }
+            const amount = Math.max(0, Math.min(1, Number(activeFx.params?.mix ?? activeFx.params?.sat ?? activeFx.params?.color ?? .35)));
+            ctx.strokeStyle = "rgba(240,184,87,.86)";
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            for (let x = 0; x < w; x += 1) {
+                const n = (x / Math.max(1, w - 1)) * 2 - 1;
+                const curved = Math.tanh(n * (1 + amount * 5));
+                const y = h * .5 - curved * h * .28;
+                if (x === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            }
+            ctx.stroke();
+            drawLabel(`${String(activeFx.type).toUpperCase()} amt ${amount.toFixed(2)}`);
+            return;
+        }
         const isLimiter = activeFx?.type === "limiter";
         const compFx = activeFx?.type === "compressor" ? activeFx : chainForTarget().find((fx) => fx.enabled !== false && fx.type === "compressor");
         const limFx = activeFx?.type === "limiter" ? activeFx : chainForTarget().find((fx) => fx.enabled !== false && fx.type === "limiter");
@@ -4230,7 +5610,7 @@ function renderAudioBoardArranger(node) {
         chainEl.className = "iamccs-device-chain";
         const previewForFx = (type) => {
             if (type === "eq") return ["eq", "EQ 3-Point Editor"];
-            if (type === "compressor" || type === "limiter" || type === "gate" || type === "deesser" || type === "transient") return ["bus", `${String(type || "Dynamics").toUpperCase()} Editor`];
+            if (["compressor", "limiter", "gate", "deesser", "transient", "reverb", "delay", "stereo", "utility", "saturator", "chorus", "tape"].includes(type)) return ["bus", `${String(type || "FX").toUpperCase()} Editor`];
             return ["placeholder", `${String(type || "FX").toUpperCase()} Preview`];
         };
         if (!chain.length) {
@@ -4247,8 +5627,14 @@ function renderAudioBoardArranger(node) {
         }
         chain.forEach((fx, index) => {
             normalizeEffect(fx);
+            fx._iamccsInlineControlSync = [];
             const module = document.createElement("div");
             module.className = "iamccs-device-module";
+            const repaintModuleCanvas = () => {
+                module.querySelectorAll(".iamccs-inline-efx-canvas").forEach((currentCanvas) => {
+                    paintInlineCanvasDeferred(currentCanvas, currentCanvas.dataset.kind || "", selected, staticPeak);
+                });
+            };
             const device = document.createElement("div");
             device.className = `iamccs-audio-device iamccs-device-${String(fx.type || "device").replace(/[^a-z0-9_-]/gi, "")}`;
             const palette = deviceColors[fx.type] || ["#3a3328", "#171714", "#0b0d0c"];
@@ -4266,6 +5652,7 @@ function renderAudioBoardArranger(node) {
                 fx.enabled = fx.enabled === false;
                 addEdit(`${targetName} ${name} ${fx.enabled ? "enabled" : "bypassed"}.`);
                 writeState("toggle_effect");
+                restartPlaybackIfNeeded(`toggle_${fx.type}`);
                 draw();
             };
             const head = document.createElement("div");
@@ -4309,22 +5696,25 @@ function renderAudioBoardArranger(node) {
                 range.max = String(max);
                 range.step = String(step);
                 range.value = String(value);
+                const syncControl = () => {
+                    const liveValue = Math.max(Number(min), Math.min(Number(max), Number(fx.params[key] ?? fallback)));
+                    range.value = String(liveValue);
+                    const t = (liveValue - Number(min)) / Math.max(.0001, Number(max) - Number(min));
+                    dial.style.setProperty("--knob-angle", `${-135 + t * 270}deg`);
+                    valueText.textContent = `${Number(liveValue.toFixed(2))}${unit || ""}`;
+                };
+                registerInlineFxControl(fx, syncControl);
                 const applyParam = (nextValue, commit = false) => {
                     const next = Math.max(Number(min), Math.min(Number(max), Number(nextValue ?? range.value ?? fallback)));
                     range.value = String(next);
                     fx.params[key] = next;
-                    const t = (next - Number(min)) / Math.max(.0001, Number(max) - Number(min));
-                    dial.style.setProperty("--knob-angle", `${-135 + t * 270}deg`);
-                    valueText.textContent = `${Number(next.toFixed(2))}${unit || ""}`;
-                    if (fx.type === "compressor" && target.type === "master") state.masterBus.compressor = Math.max(.01, Math.min(1, (Math.abs(Number(fx.params.threshold || -18)) / 60) + .15));
-                    if (fx.type === "limiter" && target.type === "master") {
-                        state.masterBus.limiter = true;
-                        state.masterBus.ceilingDb = Number(fx.params.ceiling ?? state.masterBus.ceilingDb ?? -1);
-                    }
-                    module.querySelectorAll(".iamccs-inline-efx-canvas").forEach((canvas) => paintInlineCanvas(canvas, canvas.dataset.kind || "", selected, staticPeak));
+                    mirrorDynamicsFxToState(fx, target);
+                    syncInlineFxControls(fx);
+                    repaintModuleCanvas();
                     if (commit) {
                         addEdit(`${targetName} ${name}: ${knobName} ${valueText.textContent}.`);
                         writeState(`fx_${fx.type}_${key}`);
+                        restartPlaybackIfNeeded(`fx_${fx.type}_${key}`);
                     } else {
                         scheduleSilentStateWrite(`fx_${fx.type}_${key}`);
                         scheduleShotboardSync(`fx_${fx.type}_${key}`);
@@ -4370,6 +5760,7 @@ function renderAudioBoardArranger(node) {
                 };
                 knob.append(dial, text, valueText, range);
                 knobs.appendChild(knob);
+                syncControl();
             });
             const eqSwitches = document.createElement("div");
             eqSwitches.className = "iamccs-eq-switches";
@@ -4384,6 +5775,7 @@ function renderAudioBoardArranger(node) {
                         fx.params[key] = !fx.params[key];
                         addEdit(`${targetName} EQ ${labelText} ${fx.params[key] ? "on" : "off"}.`);
                         writeState(`eq_${key}`);
+                        restartPlaybackIfNeeded(`eq_${key}`);
                         draw();
                     };
                     eqSwitches.appendChild(btn);
@@ -4419,17 +5811,23 @@ function renderAudioBoardArranger(node) {
                     const update = (ev, commit = false) => {
                         const x = Math.max(0, Math.min(1, (ev.clientX - rect.left) / Math.max(1, rect.width)));
                         const y = Math.max(0, Math.min(1, (ev.clientY - rect.top) / Math.max(1, rect.height)));
+                        const eqFreq = eqBandFrequencies(eqFx);
                         const points = [
-                            { key: "low", x: .27 },
-                            { key: "mid", x: .58 },
-                            { key: "high", x: .82 },
+                            { key: "low", fxKey: "lowFreq", x: eqVisualRatioForFreq(eqFreq.low), min: 40, max: Math.max(400, eqFreq.mid - 120) },
+                            { key: "mid", fxKey: "midFreq", x: eqVisualRatioForFreq(eqFreq.mid), min: eqFreq.low + 120, max: Math.max(eqFreq.low + 240, eqFreq.high - 400) },
+                            { key: "high", fxKey: "highFreq", x: eqVisualRatioForFreq(eqFreq.high), min: eqFreq.mid + 400, max: 16000 },
                         ];
                         const nearest = points.reduce((best, item) => Math.abs(item.x - x) < Math.abs(best.x - x) ? item : best, points[0]);
                         const key = nearest.key;
                         eqFx.params[key] = Number(((.5 - y) * 48).toFixed(2));
-                        paintInlineCanvas(canvas, "eq", selected, staticPeak);
-                        if (commit) writeState(`eq_point_${key}`);
-                        else scheduleSilentStateWrite(`eq_point_${key}`);
+                        const nextFreq = Math.max(nearest.min, Math.min(nearest.max, eqFreqForVisualRatio(x)));
+                        eqFx.params[nearest.fxKey] = nextFreq;
+                        syncInlineFxControls(eqFx);
+                        paintInlineCanvasDeferred(canvas, "eq", selected, staticPeak);
+                        if (commit) {
+                            writeState(`eq_point_${key}`);
+                            restartPlaybackIfNeeded(`eq_point_${key}`);
+                        } else scheduleSilentStateWrite(`eq_point_${key}`);
                         if (!commit) scheduleShotboardSync(`eq_point_${key}`);
                     };
                     update(event, false);
@@ -4445,7 +5843,7 @@ function renderAudioBoardArranger(node) {
             }
             if (kind === "bus") {
                 canvas.onpointerdown = (event) => {
-                    const activeFx = canvas._iamccsFx || chainForTarget().find((fx) => fx.type === "compressor" || fx.type === "limiter");
+                    const activeFx = canvas._iamccsFx || chainForTarget().find((fx) => ["compressor", "limiter", "reverb", "delay", "stereo", "utility", "saturator", "chorus", "tape", "gate", "deesser", "transient"].includes(fx.type));
                     if (!activeFx) return;
                     normalizeEffect(activeFx);
                     const rect = canvas.getBoundingClientRect();
@@ -4455,13 +5853,38 @@ function renderAudioBoardArranger(node) {
                         if (activeFx.type === "limiter") {
                             activeFx.params.ceiling = Number((-12 + x * 12).toFixed(1));
                             activeFx.params.output = Number((-12 + (1 - y) * 18).toFixed(1));
+                        } else if (activeFx.type === "reverb") {
+                            activeFx.params.size = Number(x.toFixed(2));
+                            activeFx.params.decay = Number((.1 + (1 - y) * 7.9).toFixed(2));
+                            activeFx.params.mix = Number((Math.max(.02, y)).toFixed(2));
+                        } else if (activeFx.type === "delay") {
+                            activeFx.params.time = Number((.03 + x * 1.47).toFixed(2));
+                            activeFx.params.feedback = Number((Math.max(0, Math.min(.9, 1 - y * .95))).toFixed(2));
+                            activeFx.params.mix = Number((Math.max(.02, y)).toFixed(2));
+                        } else if (activeFx.type === "stereo") {
+                            activeFx.params.width = Number((x * 2).toFixed(2));
+                            activeFx.params.angle = Number((-45 + (1 - y) * 90).toFixed(1));
+                            activeFx.params.mix = Number((Math.max(.02, y)).toFixed(2));
+                        } else if (activeFx.type === "utility") {
+                            activeFx.params.pan = Number((-1 + x * 2).toFixed(2));
+                            activeFx.params.gain = Number((-24 + (1 - y) * 48).toFixed(1));
+                            activeFx.params.width = Number((x * 2).toFixed(2));
+                            activeFx.params.mono = x < .08 ? 1 : 0;
+                        } else if (["saturator", "chorus", "tape"].includes(activeFx.type)) {
+                            const primaryKey = activeFx.type === "tape" ? "sat" : activeFx.type === "chorus" ? "depth" : "mix";
+                            activeFx.params[primaryKey] = Number((Math.max(.02, x)).toFixed(2));
+                            activeFx.params.mix = Number((Math.max(.02, y)).toFixed(2));
                         } else {
                             activeFx.params.threshold = Number((-60 + x * 60).toFixed(1));
                             activeFx.params.ratio = Number((1 + (1 - y) * 19).toFixed(1));
                         }
-                        paintInlineCanvas(canvas, "bus", selected, staticPeak);
-                        if (commit) writeState(`${activeFx.type}_point`);
-                        else scheduleSilentStateWrite(`${activeFx.type}_point`);
+                        mirrorDynamicsFxToState(activeFx, target);
+                        syncInlineFxControls(activeFx);
+                        paintInlineCanvasDeferred(canvas, "bus", selected, staticPeak);
+                        if (commit) {
+                            writeState(`${activeFx.type}_point`);
+                            restartPlaybackIfNeeded(`${activeFx.type}_point`);
+                        } else scheduleSilentStateWrite(`${activeFx.type}_point`);
                         if (!commit) scheduleShotboardSync(`${activeFx.type}_point`);
                     };
                     update(event, false);
@@ -4477,24 +5900,88 @@ function renderAudioBoardArranger(node) {
             }
             module.append(device, panel);
             chainEl.appendChild(module);
-            if (canvas) requestAnimationFrame(() => paintInlineCanvas(canvas, kind, selected, staticPeak));
+            if (canvas) paintInlineCanvasDeferred(canvas, kind, selected, staticPeak);
         });
         grid.appendChild(chainEl);
         efx.appendChild(grid);
         parent.appendChild(efx);
     };
+    const buildTrackEffectLabels = (trackState) => {
+        const labels = [];
+        const activeEffects = Array.isArray(trackState?.effectChain)
+            ? trackState.effectChain.filter((fx) => fx && fx.enabled !== false).map((fx) => String(fx.type || "FX").toUpperCase())
+            : [];
+        labels.push(...activeEffects);
+        if (trackState?.mute) labels.push("MUTE");
+        if (trackState?.solo) labels.push("SOLO");
+        if (trackState?.normalize) labels.push("NORMALIZE");
+        if (trackState?.reverb) labels.push("REV SEND");
+        return labels;
+    };
+    const bindLowerPanelResize = (handle) => {
+        handle.onpointerdown = (event) => {
+            event.preventDefault();
+            const startY = event.clientY;
+            const startHeight = Math.max(250, Math.min(760, Number(state.lowerPanelHeight || 390) || 390));
+            try { handle.setPointerCapture?.(event.pointerId); } catch {}
+            const move = (moveEvent) => {
+                const nextHeight = Math.max(250, Math.min(760, startHeight + (moveEvent.clientY - startY)));
+                state.lowerPanelHeight = nextHeight;
+                writeState("lower_panel_resize", false, { quiet: true });
+                draw();
+                moveEvent.preventDefault();
+            };
+            const up = (upEvent) => {
+                window.removeEventListener("pointermove", move);
+                window.removeEventListener("pointerup", up);
+                try { handle.releasePointerCapture?.(upEvent.pointerId); } catch {}
+                addEdit(`FX rack height ${Math.round(Number(state.lowerPanelHeight || startHeight))} px.`);
+                writeState("lower_panel_resize", false);
+            };
+            window.addEventListener("pointermove", move, { passive: false });
+            window.addEventListener("pointerup", up, { passive: false, once: true });
+        };
+    };
     const draw = () => {
+        closeContextMenu();
+        root.classList.toggle("is-tool-cut", view().tool === "cut");
+        root.classList.toggle("is-tool-trim", view().tool === "trim");
         root.querySelectorAll(".iamccs-audio-board-dynamic").forEach((el) => el.remove());
         const dynamic = document.createElement("div");
         dynamic.className = "iamccs-audio-board-dynamic";
         const head = document.createElement("div");
         head.className = "iamccs-audio-board-head";
         const left = document.createElement("div");
-        left.innerHTML = `<div class="iamccs-audio-board-title">IAMCCS AudioBoard Arranger</div><div class="iamccs-audio-board-sub">${segments().length} clips / ${Math.max(1, Number(state.audioTrackCount || 4))} tracks / ${fmtTime(totalFrames())} / sync V3: ${linkedShotboardNodes().length}</div>`;
+        left.innerHTML = `<div class="iamccs-audio-board-title">IAMCCS AudioBoard Arranger</div><div class="iamccs-audio-board-sub">${segments().length} clips / ${Math.max(1, Number(state.audioTrackCount || 4))} tracks / ${fmtTime(totalFrames())} / Shotboard links: ${linkedShotboardNodes().length} / auto publish: ${state.shotboardAutoSyncEnabled ? "ON" : "OFF"} / ${dialoguePromptSyncLabel()}</div>`;
         const tools = document.createElement("div");
         tools.className = "iamccs-audio-board-tools";
+        const toolsStack = document.createElement("div");
+        toolsStack.style.cssText = "display:grid;gap:6px;justify-items:end;align-items:start;min-width:0;";
+        const selected = selectedClip();
+        const setSelectedExternal = (key, value) => {
+            if (!selected) return;
+            selected[key] = value;
+            addEdit(`Edited ${String(selected.name || selected.fileName || "clip")}: ${key}`);
+            writeState(`edit_${key}`);
+            draw();
+        };
+        const clipActions = document.createElement("div");
+        clipActions.className = "iamccs-clip-action-bar";
+        clipActions.innerHTML = `<strong>CLIP EDIT</strong>`;
         addButton(tools, root._iamccsAudioFullscreenState ? "Close Editor" : "Open Editor", () => toggleAudioFullscreen(), root._iamccsAudioFullscreenState ? "is-active" : "");
         addButton(tools, "MULTI", () => { state.showMultiGeneration = !state.showMultiGeneration; addEdit(`Multigeneration panel ${state.showMultiGeneration ? "shown" : "hidden"}.`); writeState("toggle_multi", false); draw(); }, state.showMultiGeneration ? "is-active" : "");
+        const saveAudioBoardBtn = addButton(tools, "Save AudioBoard", (event) => { event?.preventDefault?.(); event?.stopPropagation?.(); saveAudioBoardPackage(); }, "is-save-audioboard");
+        saveAudioBoardBtn.dataset.iamccsAudioAction = "save_audioboard";
+        saveAudioBoardBtn.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); saveAudioBoardPackage(); };
+        saveAudioBoardBtn.onmousedown = (event) => { event.preventDefault(); event.stopPropagation(); };
+        const saveAsBtn = addButton(tools, "Save As", (event) => { event?.preventDefault?.(); event?.stopPropagation?.(); saveAudioBoardPackageAs(); }, "is-save-audioboard");
+        saveAsBtn.dataset.iamccsAudioAction = "save_audioboard_as";
+        saveAsBtn.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); saveAudioBoardPackageAs(); };
+        saveAsBtn.onmousedown = (event) => { event.preventDefault(); event.stopPropagation(); };
+        const importBoardBtn = addButton(tools, "Import AudioBoard", (event) => { event?.preventDefault?.(); event?.stopPropagation?.(); audioBoardInput.click(); });
+        importBoardBtn.dataset.iamccsAudioAction = "import_audioboard";
+        importBoardBtn.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); audioBoardInput.click(); };
+        importBoardBtn.onmousedown = (event) => { event.preventDefault(); event.stopPropagation(); };
         addButton(tools, "Import Audio", () => fileInput.click());
         addButton(tools, "Add Track", () => { state.audioTrackCount = Math.max(1, Number(state.audioTrackCount || 4)) + 1; addEdit("Added audio track."); writeState("add_track"); draw(); });
         addButton(tools, "ONLY FIRST", () => {
@@ -4505,17 +5992,32 @@ function renderAudioBoardArranger(node) {
             draw();
         }, state.audioBusMode === "only_first" ? "is-active" : "");
         for (const tool of ["cursor", "move", "trim", "cut"]) {
-            addButton(tools, tool.toUpperCase(), () => { view().tool = tool; addEdit(`Tool: ${tool}.`); writeState("tool", false); draw(); }, view().tool === tool ? "is-active" : "");
+            const helper = tool === "cut"
+                ? "Tool: cut. Click a clip to split at the clicked frame."
+                : tool === "trim"
+                    ? "Tool: trim. Drag a clip edge to trim."
+                    : "";
+            addButton(tools, tool.toUpperCase(), () => setTool(tool, helper), view().tool === tool ? "is-active" : "");
         }
+        addButton(tools, "Delete Selected", () => deleteSelectedClip(), "danger");
         addButton(tools, "Zoom +", () => { view().timeZoom = Math.min(8, view().timeZoom * 1.25); addEdit("Zoomed timeline in."); writeState("zoom", false); draw(); });
         addButton(tools, "Zoom -", () => { view().timeZoom = Math.max(.35, view().timeZoom / 1.25); addEdit("Zoomed timeline out."); writeState("zoom", false); draw(); });
-        addButton(tools, "Tall +", () => { view().trackHeight = Math.min(200, view().trackHeight + 10); addEdit("Increased track height."); writeState("track_height", false); draw(); });
-        addButton(tools, "Tall -", () => { view().trackHeight = Math.max(144, view().trackHeight - 10); addEdit("Reduced track height."); writeState("track_height", false); draw(); });
+        addButton(tools, "Tall +", () => { view().trackHeight = Math.min(220, view().trackHeight + 10); addEdit("Increased track height."); writeState("track_height", false); draw(); });
+        addButton(tools, "Tall -", () => { view().trackHeight = Math.max(120, view().trackHeight - 10); addEdit("Reduced track height."); writeState("track_height", false); draw(); });
         addButton(tools, "Event Monitor", () => { state.showEventMonitor = !state.showEventMonitor; addEdit(`Event monitor ${state.showEventMonitor ? "shown" : "hidden"}.`); writeState("event_monitor", false); draw(); }, state.showEventMonitor ? "is-active" : "");
-        addButton(tools, "Sync Now", () => { writeState("manual_sync"); draw(); });
-        addButton(tools, "Pull V3", () => pullFromShotboard());
+        addButton(tools, "AUTO PUBLISH", () => { state.shotboardAutoSyncEnabled = !state.shotboardAutoSyncEnabled; addEdit(`Shotboard auto publish ${state.shotboardAutoSyncEnabled ? "enabled" : "disabled"}.`); writeState("toggle_shotboard_auto_publish", false); draw(); }, state.shotboardAutoSyncEnabled ? "is-active" : "");
+        addButton(tools, "Publish", () => publishToShotboard());
         addButton(tools, "Clear", () => { stopPlayback(false); state.audioSegments = []; selectedId = ""; addEdit("Cleared arranger clips."); writeState("clear"); draw(); }, "danger");
-        head.append(left, tools);
+        addButton(clipActions, "Track Up", () => selected && setSelectedExternal("track", Math.max(0, Number(selected.track || 0) - 1)));
+        addButton(clipActions, "Track Down", () => selected && setSelectedExternal("track", Math.min(Math.max(1, Number(state.audioTrackCount || 4)) - 1, Number(selected.track || 0) + 1)));
+        addButton(clipActions, "Trim In", () => trimStartToPlayhead());
+        addButton(clipActions, "Trim Out", () => trimEndToPlayhead());
+        addButton(clipActions, "Split", () => splitSelectedAtPlayhead());
+        addButton(clipActions, "Delete Clip", () => {
+            deleteSelectedClip();
+        }, "danger");
+        toolsStack.append(tools, clipActions);
+        head.append(left, toolsStack);
         dynamic.appendChild(head);
         if (state.showMultiGeneration || (state.multiGeneration && state.multiGeneration.enabled)) appendMultiGenerationStrip(dynamic);
 
@@ -4558,28 +6060,48 @@ function renderAudioBoardArranger(node) {
             writeState("select_master", false);
             draw();
         };
-        master.innerHTML = `<div class="iamccs-master-title">MASTER OUT</div><span class="iamccs-master-meter"><i style="width:0%"></i></span>`;
+        master.innerHTML = `<div class="iamccs-master-title">MASTER OUT</div><span class="iamccs-master-meter is-stereo"><i style="width:0%"></i><i style="width:0%"></i></span>`;
         const masterControls = document.createElement("div");
         masterControls.className = "iamccs-master-controls";
         masterControls.onclick = (event) => event.stopPropagation();
+        const masterLimiterFx = masterEffectByType("limiter");
+        const masterCompFx = masterEffectByType("compressor");
         const limiterToggle = document.createElement("button");
         limiterToggle.type = "button";
-        limiterToggle.className = `iamccs-master-toggle${state.masterBus?.limiter ? " is-active" : ""}`;
+        limiterToggle.className = `iamccs-master-toggle${masterLimiterFx?.enabled !== false ? " is-active" : ""}`;
         limiterToggle.textContent = "LIMITER";
         limiterToggle.onclick = () => {
-            state.masterBus.limiter = !state.masterBus.limiter;
+            const limiterFx = masterEffectByType("limiter");
+            if (limiterFx) {
+                limiterFx.enabled = limiterFx.enabled === false;
+                state.masterBus.limiter = limiterFx.enabled !== false;
+            } else {
+                addEffectToChain("limiter", { type: "master", track: 0 });
+                return;
+            }
+            syncMasterFlagsFromChain();
             addEdit(`Master limiter ${state.masterBus.limiter ? "on" : "off"}.`);
             writeState("master_limiter");
+            restartPlaybackIfNeeded("master_limiter_toggle");
             draw();
         };
         const compToggle = document.createElement("button");
         compToggle.type = "button";
-        compToggle.className = `iamccs-master-toggle${Number(state.masterBus?.compressor || 0) > 0 ? " is-active" : ""}`;
+        compToggle.className = `iamccs-master-toggle${masterCompFx?.enabled !== false ? " is-active" : ""}`;
         compToggle.textContent = "COMP";
         compToggle.onclick = () => {
-            state.masterBus.compressor = Number(state.masterBus?.compressor || 0) > 0 ? 0 : .45;
+            const compFx = masterEffectByType("compressor");
+            if (compFx) {
+                compFx.enabled = compFx.enabled === false;
+                state.masterBus.compressor = compFx.enabled !== false ? Math.max(.45, Number(state.masterBus?.compressor || compFx.amount || .45)) : 0;
+            } else {
+                addEffectToChain("compressor", { type: "master", track: 0 });
+                return;
+            }
+            syncMasterFlagsFromChain();
             addEdit(`Master compressor ${Number(state.masterBus.compressor || 0) > 0 ? "on" : "off"}.`);
             writeState("master_compressor");
+            restartPlaybackIfNeeded("master_compressor_toggle");
             draw();
         };
         masterControls.append(limiterToggle, compToggle);
@@ -4625,6 +6147,7 @@ function renderAudioBoardArranger(node) {
                 else state[key] = Number(input.value || 1);
                 addEdit(`Changed master ${label}.`);
                 writeState(`master_${label}`);
+                restartPlaybackIfNeeded(`master_${String(label || "field").toLowerCase().replace(/[^a-z0-9]+/g, "_")}`);
                 draw();
             };
             makeDraggableNumber(input, { step, min, max });
@@ -4636,9 +6159,17 @@ function renderAudioBoardArranger(node) {
         const normInput = document.createElement("input");
         normInput.type = "checkbox";
         normInput.checked = Boolean(state.masterAudioNormalize);
-        normInput.onchange = () => { state.masterAudioNormalize = Boolean(normInput.checked); addEdit("Toggled master normalize."); writeState("master_normalize"); draw(); };
+        normInput.onchange = () => { state.masterAudioNormalize = Boolean(normInput.checked); addEdit("Toggled master normalize."); writeState("master_normalize"); restartPlaybackIfNeeded("master_normalize_toggle"); draw(); };
         norm.append(normInput, "Normalize");
         masterControls.appendChild(norm);
+        const mono = document.createElement("label");
+        mono.style.cssText = "display:flex;align-items:center;gap:5px;color:#91a5ac;font-size:9px;font-weight:900;text-transform:uppercase;";
+        const monoInput = document.createElement("input");
+        monoInput.type = "checkbox";
+        monoInput.checked = Boolean(state.masterMono);
+        monoInput.onchange = () => { state.masterMono = Boolean(monoInput.checked); addEdit(`Master out ${state.masterMono ? "mono" : "stereo"}.`); writeState("master_mono"); restartPlaybackIfNeeded("master_mono_toggle"); draw(); };
+        mono.append(monoInput, "Mono");
+        masterControls.appendChild(mono);
         master.appendChild(masterControls);
         const masterMonitor = document.createElement("span");
         masterMonitor.className = "iamccs-master-crt iamccs-master-readout";
@@ -4646,13 +6177,20 @@ function renderAudioBoardArranger(node) {
         master.appendChild(masterMonitor);
         dynamic.appendChild(master);
 
+        const trackCount = Math.max(5, Number(state.audioTrackCount || 5));
+        const visibleTrackCount = Math.min(trackCount, 5);
+        const timelineHeight = 28 + visibleTrackCount * Math.max(120, Math.min(220, Number(view().trackHeight || 168) || 168));
         const timeline = document.createElement("div");
         timeline.className = "iamccs-audio-board-timeline";
         timeline.style.setProperty("--iamccs-track-height", `${view().trackHeight}px`);
         timeline.style.setProperty("--iamccs-px-per-frame", `${pxPerFrame()}px`);
+        timeline.style.height = `${timelineHeight}px`;
+        timeline.style.overflowY = trackCount > 5 ? "auto" : "hidden";
+        const editorContentWidth = contentWidth();
         const ruler = document.createElement("div");
         ruler.className = "iamccs-audio-board-ruler";
-        ruler.style.minWidth = `${contentWidth()}px`;
+        ruler.style.width = `${editorContentWidth}px`;
+        ruler.style.minWidth = `${editorContentWidth}px`;
         const activeLoopRange = loopRange();
         const addLoopRange = (parent, klass) => {
             if (!activeLoopRange) return;
@@ -4710,31 +6248,39 @@ function renderAudioBoardArranger(node) {
         rulerHead.textContent = "TIME";
         ruler.appendChild(rulerHead);
         timeline.appendChild(ruler);
-        const trackCount = Math.max(1, Number(state.audioTrackCount || 4));
         for (let track = 0; track < trackCount; track += 1) {
+            const isTrackSelected = selectedMixer().type === "track" && selectedMixer().track === track;
             const lane = document.createElement("div");
-            lane.className = "iamccs-audio-board-track";
-            lane.style.minWidth = `${contentWidth()}px`;
+            lane.className = `iamccs-audio-board-track${isTrackSelected ? " is-selected" : ""}`;
+            lane.style.width = `${editorContentWidth}px`;
+            lane.style.minWidth = `${editorContentWidth}px`;
             addLoopRange(lane, "iamccs-loop-range");
             const trackSegs = segments().filter((seg) => Number(seg.track || 0) === track);
+            lane.oncontextmenu = (event) => openTrackContextMenu(track, event);
             const trackState = trackSettings(track);
-            trackState.volume = Math.max(0, Math.min(2, Number(trackState.volume ?? 1)));
-            trackState.pan = Math.max(-1, Math.min(1, Number(trackState.pan || 0)));
+            trackState.volume = Math.max(0, Math.min(2, finiteNumber(trackState.volume, 1)));
+            trackState.pan = Math.max(-1, Math.min(1, finiteNumber(trackState.pan, 0)));
             trackState.color = normalizeTrackColor(trackState.color, track);
             lane.style.setProperty("--iamccs-track-color", trackState.color);
-            const trackPeak = trackState.mute ? 0 : Math.min(1, trackSegs.reduce((sum, seg) => sum + peakFor(seg), 0) * trackState.volume);
+            lane.style.setProperty("--iamccs-track-fill", trackColorWithAlpha(trackState.color, .13, track));
+            lane.style.setProperty("--iamccs-track-glow", trackColorWithAlpha(trackState.color, .22, track));
+            const trackPeak = trackState.mute ? 0 : Math.min(1, trackSegs.reduce((sum, seg) => sum + peakFor(seg), 0));
             const trackLabel = document.createElement("div");
-            trackLabel.className = `iamccs-audio-board-track-label${selectedMixer().type === "track" && selectedMixer().track === track ? " is-selected" : ""}`;
+            trackLabel.className = `iamccs-audio-board-track-label${selectedMixer().type === "track" && selectedMixer().track === track ? " is-selected" : ""}${trackState.mute ? " is-muted" : ""}${trackState.lock ? " is-locked" : ""}`;
             trackLabel.style.borderLeft = `4px solid ${trackState.color}`;
-            trackLabel.onclick = () => {
+            trackLabel.style.setProperty("--iamccs-track-glow", trackColorWithAlpha(trackState.color, .22, track));
+            trackLabel.oncontextmenu = (event) => openTrackContextMenu(track, event);
+            trackLabel.onclick = (event) => {
+                event.stopPropagation();
+                const wasSelected = selectedMixer().type === "track" && selectedMixer().track === track;
                 state.selectedMixer = { type: "track", track };
                 transport.helper = `Selected A${track + 1} device chain.`;
-                writeState("select_track", false);
-                draw();
+                writeState("select_track", false, { quiet: true });
+                if (!wasSelected) draw();
             };
             const top = document.createElement("div");
             top.className = "iamccs-track-strip-top";
-            top.innerHTML = `<div class="iamccs-track-name"><span>A${track + 1}</span><small>${trackSegs.length} clips</small></div><span class="iamccs-audio-board-meter iamccs-track-meter" data-track="${track}"><i style="width:${transport.playing ? Math.round(trackPeak * 100) : 0}%"></i></span>`;
+            top.innerHTML = `<div class="iamccs-track-name"><span>A${track + 1}</span><small>${trackSegs.length} clips</small></div><span class="iamccs-audio-board-meter iamccs-track-meter ${trackHasStereoContent(track) ? "is-stereo" : ""}" data-track="${track}"><i style="width:${transport.playing ? Math.round(trackPeak * 100) : 0}%"></i>${trackHasStereoContent(track) ? `<i style="width:${transport.playing ? Math.round(trackPeak * 100) : 0}%"></i>` : ""}</span>`;
             const controls = document.createElement("div");
             controls.className = "iamccs-track-strip-controls";
             const addTrackToggle = (labelText, key) => {
@@ -4742,12 +6288,21 @@ function renderAudioBoardArranger(node) {
                 btn.type = "button";
                 btn.className = `iamccs-track-mini${trackState[key] ? " is-active" : ""}`;
                 btn.textContent = labelText;
+                btn.setAttribute("aria-pressed", trackState[key] ? "true" : "false");
+                btn.title = `Toggle ${labelText} on A${track + 1}`;
+                btn.onpointerdown = (event) => event.stopPropagation();
                 btn.onclick = (event) => {
+                    event.preventDefault();
                     event.stopPropagation();
                     state.selectedMixer = { type: "track", track };
                     trackState[key] = !trackState[key];
+                    btn.classList.toggle("is-active", Boolean(trackState[key]));
+                    btn.setAttribute("aria-pressed", trackState[key] ? "true" : "false");
+                    noteTrackMixLocalState(track, key, trackState[key] ? 1 : 0, "toggle");
                     addEdit(`A${track + 1} ${labelText} ${trackState[key] ? "on" : "off"}.`);
+                    const pushed = pushArrangerTrackToggle(track, key, trackState[key]);
                     writeState(`track_${key}`);
+                    if (!pushed) restartPlaybackIfNeeded(`track_${key}_toggle`);
                     draw();
                 };
                 controls.appendChild(btn);
@@ -4766,70 +6321,25 @@ function renderAudioBoardArranger(node) {
             colorButton.onclick = (event) => {
                 event.stopPropagation();
                 state.selectedMixer = { type: "track", track };
-                trackState.color = nextTrackColor(trackState.color, track);
-                addEdit(`A${track + 1} color changed.`);
-                writeState("track_color");
-                draw();
+                openTrackColorPicker(track, event);
             };
             controls.appendChild(colorButton);
             const knobRow = document.createElement("div");
-            knobRow.className = "iamccs-track-knob-row";
-            const makeTrackKnob = (labelText, key, min, max, step, fallback, formatter) => {
-                const wrap = document.createElement("div");
-                wrap.className = "iamccs-track-knob-wrap";
-                const knob = document.createElement("button");
-                knob.type = "button";
-                knob.className = "iamccs-track-knob";
-                const readout = document.createElement("span");
-                readout.className = "iamccs-track-knob-readout";
-                const sync = () => {
-                    const value = Math.max(min, Math.min(max, Number(trackState[key] ?? fallback)));
-                    trackState[key] = value;
-                    const t = (value - min) / Math.max(.0001, max - min);
-                    knob.style.setProperty("--iamccs-knob-angle", `${-135 + t * 270}deg`);
-                    knob.style.setProperty("--iamccs-knob-fill", `${Math.round(t * 78)}%`);
-                    readout.textContent = formatter(value);
-                    knob.title = `A${track + 1} ${labelText}: ${formatter(value)}`;
-                };
-                sync();
-                knob.onpointerdown = (event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    state.selectedMixer = { type: "track", track };
-                    const startX = event.clientX;
-                    const startY = event.clientY;
-                    const startValue = Number(trackState[key] ?? fallback);
-                    try { knob.setPointerCapture?.(event.pointerId); } catch {}
-                    const move = (moveEvent) => {
-                        const delta = ((moveEvent.clientX - startX) + (startY - moveEvent.clientY)) * Number(step || .01);
-                        trackState[key] = Math.max(min, Math.min(max, startValue + delta));
-                        sync();
-                        transport.helper = `A${track + 1} ${labelText}: ${formatter(trackState[key])}`;
-                        scheduleSilentStateWrite(`track_${key}_live`);
-                        scheduleShotboardSync(`track_${key}_live`);
-                        moveEvent.preventDefault();
-                    };
-                    const up = (upEvent) => {
-                        window.removeEventListener("pointermove", move);
-                        window.removeEventListener("pointerup", up);
-                        try { knob.releasePointerCapture?.(upEvent.pointerId); } catch {}
-                        addEdit(`A${track + 1} ${labelText} ${formatter(trackState[key])}.`);
-                        writeState(`track_${key}`, false);
-                        draw();
-                    };
-                    window.addEventListener("pointermove", move, { passive: false });
-                    window.addEventListener("pointerup", up, { passive: false, once: true });
-                };
-                const labelEl = document.createElement("span");
-                labelEl.className = "iamccs-track-knob-label";
-                labelEl.textContent = labelText;
-                wrap.append(labelEl, knob, readout);
-                return wrap;
-            };
-            knobRow.append(
-                makeTrackKnob("Volume", "volume", 0, 2, .006, 1, (v) => `${Math.round(v * 100)}%`),
-                makeTrackKnob("Pan", "pan", -1, 1, .006, 0, (v) => Math.abs(v) < .02 ? "C" : `${v < 0 ? "L" : "R"}${Math.round(Math.abs(v) * 100)}`)
-            );
+            knobRow.className = "iamccs-track-effect-row";
+            const effectLabels = buildTrackEffectLabels(trackState);
+            if (!effectLabels.length) {
+                const emptyChip = document.createElement("span");
+                emptyChip.className = "iamccs-track-effect-chip is-empty";
+                emptyChip.textContent = "NO ACTIVE FX";
+                knobRow.appendChild(emptyChip);
+            } else {
+                effectLabels.forEach((labelText) => {
+                    const chip = document.createElement("span");
+                    chip.className = "iamccs-track-effect-chip is-active";
+                    chip.textContent = labelText;
+                    knobRow.appendChild(chip);
+                });
+            }
             const bottom = document.createElement("div");
             bottom.className = "iamccs-track-strip-bottom";
             const fxSelect = document.createElement("select");
@@ -4856,6 +6366,7 @@ function renderAudioBoardArranger(node) {
             for (const seg of trackSegs) {
                 const clip = document.createElement("div");
                 clip.className = `iamccs-audio-clip${seg.id === selectedId ? " is-selected" : ""}${seg.mute ? " is-muted" : ""}`;
+                clip.dataset.segId = String(seg.id || "");
                 clip.style.borderColor = trackState.color;
                 clip.title = "Drag to move. Drag edges to trim. Double-click to move playhead.";
                 const leftHandle = document.createElement("div");
@@ -4887,165 +6398,8 @@ function renderAudioBoardArranger(node) {
         }
         dynamic.appendChild(timeline);
 
-        const selected = selectedClip();
         if (selected && !selectedId) selectedId = selected.id;
-        const clipActions = document.createElement("div");
-        clipActions.className = "iamccs-clip-action-bar";
-        clipActions.innerHTML = `<strong>CLIP EDIT</strong>`;
-        addButton(clipActions, "Clip Values", () => {
-            state.showClipValues = !state.showClipValues;
-            addEdit(`Clip values ${state.showClipValues ? "shown" : "hidden"}.`);
-            writeState("clip_values", false);
-            draw();
-        }, state.showClipValues ? "is-active" : "is-values");
-        addButton(clipActions, "Track Up", () => selected && setSelectedExternal("track", Math.max(0, Number(selected.track || 0) - 1)));
-        addButton(clipActions, "Track Down", () => selected && setSelectedExternal("track", Math.min(Math.max(1, Number(state.audioTrackCount || 4)) - 1, Number(selected.track || 0) + 1)));
-        addButton(clipActions, "Trim In", () => trimStartToPlayhead());
-        addButton(clipActions, "Trim Out", () => trimEndToPlayhead());
-        addButton(clipActions, "Split", () => splitSelectedAtPlayhead());
-        addButton(clipActions, "Delete Clip", () => {
-            if (!selected) return;
-            state.audioSegments = segments().filter((seg) => seg.id !== selected.id);
-            selectedId = "";
-            addEdit("Deleted clip.");
-            writeState("delete");
-            draw();
-        }, "danger");
-        dynamic.appendChild(clipActions);
-        const editor = document.createElement("div");
-        editor.className = "iamccs-audio-board-editor";
-        if (!state.showClipValues) editor.style.display = "none";
-        const setSelected = (key, value) => {
-            if (!selected) return;
-            selected[key] = value;
-            addEdit(`Edited ${String(selected.name || selected.fileName || "clip")}: ${key}`);
-            writeState(`edit_${key}`);
-            draw();
-        };
-        const setSelectedExternal = (key, value) => {
-            if (!selected) return;
-            selected[key] = value;
-            addEdit(`Edited ${String(selected.name || selected.fileName || "clip")}: ${key}`);
-            writeState(`edit_${key}`);
-            draw();
-        };
-        const numberControl = (label, key, value, step = "1", transform = (v) => Number(v || 0), min = null, max = null) => {
-            const wrap = document.createElement("label");
-            wrap.textContent = label;
-            const input = document.createElement("input");
-            input.type = "number";
-            input.step = step;
-            if (min != null) input.min = String(min);
-            if (max != null) input.max = String(max);
-            input.value = String(value);
-            input.onchange = () => setSelected(key, transform(input.value));
-            makeDraggableNumber(input, { step, min, max });
-            wrap.appendChild(input);
-            return wrap;
-        };
-        if (selected) {
-            editor.append(
-                numberControl("Start", "start", framesToSeconds(selected.start).toFixed(2), "0.01", secondsToFrames),
-                numberControl("End", "length", framesToSeconds(Number(selected.start || 0) + Number(selected.length || 1)).toFixed(2), "0.01", (v) => Math.max(1, secondsToFrames(v) - Number(selected.start || 0))),
-                numberControl("Len", "length", framesToSeconds(selected.length).toFixed(2), "0.01", (v) => Math.max(1, secondsToFrames(v))),
-                numberControl("Trim In", "trimStart", framesToSeconds(selected.trimStart || 0).toFixed(2), "0.01", secondsToFrames),
-                numberControl("Gain", "gain", Number(selected.gain ?? 1).toFixed(2), "0.05", (v) => Math.max(0, Math.min(4, Number(v || 0))), 0, 4),
-                numberControl("Pan", "pan", Number(selected.pan ?? 0).toFixed(2), "0.05", (v) => Math.max(-1, Math.min(1, Number(v || 0))), -1, 1),
-                numberControl("Fade In", "fadeInFrames", Number(selected.fadeInFrames || 0), "1"),
-                numberControl("Fade Out", "fadeOutFrames", Number(selected.fadeOutFrames || 0), "1"),
-                numberControl("Pitch", "pitchSemitones", Number(selected.pitchSemitones || 0), "0.5", Number, -24, 24),
-                numberControl("Stretch", "timeStretch", Number(selected.timeStretch || 1), "0.05", (v) => Math.max(.25, Math.min(4, Number(v || 1))), .25, 4),
-                numberControl("HPF", "hpfHz", Number(selected.hpfHz || 0), "10", Number, 0, 20000),
-                numberControl("LPF", "lpfHz", Number(selected.lpfHz || 22000), "10", Number, 20, 22000),
-                numberControl("EQ Low", "eqLowDb", Number(selected.eqLowDb || 0), "0.5", Number, -24, 24),
-                numberControl("EQ Mid", "eqMidDb", Number(selected.eqMidDb || 0), "0.5", Number, -24, 24),
-                numberControl("EQ High", "eqHighDb", Number(selected.eqHighDb || 0), "0.5", Number, -24, 24),
-                numberControl("Comp", "compressor", Number(selected.compressor || 0), "0.05", Number, 0, 1),
-                numberControl("Gate dB", "noiseGateDb", Number(selected.noiseGateDb ?? -60), "1", Number, -80, 0),
-                numberControl("Duck", "ducking", Number(selected.ducking || 0), "0.05", Number, 0, 1),
-                numberControl("Rev", "reverbSend", Number(selected.reverbSend || 0), "0.05", Number, 0, 1),
-                numberControl("Delay", "delaySend", Number(selected.delaySend || 0), "0.05", Number, 0, 1),
-                numberControl("Width", "stereoWidth", Number(selected.stereoWidth || 1), "0.05", Number, 0, 2),
-                numberControl("Transient", "transient", Number(selected.transient || 0), "0.05", Number, -1, 1),
-                numberControl("Denoise", "denoise", Number(selected.denoise || 0), "0.05", Number, 0, 1),
-            );
-            const purpose = document.createElement("label");
-            purpose.textContent = "Purpose";
-            const purposeSelect = document.createElement("select");
-            ["dialogue", "music", "ambience", "foley", "whoosh", "guide_audio", "dialogue_or_music"].forEach((item) => {
-                const option = document.createElement("option");
-                option.value = item;
-                option.textContent = item;
-                option.selected = String(selected.purpose || "") === item;
-                purposeSelect.appendChild(option);
-            });
-            purposeSelect.onchange = () => setSelected("purpose", purposeSelect.value);
-            purpose.appendChild(purposeSelect);
-            editor.appendChild(purpose);
-            const link = document.createElement("label");
-            link.textContent = "Panel";
-            const linkSelect = document.createElement("select");
-            const empty = document.createElement("option");
-            empty.value = "";
-            empty.textContent = "timeline";
-            linkSelect.appendChild(empty);
-            for (const item of visualOptions()) {
-                const option = document.createElement("option");
-                option.value = item.id;
-                option.textContent = item.label;
-                option.selected = String(selected.linkedVisualId || "") === item.id;
-                linkSelect.appendChild(option);
-            }
-            linkSelect.onchange = () => {
-                const picked = visualOptions().find((item) => item.id === linkSelect.value);
-                selected.linkedVisualId = linkSelect.value;
-                if (picked) selected.start = Math.max(0, Math.round(Number(picked.start || 0)));
-                addEdit(picked ? `Linked clip to panel ${picked.label} and aligned start.` : "Unlinked clip from panel.");
-                writeState("link_panel");
-                draw();
-            };
-            link.appendChild(linkSelect);
-            editor.appendChild(link);
-            [["Reverse", "reverse"]].forEach(([labelText, key]) => {
-                const wrap = document.createElement("label");
-                wrap.textContent = labelText;
-                const input = document.createElement("input");
-                input.type = "checkbox";
-                input.checked = Boolean(selected[key]);
-                input.onchange = () => setSelected(key, Boolean(input.checked));
-                wrap.appendChild(input);
-                editor.appendChild(wrap);
-            });
-        } else {
-            const empty = document.createElement("div");
-            empty.style.gridColumn = "1 / -1";
-            empty.textContent = "Import audio to create editable DAW-style Shotboard audio lanes. Default timeline is 26 seconds.";
-            editor.appendChild(empty);
-        }
-        dynamic.appendChild(editor);
 
-        const staticPeak = Math.min(1, segments().filter((seg) => !seg.mute).reduce((sum, seg) => sum + peakFor(seg), 0) * Math.max(0, Math.min(2, Number(state.masterAudioGain ?? 1) || 1)));
-        const lower = document.createElement("div");
-        lower.className = "iamccs-audio-board-lower";
-        if (!state.showEventMonitor) lower.classList.add("no-monitor");
-        if (state.showEventMonitor) {
-            const consoleBox = document.createElement("div");
-            consoleBox.className = "iamccs-event-console";
-            const edits = (state.status?.edits || []).slice(0, 8);
-            consoleBox.innerHTML = `
-                <div class="iamccs-event-console-head">
-                    <span>EVENT MONITOR</span>
-                    <span>${fmtTime(transport.playhead)} / ${fmtTime(totalFrames())}</span>
-                </div>
-                <div class="iamccs-event-console-body"><b>V3</b> ${linkedShotboardNodes().length} | <b>CUSTOM AUDIO</b> ${segments().some(hasMedia) ? "YES" : "NO"} | <b>PEAK</b> ${Math.round(staticPeak * 100)}%
-<b>HELPER</b> ${transport.helper || "Ready."}
-<b>SHORTCUTS</b> Space play/stop | C cut | M/S/N/L | [ ] trim | arrows nudge | +/- zoom
-
-${edits.length ? edits.join("\n") : "No edits yet."}</div>`;
-            lower.appendChild(consoleBox);
-        }
-        appendInlineEfxPreview(lower, selected, staticPeak);
-        dynamic.appendChild(lower);
         root.appendChild(dynamic);
         collectTransportDom();
     };
@@ -5095,7 +6449,7 @@ ${edits.length ? edits.join("\n") : "No edits yet."}</div>`;
     const domWidget = node.addDOMWidget("AudioBoard Arranger", "iamccs_audio_board_arranger", root, { serialize: false });
     hideWidget(dataWidget);
     const applyFixedAudioBoardSize = () => {
-        const fixed = [AUDIO_BOARD_FIXED_WIDTH, AUDIO_BOARD_FIXED_HEIGHT];
+        const fixed = iamccsAudioBoardFixedSizeFromDom(root, dataWidget?.value || "");
         node._iamccsAudioBoardFixedSize = fixed;
         node.resizable = false;
         node.resizeable = false;
@@ -5131,9 +6485,9 @@ ${edits.length ? edits.join("\n") : "No edits yet."}</div>`;
     if (domWidget) {
         domWidget.computeSize = () => root._iamccsAudioFullscreenState
             ? [AUDIO_BOARD_FIXED_WIDTH, 24]
-            : [AUDIO_BOARD_FIXED_WIDTH, AUDIO_BOARD_FIXED_HEIGHT - 70];
+            : [node._iamccsAudioBoardFixedSize?.[0] || AUDIO_BOARD_FIXED_WIDTH, Math.max(24, Number(node._iamccsAudioBoardFixedSize?.[1] || AUDIO_BOARD_FIXED_HEIGHT) - 70)];
     }
-    applyFixedAudioBoardSize();
+    requestAnimationFrame(() => applyFixedAudioBoardSize());
     node._iamccsAudioBoardReady = true;
     console.info("[IAMCCS AudioBoardArranger] render complete", {
         nodeId: node?.id,
@@ -5154,9 +6508,20 @@ function iamccsAudioDialogueType(node) {
         node?.constructor?.nodeData?.name,
     ].map((item) => String(item || "")).filter(Boolean);
     const widgets = (node?.widgets || []).map((w) => String(w?.name || ""));
+    const inputs = (node?.inputs || []).map((item) => String(item?.name || ""));
+    const outputs = (node?.outputs || []).map((item) => String(item?.name || ""));
     if (raw.includes("IAMCCS_AudioBoardArranger") || raw.includes("IAMCCS AudioBoard Arranger") || widgets.includes("arranger_data")) return "IAMCCS_AudioBoardArranger";
     if (raw.includes("IAMCCS_AudioBoardMixer") || raw.includes("IAMCCS AudioBoard Mixer") || widgets.includes("mixer_data")) return "IAMCCS_AudioBoardMixer";
-    if (raw.includes("IAMCCS_ControlAudEfx") || raw.includes("IAMCCS ControlAudEfx") || widgets.includes("control_data")) return "IAMCCS_ControlAudEfx";
+    if (
+        raw.includes("IAMCCS_ControlAudEfx")
+        || raw.includes("IAMCCS ControlAudEfx")
+        || raw.includes("IAMCCS_ControlAudEfxPanel")
+        || raw.includes("IAMCCS ControlAudEfx Panel")
+        || widgets.includes("control_data")
+        || inputs.includes("cine_linx_from_arranger")
+        || outputs.includes("effect_graph_json")
+        || outputs.includes("selected_clip_json")
+    ) return "IAMCCS_ControlAudEfx";
     if (raw.includes("IAMCCS_CineEmotionButtons") || widgets.includes("selected_emotions")) return "IAMCCS_CineEmotionButtons";
     if (raw.includes("IAMCCS_BoardMaker_DialogueFoley") || widgets.includes("board_json")) return "IAMCCS_BoardMaker_DialogueFoley";
     if (raw.includes("IAMCCS_CineSpeech1PromptCompiler") || widgets.includes("speech1_prompt")) return "IAMCCS_CineSpeech1PromptCompiler";
@@ -5171,6 +6536,7 @@ function renderIamccsAudioDialogueNode(node, source = "unknown") {
         "IAMCCS_BoardMaker_DialogueFoley",
         "IAMCCS_AudioBoardArranger",
         "IAMCCS_ControlAudEfx",
+        "IAMCCS_ControlAudEfxPanel",
         "IAMCCS_AudioBoardMixer",
         "IAMCCS_CineSpeech1PromptCompiler",
     ].includes(type)) return;
@@ -5193,6 +6559,11 @@ function renderIamccsAudioDialogueNode(node, source = "unknown") {
         if (type === "IAMCCS_AudioBoardMixer") renderAudioBoardMixer(node);
     } catch (err) {
         if (type === "IAMCCS_AudioBoardArranger") node._iamccsAudioBoardReady = false;
+        if (type === "IAMCCS_ControlAudEfx") {
+            node._iamccsControlAudEfxReady = false;
+            node._iamccsControlAudEfxMounting = false;
+        }
+        if (type === "IAMCCS_AudioBoardMixer") node._iamccsAudioMixerReady = false;
         console.error("[IAMCCS AudioDialogueUI] render hook failed", {
             source,
             type,
@@ -5213,7 +6584,7 @@ function ensureControlAudEfxStyles() {
             box-sizing: border-box;
             width: 100%;
             max-width: 100%;
-            min-height: 460px;
+            min-height: 520px;
             padding: 10px;
             overflow: hidden;
             color: #dce7ea;
@@ -5234,6 +6605,17 @@ function ensureControlAudEfxStyles() {
         .iamccs-audefx-head { justify-content: space-between; margin-bottom: 8px; }
         .iamccs-audefx-title { color: #fff; font-weight: 950; font-size: 13px; }
         .iamccs-audefx-sub { color: #8fa5ac; font-weight: 750; font-size: 10px; }
+        .iamccs-audefx-target {
+            display: inline-flex;
+            align-items: center;
+            min-height: 26px;
+            padding: 0 9px;
+            border-radius: 999px;
+            border: 1px solid rgba(255,226,168,.24);
+            background: linear-gradient(180deg, rgba(52,63,65,.94), rgba(18,23,25,.94));
+            color: #ffe7b6;
+            font: 900 10px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+        }
         .iamccs-audefx button {
             min-height: 25px;
             padding: 0 8px;
@@ -5250,88 +6632,64 @@ function ensureControlAudEfxStyles() {
             background: linear-gradient(180deg, #f2d79a, #c79e59);
             border-color: #ffe6ae;
         }
-        .iamccs-audefx-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-            gap: 8px;
-            width: 100%;
-            max-width: 100%;
-            overflow: hidden;
-        }
-        .iamccs-audefx-panel {
-            min-width: 0;
-            padding: 7px;
-            background: rgba(0,0,0,.22);
-            border: 1px solid rgba(255,255,255,.10);
-            border-radius: 7px;
-        }
-        .iamccs-audefx-label {
-            margin-bottom: 5px;
-            color: #ffe2a8;
-            font-size: 9px;
-            font-weight: 950;
-            text-transform: uppercase;
-        }
-        .iamccs-audefx-canvas {
-            width: 100%;
-            max-width: 100%;
-            height: 108px;
-            display: block;
-            background: #080c0f;
-            border: 1px solid rgba(255,255,255,.08);
-            border-radius: 5px;
+        .iamccs-audefx-select {
+            min-width: 190px;
+            height: 28px;
+            min-height: 28px;
+            padding: 0 8px;
+            border: 1px solid rgba(143,208,204,.38);
+            border-radius: 6px;
+            background: #071012;
+            color: #e9ffff;
+            font: 900 10px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
         }
         .iamccs-audefx-strip {
-            margin: 8px 0;
+            margin: 8px 0 10px;
             padding: 7px;
             background: rgba(0,0,0,.18);
             border: 1px solid rgba(255,255,255,.10);
             border-radius: 7px;
         }
-        .iamccs-audefx-meter {
-            position: relative;
-            width: 190px;
-            height: 12px;
-            overflow: hidden;
-            background: #070b0d;
-            border: 1px solid rgba(255,255,255,.16);
-            border-radius: 999px;
-        }
-        .iamccs-audefx-meter i {
-            display: block;
-            width: 0%;
-            height: 100%;
-            background: linear-gradient(90deg, #55c7b9 0%, #cfe37c 58%, #f0b857 78%, #dc5c42 100%);
-            transition: width .045s linear;
-        }
-        .iamccs-audefx-readout {
-            color: #a9bec4;
-            font: 900 10px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
-        }
-        .iamccs-audefx-list {
-            max-height: 86px;
-            overflow: auto;
-            white-space: pre-wrap;
+        .iamccs-audefx-summary {
             color: #9fb1b8;
-            font: 10px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace;
+            font: 900 10px/1.35 ui-monospace, SFMono-Regular, Consolas, monospace;
+        }
+        .iamccs-audefx-empty {
+            min-height: 180px;
+            display: grid;
+            place-items: center;
+            color: #9fb1b8;
+            border: 1px dashed rgba(244,212,158,.20);
+            border-radius: 8px;
+            background: repeating-linear-gradient(135deg, rgba(255,255,255,.025) 0 1px, transparent 1px 9px);
+            font: 900 10px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace;
+            text-align: center;
         }
     `;
+    document.head.appendChild(style);
 }
 
 function renderControlAudEfx(node) {
-    if (node._iamccsControlAudEfxReady) return;
-    node._iamccsControlAudEfxReady = true;
+    if (node._iamccsControlAudEfxReady || node._iamccsControlAudEfxMounting) return;
+    node._iamccsControlAudEfxMounting = true;
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    if (typeof node.addDOMWidget !== "function") {
+        // addDOMWidget not yet available — let the delayed retry handle it
+        node._iamccsControlAudEfxMounting = false;
+        return;
+    }
+    ensureAudioBoardArrangerStyles();
     ensureControlAudEfxStyles();
     const dataWidget = findWidget(node, "control_data");
-    hideWidget(dataWidget);
+    if (dataWidget) hideWidget(dataWidget);
     const root = document.createElement("div");
     root.className = "iamccs-audefx";
     root.tabIndex = 0;
-    let audioContext = null;
-    let analyser = null;
-    let source = null;
-    let raf = 0;
-    let playing = false;
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
 
     const parseControl = () => {
         try { return JSON.parse(String(dataWidget?.value || "{}")); } catch { return {}; }
@@ -5345,368 +6703,367 @@ function renderControlAudEfx(node) {
         node.setDirtyCanvas?.(true, true);
         app.graph?.setDirtyCanvas?.(true, true);
     };
+    if (!dataWidget) {
+        root.innerHTML = `<div class="iamccs-audefx-head"><div><div class="iamccs-audefx-title">IAMCCS ControlAudEfx</div><div class="iamccs-audefx-sub">UI placeholder mounted, but control_data widget is missing on this node instance.</div></div></div><div class="iamccs-audefx-empty">This node instance was created without the expected hidden widget \"control_data\". Recreate the node from the current IAMCCS-nodes build.</div>`;
+        const domWidget = node.addDOMWidget("ControlAudEfx", "iamccs_control_aud_efx", root, { serialize: false });
+        domWidget.computeSize = (width) => [Math.max(1320, Number(width || 1320)), 260];
+        requestAnimationFrame(() => {
+            const w = Math.max(1340, node.size?.[0] || 1340);
+            if (typeof node.setSize === "function") node.setSize([w, 320]);
+            else node.size = [w, 320];
+            node.setDirtyCanvas?.(true, true);
+            app.graph?.setDirtyCanvas?.(true, true);
+        });
+        node._iamccsControlAudEfxReady = true;
+        node._iamccsControlAudEfxMounting = false;
+        return;
+    }
+    const EFFECT_SPECS = {
+        eq: [["low", "LOW", -24, 24, .5, 0, "dB"], ["mid", "MID", -24, 24, .5, 0, "dB"], ["high", "HIGH", -24, 24, .5, 0, "dB"], ["q", "Q", .2, 8, .1, 1.2, ""]],
+        compressor: [["threshold", "THR", -60, 0, 1, -18, "dB"], ["ratio", "RATIO", 1, 20, .5, 4, ":1"], ["attack", "ATK", 1, 100, 1, 6, "ms"], ["release", "REL", 20, 800, 10, 180, "ms"]],
+        limiter: [["input", "IN", -12, 12, .5, 0, "dB"], ["ceiling", "CEIL", -12, 0, .5, -1, "dB"], ["lookahead", "LOOK", 0, 10, .5, 3, "ms"], ["release", "REL", 20, 800, 10, 120, "ms"]],
+        gate: [["threshold", "THR", -80, 0, 1, -45, "dB"], ["attack", "ATK", 1, 80, 1, 8, "ms"], ["hold", "HOLD", 0, 400, 10, 80, "ms"], ["release", "REL", 20, 1200, 10, 260, "ms"]],
+        reverb: [["size", "SIZE", 0, 1, .01, .45, ""], ["decay", "DECAY", .1, 8, .1, 1.8, "s"], ["damp", "DAMP", 0, 1, .01, .35, ""], ["mix", "MIX", 0, 1, .01, .18, ""]],
+        delay: [["time", "TIME", .03, 1.5, .01, .18, "s"], ["feedback", "FDBK", 0, .9, .01, .28, ""], ["filter", "FILT", 200, 12000, 100, 4200, "Hz"], ["mix", "MIX", 0, 1, .01, .2, ""]],
+        saturator: [["drive", "DRIVE", 0, 24, .5, 4, "dB"], ["color", "COLOR", 0, 1, .01, .45, ""], ["tone", "TONE", 200, 12000, 100, 2600, "Hz"], ["mix", "MIX", 0, 1, .01, .5, ""]],
+        utility: [["gain", "GAIN", -24, 24, .5, 0, "dB"], ["width", "WIDTH", 0, 2, .05, 1, ""], ["pan", "PAN", -1, 1, .05, 0, ""], ["mono", "MONO", 0, 1, 1, 0, ""]],
+        stereo: [["width", "WIDTH", 0, 2, .05, 1.15, ""], ["angle", "ANGLE", -45, 45, 1, 0, "deg"], ["bassMono", "BASS", 0, 300, 10, 120, "Hz"], ["mix", "MIX", 0, 1, .01, .5, ""]],
+        deesser: [["freq", "FREQ", 2500, 10000, 100, 6200, "Hz"], ["threshold", "THR", -60, 0, 1, -26, "dB"], ["range", "RANGE", 0, 24, .5, 8, "dB"], ["mix", "MIX", 0, 1, .01, .75, ""]],
+        transient: [["attack", "ATK", -1, 1, .05, .15, ""], ["sustain", "SUS", -1, 1, .05, 0, ""], ["drive", "DRIVE", 0, 12, .5, 0, "dB"], ["mix", "MIX", 0, 1, .01, .6, ""]],
+        tape: [["bias", "BIAS", 0, 1, .01, .45, ""], ["wow", "WOW", 0, 1, .01, .08, ""], ["sat", "SAT", 0, 1, .01, .35, ""], ["hiss", "HISS", 0, 1, .01, .04, ""]],
+        chorus: [["rate", "RATE", .05, 8, .05, .8, "Hz"], ["depth", "DEPTH", 0, 1, .01, .35, ""], ["phase", "PHASE", 0, 180, 1, 90, "deg"], ["mix", "MIX", 0, 1, .01, .22, ""]],
+    };
+    const effectParamSpecs = (type) => EFFECT_SPECS[String(type || "")] || [["amount", "AMT", 0, 1, .01, .5, ""], ["mix", "MIX", 0, 1, .01, .5, ""]];
+    const normalizeEffect = (fx) => {
+        const out = fx && typeof fx === "object" ? fx : {};
+        out.id = out.id || `fx_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        out.type = String(out.type || "utility");
+        out.enabled = out.enabled !== false;
+        out.params = out.params && typeof out.params === "object" ? out.params : {};
+        effectParamSpecs(out.type).forEach(([key, , , , , fallback]) => {
+            if (out.params[key] == null || Number.isNaN(Number(out.params[key]))) out.params[key] = fallback;
+        });
+        out.amount = Math.max(0, Math.min(1, Number(out.amount ?? .5)));
+        return out;
+    };
     const upstreamArranger = () => {
+        const candidates = [];
+        const seen = new Set();
+        const consider = (maybeNode) => {
+            const id = Number(maybeNode?.id || 0);
+            const type = String(maybeNode?.comfyClass || maybeNode?.type || "");
+            if (!id || seen.has(id) || type !== "IAMCCS_AudioBoardArranger") return;
+            seen.add(id);
+            candidates.push(maybeNode);
+        };
         for (const input of node.inputs || []) {
             const link = input.link != null ? app.graph?.links?.[input.link] : null;
             const origin = link ? app.graph?.getNodeById?.(link.origin_id) : null;
-            const type = String(origin?.comfyClass || origin?.type || "");
-            if (origin && type === "IAMCCS_AudioBoardArranger") return origin;
-            if (origin) {
-                for (const other of app.graph?._nodes || []) {
-                    const otherType = String(other?.comfyClass || other?.type || "");
-                    if (otherType !== "IAMCCS_AudioBoardArranger") continue;
-                    const linkedToOrigin = (other.outputs || []).some((output) => (output.links || []).some((linkId) => app.graph?.links?.[linkId]?.target_id === origin.id));
-                    if (linkedToOrigin) return other;
-                }
-            }
+            consider(origin);
         }
-        return null;
+        if (candidates.length) return candidates[0];
+        return (app.graph?._nodes || []).find((item) => String(item?.comfyClass || item?.type || "") === "IAMCCS_AudioBoardArranger") || null;
     };
     const arrangerState = () => {
-        const fallbackFromTimeline = () => {
-            for (const input of node.inputs || []) {
-                const link = input.link != null ? app.graph?.links?.[input.link] : null;
-                const origin = link ? app.graph?.getNodeById?.(link.origin_id) : null;
-                const timelineWidget = origin ? findWidget(origin, "timeline_data") : null;
-                try {
-                    const timeline = JSON.parse(String(timelineWidget?.value || "{}"));
-                    if (Array.isArray(timeline.audioSegments)) {
-                        return {
-                            audioSegments: timeline.audioSegments,
-                            audioTrackCount: timeline.audioTrackCount || 4,
-                            masterAudioGain: timeline.masterAudioGain ?? 1,
-                            masterAudioNormalize: Boolean(timeline.masterAudioNormalize),
-                            masterBus: timeline.masterBus || {},
-                            frame_rate: timeline.frame_rate || 24,
-                            selectedClipId: timeline.selectedClipId || "",
-                        };
-                    }
-                } catch {}
-            }
-            return {};
-        };
         const arranger = upstreamArranger();
         const widget = arranger ? findWidget(arranger, "arranger_data") : null;
         try {
             const data = JSON.parse(String(widget?.value || "{}"));
-            if (data && typeof data === "object" && Array.isArray(data.audioSegments)) return data;
-            return fallbackFromTimeline();
-        } catch {
-            return fallbackFromTimeline();
-        }
+            return data && typeof data === "object" ? data : {};
+        } catch { return {}; }
     };
-    const clips = (state) => Array.isArray(state.audioSegments) ? state.audioSegments : [];
-    const selectedClip = (state) => {
-        const data = parseControl();
-        const selectedId = String(data.selectedClipId || state.selectedClipId || "");
-        return clips(state).find((clip) => clip.id === selectedId) || clips(state)[0] || null;
+    const deviceColors = {
+        eq: ["#6a5532", "#29251c", "#0b0d0c"],
+        compressor: ["#5a3f2c", "#2d241b", "#0b0d0c"],
+        limiter: ["#673631", "#2c1e1b", "#0b0d0c"],
+        gate: ["#394d3f", "#1d2922", "#0b0d0c"],
+        reverb: ["#35445f", "#1b2232", "#090b12"],
+        delay: ["#5b4a2d", "#2a2418", "#0d0b08"],
+        saturator: ["#6b4026", "#322116", "#0d0907"],
+        utility: ["#3e514d", "#1c2927", "#071010"],
+        stereo: ["#423c60", "#211f32", "#0a0912"],
+        deesser: ["#4b5a35", "#242d1c", "#090d08"],
+        transient: ["#614c34", "#2c251a", "#0c0a08"],
+        tape: ["#57412b", "#2b2118", "#0d0906"],
+        chorus: ["#34565d", "#1a2b30", "#071012"],
     };
-    const audioViewUrl = (seg) => {
-        const file = String(seg?.audioFile || "").trim();
-        if (!file) return "";
-        const parts = file.split(/[\\/]+/).filter(Boolean);
-        const filename = parts.pop() || file;
-        const subfolder = parts.join("/");
-        return `/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(seg.audioUploadType || "input")}&subfolder=${encodeURIComponent(subfolder)}`;
-    };
-    const drawGrid = (ctx, w, h) => {
-        ctx.clearRect(0, 0, w, h);
-        ctx.fillStyle = "#080c0f";
-        ctx.fillRect(0, 0, w, h);
-        ctx.strokeStyle = "rgba(255,255,255,.07)";
-        ctx.lineWidth = 1;
-        for (let x = 0; x <= w; x += w / 8) {
-            ctx.beginPath();
-            ctx.moveTo(x, 0);
-            ctx.lineTo(x, h);
-            ctx.stroke();
-        }
-        for (let y = 0; y <= h; y += h / 4) {
-            ctx.beginPath();
-            ctx.moveTo(0, y);
-            ctx.lineTo(w, y);
-            ctx.stroke();
-        }
-    };
-    const normalizedPeak = (raw) => {
-        if (raw && typeof raw === "object") return { min: Number(raw.min || 0), max: Number(raw.max || 0), rms: Number(raw.rms || 0) };
-        const p = Math.abs(Number(raw || 0));
-        return { min: -p, max: p, rms: p * .65 };
-    };
-    const drawStaticWave = (canvas, clip) => {
-        const ctx = canvas.getContext("2d");
-        const dpr = window.devicePixelRatio || 1;
-        const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
-        const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
-        if (canvas.width !== w) canvas.width = w;
-        if (canvas.height !== h) canvas.height = h;
-        drawGrid(ctx, w, h);
-        const peaks = Array.isArray(clip?.waveformPeaks) ? clip.waveformPeaks : [];
-        if (!peaks.length) return;
-        ctx.beginPath();
-        const top = [];
-        const bottom = [];
-        for (let x = 0; x < w; x += 1) {
-            const raw = normalizedPeak(peaks[Math.min(peaks.length - 1, Math.floor((x / Math.max(1, w - 1)) * peaks.length))]);
-            top.push([x, h * .5 - raw.max * h * .46]);
-            bottom.unshift([x, h * .5 - raw.min * h * .46]);
-        }
-        ctx.fillStyle = "rgba(91,190,181,.50)";
-        ctx.strokeStyle = "rgba(244,212,158,.95)";
-        ctx.lineWidth = Math.max(1, dpr);
-        ctx.beginPath();
-        top.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
-        bottom.forEach(([x, y]) => ctx.lineTo(x, y));
-        ctx.closePath();
-        ctx.fill();
-        ctx.stroke();
-        ctx.strokeStyle = "rgba(255,255,255,.22)";
-        ctx.beginPath();
-        ctx.moveTo(0, h * .5);
-        ctx.lineTo(w, h * .5);
-        ctx.stroke();
-    };
-    const drawEq = (canvas, clip, masterBus = {}) => {
-        const ctx = canvas.getContext("2d");
-        const dpr = window.devicePixelRatio || 1;
-        const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
-        const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
-        if (canvas.width !== w) canvas.width = w;
-        if (canvas.height !== h) canvas.height = h;
-        drawGrid(ctx, w, h);
-        const low = Number(clip?.eqLowDb || 0);
-        const mid = Number(clip?.eqMidDb || 0);
-        const high = Number(clip?.eqHighDb || 0);
-        const hpf = Number(clip?.hpfHz || 0);
-        const lpf = Number(clip?.lpfHz || 22000);
-        const gainAt = (freq) => {
-            const log = (Math.log10(freq) - Math.log10(20)) / (Math.log10(22000) - Math.log10(20));
-            let db = low * Math.max(0, 1 - Math.abs(log - .22) / .32);
-            db += mid * Math.max(0, 1 - Math.abs(log - .55) / .22);
-            db += high * Math.max(0, 1 - Math.abs(log - .82) / .30);
-            if (hpf > 20 && freq < hpf) db -= Math.min(36, 24 * (1 - freq / hpf));
-            if (lpf < 21950 && freq > lpf) db -= Math.min(36, 24 * (freq / lpf - 1));
-            db -= Number(masterBus?.compressor || 0) * 2;
-            return Math.max(-24, Math.min(24, db));
+    const trackState = (data, index) => {
+        data.trackSettings = Array.isArray(data.trackSettings) ? data.trackSettings : [];
+        const safeIndex = Math.max(0, Number(index || 0));
+        data.trackSettings[safeIndex] = {
+            mute: false,
+            solo: false,
+            normalize: false,
+            reverb: false,
+            reverbSend: 0,
+            volume: 1,
+            pan: 0,
+            color: normalizeTrackColor("", safeIndex),
+            lock: false,
+            noAutoEq: true,
+            effectChain: [],
+            ...(data.trackSettings[safeIndex] && typeof data.trackSettings[safeIndex] === "object" ? data.trackSettings[safeIndex] : {}),
         };
-        ctx.strokeStyle = "#f4d49e";
-        ctx.lineWidth = Math.max(2, 2 * dpr);
-        ctx.beginPath();
-        for (let x = 0; x < w; x += 1) {
-            const t = x / Math.max(1, w - 1);
-            const freq = 20 * Math.pow(22000 / 20, t);
-            const y = h * .5 - (gainAt(freq) / 24) * h * .42;
-            if (x === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
+        data.trackSettings[safeIndex].effectChain = Array.isArray(data.trackSettings[safeIndex].effectChain) ? data.trackSettings[safeIndex].effectChain : [];
+        return data.trackSettings[safeIndex];
+    };
+    const selectedTarget = (data) => {
+        data.audioTrackCount = Math.max(1, Number(data.audioTrackCount || 5));
+        data.selectedMixer = data.selectedMixer && typeof data.selectedMixer === "object" ? data.selectedMixer : { type: "track", track: 0 };
+        data.selectedMixer.type = data.selectedMixer.type === "track" ? "track" : "master";
+        data.selectedMixer.track = Math.max(0, Math.min(data.audioTrackCount - 1, Number(data.selectedMixer.track || 0)));
+        return data.selectedMixer;
+    };
+    const chainForTarget = (data, target = selectedTarget(data)) => {
+        if (target.type === "track") {
+            const chain = trackState(data, target.track).effectChain;
+            chain.forEach(normalizeEffect);
+            return chain;
         }
-        ctx.stroke();
-        ctx.fillStyle = "#8fa5ac";
-        ctx.font = `${10 * dpr}px ui-monospace`;
-        ["20", "100", "1k", "10k"].forEach((label, i) => ctx.fillText(label, 6 + i * (w / 4), h - 7 * dpr));
+        data.masterBus = data.masterBus && typeof data.masterBus === "object" ? data.masterBus : {};
+        data.masterBus.effectChain = Array.isArray(data.masterBus.effectChain) ? data.masterBus.effectChain : [];
+        data.masterBus.effectChain.forEach(normalizeEffect);
+        return data.masterBus.effectChain;
     };
-    const ensureAudioContext = async () => {
-        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-        if (!AudioContextClass) throw new Error("WebAudio unavailable");
-        if (!audioContext) audioContext = new AudioContextClass();
-        if (audioContext.state === "suspended") await audioContext.resume();
-        return audioContext;
+    const persistArranger = (data, reason = "control_efx") => {
+        const arranger = upstreamArranger();
+        const widget = arranger ? findWidget(arranger, "arranger_data") : null;
+        if (!widget) return false;
+        widget.value = JSON.stringify(data, null, 2);
+        widget.callback?.(widget.value);
+        arranger.setDirtyCanvas?.(true, true);
+        app.graph?.setDirtyCanvas?.(true, true);
+        writeControl({ last_reason: reason, selectedMixer: data.selectedMixer });
+        document.dispatchEvent(new CustomEvent("iamccs:audio_arranger_state_changed", {
+            detail: { node_id: arranger.id, reason, selectedMixer: JSON.parse(JSON.stringify(data.selectedMixer || { type: "track", track: 0 })) },
+        }));
+        return true;
     };
-    const stop = () => {
-        try { source?.stop(); } catch {}
-        source = null;
-        playing = false;
-        if (raf) cancelAnimationFrame(raf);
-        raf = 0;
-        draw();
-    };
-    const play = async () => {
-        const state = arrangerState();
-        const clip = selectedClip(state);
-        const url = audioViewUrl(clip);
-        if (!clip || !url) return;
-        stop();
-        const ctx = await ensureAudioContext();
-        const resp = await fetch(url);
-        const decoded = await ctx.decodeAudioData((await resp.arrayBuffer()).slice(0));
-        const src = ctx.createBufferSource();
-        src.buffer = decoded;
-        src.playbackRate.value = Math.max(.25, Math.min(4, Number(clip.timeStretch || 1))) * Math.pow(2, Number(clip.pitchSemitones || 0) / 12);
-        const gain = ctx.createGain();
-        gain.gain.value = Math.max(0, Math.min(4, Number(clip.gain || 1)));
-        let last = gain;
-        const addFilter = (type, freq, db = 0, q = .707) => {
-            const f = ctx.createBiquadFilter();
-            f.type = type;
-            f.frequency.value = Math.max(10, Math.min(22000, Number(freq || 0)));
-            f.Q.value = q;
-            f.gain.value = Math.max(-36, Math.min(36, Number(db || 0)));
-            last.connect(f);
-            last = f;
-        };
-        if (Number(clip.hpfHz || 0) > 10) addFilter("highpass", clip.hpfHz);
-        if (Number(clip.lpfHz || 22000) < 21950) addFilter("lowpass", clip.lpfHz);
-        if (Number(clip.eqLowDb || 0)) addFilter("lowshelf", 140, clip.eqLowDb);
-        if (Number(clip.eqMidDb || 0)) addFilter("peaking", 1200, clip.eqMidDb, 1.1);
-        if (Number(clip.eqHighDb || 0)) addFilter("highshelf", 6200, clip.eqHighDb);
-        if (ctx.createStereoPanner) {
-            const pan = ctx.createStereoPanner();
-            pan.pan.value = Math.max(-1, Math.min(1, Number(clip.pan || 0)));
-            last.connect(pan);
-            last = pan;
-        }
-        analyser = ctx.createAnalyser();
-        analyser.fftSize = 2048;
-        analyser.smoothingTimeConstant = .72;
-        last.connect(analyser);
-        analyser.connect(ctx.destination);
-        src.connect(gain);
-        const offset = Math.max(0, Number(clip.trimStart || 0) / Math.max(1, Number(state.frame_rate || 24)));
-        src.start(0, offset, Math.max(.05, Math.min(decoded.duration - offset, Number(clip.length || 1) / Math.max(1, Number(state.frame_rate || 24)))));
-        source = src;
-        playing = true;
-        src.onended = () => stop();
-        drawRealtime();
-    };
-    const drawRealtime = () => {
-        const spectrum = root.querySelector(".iamccs-audefx-spectrum");
-        const scope = root.querySelector(".iamccs-audefx-scope");
-        const meter = root.querySelector(".iamccs-audefx-meter i");
-        const readout = root.querySelector(".iamccs-audefx-readout");
-        if (!analyser || !playing) return;
-        const freq = new Uint8Array(analyser.frequencyBinCount);
-        const wave = new Uint8Array(analyser.fftSize);
-        analyser.getByteFrequencyData(freq);
-        analyser.getByteTimeDomainData(wave);
-        const drawBars = (canvas) => {
-            if (!canvas) return;
-            const ctx = canvas.getContext("2d");
-            const dpr = window.devicePixelRatio || 1;
-            const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
-            const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
-            if (canvas.width !== w) canvas.width = w;
-            if (canvas.height !== h) canvas.height = h;
-            drawGrid(ctx, w, h);
-            const bars = 96;
-            for (let i = 0; i < bars; i += 1) {
-                const v = freq[Math.floor((i / bars) * freq.length)] / 255;
-                ctx.fillStyle = v > .85 ? "#dc5c42" : v > .58 ? "#f0b857" : "#55c7b9";
-                ctx.fillRect((i / bars) * w, h - v * h, Math.max(1, w / bars - 1), v * h);
-            }
-        };
-        const drawScope = (canvas) => {
-            if (!canvas) return;
-            const ctx = canvas.getContext("2d");
-            const dpr = window.devicePixelRatio || 1;
-            const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
-            const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
-            if (canvas.width !== w) canvas.width = w;
-            if (canvas.height !== h) canvas.height = h;
-            drawGrid(ctx, w, h);
-            ctx.strokeStyle = "#f4d49e";
-            ctx.lineWidth = Math.max(1.5, 1.5 * dpr);
-            ctx.beginPath();
-            wave.forEach((value, i) => {
-                const x = (i / Math.max(1, wave.length - 1)) * w;
-                const y = (value / 255) * h;
-                if (i === 0) ctx.moveTo(x, y);
-                else ctx.lineTo(x, y);
-            });
-            ctx.stroke();
-        };
-        drawBars(spectrum);
-        drawScope(scope);
-        let peak = 0;
-        let sum = 0;
-        for (const value of wave) {
-            const v = (value - 128) / 128;
-            peak = Math.max(peak, Math.abs(v));
-            sum += v * v;
-        }
-        const rms = Math.sqrt(sum / Math.max(1, wave.length));
-        if (meter) meter.style.width = `${Math.round(peak * 100)}%`;
-        if (readout) readout.textContent = `PK ${Math.round(peak * 100)} RMS ${Math.round(rms * 100)}`;
-        raf = requestAnimationFrame(drawRealtime);
-    };
+    const targetSummary = (data, target) => target.type === "track"
+        ? `A${target.track + 1} / clips ${(Array.isArray(data.audioSegments) ? data.audioSegments : []).filter((seg) => Number(seg?.track || 0) === target.track).length}`
+        : "MASTER OUT";
     const draw = () => {
         root.querySelectorAll(".iamccs-audefx-dynamic").forEach((el) => el.remove());
         const state = arrangerState();
-        const clip = selectedClip(state);
-        const control = parseControl();
+        const target = selectedTarget(state);
+        const chain = chainForTarget(state, target);
         const dynamic = document.createElement("div");
         dynamic.className = "iamccs-audefx-dynamic";
         const head = document.createElement("div");
         head.className = "iamccs-audefx-head";
         const title = document.createElement("div");
-        title.innerHTML = `<div class="iamccs-audefx-title">IAMCCS ControlAudEfx</div><div class="iamccs-audefx-sub">${clip ? String(clip.name || clip.fileName || clip.id) : "connect Arranger cine_linx output"} / clips ${clips(state).length}</div>`;
+        title.innerHTML = `<div class="iamccs-audefx-title">IAMCCS ControlAudEfx</div><div class="iamccs-audefx-sub">Horizontal rack synced to Arranger selected track</div>`;
         const tools = document.createElement("div");
         tools.className = "iamccs-audefx-tools";
-        const playBtn = document.createElement("button");
-        playBtn.textContent = playing ? "Stop" : "Play FX";
-        playBtn.className = playing ? "is-active" : "";
-        playBtn.onclick = () => playing ? stop() : play();
+        const targetBadge = document.createElement("span");
+        targetBadge.className = "iamccs-audefx-target";
+        targetBadge.textContent = target.type === "track" ? `TRACK A${target.track + 1}` : "MASTER OUT";
+        const insert = document.createElement("select");
+        insert.className = "iamccs-audefx-select";
+        insert.innerHTML = `<option value="">+ insert FX</option>`;
+        for (const [value, labelText] of EFFECT_CHOICES) {
+            const option = document.createElement("option");
+            option.value = value;
+            option.textContent = labelText;
+            insert.appendChild(option);
+        }
+        insert.onchange = () => {
+            const nextType = String(insert.value || "");
+            if (!nextType) return;
+            const data = arrangerState();
+            const currentTarget = selectedTarget(data);
+            const nextChain = chainForTarget(data, currentTarget);
+            nextChain.push(normalizeEffect({ id: `fx_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`, type: nextType, enabled: true, amount: nextType === "limiter" ? 1 : .5 }));
+            insert.value = "";
+            persistArranger(data, `insert_${nextType}`);
+            draw();
+        };
         const refresh = document.createElement("button");
         refresh.textContent = "Refresh";
         refresh.onclick = () => draw();
-        tools.append(playBtn, refresh);
+        tools.append(targetBadge, insert, refresh);
         head.append(title, tools);
         dynamic.appendChild(head);
         const strip = document.createElement("div");
         strip.className = "iamccs-audefx-strip";
-        strip.innerHTML = `<strong>REALTIME</strong><span class="iamccs-audefx-meter"><i></i></span><span class="iamccs-audefx-readout">PK 0 RMS 0</span><span>${clip ? `HPF ${clip.hpfHz || 0} / LPF ${clip.lpfHz || 22000} / EQ ${clip.eqLowDb || 0}, ${clip.eqMidDb || 0}, ${clip.eqHighDb || 0}` : "no clip"}</span>`;
+        strip.innerHTML = `<span class="iamccs-audefx-summary">${targetSummary(state, target)} / devices ${chain.length} / sync ${upstreamArranger() ? "Arranger" : "missing arranger"}</span>`;
         dynamic.appendChild(strip);
+        if (!upstreamArranger()) {
+            const empty = document.createElement("div");
+            empty.className = "iamccs-audefx-empty";
+            empty.textContent = "Connect cine_linx from IAMCCS_AudioBoardArranger to mirror the selected track effect rack here.";
+            dynamic.appendChild(empty);
+            root.appendChild(dynamic);
+            return;
+        }
+        const rack = document.createElement("div");
+        rack.className = "iamccs-inline-efx";
+        rack.innerHTML = `<div class="iamccs-inline-efx-head"><span>DEVICE RACK / AUDIO CONTROL EFX</span><span>${target.type === "track" ? `A${target.track + 1}` : "MASTER OUT"}</span></div>`;
         const grid = document.createElement("div");
-        grid.className = "iamccs-audefx-grid";
-        const panels = [
-            ["Waveform", "iamccs-audefx-wave"],
-            ["EQ Response", "iamccs-audefx-eq"],
-            ["Spectrum", "iamccs-audefx-spectrum"],
-            ["Oscilloscope", "iamccs-audefx-scope"],
-        ];
-        const canvases = {};
-        for (const [label, klass] of panels) {
-            const panel = document.createElement("div");
-            panel.className = "iamccs-audefx-panel";
-            const lab = document.createElement("div");
-            lab.className = "iamccs-audefx-label";
-            lab.textContent = label;
-            const canvas = document.createElement("canvas");
-            canvas.className = `iamccs-audefx-canvas ${klass}`;
-            canvases[klass] = canvas;
-            panel.append(lab, canvas);
-            grid.appendChild(panel);
+        grid.className = "iamccs-inline-efx-grid";
+        const chainEl = document.createElement("div");
+        chainEl.className = "iamccs-device-chain";
+        if (!chain.length) {
+            const module = document.createElement("div");
+            module.className = "iamccs-device-module";
+            const emptyDevice = document.createElement("div");
+            emptyDevice.className = "iamccs-audio-device";
+            emptyDevice.innerHTML = `<div class="iamccs-device-head"><span>NO DEVICE</span></div><div style="color:#b3a37e;font:800 9px/1.35 ui-monospace,SFMono-Regular,Consolas,monospace;">Selected ${target.type === "track" ? `track A${target.track + 1}` : "master"} has no inserted effects.</div>`;
+            const ph = document.createElement("div");
+            ph.className = "iamccs-inline-efx-panel";
+            ph.innerHTML = `<label>Realtime Preview</label><div class="iamccs-efx-placeholder">Insert FX from this node or from the arranger track editor.</div>`;
+            module.append(emptyDevice, ph);
+            chainEl.appendChild(module);
         }
-        dynamic.appendChild(grid);
-        const list = document.createElement("div");
-        list.className = "iamccs-audefx-list";
-        list.textContent = clip ? JSON.stringify({
-            id: clip.id,
-            linkedVisualId: clip.linkedVisualId || "",
-            gain: clip.gain,
-            pan: clip.pan,
-            hpfHz: clip.hpfHz,
-            lpfHz: clip.lpfHz,
-            eqLowDb: clip.eqLowDb,
-            eqMidDb: clip.eqMidDb,
-            eqHighDb: clip.eqHighDb,
-            compressor: clip.compressor,
-            delaySend: clip.delaySend,
-            reverbSend: clip.reverbSend,
-            masterBus: state.masterBus || {},
-        }, null, 2) : "No AudioBoardArranger connected.";
-        dynamic.appendChild(list);
-        root.appendChild(dynamic);
-        if (clip) {
-            requestAnimationFrame(() => {
-                drawStaticWave(canvases["iamccs-audefx-wave"], clip);
-                drawEq(canvases["iamccs-audefx-eq"], clip, state.masterBus || {});
-                drawGrid(canvases["iamccs-audefx-spectrum"].getContext("2d"), canvases["iamccs-audefx-spectrum"].clientWidth, canvases["iamccs-audefx-spectrum"].clientHeight);
-                drawGrid(canvases["iamccs-audefx-scope"].getContext("2d"), canvases["iamccs-audefx-scope"].clientWidth, canvases["iamccs-audefx-scope"].clientHeight);
+        chain.forEach((fx, index) => {
+            normalizeEffect(fx);
+            const module = document.createElement("div");
+            module.className = "iamccs-device-module";
+            const device = document.createElement("div");
+            device.className = `iamccs-audio-device iamccs-device-${String(fx.type || "device").replace(/[^a-z0-9_-]/gi, "")}`;
+            const palette = deviceColors[fx.type] || ["#3a3328", "#171714", "#0b0d0c"];
+            device.style.setProperty("--device-hi", palette[0]);
+            device.style.setProperty("--device-mid", palette[1]);
+            device.style.setProperty("--device-lo", palette[2]);
+            const name = EFFECT_CHOICES.find(([value]) => value === fx.type)?.[1] || String(fx.type || "FX");
+            const headEl = document.createElement("div");
+            headEl.className = "iamccs-device-head";
+            const titleEl = document.createElement("span");
+            titleEl.textContent = `${index + 1}. ${name}`;
+            const actions = document.createElement("div");
+            actions.className = "iamccs-device-head-actions";
+            const lamp = document.createElement("span");
+            lamp.className = `iamccs-device-lamp${fx.enabled === false ? " is-off" : ""}`;
+            const power = document.createElement("button");
+            power.type = "button";
+            power.className = `iamccs-device-power${fx.enabled === false ? " is-off" : ""}`;
+            power.title = "Enable / bypass";
+            power.onclick = () => {
+                const data = arrangerState();
+                const currentTarget = selectedTarget(data);
+                const currentFx = chainForTarget(data, currentTarget).find((item) => String(item?.id || "") === String(fx.id || ""));
+                if (!currentFx) return;
+                currentFx.enabled = currentFx.enabled === false;
+                persistArranger(data, `toggle_${currentFx.type}`);
+                draw();
+            };
+            const remove = document.createElement("button");
+            remove.type = "button";
+            remove.className = "iamccs-device-remove";
+            remove.textContent = "x";
+            remove.title = "Remove device";
+            remove.onclick = () => {
+                const data = arrangerState();
+                const currentTarget = selectedTarget(data);
+                const currentChain = chainForTarget(data, currentTarget);
+                const indexToRemove = currentChain.findIndex((item) => String(item?.id || "") === String(fx.id || ""));
+                if (indexToRemove < 0) return;
+                currentChain.splice(indexToRemove, 1);
+                persistArranger(data, `remove_${fx.type}`);
+                draw();
+            };
+            actions.append(lamp, power, remove);
+            headEl.append(titleEl, actions);
+            const knobs = document.createElement("div");
+            knobs.className = "iamccs-device-knobs";
+            effectParamSpecs(fx.type).forEach(([key, knobName, min, max, step, fallback, unit]) => {
+                if (fx.params[key] == null) fx.params[key] = fallback;
+                const knob = document.createElement("div");
+                knob.className = "iamccs-device-knob";
+                const dial = document.createElement("i");
+                const label = document.createElement("span");
+                label.textContent = knobName;
+                const readout = document.createElement("em");
+                const range = document.createElement("input");
+                range.type = "range";
+                range.min = String(min);
+                range.max = String(max);
+                range.step = String(step);
+                range.value = String(fx.params[key]);
+                const syncUi = () => {
+                    const liveValue = Math.max(Number(min), Math.min(Number(max), Number(fx.params[key] ?? fallback)));
+                    const t = (liveValue - Number(min)) / Math.max(.0001, Number(max) - Number(min));
+                    dial.style.setProperty("--knob-angle", `${-135 + t * 270}deg`);
+                    readout.textContent = `${Number(liveValue.toFixed(2))}${unit || ""}`;
+                    range.value = String(liveValue);
+                };
+                range.oninput = () => {
+                    fx.params[key] = Number(range.value || fallback);
+                    syncUi();
+                };
+                range.onchange = () => {
+                    const data = arrangerState();
+                    const currentTarget = selectedTarget(data);
+                    const currentFx = chainForTarget(data, currentTarget).find((item) => String(item?.id || "") === String(fx.id || ""));
+                    if (!currentFx) return;
+                    normalizeEffect(currentFx);
+                    currentFx.params[key] = Number(range.value || fallback);
+                    persistArranger(data, `${currentFx.type}_${key}`);
+                };
+                knob.append(dial, label, readout, range);
+                knobs.appendChild(knob);
+                syncUi();
             });
-        }
+            device.append(headEl, knobs);
+            const panel = document.createElement("div");
+            panel.className = "iamccs-inline-efx-panel";
+            panel.innerHTML = `<label>${name} Summary</label><div class="iamccs-efx-placeholder">${effectParamSpecs(fx.type).map(([key, knobName]) => `${knobName}: ${Number(fx.params[key] ?? 0).toFixed(2)}`).join(" | ")}</div>`;
+            module.append(device, panel);
+            chainEl.appendChild(module);
+        });
+        grid.appendChild(chainEl);
+        rack.appendChild(grid);
+        dynamic.appendChild(rack);
+        root.appendChild(dynamic);
     };
+    document.addEventListener("iamccs:audio_arranger_state_changed", (event) => {
+        const arranger = upstreamArranger();
+        if (!arranger) return;
+        if (Number(event?.detail?.node_id || 0) !== Number(arranger.id || 0)) return;
+        draw();
+    });
+    node._iamccsControlAudEfxPoll = window.setInterval(() => {
+        const arranger = upstreamArranger();
+        const widget = arranger ? findWidget(arranger, "arranger_data") : null;
+        const nextSnapshot = String(widget?.value || "");
+        if (node._iamccsControlAudEfxLastSnapshot === nextSnapshot) return;
+        node._iamccsControlAudEfxLastSnapshot = nextSnapshot;
+        draw();
+    }, 300);
     draw();
     const domWidget = node.addDOMWidget("ControlAudEfx", "iamccs_control_aud_efx", root, { serialize: false });
-    domWidget.computeSize = (width) => [width, 500];
+    domWidget.computeSize = (width) => [Math.max(1320, Number(width || 1320)), 560];
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    if (!node._iamccsControlAudEfxResizeLocked) {
+        const _prevOnResizeCtrl = node.onResize;
+        node.onResize = function(size) {
+            if (Array.isArray(size)) { size[0] = Math.max(1340, size[0]); size[1] = Math.max(630, size[1]); }
+            const result = typeof _prevOnResizeCtrl === "function" ? _prevOnResizeCtrl.apply(this, arguments) : undefined;
+            this.resizable = false;
+            this.resizeable = false;
+            if (Number(this.size?.[1] || 0) < 630) {
+                const nw = Math.max(1340, this.size?.[0] || 1340);
+                if (typeof this.setSize === "function") this.setSize([nw, 630]);
+                else this.size = [nw, 630];
+            }
+            return result;
+        };
+        node._iamccsControlAudEfxResizeLocked = true;
+    }
+    node.resizable = false;
+    node.resizeable = false;
+    const _enforceCtrlSize = () => {
+        const w = Math.max(1340, node.size?.[0] || 1340);
+        if (typeof node.setSize === "function") node.setSize([w, 630]);
+        else node.size = [w, 630];
+        node.setDirtyCanvas?.(true, true);
+        app.graph?.setDirtyCanvas?.(true, true);
+    };
+    requestAnimationFrame(_enforceCtrlSize);
+    setTimeout(_enforceCtrlSize, 250);
+    setTimeout(_enforceCtrlSize, 1200);
+    node._iamccsControlAudEfxReady = true;
+    node._iamccsControlAudEfxMounting = false;
 }
 
 
@@ -5718,7 +7075,7 @@ function ensureAudioBoardMixerStyles() {
         .iamccs-audio-mixer {
             box-sizing: border-box;
             width: 100%;
-            min-height: 560px;
+            min-height: 700px;
             padding: 10px;
             overflow: hidden;
             color: #dce7ea;
@@ -5770,14 +7127,14 @@ function ensureAudioBoardMixerStyles() {
             align-items: stretch;
             overflow-x: auto;
             overflow-y: hidden;
-            padding-bottom: 8px;
+            padding-bottom: 14px;
             scrollbar-color: #596164 #1b1d1e;
         }
         .iamccs-mixer-strip {
-            flex: 0 0 158px;
-            min-height: 430px;
+            flex: 0 0 184px;
+            min-height: 520px;
             display: grid;
-            grid-template-rows: 34px 42px 58px 1fr 32px 34px;
+            grid-template-rows: 44px 62px 1fr 34px 36px;
             gap: 7px;
             padding: 8px;
             color: #d6dbdc;
@@ -5787,28 +7144,42 @@ function ensureAudioBoardMixerStyles() {
             box-shadow: inset 0 1px 0 rgba(255,255,255,.10), 0 8px 18px rgba(0,0,0,.18);
         }
         .iamccs-mixer-strip.is-master {
-            flex-basis: 210px;
+            flex-basis: 232px;
             background: linear-gradient(180deg, #2b2c2d, #17191a);
         }
-        .iamccs-mixer-fx {
-            display:flex;
-            align-items:center;
-            justify-content:space-between;
-            height:28px;
-            padding:0 7px;
-            color:#bec6c8;
-            background:linear-gradient(90deg, #454848 0 73%, #87918f 73% 100%);
-            border:1px solid rgba(255,255,255,.13);
-            border-radius:2px;
-            font:900 10px/1 ui-monospace,SFMono-Regular,Consolas,monospace;
-        }
-        .iamccs-mixer-strip.is-master .iamccs-mixer-fx { background:linear-gradient(90deg, #353637 0 74%, #6f7977 74% 100%); }
         .iamccs-mixer-pan {
             display:grid;
             place-items:center;
             gap:2px;
             color:#313437;
             font:800 9px/1 ui-monospace,SFMono-Regular,Consolas,monospace;
+        }
+        .iamccs-mixer-chiprow {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-top: 6px;
+        }
+        .iamccs-mixer-chip {
+            display: inline-flex;
+            align-items: center;
+            min-height: 22px;
+            padding: 0 8px;
+            border-radius: 999px;
+            border: 1px solid rgba(216,223,220,.22);
+            background: linear-gradient(180deg, #3d4244, #232729);
+            color: #dce4e2;
+            font: 900 9px/1 ui-monospace, SFMono-Regular, Consolas, monospace;
+        }
+        .iamccs-mixer-chip.is-ok {
+            color: #122119;
+            background: linear-gradient(180deg, #bfe7b9, #5baa72);
+            border-color: rgba(191,231,185,.62);
+        }
+        .iamccs-mixer-chip.is-warn {
+            color: #2a170d;
+            background: linear-gradient(180deg, #f2d79a, #c08649);
+            border-color: rgba(255,226,168,.52);
         }
         .iamccs-mixer-knob {
             width:34px;
@@ -5841,6 +7212,18 @@ function ensureAudioBoardMixerStyles() {
             grid-template-columns: 1fr 1fr;
             gap:5px;
         }
+        .iamccs-mixer-meter-tag {
+            min-height: 28px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: #d6dbdc;
+            background: linear-gradient(180deg,#333536,#202223);
+            border: 1px solid rgba(255,255,255,.10);
+            border-radius: 4px;
+            font: 900 10px/1 ui-monospace,SFMono-Regular,Consolas,monospace;
+            letter-spacing: .05em;
+        }
         .iamccs-mixer-actions button {
             min-height:28px;
             color:#a85b58;
@@ -5864,13 +7247,16 @@ function ensureAudioBoardMixerStyles() {
             grid-template-columns: 36px 1fr 32px;
             gap:7px;
             align-items:end;
-            min-height:230px;
+            min-height:310px;
+            padding: 6px 0 4px;
+            box-sizing: border-box;
         }
         .iamccs-mixer-scale {
             align-self:stretch;
             display:flex;
             flex-direction:column;
             justify-content:space-between;
+            padding: 2px 0 4px;
             color:#85898c;
             font:900 10px/1 ui-monospace,SFMono-Regular,Consolas,monospace;
         }
@@ -5884,7 +7270,7 @@ function ensureAudioBoardMixerStyles() {
             writing-mode: bt-lr;
             appearance: slider-vertical;
             width:32px;
-            height:218px;
+            height:286px;
             accent-color:#c7cbca;
             cursor:ns-resize;
         }
@@ -5947,32 +7333,86 @@ function renderAudioBoardMixer(node) {
         app.graph?.setDirtyCanvas?.(true, true);
     };
     const upstreamArranger = () => {
+        const graphNodes = Array.isArray(app.graph?._nodes) ? app.graph._nodes : [];
+        const seen = new Set();
+        const candidates = [];
+        const consider = (maybeNode) => {
+            const id = Number(maybeNode?.id || 0);
+            const type = String(maybeNode?.comfyClass || maybeNode?.type || "");
+            if (!id || seen.has(id) || type !== "IAMCCS_AudioBoardArranger") return;
+            seen.add(id);
+            candidates.push(maybeNode);
+        };
         for (const input of node.inputs || []) {
             const link = input.link != null ? app.graph?.links?.[input.link] : null;
-            const origin = link ? app.graph?.getNodeById?.(link.origin_id) : null;
-            const type = String(origin?.comfyClass || origin?.type || "");
-            if (origin && type === "IAMCCS_AudioBoardArranger") return origin;
-            if (origin) {
-                for (const other of app.graph?._nodes || []) {
-                    const otherType = String(other?.comfyClass || other?.type || "");
-                    if (otherType !== "IAMCCS_AudioBoardArranger") continue;
-                    const linkedToOrigin = (other.outputs || []).some((output) => (output.links || []).some((linkId) => app.graph?.links?.[linkId]?.target_id === origin.id));
-                    if (linkedToOrigin) return other;
-                }
+            consider(link ? app.graph?.getNodeById?.(link.origin_id) : null);
+        }
+        for (const output of node.outputs || []) {
+            for (const linkId of output.links || []) {
+                consider(app.graph?.getNodeById?.(app.graph?.links?.[linkId]?.target_id));
             }
         }
-        return null;
+        if (candidates.length) return candidates[0];
+        const arrangers = graphNodes.filter((item) => String(item?.comfyClass || item?.type || "") === "IAMCCS_AudioBoardArranger");
+        return arrangers.length === 1 ? arrangers[0] : null;
     };
     const readArranger = () => {
         const arranger = upstreamArranger();
         const widget = arranger ? findWidget(arranger, "arranger_data") : null;
+        const local = parseLocal();
         try {
             const data = JSON.parse(String(widget?.value || "{}"));
-            if (data && typeof data === "object") return { arranger, widget, data };
+            if (data && typeof data === "object") {
+                let reconciled = false;
+                if ((!Array.isArray(data.trackSettings) || !data.trackSettings.length) && Array.isArray(local.mirrorTrackSettings) && local.mirrorTrackSettings.length) {
+                    data.trackSettings = JSON.parse(JSON.stringify(local.mirrorTrackSettings));
+                    reconciled = true;
+                } else if (Array.isArray(data.trackSettings) && Array.isArray(local.mirrorTrackSettings) && local.mirrorTrackSettings.length) {
+                    const protectedKeys = ["name", "mute", "solo", "volume", "pan", "normalize", "reverb", "reverbSend", "lock", "color", "effectChain", "noAutoEq"];
+                    const maxTracks = Math.max(data.trackSettings.length, local.mirrorTrackSettings.length, Number(data.audioTrackCount || 0));
+                    for (let index = 0; index < maxTracks; index += 1) {
+                        const localTrack = local.mirrorTrackSettings[index];
+                        if (!localTrack || typeof localTrack !== "object") continue;
+                        const nextTrack = {
+                            ...(data.trackSettings[index] && typeof data.trackSettings[index] === "object" ? data.trackSettings[index] : {}),
+                        };
+                        let trackChanged = false;
+                        protectedKeys.forEach((key) => {
+                            if (!(key in localTrack)) return;
+                            const localValue = localTrack[key];
+                            const currentValue = nextTrack[key];
+                            if (JSON.stringify(currentValue) === JSON.stringify(localValue)) return;
+                            nextTrack[key] = JSON.parse(JSON.stringify(localValue));
+                            trackChanged = true;
+                        });
+                        if (!trackChanged) continue;
+                        data.trackSettings[index] = nextTrack;
+                        reconciled = true;
+                    }
+                }
+                if ((!data.masterBus || typeof data.masterBus !== "object" || !Object.keys(data.masterBus).length) && local.masterBus && typeof local.masterBus === "object") {
+                    data.masterBus = { ...local.masterBus };
+                    reconciled = true;
+                }
+                if ((!Array.isArray(data.audioSegments) || !data.audioSegments.length) && Array.isArray(local.audioSegments) && local.audioSegments.length) {
+                    data.audioSegments = JSON.parse(JSON.stringify(local.audioSegments));
+                    reconciled = true;
+                }
+                const localMasterGain = Number(local.masterAudioGain);
+                const dataMasterGain = Number(data.masterAudioGain);
+                if (Number.isFinite(localMasterGain) && localMasterGain > 0 && (!Number.isFinite(dataMasterGain) || dataMasterGain <= 0)) {
+                    data.masterAudioGain = Math.max(0, Math.min(2, localMasterGain));
+                    reconciled = true;
+                }
+                return { arranger, widget, data, reconciled };
+            }
         } catch {}
-        return { arranger: null, widget: null, data: {} };
+        return { arranger, widget, data: { ...(local && typeof local === "object" ? local : {}) }, reconciled: false };
     };
     const arrangerTransport = () => upstreamArranger()?._iamccsAudioBoardTransport || null;
+    const pushMixerTrackVolume = (track, value) => arrangerTransport()?.setTrackVolume?.(track, value) === true;
+    const pushMixerTrackPan = (track, value) => arrangerTransport()?.setTrackPan?.(track, value) === true;
+    const pushMixerMasterGain = (value) => arrangerTransport()?.setMasterGain?.(value) === true;
     const fmtMixerTime = (frames, fpsValue = 24) => {
         const safeFps = Math.max(1, Number(fpsValue || 24) || 24);
         const total = Math.max(0, Number(frames || 0) / safeFps);
@@ -6004,7 +7444,7 @@ function renderAudioBoardMixer(node) {
             widget.callback?.(widget.value);
             arranger?.setDirtyCanvas?.(true, true);
         }
-        writeLocal({ mirrorTrackSettings: data.trackSettings || [], masterBus: data.masterBus || {}, last_sync_reason: reason });
+        writeLocal({ mirrorTrackSettings: data.trackSettings || [], masterBus: data.masterBus || {}, masterAudioGain: data.masterAudioGain ?? 1, last_sync_reason: reason });
     };
     const peakForTrack = (data, track) => {
         const segs = Array.isArray(data.audioSegments) ? data.audioSegments.filter((seg) => Number(seg.track || 0) === track && !seg.mute) : [];
@@ -6064,8 +7504,17 @@ function renderAudioBoardMixer(node) {
         mixerMeterRaf = requestAnimationFrame(updateMixerLiveMeters);
     }
     const draw = () => {
-        const { data } = readArranger();
+        const { arranger, widget, data, reconciled } = readArranger();
         const local = parseLocal();
+        if (reconciled && widget) {
+            const nextValue = JSON.stringify(data, null, 2);
+            if (String(widget.value || "") !== nextValue) {
+                widget.value = nextValue;
+                widget.callback?.(widget.value);
+                arranger?.setDirtyCanvas?.(true, true);
+                app.graph?.setDirtyCanvas?.(true, true);
+            }
+        }
         if (!Array.isArray(data.audioSegments) && Array.isArray(local.audioSegments)) Object.assign(data, local);
         data.audioTrackCount = Math.max(1, Number(data.audioTrackCount || (Array.isArray(data.trackSettings) ? data.trackSettings.length : 4) || 4));
         data.masterBus = data.masterBus && typeof data.masterBus === "object" ? data.masterBus : {};
@@ -6074,7 +7523,21 @@ function renderAudioBoardMixer(node) {
         const head = document.createElement("div");
         head.className = "iamccs-mixer-head";
         const title = document.createElement("div");
-        title.innerHTML = `<div class="iamccs-mixer-title">IAMCCS AudioBoard Mixer</div><div class="iamccs-mixer-sub">${data.audioSegments?.length || 0} clips / ${data.audioTrackCount} channel strips / sync ${upstreamArranger() ? "Arranger" : "cine_linx"}</div>`;
+        title.innerHTML = `<div class="iamccs-mixer-title">IAMCCS AudioBoard Mixer</div><div class="iamccs-mixer-sub">${data.audioSegments?.length || 0} clips / ${data.audioTrackCount} channel strips / sync ${arranger ? "Arranger" : "cine_linx"}</div>`;
+        const chipRow = document.createElement("div");
+        chipRow.className = "iamccs-mixer-chiprow";
+        const chips = [
+            { text: arranger ? "SYNC OK" : "SYNC MISSING", className: arranger ? "is-ok" : "is-warn" },
+            { text: arrangerTransport() ? "TRANSPORT OK" : "NO TRANSPORT", className: arrangerTransport() ? "is-ok" : "is-warn" },
+            { text: Array.isArray(local.mirrorTrackSettings) && local.mirrorTrackSettings.length ? "LOCAL MIRROR" : "NO MIRROR", className: Array.isArray(local.mirrorTrackSettings) && local.mirrorTrackSettings.length ? "is-ok" : "is-warn" },
+        ];
+        chips.forEach((chipData) => {
+            const chip = document.createElement("span");
+            chip.className = `iamccs-mixer-chip ${chipData.className}`;
+            chip.textContent = chipData.text;
+            chipRow.appendChild(chip);
+        });
+        title.appendChild(chipRow);
         const refresh = document.createElement("button");
         refresh.textContent = "Sync From Arranger";
         refresh.onclick = () => draw();
@@ -6085,6 +7548,20 @@ function renderAudioBoardMixer(node) {
         }
         const transport = document.createElement("div");
         transport.className = "iamccs-mixer-transport";
+        const getTransportSnap = () => arrangerTransport()?.snapshot?.() || null;
+        const jumpTransport = (frame) => {
+            const api = arrangerTransport();
+            if (!api?.setPlayhead) return;
+            const snap = getTransportSnap();
+            const total = Math.max(0, Number(snap?.totalFrames || Math.round(Number(data.duration_seconds || 0) * Number(data.frame_rate || 24)) || 0));
+            api.setPlayhead(Math.max(0, Math.min(total, Math.round(Number(frame || 0)))), true);
+        };
+        const nudgeTransportSeconds = (seconds) => {
+            const snap = getTransportSnap();
+            const fpsValue = Math.max(1, Number(snap?.fps || data.frame_rate || 24) || 24);
+            const current = Math.max(0, Number(snap?.playhead || 0));
+            jumpTransport(current + (Number(seconds || 0) * fpsValue));
+        };
         const makeTransportButton = (label, action, attr = "") => {
             const button = document.createElement("button");
             button.type = "button";
@@ -6099,6 +7576,7 @@ function renderAudioBoardMixer(node) {
             return button;
         };
         const rewind = makeTransportButton("|<", () => arrangerTransport()?.rewind?.(), "rewind");
+        const back = makeTransportButton("<<", () => nudgeTransportSeconds(-1), "back");
         const play = makeTransportButton("Play", () => arrangerTransport()?.toggle?.(), "play");
         const loop = makeTransportButton("Loop", () => {
             data.loopEnabled = !data.loopEnabled;
@@ -6107,13 +7585,15 @@ function renderAudioBoardMixer(node) {
         }, "loop");
         loop.classList.toggle("is-active", Boolean(data.loopEnabled));
         const stop = makeTransportButton("Stop", () => arrangerTransport()?.stop?.(true), "stop");
+        const forward = makeTransportButton(">>", () => nudgeTransportSeconds(1), "forward");
+        const end = makeTransportButton(">|", () => jumpTransport(Number(getTransportSnap()?.totalFrames || 0)), "end");
         const time = document.createElement("span");
         time.className = "iamccs-mixer-time";
         time.textContent = `${fmtMixerTime(0, data.frame_rate)} / ${fmtMixerTime(Math.max(1, Math.round(Number(data.duration_seconds || 0) * Number(data.frame_rate || 24))), data.frame_rate)}`;
         const stateBadge = document.createElement("span");
         stateBadge.className = "iamccs-mixer-state";
         stateBadge.textContent = upstreamArranger() ? "[Mixer Sync]" : "[no arranger]";
-        transport.append(rewind, play, loop, stop, time, stateBadge);
+        transport.append(rewind, back, play, stop, forward, end, loop, time, stateBadge);
         const strips = document.createElement("div");
         strips.className = "iamccs-mixer-strips";
         const makeStrip = (index, isMaster = false) => {
@@ -6121,9 +7601,6 @@ function renderAudioBoardMixer(node) {
             strip.className = `iamccs-mixer-strip${isMaster ? " is-master" : ""}`;
             const st = isMaster ? data.masterBus : settings[index];
             const label = isMaster ? "MASTER" : String(st.name || `A${index + 1}`);
-            const fx = document.createElement("div");
-            fx.className = "iamccs-mixer-fx";
-            fx.innerHTML = `<span>FX</span><button title="Effect power">${(st.effectChain || []).some((item) => item.enabled !== false) ? "on" : "off"}</button>`;
             const pan = document.createElement("div");
             pan.className = "iamccs-mixer-pan";
             const panKnob = document.createElement("button");
@@ -6133,21 +7610,34 @@ function renderAudioBoardMixer(node) {
             const panText = document.createElement("span");
             const syncPanText = () => { const v = isMaster ? 0 : Number(st.pan || 0); panText.textContent = isMaster ? "stereo" : (Math.abs(v) < .02 ? "C" : `${v < 0 ? "L" : "R"}${Math.round(Math.abs(v) * 100)}`); setKnob(panKnob, v, -1, 1); };
             syncPanText();
-            if (!isMaster) attachDrag(panKnob, () => st.pan || 0, (value, commit) => { st.pan = value; syncPanText(); if (commit) syncArranger(data, `mixer_pan_${index}`); }, -1, 1, .006);
+            if (!isMaster) attachDrag(panKnob, () => st.pan || 0, (value, commit) => {
+                st.pan = value;
+                syncPanText();
+                pushMixerTrackPan(index, value);
+                if (commit) syncArranger(data, `mixer_pan_${index}`);
+            }, -1, 1, .006);
             pan.append(panKnob, panText);
             const actions = document.createElement("div");
             actions.className = "iamccs-mixer-actions";
             if (isMaster) {
-                actions.innerHTML = `<button>RMS</button><button>PK</button>`;
+                const rmsTag = document.createElement("span");
+                rmsTag.className = "iamccs-mixer-meter-tag";
+                rmsTag.textContent = "RMS";
+                rmsTag.title = "Root mean square level indicator";
+                const pkTag = document.createElement("span");
+                pkTag.className = "iamccs-mixer-meter-tag";
+                pkTag.textContent = "PK";
+                pkTag.title = "Peak level indicator";
+                actions.append(rmsTag, pkTag);
             } else {
                 const mute = document.createElement("button");
                 mute.textContent = "M";
                 mute.className = st.mute ? "is-active" : "";
-                mute.onclick = () => { st.mute = !st.mute; syncArranger(data, `mixer_mute_${index}`); draw(); };
+                mute.onclick = () => { st.mute = !st.mute; arrangerTransport()?.setTrackToggle?.(index, "mute", st.mute); syncArranger(data, `mixer_mute_${index}`); draw(); };
                 const solo = document.createElement("button");
                 solo.textContent = "S";
                 solo.className = `solo${st.solo ? " is-active" : ""}`;
-                solo.onclick = () => { st.solo = !st.solo; syncArranger(data, `mixer_solo_${index}`); draw(); };
+                solo.onclick = () => { st.solo = !st.solo; arrangerTransport()?.setTrackToggle?.(index, "solo", st.solo); syncArranger(data, `mixer_solo_${index}`); draw(); };
                 actions.append(mute, solo);
             }
             const body = document.createElement("div");
@@ -6168,9 +7658,15 @@ function renderAudioBoardMixer(node) {
             slider.step = "0.01";
             slider.value = String(isMaster ? Number(data.masterAudioGain ?? 1) : Number(st.volume ?? 1));
             slider.oninput = () => {
-                if (isMaster) data.masterAudioGain = Number(slider.value || 1);
-                else st.volume = Number(slider.value || 1);
-                meterFill.style.height = `${Math.round((isMaster ? .45 : peakForTrack(data, index)) * 100)}%`;
+                const nextValue = Number(slider.value || 1);
+                if (isMaster) {
+                    data.masterAudioGain = nextValue;
+                    pushMixerMasterGain(nextValue);
+                } else {
+                    st.volume = nextValue;
+                    pushMixerTrackVolume(index, nextValue);
+                }
+                meterFill.style.height = `${Math.round((isMaster ? Math.min(1, .45 * Math.max(.25, nextValue)) : peakForTrack(data, index)) * 100)}%`;
             };
             slider.onchange = () => syncArranger(data, isMaster ? "mixer_master_gain" : `mixer_volume_${index}`);
             fader.appendChild(slider);
@@ -6189,7 +7685,7 @@ function renderAudioBoardMixer(node) {
             const name = document.createElement("div");
             name.className = "iamccs-mixer-label";
             name.textContent = label.replace(/^A/, "");
-            strip.append(fx, pan, actions, body, route, name);
+            strip.append(pan, actions, body, route, name);
             return strip;
         };
         strips.appendChild(makeStrip(0, true));
@@ -6200,7 +7696,7 @@ function renderAudioBoardMixer(node) {
     };
     draw();
     const domWidget = node.addDOMWidget("AudioBoardMixer", "iamccs_audio_board_mixer", root, { serialize: false });
-    domWidget.computeSize = (width) => [width, 620];
+    domWidget.computeSize = (width) => [Math.max(1480, Number(width || 1480)), 760];
 }
 
 app.registerExtension({
@@ -6232,6 +7728,7 @@ app.registerExtension({
             nodeData.name !== "IAMCCS_BoardMaker_DialogueFoley" &&
             nodeData.name !== "IAMCCS_AudioBoardArranger" &&
             nodeData.name !== "IAMCCS_ControlAudEfx" &&
+            nodeData.name !== "IAMCCS_ControlAudEfxPanel" &&
             nodeData.name !== "IAMCCS_AudioBoardMixer" &&
             nodeData.name !== "IAMCCS_CineSpeech1PromptCompiler"
         ) return;
@@ -6242,5 +7739,26 @@ app.registerExtension({
             console.info("[IAMCCS AudioDialogueUI] node created", { name: nodeData.name, id: this?.id, type: this?.type });
             renderIamccsAudioDialogueNode(this, "prototype.onNodeCreated");
         };
+
+        if (nodeData.name === "IAMCCS_AudioBoardArranger") {
+            const onExecuted = nodeType.prototype.onExecuted;
+            nodeType.prototype.onExecuted = function (message) {
+                onExecuted?.apply(this, arguments);
+                try {
+                    const audioBoardJson = firstUiValue(message, "iamccs_audio_board");
+                    if (!audioBoardJson) return;
+                    const applied = typeof this._iamccsAudioBoardApplyRuntimeTimeline === "function"
+                        ? this._iamccsAudioBoardApplyRuntimeTimeline(audioBoardJson, "onExecuted")
+                        : setWidgetValue(this, "arranger_data", audioBoardJson);
+                    if (applied) {
+                        this.properties = this.properties || {};
+                        this.properties.iamccsAudioBoardRuntimeSyncAt = new Date().toISOString();
+                        renderIamccsAudioDialogueNode(this, "prototype.onExecuted");
+                    }
+                } catch (err) {
+                    console.warn("[IAMCCS AudioBoardArranger] runtime UI sync failed", err);
+                }
+            };
+        }
     },
 });

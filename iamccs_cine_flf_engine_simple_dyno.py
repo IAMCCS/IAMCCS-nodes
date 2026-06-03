@@ -8,7 +8,7 @@ try:
 except Exception:  # pragma: no cover - depends on ComfyUI/KJ/LTX version
     _append_guide_attention_entry = None
 
-from .iamccs_wdc_ltx_port import IAMCCS_CineFLFEngineSimple
+from .iamccs_ltx_guide_port import IAMCCS_CineFLFEngineSimple
 
 
 class IAMCCS_CineFLFEngineSimpleDyno(IAMCCS_CineFLFEngineSimple):

@@ -91,7 +91,7 @@ from .iamccs_ltx2_extension_module import (
     IAMCCS_LTX2_FirstLastLatentControl_Pro,
 )
 
-from .iamccs_wdc_ltx_port import (
+from .iamccs_ltx_guide_port import (
     IAMCCS_WDC_MultiImageLoader,
     IAMCCS_WDC_LTXKeyframer,
     IAMCCS_WDC_LTXSequencer,
@@ -276,11 +276,12 @@ from .iamccs_cine_audio_dialogue import (
     IAMCCS_CineEmotionButtons,
     IAMCCS_CineDialoguePromptKit,
 )
-# [1.4.7] au_tools excluded from this release — will be re-enabled in 1.4.8
-# from .au_tools.audio_bus_out import IAMCCS_BusOut
-# from .au_tools.audio_board_mixer import IAMCCS_AudioBoardMixer
-# from .au_tools.audio_control_efx import IAMCCS_ControlAudEfx
-# from .au_tools.dialogue_script_planner import IAMCCS_DialogueScriptPlanner
+from .audio.audio_bus_out import IAMCCS_BusOut
+from .audio.audio_board_mixer import IAMCCS_AudioBoardMixer
+from .audio.audio_control_efx import IAMCCS_ControlAudEfx
+from .audio.audio_control_efx_panel import IAMCCS_ControlAudEfxPanel
+from .audio.dialogue_tag_editor import IAMCCS_DialogueTagEditor, IAMCCS_DialogueAudioBoardBridge
+from .audio.cine_audio_info import IAMCCS_CineAudioInfo
 
 from .iamccs_ltx2_segment_queue import (
     IAMCCS_LTX2_BlendLatentBridge,
@@ -540,11 +541,13 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_CineDialogueLineRouter": IAMCCS_CineDialogueLineRouter,
     "IAMCCS_CineTimelineAudioMixer": IAMCCS_CineTimelineAudioMixer,
     "IAMCCS_AudioBoardArranger": IAMCCS_AudioBoardArranger,
-    # [1.4.7] au_tools excluded — re-enable in 1.4.8
-    # "IAMCCS_BusOut": IAMCCS_BusOut,
-    # "IAMCCS_AudioBoardMixer": IAMCCS_AudioBoardMixer,
-    # "IAMCCS_ControlAudEfx": IAMCCS_ControlAudEfx,
-    # "IAMCCS_DialogueScriptPlanner": IAMCCS_DialogueScriptPlanner,
+    "IAMCCS_BusOut": IAMCCS_BusOut,
+    "IAMCCS_AudioBoardMixer": IAMCCS_AudioBoardMixer,
+    "IAMCCS_ControlAudEfx": IAMCCS_ControlAudEfx,
+    "IAMCCS_ControlAudEfxPanel": IAMCCS_ControlAudEfxPanel,
+    "IAMCCS_DialogueTagEditor": IAMCCS_DialogueTagEditor,
+    "IAMCCS_DialogueAudioBoardBridge": IAMCCS_DialogueAudioBoardBridge,
+    "IAMCCS_CineAudioInfo": IAMCCS_CineAudioInfo,
     "IAMCCS_CineVideoToWooshInputs": IAMCCS_CineVideoToWooshInputs,
     "IAMCCS_CineSpeech1PromptCompiler": IAMCCS_CineSpeech1PromptCompiler,
     "IAMCCS_CineSpeechLength": IAMCCS_CineSpeechLength,
@@ -608,7 +611,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_WanLoRAStack": "LoRA Stack (WAN-style remap)",
     "IAMCCS_ModelWithLoRA": "Apply LoRA to MODEL (Native)",
-    "IAMCCS_WanLoRAStackModelIO": "LoRA Stack (Model In→Out) WAN",
+    "IAMCCS_WanLoRAStackModelIO": "LoRA Stack (Model In?Out) WAN",
     "IAMCCS_WanLoRASchedule": "LoRA Schedule (WAN, ranged)",
     "IAMCCS_WanLoRAHookSchedule": "LoRA Schedule (WAN, hooks)",
     "IAMCCS_ApplyLoRAHooksToConditioning": "Apply LoRA Hooks to Conditioning",
@@ -623,7 +626,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_LTX2_LoRAStackStaged": "LoRA Stack (LTX-2, staged: stage1+stage2) (BETA)",
     "IAMCCS_ModelWithLoRA_LTX2": "Apply LoRA to MODEL (LTX-2, quiet logs)",
     "IAMCCS_ModelWithLoRA_LTX2_Staged": "Apply LoRA to MODEL (LTX-2, staged) (BETA)",
-    "IAMCCS_LTX2_LoRAStackModelIO": "LoRA Stack (Model In→Out) LTX-2",
+    "IAMCCS_LTX2_LoRAStackModelIO": "LoRA Stack (Model In?Out) LTX-2",
     "IAMCCS_LTX2_LoRAStackSegmented6": "LoRA Stack (LTX-2, segmented: 3 seg × 2 stages)",
     "IAMCCS_LTX2_ModelWithLoRA_Segmented6": "Apply LoRA to MODEL (LTX-2, segmented: 3 seg × 2 stages)",
 
@@ -644,26 +647,26 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_TwoSegmentPlanner": "Two Segment Planner (stable 2SEG)",
     "IAMCCS_ThreeSegmentPlanner": "Three Segment Planner (stable 3SEG)",
     "IAMCCS_SegmentSwitch": "Segment Switch (by segment_index)",
-    "IAMCCS_LTX2_ExtensionModule": "LTX-2 Extension Module 🎬",
-    "IAMCCS_LTX2_ExtensionModule_Disk": "LTX-2 Extension Module (Disk / Low RAM) 💾",
+    "IAMCCS_LTX2_ExtensionModule": "LTX-2 Extension Module ??",
+    "IAMCCS_LTX2_ExtensionModule_Disk": "LTX-2 Extension Module (Disk / Low RAM) ??",
     "IAMCCS_LTX2_JointRefreshLatent": "LTX-2 Joint Refresh Latent",
     "IAMCCS_LTX2_JointRefreshLatent_Disk": "LTX-2 Joint Refresh Latent (Disk)",
-    "IAMCCS_LoadImagesFromDirLite": "Load Images From Dir (Lite) 📁",
-    "IAMCCS_ImageBatchRangeLite": "Image Batch Range (VRAM) 🎞️",
-    "IAMCCS_SourceFramesToDisk": "Source Frames To Disk 📼💾",
-    "IAMCCS_StartDirToVideoLatent": "Start Dir To Video Latent 🚀",
-    "IAMCCS_StartImagesToVideoLatent": "Start Images To Video Latent 🚀",
-    "IAMCCS_VideoCombineFromDir": "Video Combine From Dir 🎞️",
-    "IAMCCS_LTX2_ExtensionModule_simple": "LTX-2 Extension Module (simple) 🎬",
-    "IAMCCS_LTX2_GetImageFromBatch": "LTX-2 Get Images From Batch 🎞️",
-    "IAMCCS_LTX2_ReferenceImageSwitch": "LTX-2 Reference Image Switch 🧷",
-    "IAMCCS_LTX2_ReferenceStartFramesInjector": "LTX-2 Inject Reference Into Start Frames 🧬",
-    "IAMCCS_LTX2_FrameCountValidator": "LTX-2 Frame Count Validator ✅ (8n+1)",
-    "IAMCCS_LTX2_FirstLastFramesController": "LTX-2 First/Last Frames Controller 🧲",
-    "IAMCCS_LTX2_ContextLatent": "LTX-2 Context → Latent (continue) 🧩",
-    "IAMCCS_LTX2_MiddleFrames": "LTX-2 Middle Frames (accumulator) 🧷",
-    "IAMCCS_LTX2_FirstLastLatentControl": "LTX-2 First/Last → Latent (noise_mask) 🎯",
-    "IAMCCS_LTX2_FirstLastLatentControl_Pro": "LTX-2 First/Last → Latent (Pro, slot caps) 🎯",
+    "IAMCCS_LoadImagesFromDirLite": "Load Images From Dir (Lite) ??",
+    "IAMCCS_ImageBatchRangeLite": "Image Batch Range (VRAM) ???",
+    "IAMCCS_SourceFramesToDisk": "Source Frames To Disk ????",
+    "IAMCCS_StartDirToVideoLatent": "Start Dir To Video Latent ??",
+    "IAMCCS_StartImagesToVideoLatent": "Start Images To Video Latent ??",
+    "IAMCCS_VideoCombineFromDir": "Video Combine From Dir ???",
+    "IAMCCS_LTX2_ExtensionModule_simple": "LTX-2 Extension Module (simple) ??",
+    "IAMCCS_LTX2_GetImageFromBatch": "LTX-2 Get Images From Batch ???",
+    "IAMCCS_LTX2_ReferenceImageSwitch": "LTX-2 Reference Image Switch ??",
+    "IAMCCS_LTX2_ReferenceStartFramesInjector": "LTX-2 Inject Reference Into Start Frames ??",
+    "IAMCCS_LTX2_FrameCountValidator": "LTX-2 Frame Count Validator ? (8n+1)",
+    "IAMCCS_LTX2_FirstLastFramesController": "LTX-2 First/Last Frames Controller ??",
+    "IAMCCS_LTX2_ContextLatent": "LTX-2 Context ? Latent (continue) ??",
+    "IAMCCS_LTX2_MiddleFrames": "LTX-2 Middle Frames (accumulator) ??",
+    "IAMCCS_LTX2_FirstLastLatentControl": "LTX-2 First/Last ? Latent (noise_mask) ??",
+    "IAMCCS_LTX2_FirstLastLatentControl_Pro": "LTX-2 First/Last ? Latent (Pro, slot caps) ??",
     "IAMCCS_CineReferenceBoard": "IAMCCS Cine Reference Board",
     "IAMCCS_CineLTXSequencer": "IAMCCS Cine FLF Timeline Sequencer",
     "IAMCCS_CineAllInOneFLFEngine": "IAMCCS Cine AllInOne FLF Engine",
@@ -716,11 +719,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_CineFLFEngineSimple": "IAMCCS Cine FLF Engine Simple",
     "IAMCCS_CineFLFEngineSimpleDyno": "IAMCCS Cine FLF Engine Simple Dyno",
     "IAMCCS_WDC_LTXSequencerFixed5": "IAMCCS Cine LTX Sequencer Fixed 5 (legacy alias)",
-    "IAMCCS_LTX2_InitLatentSampler": "LTX-2 Init Latent Sampler 🧱",
-    "IAMCCS_LTX2_LoopingSampler": "LTX-2 Looping Sampler (temporal overlap) 🧷",
-    "IAMCCS_LTX2_OneShotLowRAMLooper": "LTX-2 One-Shot Low-RAM Looper 🪶",
-    "IAMCCS_LTX2_ExtendSampler": "LTX-2 Extend Sampler (temporal overlap) 🧷",
-    "IAMCCS_LTX2_ConditionNextLatentWithPrevOverlap": "LTX-2 Condition Next Latent (prev overlap) 🧷",
+    "IAMCCS_LTX2_InitLatentSampler": "LTX-2 Init Latent Sampler ??",
+    "IAMCCS_LTX2_LoopingSampler": "LTX-2 Looping Sampler (temporal overlap) ??",
+    "IAMCCS_LTX2_OneShotLowRAMLooper": "LTX-2 One-Shot Low-RAM Looper ??",
+    "IAMCCS_LTX2_ExtendSampler": "LTX-2 Extend Sampler (temporal overlap) ??",
+    "IAMCCS_LTX2_ConditionNextLatentWithPrevOverlap": "LTX-2 Condition Next Latent (prev overlap) ??",
     "IAMCCS_WanImageMotion": "WanImageMotion",
     "IAMCCS_WanImageMotion_AdaIN": "WanImageMotion",
     "WanImageMotionPro": "WanImageMotionPro Plus",
@@ -731,8 +734,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_WanImageMotionProPlus": "WanImageMotionPro Plus",
     "IAMCCS_WanImageMotionProPlus_Simple": "WanImageMotionPro Plus Simple",
     "IAMCCS_WanImageMotionInductive": "WanImageMotion Inductive",
-    "IAMCCS_WanSVIToFLFBridgeProPlus": "Wan SVI→FLF Bridge Pro Plus",
-    "IAMCCS_WanSVIToFLFBridgeProPlus_Simple": "Wan SVI→FLF Bridge Pro Plus",
+    "IAMCCS_WanSVIToFLFBridgeProPlus": "Wan SVI?FLF Bridge Pro Plus",
+    "IAMCCS_WanSVIToFLFBridgeProPlus_Simple": "Wan SVI?FLF Bridge Pro Plus",
     "WanMotionProTrimmer": "WanMotionProTrimmer (trim overshoot tail)",
     "IAMCCS_WanPrevTailPrep": "Wan Prev Tail Prep",
     "IAMCCS_WanLongPlanner": "Wan Long Planner",
@@ -798,22 +801,22 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_HwSupporterAny": "HW Supporter (ANY passthrough)",
     "IAMCCS_HardMemoryPurge": "Hard RAM/VRAM Purge (trim working set)",
     "IAMCCS_VRAMCleanup": "VRAM Cleanup (unload + empty cache)",
-    "IAMCCS_VRAMFlushLatent": "VRAM Flush → Latent passthrough (empty cache)",
+    "IAMCCS_VRAMFlushLatent": "VRAM Flush ? Latent passthrough (empty cache)",
     "IAMCCS_VAEDecodeTiledSafe": "VAE Decode Tiled (safe, optional cleanup)",
-    "IAMCCS_VAEDecodeToDisk": "VAE Decode → Disk (frames, low RAM)",
+    "IAMCCS_VAEDecodeToDisk": "VAE Decode ? Disk (frames, low RAM)",
     "IAMCCS_HWProbeRecommendations": "HW Probe Recommendations (JSON)",
     "IAMCCS_DetailAtelier": "IAMCCS Detail Atelier",
     "IAMCCS_DetailAtelierAdvanced": "IAMCCS Detail Atelier Advanced",
     "IAMCCS_DetailAtelierSampler": "IAMCCS Detail Atelier",
 
-    "IAMCCS_MoveAhead": "MoveAhead (FreeLong spectral blend) 🎬",
-    "IAMCCS_MoveAheadEnforcer": "MoveAhead Enforcer (3-tier motion lock) 🎬",
-    "IAMCCS_MotionScale": "MotionScale (temporal RoPE scale) ⚡",
-    "IAMCCS_MotionScaleAdvanced": "MotionScale Advanced (RoPE + theta) ⚡",
+    "IAMCCS_MoveAhead": "MoveAhead (FreeLong spectral blend) ??",
+    "IAMCCS_MoveAheadEnforcer": "MoveAhead Enforcer (3-tier motion lock) ??",
+    "IAMCCS_MotionScale": "MotionScale (temporal RoPE scale) ?",
+    "IAMCCS_MotionScaleAdvanced": "MotionScale Advanced (RoPE + theta) ?",
 
-    "IAMCCS_MotionBridgeSave": "Motion Bridge Save 🎬💾",
-    "IAMCCS_MotionBridgeLoad": "Motion Bridge Load 🎬📂",
-    "IAMCCS_LatentTailSlice":  "Latent Tail Slice ✂️",
+    "IAMCCS_MotionBridgeSave": "Motion Bridge Save ????",
+    "IAMCCS_MotionBridgeLoad": "Motion Bridge Load ????",
+    "IAMCCS_LatentTailSlice":  "Latent Tail Slice ??",
     "IAMCCS_AudioExtensionMath": "Audio Extension Math (timeline sync)",
     "IAMCCS_AudioExtender": "Audio Extender (segment + overlap)",
     "IAMCCS_AudioTimelineAssembler": "Audio Timeline Assembler (full track)",
@@ -823,11 +826,13 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_CineDialogueLineRouter": "IAMCCS Dialogue Line Router",
     "IAMCCS_CineTimelineAudioMixer": "IAMCCS Timeline Audio Mixer",
     "IAMCCS_AudioBoardArranger": "IAMCCS AudioBoard Arranger",
-    # [1.4.7] au_tools excluded — re-enable in 1.4.8
-    # "IAMCCS_BusOut": "IAMCCS BusOut",
-    # "IAMCCS_AudioBoardMixer": "IAMCCS AudioBoard Mixer",
-    # "IAMCCS_ControlAudEfx": "IAMCCS ControlAudEfx",
-    # "IAMCCS_DialogueScriptPlanner": "IAMCCS DialogueScript Planner",
+    "IAMCCS_BusOut": "IAMCCS BusOut",
+    "IAMCCS_AudioBoardMixer": "IAMCCS AudioBoard Mixer",
+    "IAMCCS_ControlAudEfx": "IAMCCS ControlAudEfx",
+    "IAMCCS_ControlAudEfxPanel": "IAMCCS ControlAudEfx Panel",
+    "IAMCCS_DialogueTagEditor": "IAMCCS Dialogue Tag Editor",
+    "IAMCCS_DialogueAudioBoardBridge": "IAMCCS Dialogue AudioBoard Bridge",
+    "IAMCCS_CineAudioInfo": "IAMCCS CineAudioInfo",
     "IAMCCS_CineVideoToWooshInputs": "IAMCCS Video To Woosh Inputs",
     "IAMCCS_CineSpeech1PromptCompiler": "IAMCCS Speech1 Prompt Compiler",
     "IAMCCS_CineSpeechLength": "IAMCCS Speech Length Calculator",
@@ -838,45 +843,43 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_CineFinalAudioMixer": "IAMCCS Final Audio Mixer",
     "IAMCCS_CineEmotionButtons": "IAMCCS Emotion Buttons",
     "IAMCCS_CineDialoguePromptKit": "IAMCCS Dialogue Prompt Kit",
-    "IAMCCS_LTX2_LastFrameBridgeSave": "LTX-2 Last Frame Bridge Save 🖼️💾",
-    "IAMCCS_LTX2_BlendLatentBridge": "LTX-2 Blend Latent Bridge 🎚️",
-    "IAMCCS_LTX2_LastFrameBridgeLoad": "LTX-2 Last Frame Bridge Load 🖼️",
-    "IAMCCS_LTX2_LoadLatentBridge": "LTX-2 Load Latent Bridge 🧬",
-    "IAMCCS_LTX2_LongVideoWrapperPrep": "LTX-2 Long Video Wrapper Prep 🧰",
-    "IAMCCS_LTX2_LongVideoWrapperPrepDisk": "LTX-2 Long Video Wrapper Prep (Disk) 💾🧰",
-    "IAMCCS_LTX2_SaveLatentBridge": "LTX-2 Save Latent Bridge 💾",
-    "IAMCCS_LTX2_SegmentQueueLoop": "LTX-2 Segment Queue Loop 🔁",
+    "IAMCCS_LTX2_LastFrameBridgeSave": "LTX-2 Last Frame Bridge Save ?????",
+    "IAMCCS_LTX2_BlendLatentBridge": "LTX-2 Blend Latent Bridge ???",
+    "IAMCCS_LTX2_LastFrameBridgeLoad": "LTX-2 Last Frame Bridge Load ???",
+    "IAMCCS_LTX2_LoadLatentBridge": "LTX-2 Load Latent Bridge ??",
+    "IAMCCS_LTX2_LongVideoWrapperPrep": "LTX-2 Long Video Wrapper Prep ??",
+    "IAMCCS_LTX2_LongVideoWrapperPrepDisk": "LTX-2 Long Video Wrapper Prep (Disk) ????",
+    "IAMCCS_LTX2_SaveLatentBridge": "LTX-2 Save Latent Bridge ??",
+    "IAMCCS_LTX2_SegmentQueueLoop": "LTX-2 Segment Queue Loop ??",
     "IAMCCS_ImageResizeBatchSafe": "Image Resize Batch Safe (IAMCCS)",
-    "IAMCCS_LoadResizeSegmentFromDir": "Load + Resize Segment From Dir 🧰",
+    "IAMCCS_LoadResizeSegmentFromDir": "Load + Resize Segment From Dir ??",
 
     # QwenVL FLF
-    **({"IAMCCS_QWEN_VL_FLF":          "QwenVL FLF — First/Last Frame Prompt 🎬",
-        "IAMCCS_QWEN_VL_FLF_Advanced": "QwenVL FLF — First/Last Frame Prompt (Advanced) 🎬",
+    **({"IAMCCS_QWEN_VL_FLF":          "QwenVL FLF — First/Last Frame Prompt ??",
+        "IAMCCS_QWEN_VL_FLF_Advanced": "QwenVL FLF — First/Last Frame Prompt (Advanced) ??",
     } if IAMCCS_QWEN_VL_FLF is not None else {}),
 
 }
 
-# [1.4.7] cine_wan_edition_beta excluded from this release — will be re-enabled in 1.4.8
-# try:
-#     from .cine_wan_edition_beta import (
-#         NODE_CLASS_MAPPINGS as _IAMCCS_WAN_BETA_NODE_CLASS_MAPPINGS,
-#         NODE_DISPLAY_NAME_MAPPINGS as _IAMCCS_WAN_BETA_NODE_DISPLAY_NAME_MAPPINGS,
-#     )
-#     NODE_CLASS_MAPPINGS.update(_IAMCCS_WAN_BETA_NODE_CLASS_MAPPINGS)
-#     NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_WAN_BETA_NODE_DISPLAY_NAME_MAPPINGS)
-# except Exception as _iamccs_wan_beta_error:
-#     print(f"[IAMCCS WAN BETA] optional module not loaded: {_iamccs_wan_beta_error}")
+try:
+    from .cine_wan_edition_beta import (
+        NODE_CLASS_MAPPINGS as _IAMCCS_WAN_BETA_NODE_CLASS_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as _IAMCCS_WAN_BETA_NODE_DISPLAY_NAME_MAPPINGS,
+    )
+    NODE_CLASS_MAPPINGS.update(_IAMCCS_WAN_BETA_NODE_CLASS_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_WAN_BETA_NODE_DISPLAY_NAME_MAPPINGS)
+except Exception as _iamccs_wan_beta_error:
+    print(f"[IAMCCS WAN BETA] optional module not loaded: {_iamccs_wan_beta_error}")
 
-# [1.4.7] cine_multigeneration excluded from this release — will be re-enabled in 1.4.8
-# try:
-#     from .cine_multigeneration import (
-#         NODE_CLASS_MAPPINGS as _IAMCCS_MULTIGENERATION_NODE_CLASS_MAPPINGS,
-#         NODE_DISPLAY_NAME_MAPPINGS as _IAMCCS_MULTIGENERATION_NODE_DISPLAY_NAME_MAPPINGS,
-#     )
-#     NODE_CLASS_MAPPINGS.update(_IAMCCS_MULTIGENERATION_NODE_CLASS_MAPPINGS)
-#     NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_MULTIGENERATION_NODE_DISPLAY_NAME_MAPPINGS)
-# except Exception as _iamccs_multigeneration_error:
-#     print(f"[IAMCCS Multigeneration] optional module not loaded: {_iamccs_multigeneration_error}")
+try:
+    from .cine_multigeneration import (
+        NODE_CLASS_MAPPINGS as _IAMCCS_MULTIGENERATION_NODE_CLASS_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as _IAMCCS_MULTIGENERATION_NODE_DISPLAY_NAME_MAPPINGS,
+    )
+    NODE_CLASS_MAPPINGS.update(_IAMCCS_MULTIGENERATION_NODE_CLASS_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_MULTIGENERATION_NODE_DISPLAY_NAME_MAPPINGS)
+except Exception as _iamccs_multigeneration_error:
+    print(f"[IAMCCS Multigeneration] optional module not loaded: {_iamccs_multigeneration_error}")
 
 WEB_DIRECTORY = "./web"
 
@@ -1366,6 +1369,142 @@ def setup_api_routes() -> None:
                     "image_count": len(ordered_paths),
                     "failed_images": failed,
                     "images": manifest_images,
+                })
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+
+        @routes.post("/api/iamccs/audio/save_audioboard_package")
+        async def iamccs_audio_save_audioboard_package(request):
+            try:
+                import copy
+                import json
+                import re
+                import shutil
+                import time
+                import folder_paths
+
+                def _sanitize(value, fallback="audioboard_package"):
+                    clean = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', "_", str(value or fallback).strip())
+                    clean = re.sub(r"\s+", "_", clean).strip("._")
+                    return (clean[:90] or fallback)
+
+                def _resolve_audio_source(path, input_dir):
+                    clean = str(path or "").strip()
+                    if not clean or clean.startswith("data:"):
+                        return None
+                    if os.path.isabs(clean):
+                        return os.path.abspath(os.path.expanduser(clean))
+                    return os.path.abspath(os.path.join(input_dir, clean.replace("/", os.sep)))
+
+                def _rewrite_audio_paths(board, path_map):
+                    for seg in board.get("audioSegments") or []:
+                        if not isinstance(seg, dict):
+                            continue
+                        for key in ("audioFile", "fileName", "path"):
+                            value = str(seg.get(key) or "").strip()
+                            if value in path_map:
+                                seg[f"original_{key}"] = value
+                                seg[key] = path_map[value]
+
+                data = await request.json()
+                board = data.get("board")
+                if not isinstance(board, dict):
+                    return web.json_response({"error": "Missing AudioBoard object"}, status=400)
+
+                input_dir = folder_paths.get_input_directory()
+                package_root = os.path.join(input_dir, "IAMCCS_audioboard_packages")
+                package_name = _sanitize(data.get("package_name") or data.get("label") or f"audioboard_{int(time.time())}")
+                package_dir = os.path.join(package_root, package_name)
+                audio_dir = os.path.join(package_dir, "audio")
+                os.makedirs(audio_dir, exist_ok=True)
+
+                original_board = copy.deepcopy(board)
+                segments = original_board.get("audioSegments") if isinstance(original_board.get("audioSegments"), list) else []
+                manifest_audio = []
+                path_map = {}
+                allowed_ext = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".aiff", ".aif", ".opus"}
+
+                for index, seg in enumerate(segments, start=1):
+                    if not isinstance(seg, dict):
+                        continue
+                    original_path = str(seg.get("audioFile") or seg.get("fileName") or seg.get("path") or "").strip()
+                    entry = {
+                        "index": index,
+                        "id": str(seg.get("id") or f"audio_{index:03d}"),
+                        "track": int(float(seg.get("track", 0) or 0)),
+                        "start": int(float(seg.get("start", 0) or 0)),
+                        "length": int(float(seg.get("length", 0) or 0)),
+                        "original_path": original_path,
+                    }
+                    source_path = _resolve_audio_source(original_path, input_dir)
+                    source_name = os.path.basename(source_path or original_path) or f"audio_{index:03d}.wav"
+                    ext = os.path.splitext(source_name)[1].lower()
+                    if ext not in allowed_ext:
+                        ext = ".wav"
+                    stem = _sanitize(os.path.splitext(source_name)[0], f"audio_{index:03d}")[:52]
+                    filename = f"audio_{index:03d}_{stem}{ext}"
+                    target_path = os.path.join(audio_dir, filename)
+                    rel_path = "/".join(["IAMCCS_audioboard_packages", package_name, "audio", filename])
+                    try:
+                        if source_path and os.path.isfile(source_path):
+                            shutil.copy2(source_path, target_path)
+                            entry["source_path"] = source_path
+                            entry["bytes"] = os.path.getsize(target_path)
+                            entry["package_path"] = rel_path
+                            if original_path:
+                                path_map[original_path] = rel_path
+                        else:
+                            entry["error"] = f"Audio not found: {original_path}"
+                    except Exception as err:
+                        entry["error"] = str(err)
+                    manifest_audio.append(entry)
+
+                packaged_board = copy.deepcopy(original_board)
+                _rewrite_audio_paths(packaged_board, path_map)
+                saved_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+                packaged_board["metadata"] = {
+                    **(packaged_board.get("metadata") or {}),
+                    "packaged_at": saved_at,
+                    "package_schema": "iamccs.audio.audioboard.package",
+                }
+                packaged_board["package"] = {
+                    "name": package_name,
+                    "root": package_dir,
+                    "audio_dir": "audio",
+                    "audio": manifest_audio,
+                }
+
+                manifest = {
+                    "metadata": {
+                        "schema": "iamccs.audio.audioboard.package",
+                        "schema_version": 1,
+                        "saved_at": saved_at,
+                        "package_name": package_name,
+                        "package_root": package_dir,
+                    },
+                    "board_file": "audioboard.json",
+                    "audio_dir": "audio",
+                    "audio_count": len(manifest_audio),
+                    "failed_audio": sum(1 for item in manifest_audio if item.get("error")),
+                    "audio": manifest_audio,
+                    "trackSettings": packaged_board.get("trackSettings") or [],
+                    "masterBus": packaged_board.get("masterBus") or {},
+                }
+
+                with open(os.path.join(package_dir, "audioboard.json"), "w", encoding="utf-8") as fh:
+                    json.dump(packaged_board, fh, indent=2, ensure_ascii=False)
+                with open(os.path.join(package_dir, "manifest.json"), "w", encoding="utf-8") as fh:
+                    json.dump(manifest, fh, indent=2, ensure_ascii=False)
+
+                return web.json_response({
+                    "ok": True,
+                    "package_name": package_name,
+                    "package_dir": package_dir,
+                    "board_file": os.path.join(package_dir, "audioboard.json"),
+                    "manifest_file": os.path.join(package_dir, "manifest.json"),
+                    "audio_count": len(manifest_audio),
+                    "failed_audio": manifest["failed_audio"],
+                    "audio": manifest_audio,
                 })
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)

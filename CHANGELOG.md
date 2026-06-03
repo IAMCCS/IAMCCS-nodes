@@ -1,5 +1,7 @@
 # IAMCCS Nodes - Changelog
 
+## 🆕 2026-06-04 - version 1.4.8 —Add audioboard arranger + utilities and new functions
+
 ## 🆕 2026-05-31 - version 1.4.7 —Add utilities and new functions and bugs fixed
 
 ## 🆕 2026-05-20 - version 1.4.6 — Shotboard planner v2 and v3 added

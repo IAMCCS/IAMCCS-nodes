@@ -4,10 +4,17 @@ import json
 import math
 import os
 import shutil
+import struct
+import time
+from io import BytesIO
+from PIL import Image
+from threading import Lock, Thread
 
 import torch
+import torch.nn.functional as F
 
 import comfy.model_management as model_management
+import comfy.patcher_extension
 import comfy.samplers
 import comfy.utils
 import nodes as comfy_nodes
@@ -29,6 +36,13 @@ from comfy_extras.nodes_lt_audio import LTXVAudioVAEEncode
 from comfy_extras.nodes_mask import SolidMask
 
 from .iamccs_supernodes_linx import SUPERNODE_LINX_TYPE, build_stage_linx_payload, linx_output, linx_policy, linx_resource
+
+try:
+    from protocol import BinaryEventTypes
+    from server import PromptServer
+except Exception:
+    BinaryEventTypes = None
+    PromptServer = None
 
 
 _SAMPLER_NAMES = tuple(comfy.samplers.SAMPLER_NAMES)
@@ -210,6 +224,217 @@ def _empty_preview_image():
     return torch.zeros((1, 64, 64, 3), dtype=torch.float32)
 
 
+def _iamccs_prompt_server():
+    try:
+        prompt_server_cls = PromptServer
+        if prompt_server_cls is None:
+            from server import PromptServer as prompt_server_cls  # type: ignore
+        instance = getattr(prompt_server_cls, "instance", None)
+        if instance is None or getattr(instance, "client_id", None) is None:
+            return None
+        return instance
+    except Exception:
+        return None
+
+
+def _iamccs_preview_event_type():
+    try:
+        event_type = BinaryEventTypes
+        if event_type is None:
+            from protocol import BinaryEventTypes as event_type  # type: ignore
+        return event_type
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+# IAMCCS internal taeltx (TAEHV) sampling preview wrapper.
+# Replaces the KJNodes LTX2SamplingPreviewOverride to fix a VRAM leak:
+# KJNodes moves taeltx.first_stage_model to GPU but never offloads it after
+# sampling, leaving it in VRAM and causing OOM when the full video VAE tries
+# to decode the final latent.  This wrapper always offloads in a try/finally.
+# By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+# ---------------------------------------------------------------------------
+class _IAMCCS_TaeltxOuterSampleWrapper:
+    """OUTER_SAMPLE wrapper that drives per-step taeltx preview and cleans up VRAM.
+
+    # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+
+    Frame extraction for LTX 2.3 AV combined latent (NestedTensor):
+    - ComfyUI's sampler calls pack_latents() on the NestedTensor before sampling,
+      giving a flat tensor [B, 1, T_vid*H*W*C + T_aud*...] and latent_shapes list.
+    - latent_shapes[0] = video latent original shape  [B, C, T, H, W]
+    - latent_shapes[1] = audio latent original shape
+    - The callback receives x0 in packed form; we slice [:math.prod(video_shape[1:])]
+      and reshape to restore [B, C, T, H, W] before taeltx decode.
+    - TAEHV first_stage_model.decode() expects [B, C, T, H, W] and returns
+      [B, C, T, H, W]; permute(0,2,3,4,1) -> [B, T, H, W, C].
+    # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    """
+
+    def __init__(self, vae, preview_rate=8):
+        # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+        self.vae = vae
+        self.preview_rate = int(max(1, min(60, int(preview_rate or 8))))
+        self._first_preview = True
+        self._last_preview_t = 0.0
+        self._c_index = 0
+        self._preview_lock = Lock()
+        self._preview_busy = False
+        self._taeltx_dtype = torch.float32
+
+    def _emit_preview_metadata(self, frame_count):
+        server_instance = _iamccs_prompt_server()
+        if server_instance is None:
+            return
+        try:
+            server_instance.send_sync(
+                "VHS_latentpreview",
+                {
+                    "length": int(max(1, frame_count)),
+                    "rate": int(self.preview_rate),
+                    "id": str(getattr(server_instance, "last_node_id", "") or ""),
+                },
+                server_instance.client_id,
+            )
+        except Exception:
+            pass
+
+    def _process_preview_frames(self, frame_batch, start_index, total_frames):
+        event_types = _iamccs_preview_event_type()
+        if event_types is None:
+            return
+        server_instance = _iamccs_prompt_server()
+        if server_instance is None:
+            return
+
+        with self._preview_lock:
+            if self._preview_busy:
+                return
+            self._preview_busy = True
+            try:
+                with torch.no_grad():
+                    decoded = self.vae.first_stage_model.decode(frame_batch.unsqueeze(0))[0].permute(1, 2, 3, 0)
+
+                if decoded.size(1) < 256 or decoded.size(2) < 256:
+                    decoded = F.interpolate(decoded.movedim(-1, 0), scale_factor=4, mode="nearest").movedim(0, -1)
+
+                previews_ubyte = decoded.clamp(0, 1).mul(255).to(device="cpu", dtype=torch.uint8)
+                node_id = str(getattr(server_instance, "last_node_id", "") or "")
+                frame_index = int(start_index)
+                frame_mod = max(1, ((int(total_frames) - 1) * 8) + 1)
+
+                for preview in previews_ubyte:
+                    pil = Image.fromarray(preview.numpy())
+                    message = BytesIO()
+                    message.write((1).to_bytes(length=4, byteorder="big") * 2)
+                    message.write(frame_index.to_bytes(length=4, byteorder="big"))
+                    message.write(struct.pack("16p", node_id.encode("ascii", errors="ignore")))
+                    pil.save(message, format="JPEG", quality=95, compress_level=1)
+                    server_instance.send_sync(
+                        event_types.PREVIEW_IMAGE,
+                        message.getvalue(),
+                        server_instance.client_id,
+                    )
+                    frame_index = (frame_index + 1) % frame_mod
+            except Exception:
+                pass
+            finally:
+                self._preview_busy = False
+
+    def __call__(self, executor, noise, latent_image, sampler, sigmas,
+                 denoise_mask, callback, disable_pbar, seed, latent_shapes):
+        guider = executor.class_obj
+
+        # latent_shapes[0] is the video latent shape when using AV NestedTensor.
+        # Keep this wrapper fail-open: if Comfy changes the callback payload, preview
+        # must turn into a no-op instead of breaking the actual generation.
+        try:
+            video_shape = latent_shapes[0] if latent_shapes is not None and len(latent_shapes) > 0 else None
+        except Exception:
+            video_shape = None
+
+        # Count keyframe tokens appended to the T dimension (LTX guide frames)
+        num_keyframes = 0
+        try:
+            if 'positive' in guider.conds and len(guider.conds['positive']) > 0:
+                keyframe_idxs = guider.conds['positive'][0].get('keyframe_idxs')
+                if keyframe_idxs is not None:
+                    num_keyframes = int(len(torch.unique(keyframe_idxs[0, 0, :, 0])))
+        except Exception:
+            pass
+
+        taeltx = self.vae
+        rate = self.preview_rate
+        original_callback = callback
+
+        # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+        # VRAM-SAFE DESIGN: taeltx stays on CPU and preview transport is emitted
+        # as side-channel events only. This keeps the actual denoise callback path
+        # aligned with Comfy core while still providing realtime preview.
+        try:
+            taeltx.first_stage_model.to("cpu")
+        except Exception:
+            pass
+        try:
+            self._taeltx_dtype = taeltx.first_stage_model.decoder[1].weight.dtype
+        except Exception:
+            self._taeltx_dtype = torch.float32
+
+        def _preview_callback(step, x0, x, total_steps):
+            if original_callback is not None:
+                original_callback(step, x0, x, total_steps)
+
+            try:
+                if x0 is not None:
+                    now = time.time()
+                    x0_vid = x0
+                    if video_shape is not None:
+                        cut = math.prod(video_shape[1:])
+                        x0_vid = x0[:, :, :cut].reshape([x0.shape[0]] + list(video_shape)[1:])
+                    if num_keyframes > 0 and x0_vid.shape[2] > num_keyframes:
+                        x0_vid = x0_vid[:, :, :-num_keyframes]
+                    if x0_vid.ndim != 5 or x0_vid.shape[2] <= 0:
+                        return
+
+                    preview_frames = x0_vid.movedim(2, 1).reshape((-1,) + tuple(x0_vid.shape[-3:]))
+                    total_preview_frames = int(preview_frames.size(0))
+                    num_previews = int((now - self._last_preview_t) * rate)
+                    self._last_preview_t = self._last_preview_t + (float(num_previews) / float(rate))
+                    if num_previews > total_preview_frames:
+                        num_previews = total_preview_frames
+                    elif num_previews <= 0:
+                        return
+
+                    if self._first_preview:
+                        self._first_preview = False
+                        self._emit_preview_metadata(total_preview_frames)
+                        self._last_preview_t = now + (1.0 / float(rate))
+
+                    if self._c_index + num_previews > total_preview_frames:
+                        selected_frames = preview_frames.roll(-self._c_index, 0)[:num_previews]
+                    else:
+                        selected_frames = preview_frames[self._c_index:self._c_index + num_previews]
+                    start_index = int(self._c_index)
+                    self._c_index = (self._c_index + num_previews) % total_preview_frames
+
+                    selected_frames = selected_frames.detach().to(device="cpu", dtype=self._taeltx_dtype).contiguous()
+                    Thread(
+                        target=self._process_preview_frames,
+                        args=(selected_frames, start_index, total_preview_frames),
+                        daemon=True,
+                    ).start()
+            except Exception:
+                pass
+
+        return executor(
+            noise, latent_image, sampler, sigmas,
+            denoise_mask, _preview_callback, disable_pbar, seed,
+            latent_shapes=latent_shapes,
+        )
+
+
 def _limit_video_latent_for_preview(video_latent, vae, max_preview_frames):
     if not isinstance(video_latent, dict):
         return video_latent
@@ -254,6 +479,32 @@ def _decode_taeltx_preview(taeltx_vae, video_latent, enabled=False, max_preview_
         return _empty_preview_image(), f"taeltx_preview=failed(unexpected_output={type(images).__name__})", False
     except Exception as exc:
         return _empty_preview_image(), f"taeltx_preview=failed({type(exc).__name__}: {str(exc)[:180]})", False
+
+
+def _apply_kj_ltx2_sampling_preview_override(model, taeltx_vae=None, enabled=False, preview_rate=8):
+    # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    """Attach IAMCCS taeltx preview wrapper during sampling (with correct VRAM cleanup).
+
+    Uses _IAMCCS_TaeltxOuterSampleWrapper instead of KJNodes LTX2SamplingPreviewOverride
+    to avoid the VRAM leak caused by KJNodes never offloading taeltx after sampling.
+    """
+    if not bool(enabled):
+        return model, "iamccs_taeltx_preview=off"
+    if model is None:
+        return model, "iamccs_taeltx_preview=off(no_model)"
+    if taeltx_vae is None:
+        return model, "iamccs_taeltx_preview=off(no_taeltx_vae)"
+    try:
+        rate = int(max(1, min(60, int(preview_rate or 8))))
+        patched = model.clone()
+        patched.add_wrapper_with_key(
+            comfy.patcher_extension.WrappersMP.OUTER_SAMPLE,
+            "iamccs_taeltx_preview",
+            _IAMCCS_TaeltxOuterSampleWrapper(taeltx_vae, rate),
+        )
+        return patched, f"iamccs_taeltx_preview=on(rate={rate},transport=kj_realtime_cpu_safe)"
+    except Exception as exc:
+        return model, f"iamccs_taeltx_preview=failed({type(exc).__name__}: {str(exc)[:180]})"
 
 
 def _sanitize_audio_for_ffmpeg(audio):
@@ -2113,7 +2364,8 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                 "vram_flush": ("BOOLEAN", {"default": False}),
                 "motion_intensity": ("FLOAT", {"default": 1.0, "min": 0.25, "max": 4.0, "step": 0.05}),
                 "taeltx_preview": ("BOOLEAN", {"default": False}),
-                "taeltx_preview_max_frames": ("INT", {"default": 17, "min": 1, "max": 257, "step": 1}),
+                "taeltx_preview_max_frames": ("INT", {"default": 17, "min": 0, "max": 257, "step": 1}),
+                "taeltx_preview_fps": ("INT", {"default": 8, "min": 1, "max": 60, "step": 1}),
             },
             "optional": {
                 "image": ("IMAGE", {"lazy": True}),
@@ -2300,6 +2552,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
         taeltx_vae=None,
         taeltx_preview=False,
         taeltx_preview_max_frames=17,
+        taeltx_preview_fps=8,
         unique_id=None,
     ):
         debug_verbose = _debug_verbose_enabled(debug_verbose, linx)
@@ -2359,6 +2612,7 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
         taeltx_vae = _input_or_linx(taeltx_vae, linx, "taeltx_vae")
         taeltx_preview_enabled = bool(taeltx_preview)
         taeltx_preview_max_frames = max(1, int(taeltx_preview_max_frames or 17))
+        taeltx_preview_fps = int(max(1, min(60, int(taeltx_preview_fps or 8))))
         taeltx_preview_images = _empty_preview_image()
         taeltx_preview_report = "taeltx_preview=off"
         uses_input_audio_probe = bool(media_probe["uses_input_audio"])
@@ -3046,10 +3300,21 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
                     accelerator=accelerator_report,
                     model_sampling=model_sampling_report,
                 )
+            model_for_segment, kj_preview_report = _apply_kj_ltx2_sampling_preview_override(
+                model_for_segment,
+                taeltx_vae,
+                taeltx_preview_enabled,
+                taeltx_preview_fps,
+            )
+            _pipeline_debug_step(
+                pipeline_debug,
+                "single_kj_ltx2_sampling_preview_override",
+                report=kj_preview_report,
+            )
             guider = CFGGuider.execute(model_for_segment, conditioned_positive, conditioned_negative, float(effective_cfg_value))[0]
             sampler = KSamplerSelect.execute(str(effective_sampler))[0]
             sampler_node_name = "SamplerCustomAdvanced"
-            reference_sampler_cls = comfy_nodes.NODE_CLASS_MAPPINGS.get("IAMCCS_SamplerAdvancedVersion1") if reference_audio_img2vid else None
+            reference_sampler_cls = comfy_nodes.NODE_CLASS_MAPPINGS.get("IAMCCS_SamplerAdvancedVersion1") if reference_audio_img2vid and not legacy_audio_img2vid_backend else None
             if reference_sampler_cls is not None:
                 sampler_node_name = "IAMCCS_SamplerAdvancedVersion1(disable_progress=True,cleanup=True)"
             _pipeline_debug_step(
@@ -3737,6 +4002,17 @@ class IAMCCS_GC_AUIMG2VIDExecutableRender:
             else:
                 model_for_segment = ModelSamplingLTXV.execute(model, float(max_shift), float(base_shift), av_latent)[0]
                 loop_model_sampling_report = f"ModelSamplingLTXV(max_shift={float(max_shift):.3f},base_shift={float(base_shift):.3f})"
+            model_for_segment, kj_preview_report = _apply_kj_ltx2_sampling_preview_override(
+                model_for_segment,
+                taeltx_vae,
+                taeltx_preview_enabled,
+                taeltx_preview_fps,
+            )
+            _pipeline_debug_step(
+                pipeline_debug,
+                f"segment_{segment_index}_kj_ltx2_sampling_preview_override",
+                report=kj_preview_report,
+            )
             guider = CFGGuider.execute(model_for_segment, segment_positive, segment_negative, float(effective_cfg_value))[0]
             sampler = KSamplerSelect.execute(str(effective_sampler))[0]
             if legacy_audio_img2vid_backend:
