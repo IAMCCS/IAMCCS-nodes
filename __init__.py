@@ -147,6 +147,7 @@ from .iamccs_cine_stage2_preview_toggle import IAMCCS_CineStage2PreviewToggle
 from .iamccs_cine_flf_productor_dyno import IAMCCS_CineFLFProductorDyno
 from .iamccs_cine_flf_engine_simple_dyno import IAMCCS_CineFLFEngineSimpleDyno
 from .iamccs_cine_duration_lock import IAMCCS_CineBoardDurationLock, IAMCCS_CineLatentDurationCrop
+from .iamccs_cine_temporal_cut_barrier import IAMCCS_CineTemporalCutBarrier
 
 from .iamccs_ltx2_temporal_overlap_samplers import (
     IAMCCS_LTX2_ConditionNextLatentWithPrevOverlap,
@@ -282,6 +283,8 @@ from .audio.audio_control_efx import IAMCCS_ControlAudEfx
 from .audio.audio_control_efx_panel import IAMCCS_ControlAudEfxPanel
 from .audio.dialogue_tag_editor import IAMCCS_DialogueTagEditor, IAMCCS_DialogueAudioBoardBridge
 from .audio.cine_audio_info import IAMCCS_CineAudioInfo
+from .iamccs_ideogram_storyboard_frame_designer import IAMCCS_StoryboardFrameDesigner
+from .iamccs_ideo_translate import IAMCCS_IdeoTranslate
 
 from .iamccs_ltx2_segment_queue import (
     IAMCCS_LTX2_BlendLatentBridge,
@@ -440,6 +443,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_CineFLFLengthCompensator": IAMCCS_CineFLFLengthCompensator,
     "IAMCCS_CineBoardDurationLock": IAMCCS_CineBoardDurationLock,
     "IAMCCS_CineLatentDurationCrop": IAMCCS_CineLatentDurationCrop,
+    "IAMCCS_CineTemporalCutBarrier": IAMCCS_CineTemporalCutBarrier,
     "IAMCCS_CinePromptRelaySafeEncode": IAMCCS_CinePromptRelaySafeEncode,
     "IAMCCS_CineRelayOrBypass": IAMCCS_CineRelayOrBypass,
     "IAMCCS_CinePromptArchitect": IAMCCS_CinePromptArchitect,
@@ -548,6 +552,8 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_DialogueTagEditor": IAMCCS_DialogueTagEditor,
     "IAMCCS_DialogueAudioBoardBridge": IAMCCS_DialogueAudioBoardBridge,
     "IAMCCS_CineAudioInfo": IAMCCS_CineAudioInfo,
+    "IAMCCS_StoryboardFrameDesigner": IAMCCS_StoryboardFrameDesigner,
+    "IAMCCS_IdeoTranslate": IAMCCS_IdeoTranslate,
     "IAMCCS_CineVideoToWooshInputs": IAMCCS_CineVideoToWooshInputs,
     "IAMCCS_CineSpeech1PromptCompiler": IAMCCS_CineSpeech1PromptCompiler,
     "IAMCCS_CineSpeechLength": IAMCCS_CineSpeechLength,
@@ -694,6 +700,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_CineFLFLengthCompensator": "IAMCCS Cine FLF Length Compensator",
     "IAMCCS_CineBoardDurationLock": "IAMCCS Cine Board Duration Lock",
     "IAMCCS_CineLatentDurationCrop": "IAMCCS Cine Latent Duration Crop",
+    "IAMCCS_CineTemporalCutBarrier": "IAMCCS Cine Temporal Cut Barrier (Experimental)",
     "IAMCCS_CinePromptRelaySafeEncode": "IAMCCS Cine PromptRelay Safe Encode",
     "IAMCCS_CineRelayOrBypass": "IAMCCS Cine Relay Or Bypass",
     "IAMCCS_CinePromptArchitect": "IAMCCS CinePrompt Architect",
@@ -833,6 +840,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_DialogueTagEditor": "IAMCCS Dialogue Tag Editor",
     "IAMCCS_DialogueAudioBoardBridge": "IAMCCS Dialogue AudioBoard Bridge",
     "IAMCCS_CineAudioInfo": "IAMCCS CineAudioInfo",
+    "IAMCCS_StoryboardFrameDesigner": "IAMCCS StoryboardFrame + TextInFrame Director",
+    "IAMCCS_IdeoTranslate": "IAMCCS IdeoTranslate",
     "IAMCCS_CineVideoToWooshInputs": "IAMCCS Video To Woosh Inputs",
     "IAMCCS_CineSpeech1PromptCompiler": "IAMCCS Speech1 Prompt Compiler",
     "IAMCCS_CineSpeechLength": "IAMCCS Speech Length Calculator",

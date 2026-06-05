@@ -59,30 +59,58 @@ function isWorkflowDraftKey(key) {
 
 function looksLikeHeavyMediaString(value) {
     const text = String(value || "");
-    return text.length > 180_000 || text.includes("data:audio") || text.includes("data:video") || text.includes(";base64,");
+    return text.includes("data:audio") || text.includes("data:video") || text.includes(";base64,");
+}
+
+function isRegenerableDraftCacheKey(key) {
+    const normalized = String(key || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    return normalized.includes("waveformpeaks") ||
+        normalized.includes("waveformcache") ||
+        normalized.includes("decodedwaveform") ||
+        normalized.includes("audiobuffercache");
 }
 
 function makeLiteDraftPayload(payload) {
     try {
         const parsed = JSON.parse(String(payload || "{}"));
         let stripped = 0;
-        const visit = (value, key = "") => {
+        const visit = (value, key = "", depth = 0) => {
+            const lowerKey = String(key || "").toLowerCase();
+            if (Array.isArray(value)) {
+                if (isRegenerableDraftCacheKey(key)) {
+                    stripped += JSON.stringify(value).length;
+                    return [];
+                }
+                if (lowerKey === "edits" && value.length > 80) {
+                    const kept = value.slice(-80);
+                    stripped += Math.max(0, JSON.stringify(value).length - JSON.stringify(kept).length);
+                    return kept.map((item) => visit(item, key, depth + 1));
+                }
+                return value.map((item) => visit(item, key, depth + 1));
+            }
             if (typeof value === "string") {
-                const lowerKey = String(key || "").toLowerCase();
                 if (
                     lowerKey.includes("b64") ||
                     lowerKey.includes("base64") ||
                     looksLikeHeavyMediaString(value)
                 ) {
                     stripped += value.length;
-                    return `[IAMCCS stripped heavy draft payload: ${value.length} chars]`;
+                    return `[IAMCCS stripped embedded media: ${value.length} chars]`;
+                }
+                const trimmed = value.trim();
+                if (depth < 10 && value.length > 2048 && (trimmed.startsWith("{") || trimmed.startsWith("["))) {
+                    try {
+                        const embedded = JSON.parse(value);
+                        const compacted = JSON.stringify(visit(embedded, `${key}_embedded`, depth + 1));
+                        stripped += Math.max(0, value.length - compacted.length);
+                        return compacted;
+                    } catch {}
                 }
                 return value;
             }
-            if (Array.isArray(value)) return value.map((item) => visit(item, key));
             if (value && typeof value === "object") {
                 for (const objectKey of Object.keys(value)) {
-                    value[objectKey] = visit(value[objectKey], objectKey);
+                    value[objectKey] = visit(value[objectKey], objectKey, depth + 1);
                 }
             }
             return value;
@@ -90,43 +118,30 @@ function makeLiteDraftPayload(payload) {
         const lite = visit(parsed);
         return { payload: JSON.stringify(lite), stripped };
     } catch {
-        const text = String(payload || "");
-        if (!looksLikeHeavyMediaString(text)) return { payload: text, stripped: 0 };
-        return {
-            payload: JSON.stringify({
-                iamccs_lite_draft: true,
-                note: "Original Comfy draft was too heavy for browser storage.",
-                stripped_chars: text.length,
-            }),
-            stripped: text.length,
-        };
+        // A malformed draft must never be replaced with a placeholder: ComfyUI
+        // would remove it on the next refresh because it is no longer a workflow.
+        return { payload: String(payload || ""), stripped: 0 };
     }
 }
 
-function pruneOtherWorkflowDrafts(currentKey) {
-    let removed = 0;
+function compactStoredWorkflowDrafts(currentKey, nativeSetItem) {
+    let compacted = 0;
     let chars = 0;
     try {
-        const keys = [];
         for (let i = 0; i < localStorage.length; i += 1) {
             const key = localStorage.key(i);
-            if (!key || key === currentKey) continue;
-            if (isWorkflowDraftKey(key)) {
-                const value = localStorage.getItem(key) || "";
-                keys.push({ key, length: value.length });
-            }
-        }
-        keys.sort((a, b) => b.length - a.length);
-        for (const item of keys.slice(0, 6)) {
-            const value = localStorage.getItem(item.key) || "";
-            chars += value.length;
-            localStorage.removeItem(item.key);
-            removed += 1;
+            if (!key || key === currentKey || !isWorkflowDraftKey(key)) continue;
+            const value = localStorage.getItem(key) || "";
+            const lite = makeLiteDraftPayload(value);
+            if (!lite.stripped || lite.payload.length >= value.length) continue;
+            nativeSetItem.call(localStorage, key, lite.payload);
+            compacted += 1;
+            chars += value.length - lite.payload.length;
         }
     } catch (err) {
-        console.warn("[IAMCCS] Draft pruning during quota rescue failed", err);
+        console.warn("[IAMCCS] Existing draft compaction during quota rescue failed", err);
     }
-    return { removed, chars };
+    return { compacted, chars };
 }
 
 function installLiteDraftFallback() {
@@ -138,27 +153,35 @@ function installLiteDraftFallback() {
             return nativeSetItem.call(this, key, value);
         } catch (err) {
             if (!isWorkflowDraftKey(key)) throw err;
-            const pruned = pruneOtherWorkflowDrafts(String(key || ""));
+            const compactedExisting = compactStoredWorkflowDrafts(String(key || ""), nativeSetItem);
             try {
                 return nativeSetItem.call(this, key, value);
             } catch (secondErr) {
                 const lite = makeLiteDraftPayload(value);
-                if (!lite.stripped) throw secondErr;
+                if (!lite.stripped || lite.payload.length >= String(value || "").length) throw secondErr;
                 try {
                     nativeSetItem.call(this, key, lite.payload);
-                    console.warn("[IAMCCS] Saved lite workflow draft after browser quota error.", {
+                    console.warn("[IAMCCS] Saved valid compact workflow draft after browser quota error.", {
                         key,
                         stripped: lite.stripped,
-                        pruned,
+                        compactedExisting,
                     });
                     return undefined;
                 } catch (thirdErr) {
-                    console.error("[IAMCCS] Lite workflow draft fallback failed.", { key, pruned, thirdErr });
+                    console.error("[IAMCCS] Compact workflow draft fallback failed without deleting other drafts.", {
+                        key,
+                        compactedExisting,
+                        thirdErr,
+                    });
                     throw thirdErr;
                 }
             }
         }
     };
+    const startupCompaction = compactStoredWorkflowDrafts("", nativeSetItem);
+    if (startupCompaction.compacted) {
+        console.info("[IAMCCS] Compacted existing valid workflow drafts without deleting them.", startupCompaction);
+    }
 }
 
 app.registerExtension({

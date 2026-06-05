@@ -4501,7 +4501,7 @@ function renderShotboardPro(node) {
     numberSetting("Max guides", "max_guides", "1", "0");
     numberSetting("Guide gap", "min_guide_gap_seconds", "0.1", "0");
     numberSetting("Default force", "default_force", "0.1", "0");
-    numberSetting("Relay softness", "promptrelay_epsilon", "0.1", "0");
+    numberSetting("Relay softness", "promptrelay_epsilon", "0.0001", "0.0001");
     selectSetting("LTX frames", "ltx_round_mode", ["up_8n_plus_1", "nearest_8n_plus_1", "none"]);
     numberSetting("Ref width", "image_width", "32", "64");
     numberSetting("Ref height", "image_height", "32", "64");
@@ -6637,7 +6637,7 @@ function renderShotboardV3(node) {
                     segments: Array.isArray(data.segments) ? data.segments : [],
                     rows: Array.isArray(data.rows) ? data.rows : [],
                     audioSegments: Array.isArray(data.audioSegments) ? data.audioSegments : [],
-                    audioTrackCount: Math.max(1, Number(data.audioTrackCount || 2)),
+                    audioTrackCount: Math.max(1, Number(data.audioTrackCount || 1)),
                     masterAudioGain: Math.max(0, Math.min(2, Number(data.masterAudioGain ?? data.master_audio_gain ?? 1) || 1)),
                     masterAudioNormalize: Boolean(data.masterAudioNormalize || data.master_audio_normalize),
                     duration_seconds: objectDurationTruth(data),
@@ -6652,7 +6652,7 @@ function renderShotboardV3(node) {
                 };
             }
         } catch {}
-        return { schema: "iamccs.cine.filmmaker_timeline", schema_version: 1, segments: [], rows: [], audioSegments: [], audioTrackCount: 2, duration_seconds: null, frame_rate: null, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
+        return { schema: "iamccs.cine.filmmaker_timeline", schema_version: 1, segments: [], rows: [], audioSegments: [], audioTrackCount: 1, duration_seconds: null, frame_rate: null, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
     }
 
     let timeline = readTimeline();
@@ -7387,14 +7387,14 @@ function renderShotboardV3(node) {
             image_height: Number(imageHeightWidget?.value || 432),
             image_resize_method: cineResizeMethodValue(getWidget(node, "image_resize_method")?.value),
             image_multiple_of: Number(getWidget(node, "image_multiple_of")?.value || 32),
-            promptrelay_epsilon: Number(getWidget(node, "promptrelay_epsilon")?.value || 0.65),
+            promptrelay_epsilon: Number(getWidget(node, "promptrelay_epsilon")?.value || 0.001),
             img_compression: Number(getWidget(node, "img_compression")?.value || 0),
             default_force: Number(defaultForceWidget?.value || 0.25),
             guide_policy: String(getWidget(node, "guide_policy")?.value || "every_checked_row"),
             min_guide_gap_seconds: Number(getWidget(node, "min_guide_gap_seconds")?.value || 0),
             max_guides: Number(getWidget(node, "max_guides")?.value || 50),
             ltx_round_mode: String(getWidget(node, "ltx_round_mode")?.value || "up_8n_plus_1"),
-            audioTrackCount: Math.max(1, Math.round(Number(timeline.audioTrackCount || 2))),
+            audioTrackCount: Math.max(1, Math.round(Number(timeline.audioTrackCount || 1))),
             masterAudioGain: Math.max(0, Math.min(2, Number(timeline.masterAudioGain ?? 1) || 1)),
             masterAudioNormalize: Boolean(timeline.masterAudioNormalize),
             segments: timeline.segments,
@@ -7451,7 +7451,7 @@ function renderShotboardV3(node) {
             segments: reconciledSegments,
             rows: nextRows,
             audioSegments: Array.isArray(source.audioSegments) ? source.audioSegments.map((seg) => ({ ...(seg || {}), id: seg?.id || newId("aud") })) : (timeline.audioSegments || []),
-            audioTrackCount: Math.max(1, Number(source.audioTrackCount || timeline.audioTrackCount || 2)),
+            audioTrackCount: Math.max(1, Number(source.audioTrackCount || timeline.audioTrackCount || 1)),
             audioSyncMode: String(source.audioSyncMode || timeline.audioSyncMode || "timeline_audio"),
             duration_seconds: objectDurationTruth(source) || timeline.duration_seconds,
             frame_rate: objectFpsTruth(source) || timeline.frame_rate,
@@ -7469,8 +7469,8 @@ function renderShotboardV3(node) {
 
     if (!Array.isArray(timeline.segments)) timeline.segments = [];
     const collapsedNodeHeight = () => {
-        const tracks = Math.max(1, Math.round(Number(timeline.audioTrackCount || 2)));
-        return Math.max(SHOTBOARD_V3_COLLAPSED_HEIGHT, 450 + tracks * 45);
+        const tracks = Math.max(1, Math.round(Number(timeline.audioTrackCount || 1)));
+        return Math.max(SHOTBOARD_V3_COLLAPSED_HEIGHT, 450 + tracks * 90);
     };
     const currentNodeHeight = () => collapsed ? collapsedNodeHeight() : SHOTBOARD_V3_OPEN_HEIGHT;
 
@@ -7885,7 +7885,7 @@ function renderShotboardV3(node) {
     };
     addSelectSetting("Resize", "image_resize_method", ["crop", "pad", "keep proportion", "stretch"]);
     addSetting("Multiple", "image_multiple_of", "1", "1");
-    addSetting("Relay softness", "promptrelay_epsilon", "0.05", "0");
+    addSetting("Relay softness", "promptrelay_epsilon", "0.0001", "0.0001");
     const guidePolicyWrap = document.createElement("label");
     guidePolicyWrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
     const guidePolicyLabel = document.createElement("span");
@@ -8231,19 +8231,33 @@ function renderShotboardV3(node) {
     }
 
     function ensureSegmentWaveform(seg) {
-        if (!seg || !audioSegmentHasMedia(seg) || seg.waveformReal === true || waveformLoading.has(seg.id)) return;
+        if (!seg || !audioSegmentHasMedia(seg) || waveformLoading.has(seg.id)) return;
+        const sourceKey = String(seg.audioFile || `${seg.id || "audio"}:${String(seg.audioB64 || "").slice(0, 64)}`);
+        const hasDecodedPeaks = Array.isArray(seg.waveformPeaks)
+            && seg.waveformPeaks.length > 8
+            && seg.waveformPeaks.some((item) => item && typeof item === "object" && Number.isFinite(Number(item.min)) && Number.isFinite(Number(item.max)));
+        if (seg._iamccsWaveformDecodedKey === sourceKey && seg.waveformReal === true && hasDecodedPeaks) return;
+        if (seg._iamccsWaveformFailedKey === sourceKey) return;
+        // Never trust serialized/fallback peaks as the visual truth. Decode the actual
+        // current media source so the waveform remains useful while trimming.
+        seg.waveformReal = false;
         waveformLoading.add(seg.id);
         audioBufferForSegment(seg)
             .then((buffer) => {
-                if (!buffer) return;
+                if (!buffer) throw new Error("decoded audio buffer unavailable");
                 seg.audioDurationFrames = Math.max(1, Math.round(Number(buffer.duration || 0) * getFps()));
                 seg.waveformPeaks = peaksFromBuffer(buffer, Math.max(900, Math.min(2200, Math.round(Number(buffer.duration || 0) * 70))));
                 seg.waveformReal = true;
+                seg._iamccsWaveformDecodedKey = sourceKey;
+                delete seg._iamccsWaveformFailedKey;
                 waveformLoading.delete(seg.id);
                 draw();
             })
             .catch((err) => {
                 waveformLoading.delete(seg.id);
+                seg.waveformPeaks = [];
+                seg.waveformReal = false;
+                seg._iamccsWaveformFailedKey = sourceKey;
                 console.warn("[IAMCCS Cine Shotboard V3] waveform decode failed", seg?.audioFile || seg?.fileName || seg?.id, err);
             });
     }
@@ -8370,10 +8384,26 @@ function renderShotboardV3(node) {
             const parts = String(seg.audioFile || "").split("/");
             const filename = parts.pop() || "";
             const subfolder = parts.join("/");
-            const audioUrl = api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=input&subfolder=${encodeURIComponent(subfolder)}`);
-            const resp = await fetch(audioUrl);
-            if (!resp.ok) throw new Error(`audio fetch failed: ${resp.status}`);
-            arrayBuffer = await resp.arrayBuffer();
+            const declaredType = String(seg.audioUploadType || seg.uploadType || seg.storageType || "").toLowerCase();
+            const storageTypes = [...new Set([
+                ["input", "output", "temp"].includes(declaredType) ? declaredType : "",
+                "input",
+                "output",
+                "temp",
+            ].filter(Boolean))];
+            let lastStatus = "not found";
+            for (const storageType of storageTypes) {
+                const audioUrl = api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(storageType)}&subfolder=${encodeURIComponent(subfolder)}`);
+                const resp = await fetch(audioUrl);
+                if (!resp.ok) {
+                    lastStatus = `${storageType}:${resp.status}`;
+                    continue;
+                }
+                arrayBuffer = await resp.arrayBuffer();
+                seg.audioUploadType = storageType;
+                break;
+            }
+            if (!arrayBuffer) throw new Error(`audio fetch failed: ${lastStatus}`);
         } else if (seg.audioB64) {
             let encoded = String(seg.audioB64 || "");
             if (encoded.includes(",")) encoded = encoded.split(",").pop();
@@ -8855,8 +8885,8 @@ function renderShotboardV3(node) {
         const shell = document.createElement("div");
         shell.style.cssText = [
             "position:absolute",
-            "left:8px",
-            "right:8px",
+            "left:14px",
+            "right:14px",
             "top:6px",
             "bottom:6px",
             "border-radius:7px",
@@ -9236,7 +9266,7 @@ function renderShotboardV3(node) {
             "padding:6px",
             "display:grid",
             "gap:5px",
-            "z-index:999",
+            `z-index:${CINE_FULLSCREEN_Z_INDEX + 20}`,
             "font:10px/1.15 monospace",
             "font-weight:900",
         ].join(";");
@@ -9342,10 +9372,10 @@ function renderShotboardV3(node) {
         const block = document.createElement("div");
         const left = (Number(seg.start || 0) / total) * 100;
         const width = Math.max(1, (Number(seg.length || 1) / total) * 100);
-        const top = isAudio ? (Number(seg.track || 0) * 45 + 4) : 8;
+        const top = isAudio ? (Number(seg.track || 0) * 90 + 4) : 8;
         const truthRailHeight = isAudio ? 0 : 16;
         const frameShellHeight = isAudio ? 128 : 144;
-        const height = isAudio ? 36 : 238 + timelineExtraH; // grows with user timeline resize
+        const height = isAudio ? 82 : 238 + timelineExtraH; // grows with user timeline resize
         const imageHeight = 108;
         const transitionLaneTop = truthRailHeight + imageHeight;
         const transitionLaneHeight = 20;
@@ -9635,36 +9665,38 @@ function renderShotboardV3(node) {
             resize.title = "Drag right edge to trim audio end";
             resize.style.cssText = [
                 "position:absolute",
-                "right:-5px",
+                "right:0",
                 "top:0",
-                "height:36px",
-                "width:12px",
+                "bottom:0",
+                "width:14px",
                 "cursor:ew-resize",
-                "z-index:36",
-                "background:rgba(255,255,255,.055)",
-                "border-left:1px solid rgba(244,229,196,.50)",
-                "box-shadow:0 0 0 1px rgba(0,0,0,.22), inset 1px 0 0 rgba(0,0,0,.18)",
+                "z-index:48",
+                "background:linear-gradient(90deg,rgba(244,213,158,.18),rgba(244,213,158,.72))",
+                "border-left:1px solid rgba(255,240,205,.82)",
+                "border-radius:0 4px 4px 0",
+                "box-shadow:-2px 0 8px rgba(0,0,0,.44), inset 1px 0 0 rgba(255,255,255,.34)",
             ].join(";");
             const rightGrip = document.createElement("div");
-            rightGrip.style.cssText = "position:absolute;right:4px;top:50%;width:3px;height:30px;transform:translateY(-50%);border-radius:999px;background:rgba(244,229,196,.92);box-shadow:0 0 5px rgba(0,0,0,.45);opacity:.88;pointer-events:none;";
+            rightGrip.style.cssText = "position:absolute;right:5px;top:50%;width:3px;height:44px;transform:translateY(-50%);border-radius:999px;background:#FFF0C9;box-shadow:0 0 7px rgba(0,0,0,.55);pointer-events:none;";
             resize.appendChild(rightGrip);
             block.appendChild(resize);
             resizeLeft = document.createElement("div");
             resizeLeft.title = "Drag left edge to trim audio start";
             resizeLeft.style.cssText = [
                 "position:absolute",
-                "left:-5px",
+                "left:0",
                 "top:0",
-                "height:36px",
-                "width:12px",
+                "bottom:0",
+                "width:14px",
                 "cursor:ew-resize",
-                "z-index:36",
-                "background:rgba(255,255,255,.045)",
-                "border-right:1px solid rgba(143,208,204,.56)",
-                "box-shadow:0 0 0 1px rgba(0,0,0,.22), inset -1px 0 0 rgba(0,0,0,.18)",
+                "z-index:48",
+                "background:linear-gradient(90deg,rgba(143,208,204,.72),rgba(143,208,204,.18))",
+                "border-right:1px solid rgba(196,255,248,.84)",
+                "border-radius:4px 0 0 4px",
+                "box-shadow:2px 0 8px rgba(0,0,0,.44), inset -1px 0 0 rgba(255,255,255,.30)",
             ].join(";");
             const leftGrip = document.createElement("div");
-            leftGrip.style.cssText = "position:absolute;left:4px;top:50%;width:3px;height:30px;transform:translateY(-50%);border-radius:999px;background:rgba(143,208,204,.92);box-shadow:0 0 5px rgba(0,0,0,.45);opacity:.88;pointer-events:none;";
+            leftGrip.style.cssText = "position:absolute;left:5px;top:50%;width:3px;height:44px;transform:translateY(-50%);border-radius:999px;background:#C9FFF8;box-shadow:0 0 7px rgba(0,0,0,.55);pointer-events:none;";
             resizeLeft.appendChild(leftGrip);
             block.appendChild(resizeLeft);
         }
@@ -10999,14 +11031,14 @@ function renderShotboardV3(node) {
         // Read user timeline-height resize value, update all related heights
         // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
         timelineExtraH = Math.max(0, Math.min(600, Math.round(Number(node.properties?.iamccs_v3_timeline_extra_height || 0))));
-        const _atCount = Math.max(1, Number(timeline.audioTrackCount || 2));
-        timelineBox.style.height = `${264 + _atCount * 45 + timelineExtraH}px`;
-        audioTracks.style.height = `${_atCount * 45}px`;
+        const _atCount = Math.max(1, Number(timeline.audioTrackCount || 1));
+        timelineBox.style.height = `${264 + _atCount * 90 + timelineExtraH}px`;
+        audioTracks.style.height = `${_atCount * 90}px`;
         imageTrack.style.height = `${254 + timelineExtraH}px`;
         audioTracks.style.top = `${254 + timelineExtraH}px`;
-        for (let i = 0; i < Math.max(1, Number(timeline.audioTrackCount || 2)); i += 1) {
+        for (let i = 0; i < Math.max(1, Number(timeline.audioTrackCount || 1)); i += 1) {
             const lane = document.createElement("div");
-            lane.style.cssText = `position:absolute;left:0;right:0;top:${i * 45}px;height:45px;border-bottom:1px solid ${purple.borderSoft};background:${i % 2 ? "rgba(255,255,255,.025)" : "transparent"};`;
+            lane.style.cssText = `position:absolute;left:0;right:0;top:${i * 90}px;height:90px;border-bottom:1px solid ${purple.borderSoft};background:${i % 2 ? "rgba(255,255,255,.025)" : "transparent"};`;
             const plus = document.createElement("button");
             plus.type = "button";
             plus.innerHTML = `<span>+</span><b>Audio</b>`;
@@ -11014,7 +11046,7 @@ function renderShotboardV3(node) {
             plus.style.cssText = [
                 "position:sticky",
                 "left:8px",
-                "top:5px",
+                "top:27px",
                 "width:118px",
                 "height:35px",
                 "box-sizing:border-box",
@@ -11359,14 +11391,14 @@ function renderShotboardV3(node) {
         pendingAudioTrack = 0;
         audioInput.click();
     };
-    addTrackBtn.onclick = () => { timeline.audioTrackCount = Math.max(1, Number(timeline.audioTrackCount || 2)) + 1; draw(); };
+    addTrackBtn.onclick = () => { timeline.audioTrackCount = Math.max(1, Number(timeline.audioTrackCount || 1)) + 1; draw(); };
     timelineBox.ondblclick = (event) => {
         const rect = timelineBox.getBoundingClientRect();
         const frame = Math.round(((event.clientX - rect.left) / Math.max(1, rect.width)) * getTotalFrames());
         const y = event.clientY - rect.top;
-        if (y >= 308) {
+        if (y >= 254) {
             pendingAudioInsertFrame = frame;
-            pendingAudioTrack = Math.max(0, Math.min(Math.max(1, Number(timeline.audioTrackCount || 2)) - 1, Math.floor((y - 308) / 45)));
+            pendingAudioTrack = Math.max(0, Math.min(Math.max(1, Number(timeline.audioTrackCount || 1)) - 1, Math.floor((y - 254) / 90)));
             audioInput.click();
         } else {
             openAppendImagePicker();
@@ -11656,7 +11688,7 @@ function renderShotboardV3(node) {
                     schema_version: 1,
                     segments: converted,
                     audioSegments: [],
-                    audioTrackCount: 2,
+                    audioTrackCount: 1,
                     audioSyncMode: "timeline_audio",
                     generationStrategy: "single_timeline",
                 };
@@ -11811,7 +11843,7 @@ function renderShotboardV3(node) {
         stopPlayback();
         promptArea.value = "";
         setWidgetValue(node, "global_prompt", "");
-        timeline = { schema: "iamccs.cine.filmmaker_timeline", schema_version: 2, segments: [], audioSegments: [], audioTrackCount: 2, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
+        timeline = { schema: "iamccs.cine.filmmaker_timeline", schema_version: 2, segments: [], audioSegments: [], audioTrackCount: 1, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
         selectedId = null;
         clearOwnReferencePaths(node);
         writeTimeline();

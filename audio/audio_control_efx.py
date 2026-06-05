@@ -137,7 +137,8 @@ class IAMCCS_ControlAudEfx:
     RETURN_TYPES = (SUPERNODE_LINX_TYPE, "STRING", "STRING", "STRING")
     RETURN_NAMES = ("cine_linx", "effect_graph_json", "selected_clip_json", "report")
     FUNCTION = "control"
-    CATEGORY = "IAMCCS/Cine/Audio"
+    CATEGORY = "IAMCCS/Compatibility"
+    DEPRECATED = True
 
     def control(self, control_data, cine_linx=None, cine_linx_from_arranger=None):
         data = _safe_json_loads(control_data, {})

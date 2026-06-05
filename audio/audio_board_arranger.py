@@ -184,12 +184,15 @@ class IAMCCS_AudioBoardArranger:
         for index in range(max(1, int(count))):
             item = copy.deepcopy(source[index]) if index < len(source) and isinstance(source[index], dict) else {}
             item["volume"] = max(0.0, min(2.0, _safe_float(item.get("volume", 1.0), 1.0)))
+            item["gainDb"] = max(-24.0, min(24.0, _safe_float(item.get("gainDb", 0.0), 0.0)))
             item["pan"] = max(-1.0, min(1.0, _safe_float(item.get("pan", 0.0), 0.0)))
             item["mute"] = bool(item.get("mute", False))
             item["solo"] = bool(item.get("solo", False))
             item["normalize"] = bool(item.get("normalize", False))
+            item["bypassEffects"] = bool(item.get("bypassEffects", False))
             item["reverb"] = bool(item.get("reverb", False))
             item["reverbSend"] = max(0.0, min(1.0, _safe_float(item.get("reverbSend", 0.0), 0.0)))
+            item["effectChain"] = item.get("effectChain") if isinstance(item.get("effectChain"), list) else []
             out.append(item)
         return out
 
@@ -204,18 +207,49 @@ class IAMCCS_AudioBoardArranger:
             track = max(0, _safe_int(item.get("track", 0), 0))
             track_state = settings[track] if track < len(settings) else {}
             track_volume = max(0.0, min(2.0, _safe_float(track_state.get("volume", 1.0), 1.0)))
+            track_gain_db = max(-24.0, min(24.0, _safe_float(track_state.get("gainDb", 0.0), 0.0)))
+            track_gain = 10.0 ** (track_gain_db / 20.0)
             track_pan = max(-1.0, min(1.0, _safe_float(track_state.get("pan", 0.0), 0.0)))
             clip_gain = max(0.0, min(4.0, _safe_float(item.get("gain", item.get("volume", 1.0)), 1.0)))
             clip_pan = max(-1.0, min(1.0, _safe_float(item.get("pan", 0.0), 0.0)))
+            bypass_effects = bool(track_state.get("bypassEffects", False))
+            item["sourceClipGain"] = max(0.0, min(4.0, _safe_float(item.get("sourceClipGain", clip_gain), clip_gain)))
+            item["sourceClipPan"] = max(-1.0, min(1.0, _safe_float(item.get("sourceClipPan", clip_pan), clip_pan)))
             item["trackVolume"] = track_volume
+            item["trackGainDb"] = track_gain_db
             item["trackPan"] = track_pan
             item["trackMute"] = bool(track_state.get("mute", False))
             item["trackSolo"] = bool(track_state.get("solo", False))
-            item["gain"] = max(0.0, min(4.0, clip_gain * track_volume))
-            item["pan"] = max(-1.0, min(1.0, clip_pan + track_pan))
+            item["effectsBypassed"] = bypass_effects
+            item["gain"] = max(0.0, min(4.0, item["sourceClipGain"] * track_volume * track_gain))
+            item["pan"] = max(-1.0, min(1.0, item["sourceClipPan"] + track_pan))
+            effect_chain = track_state.get("effectChain") if isinstance(track_state.get("effectChain"), list) else []
+            track_eq = next((
+                fx for fx in effect_chain
+                if isinstance(fx, dict) and str(fx.get("type", "")).lower() == "eq" and fx.get("enabled", True) is not False
+            ), None)
+            if not bypass_effects and isinstance(track_eq, dict):
+                params = track_eq.get("params") if isinstance(track_eq.get("params"), dict) else {}
+                item["eqLowDb"] = _safe_float(item.get("eqLowDb", 0.0), 0.0) + _safe_float(params.get("low", 0.0), 0.0)
+                item["eqMidDb"] = _safe_float(item.get("eqMidDb", 0.0), 0.0) + _safe_float(params.get("mid", 0.0), 0.0)
+                item["eqHighDb"] = _safe_float(item.get("eqHighDb", 0.0), 0.0) + _safe_float(params.get("high", 0.0), 0.0)
+                item["eqLowFreq"] = _safe_float(params.get("lowFreq", 140.0), 140.0)
+                item["eqMidFreq"] = _safe_float(params.get("midFreq", 1200.0), 1200.0)
+                item["eqHighFreq"] = _safe_float(params.get("highFreq", 6200.0), 6200.0)
+                item["eqQ"] = _safe_float(params.get("q", 1.2), 1.2)
+                if bool(params.get("lowCut", False)):
+                    item["hpfHz"] = max(_safe_float(item.get("hpfHz", 0.0), 0.0), _safe_float(params.get("lowCutFreq", 80.0), 80.0))
+                if bool(params.get("highCut", False)):
+                    item["lpfHz"] = min(_safe_float(item.get("lpfHz", 22000.0), 22000.0), _safe_float(params.get("highCutFreq", 12000.0), 12000.0))
+            elif bypass_effects:
+                for key in ("eqLowDb", "eqMidDb", "eqHighDb", "compressor", "ducking", "reverbSend", "delaySend", "transient", "denoise"):
+                    item[key] = 0.0
+                item["hpfHz"] = 0.0
+                item["lpfHz"] = 22000.0
+                item["stereoWidth"] = 1.0
             if bool(track_state.get("normalize", False)):
                 item["normalizeAudio"] = True
-            if bool(track_state.get("reverb", False)) and _safe_float(item.get("reverbSend", 0.0), 0.0) <= 0.0:
+            if not bypass_effects and bool(track_state.get("reverb", False)) and _safe_float(item.get("reverbSend", 0.0), 0.0) <= 0.0:
                 item["reverbSend"] = max(0.15, _safe_float(track_state.get("reverbSend", 0.0), 0.0))
             if bool(track_state.get("mute", False)):
                 item["mute"] = True

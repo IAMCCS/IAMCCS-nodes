@@ -100,7 +100,13 @@ def _segments(raw: Any) -> List[Dict[str, Any]]:
 
 def _settings_at(settings: Any, track_index: int) -> Dict[str, Any]:
     if isinstance(settings, list) and 0 <= track_index < len(settings) and isinstance(settings[track_index], dict):
-        return copy.deepcopy(settings[track_index])
+        item = copy.deepcopy(settings[track_index])
+        item["volume"] = max(0.0, min(2.0, _safe_float(item.get("volume", 1.0), 1.0)))
+        item["gainDb"] = max(-24.0, min(24.0, _safe_float(item.get("gainDb", 0.0), 0.0)))
+        item["pan"] = max(-1.0, min(1.0, _safe_float(item.get("pan", 0.0), 0.0)))
+        item["bypassEffects"] = bool(item.get("bypassEffects", False))
+        item["effectChain"] = item.get("effectChain") if isinstance(item.get("effectChain"), list) else []
+        return item
     return {}
 
 
@@ -117,13 +123,28 @@ def _segments_with_track_mix(segments: List[Dict[str, Any]], settings: Any, filt
         track = max(0, _safe_int(item.get("track", 0), 0))
         track_state = _settings_at(track_settings, track)
         track_volume = max(0.0, min(2.0, _safe_float(track_state.get("volume", item.get("trackVolume", 1.0)), 1.0)))
+        track_gain_db = max(-24.0, min(24.0, _safe_float(track_state.get("gainDb", item.get("trackGainDb", 0.0)), 0.0)))
+        track_gain = 10.0 ** (track_gain_db / 20.0)
         track_pan = max(-1.0, min(1.0, _safe_float(track_state.get("pan", item.get("trackPan", 0.0)), 0.0)))
-        if "trackVolume" not in item:
-            item["gain"] = max(0.0, min(4.0, _safe_float(item.get("gain", 1.0), 1.0) * track_volume))
-            item["trackVolume"] = track_volume
-        if "trackPan" not in item:
-            item["pan"] = max(-1.0, min(1.0, _safe_float(item.get("pan", 0.0), 0.0) + track_pan))
-            item["trackPan"] = track_pan
+        old_volume = max(0.0001, _safe_float(item.get("trackVolume", 1.0), 1.0))
+        old_gain_db = _safe_float(item.get("trackGainDb", 0.0), 0.0)
+        old_gain = max(0.0001, 10.0 ** (old_gain_db / 20.0))
+        source_gain = _safe_float(item.get("sourceClipGain", _safe_float(item.get("gain", 1.0), 1.0) / (old_volume * old_gain)), 1.0)
+        source_pan = _safe_float(item.get("sourceClipPan", _safe_float(item.get("pan", 0.0), 0.0) - _safe_float(item.get("trackPan", 0.0), 0.0)), 0.0)
+        item["sourceClipGain"] = max(0.0, min(4.0, source_gain))
+        item["sourceClipPan"] = max(-1.0, min(1.0, source_pan))
+        item["gain"] = max(0.0, min(4.0, item["sourceClipGain"] * track_volume * track_gain))
+        item["trackVolume"] = track_volume
+        item["trackGainDb"] = track_gain_db
+        item["pan"] = max(-1.0, min(1.0, item["sourceClipPan"] + track_pan))
+        item["trackPan"] = track_pan
+        item["effectsBypassed"] = bool(track_state.get("bypassEffects", item.get("effectsBypassed", False)))
+        if item["effectsBypassed"]:
+            for key in ("eqLowDb", "eqMidDb", "eqHighDb", "compressor", "ducking", "reverbSend", "delaySend", "transient", "denoise"):
+                item[key] = 0.0
+            item["hpfHz"] = 0.0
+            item["lpfHz"] = 22000.0
+            item["stereoWidth"] = 1.0
         if bool(track_state.get("mute", False)):
             item["mute"] = True
         if solo_tracks and track not in solo_tracks:
@@ -308,7 +329,10 @@ class IAMCCS_BusOut:
                 "track_index": track_index,
                 "track_name": f"A{track_index + 1}",
                 "segments": track_segments,
-                "effects": _settings_at(selected_track_settings, track_index),
+                "effects": {
+                    **_settings_at(selected_track_settings, track_index),
+                    "effectChain": [] if bool(_settings_at(selected_track_settings, track_index).get("bypassEffects", False)) else _settings_at(selected_track_settings, track_index).get("effectChain", []),
+                },
                 "effect_graph_json": effect_graph,
                 "duration_frames": _max_end(track_segments),
                 "is_stereo": _has_stereo(track_segments),

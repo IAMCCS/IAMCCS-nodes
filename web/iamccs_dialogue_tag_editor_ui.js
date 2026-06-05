@@ -38,7 +38,7 @@ function defaultData() {
     schema: "iamccs.dialogue_tag_editor",
     schema_version: 2,
     global_prompt: "cinematic night interior, two men in field and reverse-field dialogue, natural audio-driven lip sync, controlled tension, subtle listening reactions, stable identities, coherent eyelines, no subtitles, no visible text",
-    settings: { engine_profile: "", output_mode: "speaker_stems_for_overlap", tts_generation_mode: "double_stem_ab", inline_edit_mode: "metadata_only", default_gap_seconds: 0.12, text_theme: "light_boxes", font_zoom: 1 },
+    settings: { engine_profile: "", output_mode: "speaker_stems_for_overlap", tts_generation_mode: "double_stem_ab", speaker_stems_zero_start: false, inline_edit_mode: "metadata_only", default_gap_seconds: 0.12, text_theme: "light_boxes", font_zoom: 1 },
     speakers: [
       { id: "A", name: "Man A", voice: "speaker_a_low_tense", reference_text: "Keep your voice low. We do not know who is listening.", language: "en" },
       { id: "B", name: "Man B", voice: "speaker_b_controlled_whisper", reference_text: "Good. Now we finally have something worth protecting.", language: "en" },
@@ -900,7 +900,7 @@ function ensureStyle() {
   .iamccs-overlap-help{color:#7a6a51;font-size:10px;font-weight:700;line-height:1.4}.iamccs-dte.light .iamccs-overlap-help{color:#7a6a51}
   .iamccs-dte:not(.light) .iamccs-dte-center{background:#12151b;color:#f4f7fb}.iamccs-dte:not(.light) .iamccs-dte-toolbar{background:#171c25;border-bottom-color:#2d3542}.iamccs-dte:not(.light) .iamccs-dte-section{background:#12151b;border-bottom-color:#29303b}.iamccs-dte:not(.light) .iamccs-dte-label{background:rgba(109,141,183,.12);border-left-color:#6d8db7;color:#dbe7ff}.iamccs-dte:not(.light) .iamccs-dte-label span:last-child{color:#a8b4c6}.iamccs-dte:not(.light) .iamccs-dte-card{background:#171b23;border-color:#313949}.iamccs-dte:not(.light) .iamccs-dte-card-head{color:#eef4ff}.iamccs-dte:not(.light) .iamccs-dte-card-meta{color:#aab5c6}.iamccs-dte:not(.light) .iamccs-overlap-help{color:#a8b4c6}
   .iamccs-dte h4{margin:0 0 10px;padding:5px 7px;border-left:4px solid var(--brass);background:rgba(214,182,111,.12);color:#f4dfad;text-transform:uppercase;font-size:10px;letter-spacing:.05em}.iamccs-dte button,.iamccs-dte select,.iamccs-dte input{font:inherit;color:#f6ead1;background:#2a2b23;border:1px solid rgba(214,182,111,.38);border-radius:6px}
-  .iamccs-dte button{height:28px;padding:0 10px;font-weight:900;cursor:pointer;transition:transform .12s ease,box-shadow .18s ease,background .18s ease,color .18s ease}.iamccs-dte button:hover{border-color:#f1ce78;color:#fff6d8;background:#343426}.iamccs-dte .gold{background:#d6b66f;border-color:#f0d892;color:#21180b}.iamccs-dte .active{outline:2px solid rgba(214,182,111,.5)}
+  .iamccs-dte button{height:28px;padding:0 10px;font-weight:900;cursor:pointer;transition:transform .12s ease,box-shadow .18s ease,background .18s ease,color .18s ease}.iamccs-dte button:hover{border-color:#f1ce78;color:#fff6d8;background:#343426}.iamccs-dte .gold{background:#d6b66f;border-color:#f0d892;color:#21180b}.iamccs-dte .active,.iamccs-dte button[aria-pressed="true"]{outline:2px solid rgba(133,235,145,.72);background:linear-gradient(180deg,#b9e98e,#69aa61);border-color:#d8f5b7;color:#10210f;box-shadow:0 0 0 3px rgba(105,170,97,.20),0 0 16px rgba(105,220,117,.30);transform:translateY(1px)}.iamccs-dte button[aria-pressed="true"]::after{content:" ON";font-size:8px;font-weight:950;color:#173719}
   .iamccs-dte .iamccs-inject-btn{min-width:110px;box-shadow:0 0 0 0 rgba(214,182,111,0)}.iamccs-dte .iamccs-inject-btn.is-busy{transform:translateY(1px) scale(.985);box-shadow:0 0 0 2px rgba(214,182,111,.28),0 0 18px rgba(214,182,111,.22);filter:saturate(1.12)}.iamccs-dte .iamccs-inject-btn.is-done{background:#84b86b;border-color:#ccecad;color:#10200e;box-shadow:0 0 0 2px rgba(132,184,107,.24),0 0 16px rgba(132,184,107,.16)}
   .iamccs-dte select,.iamccs-dte input{height:30px;padding:4px 8px;width:100%;margin-bottom:10px}.iamccs-dte-speaker{padding:12px;margin-bottom:12px;background:#26251d;border:1px solid rgba(214,182,111,.34);border-radius:7px}
   .iamccs-overlap-panel{padding:12px;margin-bottom:12px;background:#26251d;border:1px solid rgba(214,182,111,.34);border-radius:7px}.iamccs-overlap-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}.iamccs-overlap-row input{margin-bottom:0}.iamccs-overlap-preset-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.iamccs-overlap-preset-grid button{width:100%;height:30px;padding:0 7px;font-size:10px;text-align:center;white-space:normal;line-height:1.05;overflow:hidden}.iamccs-tts-convert-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.iamccs-tts-convert-grid button{height:36px;font-size:9px}.iamccs-dte button.iamccs-convert-success{background:#5fb56f;border-color:#a9e6b5;color:#071c0d;box-shadow:0 0 0 2px rgba(95,181,111,.2)}.iamccs-dte button.iamccs-convert-active{outline:2px solid rgba(95,181,111,.46)}.iamccs-tts-node-select{height:30px!important;margin:8px 0 12px}.iamccs-node-actions{display:grid;gap:10px;justify-items:center;margin:10px 0 4px}.iamccs-node-actions button{width:100%;max-width:220px;min-height:38px;height:auto;padding:8px 12px;line-height:1.15}.iamccs-overlap-hint{margin-top:10px;color:#c9bea4;font-size:10px;line-height:1.4}.iamccs-dte.light .iamccs-overlap-hint{color:#6f675b}
@@ -986,9 +986,22 @@ function buildInjectionPayload(data, fps = 24) {
     audioSegments.push({ id: "dlg_" + String(index + 1).padStart(3, "0") + "_" + speaker.toLowerCase(), type: "audio", name: speaker + " " + String(index + 1).padStart(2, "0"), track: modeFromData(data) === "tts_master_unico" ? 0 : (speaker === "B" ? 1 : 0), start, length, audioDurationFrames: length, gain: 1, pan: 0, purpose: "dialogue_pending_tts", speaker, dialogueText: cleanText, pendingTTS: true, source: "IAMCCS_DialogueTagEditor_UI_Inject" });
     cursor = Math.max(cursor, startSeconds + duration + Number(data.settings?.default_gap_seconds || 0.12) - Math.max(0, Number(line.overlap_after || 0)));
   });
+  const zeroStartStems = Boolean(data.settings?.speaker_stems_zero_start) && modeFromData(data) !== "tts_master_unico";
+  if (zeroStartStems) {
+    const firstBySpeaker = new Map();
+    audioSegments.forEach((seg) => {
+      const key = String(seg.speaker || seg.track || "A");
+      firstBySpeaker.set(key, Math.min(firstBySpeaker.get(key) ?? Number(seg.start || 0), Number(seg.start || 0)));
+    });
+    audioSegments.forEach((seg) => {
+      const key = String(seg.speaker || seg.track || "A");
+      seg.start = Math.max(0, Number(seg.start || 0) - Number(firstBySpeaker.get(key) || 0));
+      seg.speakerStemsZeroStart = true;
+    });
+  }
   const durationFrames = Math.max(0, ...segments.map((s) => s.start + s.length), ...audioSegments.map((s) => s.start + s.length));
   const audioTrackCount = modeFromData(data) === "tts_master_unico" ? 1 : 2;
-  const audioBoard = { schema: "iamccs.audio_board_arranger", schema_version: 1, audioSegments, audioTrackCount, audioSyncMode: "timeline_audio", duration_seconds: durationFrames / fps, frame_rate: fps, masterAudioGain: 1, masterAudioNormalize: false, bridgeStatus: { source: "DialogueTagEditor UI Inject", pending_tts: true } };
+  const audioBoard = { schema: "iamccs.audio_board_arranger", schema_version: 1, audioSegments, audioTrackCount, audioSyncMode: "timeline_audio", duration_seconds: durationFrames / fps, frame_rate: fps, masterAudioGain: 1, masterAudioNormalize: false, speakerStemsZeroStart: zeroStartStems, bridgeStatus: { source: "DialogueTagEditor UI Inject", pending_tts: true } };
   const timeline = { schema: "iamccs.cine.filmmaker_timeline", schema_version: 2, global_prompt: data.global_prompt || "", prompt: data.global_prompt || "", promptrelay_enabled: true, use_custom_audio: false, audioSyncMode: "timeline_audio", duration_seconds: durationFrames / fps, frame_rate: fps, director_local_prompts: localPrompts.join(" | "), local_prompts: localPrompts.join(" | "), director_segment_lengths: lengths.join(","), segment_lengths: lengths.join(","), segments, audioSegments, audioTrackCount, dialogue: data };
   return { audioBoard, timeline };
 }
@@ -1084,11 +1097,14 @@ function install(node, reason = "install") {
     const addA = button("Add A", "gold");
     const addB = button("Add B", "gold");
     const injectBtn = button("Inject UI", "gold iamccs-inject-btn");
+    const zeroStartBtn = button("A+B @ 0", data.settings?.speaker_stems_zero_start ? "active" : "");
+    zeroStartBtn.title = "When active, Speaker A and Speaker B stems both begin at frame 0 while preserving timing inside each speaker lane.";
+    zeroStartBtn.setAttribute("aria-pressed", String(Boolean(data.settings?.speaker_stems_zero_start)));
     const boldBtn = button("Bold", "");
     const lightBtn = button(light ? "Dark" : "Light", light ? "" : "active");
     const zOut = button("A-", "");
     const zIn = button("A+", "");
-    actions.append(addA, addB, boldBtn, injectBtn, lightBtn, zOut, zIn);
+    actions.append(addA, addB, zeroStartBtn, boldBtn, injectBtn, lightBtn, zOut, zIn);
     head.append(title, actions);
 
     const main = document.createElement("div");
@@ -1343,6 +1359,12 @@ function install(node, reason = "install") {
     zOut.onclick = () => { zoom = Math.max(0.8, zoom - 0.1); save(); render(); };
     zIn.onclick = () => { zoom = Math.min(1.8, zoom + 0.1); save(); render(); };
     injectBtn.onclick = () => injectVisibleWidgets(node, data, status, injectBtn, foot);
+    zeroStartBtn.onclick = () => {
+      data.settings ||= {};
+      data.settings.speaker_stems_zero_start = !data.settings.speaker_stems_zero_start;
+      save();
+      render();
+    };
 
     function renderCards(container) {
       container.replaceChildren();

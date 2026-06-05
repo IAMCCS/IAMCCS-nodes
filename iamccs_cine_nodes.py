@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import base64
+import copy
 import datetime
 import io
 import hashlib
@@ -1073,7 +1074,7 @@ class IAMCCS_CineShotboardTimelinePro:
                 "min_guide_gap_seconds": ("FLOAT", {"default": 1.75, "min": 0.0, "max": 60.0, "step": 0.05}),
                 "max_guides": ("INT", {"default": 5, "min": 0, "max": 50, "step": 1}),
                 "default_force": ("FLOAT", {"default": 0.22, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "promptrelay_epsilon": ("FLOAT", {"default": 0.65, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "promptrelay_epsilon": ("FLOAT", {"default": 0.001, "min": 0.0001, "max": 0.99, "step": 0.0001}),
                 "ltx_round_mode": (["up_8n_plus_1", "nearest_8n_plus_1", "none"], {"default": "up_8n_plus_1"}),
                 "tail_safety_frames": ("INT", {"default": 1, "min": 0, "max": 256, "step": 1}),
                 "image_paths": ("STRING", {
@@ -1796,7 +1797,7 @@ class IAMCCS_CineShotboardPlannerPro(IAMCCS_CineShotboardTimelinePro):
                 "min_guide_gap_seconds": ("FLOAT", {"default": 1.75, "min": 0.0, "max": 60.0, "step": 0.05}),
                 "max_guides": ("INT", {"default": 5, "min": 0, "max": 50, "step": 1}),
                 "default_force": ("FLOAT", {"default": 0.22, "min": 0.0, "max": 1.0, "step": 0.01}),
-                "promptrelay_epsilon": ("FLOAT", {"default": 0.65, "min": 0.0, "max": 10.0, "step": 0.01}),
+                "promptrelay_epsilon": ("FLOAT", {"default": 0.001, "min": 0.0001, "max": 0.99, "step": 0.0001}),
                 "ltx_round_mode": (["up_8n_plus_1", "nearest_8n_plus_1", "none"], {"default": "up_8n_plus_1"}),
                 "image_paths": ("STRING", {
                     "default": "",
@@ -2665,10 +2666,17 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
         self._merge_upstream_helper_layers(cine_linx, upstream_cine_linx)
         data = _safe_json_loads(str(timeline_data or "{}"), {})
         audio_segments = data.get("audioSegments", []) if isinstance(data, dict) else []
+        audio_timeline_payload = {}
         if isinstance(cine_linx, dict):
             upstream_resources_for_audio = cine_linx.get("resources", {}) if isinstance(cine_linx.get("resources"), dict) else {}
             upstream_outputs_for_audio = cine_linx.get("outputs", {}) if isinstance(cine_linx.get("outputs"), dict) else {}
             upstream_tracks_for_audio = upstream_resources_for_audio.get("cine_audio_tracks")
+            parsed_upstream_audio_timeline = _safe_json_loads(
+                upstream_resources_for_audio.get("cine_audio_timeline_json", upstream_outputs_for_audio.get("audio_timeline_json", "{}")),
+                {},
+            )
+            if isinstance(parsed_upstream_audio_timeline, dict):
+                audio_timeline_payload = copy.deepcopy(parsed_upstream_audio_timeline)
             upstream_audio_segments = []
             if isinstance(upstream_tracks_for_audio, dict):
                 for key in ("shotboard_segments", "segments", "all_segments"):
@@ -2799,7 +2807,14 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                 outputs["segment_lengths"] = ""
             resources["cine_payload"] = payload
             resources["cine_verbose_log"] = bool(verbose_log)
-            resources["cine_audio_timeline_json"] = json.dumps(audio_segments if isinstance(audio_segments, list) else [], ensure_ascii=False)
+            if not isinstance(audio_timeline_payload, dict):
+                audio_timeline_payload = {}
+            audio_timeline_payload["audioSegments"] = audio_segments if isinstance(audio_segments, list) else []
+            if isinstance(data, dict):
+                for audio_key in ("audioTrackCount", "trackSettings", "masterBus", "masterAudioGain", "masterAudioNormalize", "masterMono", "audioBusMode", "onlyFirstTrack", "audioSyncMode"):
+                    if audio_key not in audio_timeline_payload and audio_key in data:
+                        audio_timeline_payload[audio_key] = copy.deepcopy(data.get(audio_key))
+            resources["cine_audio_timeline_json"] = json.dumps(audio_timeline_payload, ensure_ascii=False)
             resources["cine_visual_segments_json"] = json.dumps(visual_segments if isinstance(visual_segments, list) else [], ensure_ascii=False)
             resources["cine_director_local_prompts"] = director_local_prompts
             resources["cine_director_segment_lengths"] = director_segment_lengths
@@ -3265,7 +3280,7 @@ class IAMCCS_CineInfo:
         local_prompts = str(resources.get("cine_local_prompts", outputs.get("local_prompts", payload.get("local_prompts", ""))) or "")
         segment_lengths = str(resources.get("cine_segment_lengths", outputs.get("segment_lengths", payload.get("segment_lengths", ""))) or "")
         max_frames = _safe_int(resources.get("cine_max_frames", outputs.get("max_frames", payload.get("max_frames", 0))), 0)
-        promptrelay_epsilon = _safe_float(resources.get("cine_promptrelay_epsilon", outputs.get("promptrelay_epsilon", payload.get("promptrelay_epsilon", 0.65))), 0.65)
+        promptrelay_epsilon = _safe_float(resources.get("cine_promptrelay_epsilon", outputs.get("promptrelay_epsilon", payload.get("promptrelay_epsilon", 0.001))), 0.001)
         duration_seconds = _safe_float(resources.get("cine_duration_seconds", outputs.get("duration_seconds", payload.get("duration_seconds", 0.0))), 0.0)
         frame_rate = _safe_int(resources.get("cine_frame_rate", outputs.get("frame_rate", payload.get("frame_rate", 24))), 24)
         width = _safe_int(resources.get("cine_image_width", outputs.get("width", payload.get("image_width", 768))), 768)
@@ -4019,9 +4034,44 @@ class IAMCCS_CineFilmmakerBackend:
         safe_fps = max(1.0, float(frame_rate or 24.0))
         out_waveform = torch.zeros((2, audio_out["waveform"].shape[-1]), dtype=torch.float32)
         input_root = folder_paths.get_input_directory()
+        track_settings = data.get("trackSettings", []) if isinstance(data, dict) and isinstance(data.get("trackSettings"), list) else []
+        solo_tracks = {idx for idx, item in enumerate(track_settings) if isinstance(item, dict) and _safe_bool(item.get("solo", False), False)}
+        dsp_stats = {"muted": 0, "eq": 0, "pan": 0}
+
+        def apply_eq(waveform: torch.Tensor, params: Dict[str, Any]) -> torch.Tensor:
+            if not isinstance(params, dict) or not torch.is_tensor(waveform) or waveform.numel() == 0:
+                return waveform
+            try:
+                import torchaudio.functional as audio_f
+                result = waveform
+                hpf = _safe_float(params.get("hpfHz", params.get("lowCutFreq", 0.0)), 0.0)
+                lpf = _safe_float(params.get("lpfHz", params.get("highCutFreq", 22000.0)), 22000.0)
+                if hpf > 10.0:
+                    result = audio_f.highpass_biquad(result, target_sr, min(20000.0, hpf), Q=0.707)
+                low = _safe_float(params.get("eqLowDb", params.get("low", 0.0)), 0.0)
+                mid = _safe_float(params.get("eqMidDb", params.get("mid", 0.0)), 0.0)
+                high = _safe_float(params.get("eqHighDb", params.get("high", 0.0)), 0.0)
+                if abs(low) > 0.001:
+                    result = audio_f.bass_biquad(result, target_sr, low, central_freq=_safe_float(params.get("eqLowFreq", params.get("lowFreq", 140.0)), 140.0), Q=0.707)
+                if abs(mid) > 0.001:
+                    result = audio_f.equalizer_biquad(result, target_sr, _safe_float(params.get("eqMidFreq", params.get("midFreq", 1200.0)), 1200.0), mid, Q=max(0.2, _safe_float(params.get("eqQ", params.get("q", 1.2)), 1.2)))
+                if abs(high) > 0.001:
+                    result = audio_f.treble_biquad(result, target_sr, high, central_freq=_safe_float(params.get("eqHighFreq", params.get("highFreq", 6200.0)), 6200.0), Q=0.707)
+                if lpf < 21950.0:
+                    result = audio_f.lowpass_biquad(result, target_sr, max(20.0, lpf), Q=0.707)
+                return result
+            except Exception as exc:
+                print(f"[IAMCCS FilmmakerBackend] Audio EQ skipped: {exc}")
+                return waveform
 
         for seg in audio_segments:
             if not isinstance(seg, dict):
+                continue
+            track_index = max(0, _safe_int(seg.get("track", 0), 0))
+            track_state = track_settings[track_index] if track_index < len(track_settings) and isinstance(track_settings[track_index], dict) else {}
+            effects_bypassed = _safe_bool(seg.get("effectsBypassed", track_state.get("bypassEffects", False)), False)
+            if _safe_bool(seg.get("mute", False), False) or _safe_bool(track_state.get("mute", False), False) or (solo_tracks and track_index not in solo_tracks):
+                dsp_stats["muted"] += 1
                 continue
             buffer = None
             audio_file = str(seg.get("audioFile") or "")
@@ -4070,13 +4120,29 @@ class IAMCCS_CineFilmmakerBackend:
                 if src_end <= src_start:
                     continue
                 clip_waveform = waveform[:, src_start:src_end]
+                if not effects_bypassed:
+                    clip_waveform = apply_eq(clip_waveform, seg)
+                if not effects_bypassed and (any(abs(_safe_float(seg.get(key, 0.0), 0.0)) > 0.001 for key in ("eqLowDb", "eqMidDb", "eqHighDb")) or _safe_float(seg.get("hpfHz", 0.0), 0.0) > 10.0 or _safe_float(seg.get("lpfHz", 22000.0), 22000.0) < 21950.0):
+                    dsp_stats["eq"] += 1
                 if _safe_bool(seg.get("normalizeAudio", seg.get("normalize", False)), False) and clip_waveform.numel():
                     peak = float(torch.max(torch.abs(clip_waveform)).detach().cpu().item())
                     if peak > 0.0001:
                         clip_waveform = clip_waveform * min(4.0, 0.92 / peak)
-                gain = _clamp(seg.get("gain", seg.get("volume", 1.0)), 0.0, 2.0, 1.0)
+                gain = _clamp(seg.get("gain", seg.get("volume", 1.0)), 0.0, 4.0, 1.0)
+                if "trackVolume" not in seg:
+                    gain *= _clamp(track_state.get("volume", 1.0), 0.0, 2.0, 1.0)
+                if "trackGainDb" not in seg:
+                    track_gain_db = _clamp(track_state.get("gainDb", 0.0), -24.0, 24.0, 0.0)
+                    gain *= 10.0 ** (float(track_gain_db) / 20.0)
                 if abs(float(gain) - 1.0) > 0.0001:
                     clip_waveform = clip_waveform * float(gain)
+                pan = _clamp(seg.get("pan", 0.0), -1.0, 1.0, 0.0)
+                if "trackPan" not in seg:
+                    pan = _clamp(float(pan) + _safe_float(track_state.get("pan", 0.0), 0.0), -1.0, 1.0, 0.0)
+                if abs(float(pan)) > 0.0001 and clip_waveform.shape[0] >= 2:
+                    clip_waveform[0] *= 1.0 - max(0.0, float(pan))
+                    clip_waveform[1] *= 1.0 + min(0.0, float(pan))
+                    dsp_stats["pan"] += 1
                 fade_in_frames = max(0.0, float(seg.get("fadeInFrames", seg.get("fade_in_frames", 0)) or 0))
                 fade_out_frames = max(0.0, float(seg.get("fadeOutFrames", seg.get("fade_out_frames", 0)) or 0))
                 fade_in_samples = min(clip_waveform.shape[1], int(fade_in_frames / safe_fps * target_sr))
@@ -4100,6 +4166,23 @@ class IAMCCS_CineFilmmakerBackend:
                 continue
 
         if isinstance(data, dict):
+            master_bus = data.get("masterBus") if isinstance(data.get("masterBus"), dict) else {}
+            master_chain = master_bus.get("effectChain") if isinstance(master_bus.get("effectChain"), list) else []
+            master_eq = next((
+                fx.get("params", {}) for fx in master_chain
+                if isinstance(fx, dict) and str(fx.get("type", "")).lower() == "eq" and fx.get("enabled", True) is not False and isinstance(fx.get("params"), dict)
+            ), None)
+            if isinstance(master_eq, dict):
+                master_params = dict(master_eq)
+                if not _safe_bool(master_params.get("lowCut", False), False):
+                    master_params["lowCutFreq"] = 0.0
+                if not _safe_bool(master_params.get("highCut", False), False):
+                    master_params["highCutFreq"] = 22000.0
+                out_waveform = apply_eq(out_waveform, master_params)
+                dsp_stats["eq"] += 1
+            if _safe_bool(data.get("masterMono", False), False):
+                mono = out_waveform.mean(dim=0, keepdim=True)
+                out_waveform = mono.repeat(2, 1)
             master_gain = _clamp(data.get("masterAudioGain", data.get("master_audio_gain", 1.0)), 0.0, 2.0, 1.0)
             if abs(float(master_gain) - 1.0) > 0.0001:
                 out_waveform = out_waveform * float(master_gain)
@@ -4108,6 +4191,8 @@ class IAMCCS_CineFilmmakerBackend:
                 if peak > 0.0001:
                     out_waveform = out_waveform * min(4.0, 0.92 / peak)
 
+        if any(dsp_stats.values()):
+            print(f"[IAMCCS FilmmakerBackend] Audio DSP applied muted={dsp_stats['muted']} eq={dsp_stats['eq']} pan={dsp_stats['pan']}")
         return {"waveform": out_waveform.unsqueeze(0), "sample_rate": target_sr}
 
     @staticmethod
@@ -4293,7 +4378,7 @@ class IAMCCS_CineFilmmakerBackend:
                 f"target_frames={int(duration_target_frames)} max_frames={int(max_frames)} "
                 f"timeline_end_frames={int(timeline_end_frames)} clamp_applied={bool(duration_clamp_applied)}"
             )
-        epsilon = _safe_float(resources.get("cine_promptrelay_epsilon", outputs.get("promptrelay_epsilon", payload.get("promptrelay_epsilon", 0.65))), 0.65)
+        epsilon = _safe_float(resources.get("cine_promptrelay_epsilon", outputs.get("promptrelay_epsilon", payload.get("promptrelay_epsilon", 0.001))), 0.001)
 
         latent = optional_latent if isinstance(optional_latent, dict) else self._empty_latent(width, height, max_frames)
         promptrelay_requested = _safe_bool(
@@ -4613,7 +4698,7 @@ class IAMCCS_CineShotboardBackendPro:
         global_prompt = str(resources.get("cine_global_prompt", outputs.get("global_prompt", payload.get("global_prompt", ""))) or "")
         local_prompts = str(resources.get("cine_local_prompts", outputs.get("local_prompts", payload.get("local_prompts", ""))) or "")
         segment_lengths = str(resources.get("cine_segment_lengths", outputs.get("segment_lengths", payload.get("segment_lengths", ""))) or "")
-        epsilon = _safe_float(resources.get("cine_promptrelay_epsilon", outputs.get("promptrelay_epsilon", payload.get("promptrelay_epsilon", 0.65))), 0.65)
+        epsilon = _safe_float(resources.get("cine_promptrelay_epsilon", outputs.get("promptrelay_epsilon", payload.get("promptrelay_epsilon", 0.001))), 0.001)
         duration_seconds = _safe_float(resources.get("cine_duration_seconds", outputs.get("duration_seconds", payload.get("duration_seconds", 8.0))), 8.0)
         frame_rate = _safe_int(resources.get("cine_frame_rate", outputs.get("frame_rate", payload.get("frame_rate", 24))), 24)
         width = _safe_int(resources.get("cine_image_width", outputs.get("width", payload.get("image_width", 768))), 768)

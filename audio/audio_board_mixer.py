@@ -98,9 +98,12 @@ def _default_track_settings(count: int, existing: Any) -> List[Dict[str, Any]]:
         base = copy.deepcopy(settings[index]) if index < len(settings) and isinstance(settings[index], dict) else {}
         base.setdefault("name", f"A{index + 1}")
         base["volume"] = max(0.0, min(2.0, _safe_float(base.get("volume", 1.0), 1.0)))
+        base["gainDb"] = max(-24.0, min(24.0, _safe_float(base.get("gainDb", 0.0), 0.0)))
         base["pan"] = max(-1.0, min(1.0, _safe_float(base.get("pan", 0.0), 0.0)))
         base["mute"] = bool(base.get("mute", False))
         base["solo"] = bool(base.get("solo", False))
+        base["normalize"] = bool(base.get("normalize", False))
+        base["bypassEffects"] = bool(base.get("bypassEffects", False))
         chain = base.get("effectChain")
         base["effectChain"] = chain if isinstance(chain, list) else []
         out.append(base)
@@ -180,13 +183,15 @@ class IAMCCS_AudioBoardMixer:
         if not source_segments:
             source_segments = _segments(payload.get("audioSegments"))
 
+        # Connected AudioBoard/cine_linx is the truth. Mixer-local mirror data is
+        # only a fallback for a disconnected monitor and must never reapply stale mute/zero gain.
         source_settings = _first_list(
-            mixer.get("mirrorTrackSettings"),
-            mixer.get("trackSettings"),
             audio_tracks.get("trackSettings"),
             audio_tracks.get("track_settings"),
             audio_tracks.get("all_track_settings"),
             payload.get("trackSettings"),
+            mixer.get("trackSettings"),
+            mixer.get("mirrorTrackSettings"),
         )
         track_count = max(
             1,
@@ -198,7 +203,8 @@ class IAMCCS_AudioBoardMixer:
         track_settings = _default_track_settings(track_count, source_settings)
         master_bus = copy.deepcopy(audio_tracks.get("master_bus") if isinstance(audio_tracks.get("master_bus"), dict) else {})
         master_bus.update(copy.deepcopy(mixer.get("masterBus") if isinstance(mixer.get("masterBus"), dict) else {}))
-        master_gain = max(0.0, min(2.0, _safe_float(mixer.get("masterAudioGain", payload.get("masterAudioGain", 1.0)), 1.0)))
+        upstream_master_gain = payload.get("masterAudioGain", audio_tracks.get("masterAudioGain", 1.0))
+        master_gain = max(0.01, min(2.0, _safe_float(upstream_master_gain, 1.0)))
 
         manifest = {
             "schema": "iamccs.audio_board_mixer.manifest",
