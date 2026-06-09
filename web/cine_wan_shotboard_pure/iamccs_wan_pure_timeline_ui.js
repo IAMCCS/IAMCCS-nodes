@@ -1,8 +1,9 @@
-﻿import { app } from "../../scripts/app.js";
-import { api } from "../../scripts/api.js";
+﻿import { app } from "../../../scripts/app.js";
+import { api } from "../../../scripts/api.js";
 
-console.info("[IAMCCS V3] Stable node UI mode active. AudioBoard UI is loaded directly by Comfy extension registry.");
-const CINE_VERSION = "2026-05-26-v3-perf-idle-sync";
+console.info("[IAMCCS WAN V3] Isolated WAN Shotboard UI mode active.");
+const WAN_NODE_CLASS = "IAMCCS_WanShotboardPlannerPure";
+const CINE_VERSION = "2026-06-08-wan-v3-isolated-v2-palette-meter-scrub-reliable-plus";
 const SHOTBOARD_V3_RIGID_WIDTH = 1920;
 const SHOTBOARD_V3_OPEN_HEIGHT = 900;
 const SHOTBOARD_V3_COLLAPSED_HEIGHT = 660; // increased to accommodate global prompt always visible in collapsed mode
@@ -58,6 +59,13 @@ const CINE_NODE_CHROME = {
         box: "#D89B45",
         border: "#6B6258",
         glow: "rgba(216,155,69,.20)",
+    },
+    wanShotboardV3: {
+        header: "#0F3E55",
+        nodeBg: "#061923",
+        box: "#6FB6D2",
+        border: "#2D7A92",
+        glow: "rgba(111,182,210,.24)",
     },
     shotboardLite: {
         header: "#4A3720",
@@ -158,7 +166,11 @@ function nodeClassName(node) {
 }
 
 function isShotboardV3Class(klass) {
-    return klass === "IAMCCS_CineShotboardPlannerV3";
+    return klass === WAN_NODE_CLASS;
+}
+
+function isWanShotboardV3Class(klass) {
+    return klass === WAN_NODE_CLASS;
 }
 
 function getWidget(node, name) {
@@ -386,7 +398,7 @@ function healCineInfoImageBatchLink(node, state) {
 
 function traceLinkedCinePlanner(node) {
     const startInputs = ["timeline_data", "multi_input", "duration_seconds"];
-    const accepted = new Set(["IAMCCS_CineShotboardLite", "IAMCCS_CineShotboardPlannerPro", "IAMCCS_CineShotboardPlannerProV2", "IAMCCS_CineShotboardPlannerV3", "IAMCCS_CineShotboardPlannerProLegacy", "IAMCCS_CineShotboardTimelinePro", "IAMCCS_CineReferenceBoard"]);
+    const accepted = new Set([WAN_NODE_CLASS]);
     for (const inputName of startInputs) {
         let current = getLinkedOriginNode(node, inputName);
         const visited = new Set();
@@ -396,7 +408,7 @@ function traceLinkedCinePlanner(node) {
             const cls = nodeClassName(current);
             if (accepted.has(cls)) return current;
             if (cls === "IAMCCS_CineInfo" || cls === "IAMCCS_CinePromptModeSwitch" || cls === "IAMCCS_CinePromptRelayImageBridge") {
-                current = getLinkedOriginNode(current, "cine_linx");
+                current = getLinkedOriginNode(current, "wan_shotboard");
                 continue;
             }
             if (cls === "Reroute" || current.type === "Reroute") {
@@ -503,34 +515,6 @@ function button(label, tone = "neutral", palette = null) {
     return btn;
 }
 
-function installRootPressFeedback(root, palette) {
-    if (!root || root._iamccsRootPressFeedback) return;
-    root._iamccsRootPressFeedback = true;
-    const pressTarget = (event) => {
-        const button = event.target?.closest?.("button");
-        if (!button || !root.contains(button)) return;
-        if (button.dataset.iamccsRootPressed !== "true") {
-            button._iamccsRootPressFilter = button.style.filter;
-            button._iamccsRootPressBorder = button.style.borderColor;
-            button._iamccsRootPressShadow = button.style.boxShadow;
-        }
-        button.dataset.iamccsRootPressed = "true";
-        button.style.filter = "brightness(1.22) saturate(1.22)";
-        button.style.borderColor = palette?.accent || "#FFE08A";
-        button.style.boxShadow = "inset 0 0 0 2px rgba(255,255,255,.32),0 0 0 3px rgba(255,224,138,.45),0 0 18px rgba(111,182,210,.34)";
-        window.setTimeout(() => {
-            if (button.dataset.iamccsRootPressed === "true") {
-                button.dataset.iamccsRootPressed = "false";
-                button.style.filter = button._iamccsRootPressFilter || "";
-                button.style.borderColor = button._iamccsRootPressBorder || button.style.borderColor;
-                button.style.boxShadow = button._iamccsRootPressShadow || button.style.boxShadow;
-            }
-        }, 300);
-    };
-    root.addEventListener("pointerdown", pressTarget, { capture: true });
-    root.addEventListener("click", pressTarget, { capture: true });
-}
-
 function protectControlDrag(element) {
     if (!element) return element;
     element.draggable = false;
@@ -547,6 +531,140 @@ function protectControlDrag(element) {
         event.stopPropagation();
     }, { capture: true });
     return element;
+}
+
+function bindReliableTimelineButton(button, action) {
+    if (!button || typeof action !== "function") return button;
+    let armed = false;
+    let lastFire = 0;
+    const fire = (event) => {
+        event?.stopPropagation?.();
+        const now = performance.now();
+        if (now - lastFire < 260) return;
+        lastFire = now;
+        action(event);
+    };
+    button.draggable = false;
+    button.setAttribute?.("draggable", "false");
+    button.addEventListener("pointerdown", (event) => {
+        armed = true;
+        event.stopPropagation();
+        try { button.setPointerCapture?.(event.pointerId); } catch {}
+        button._iamccsReliableFilter = button.style.filter;
+        button._iamccsReliableBoxShadow = button.style.boxShadow;
+        button.style.filter = "brightness(1.24) saturate(1.2)";
+        button.style.boxShadow = `${button._iamccsReliableBoxShadow || "0 4px 14px rgba(0,0,0,.35)"}, 0 0 0 3px rgba(244,239,230,.32)`;
+        button.classList.add("iamccs-pressing");
+    }, { capture: true });
+    button.addEventListener("pointerup", (event) => {
+        event.stopPropagation();
+        try { button.releasePointerCapture?.(event.pointerId); } catch {}
+        button.style.filter = button._iamccsReliableFilter || "";
+        button.style.boxShadow = button._iamccsReliableBoxShadow || "";
+        button.classList.remove("iamccs-pressing");
+        if (!armed) return;
+        armed = false;
+        fire(event);
+    }, { capture: true });
+    button.addEventListener("pointercancel", (event) => {
+        event.stopPropagation();
+        armed = false;
+        button.style.filter = button._iamccsReliableFilter || "";
+        button.style.boxShadow = button._iamccsReliableBoxShadow || "";
+        button.classList.remove("iamccs-pressing");
+    }, { capture: true });
+    button.addEventListener("click", (event) => {
+        event.preventDefault();
+        fire(event);
+    }, { capture: true });
+    button.addEventListener("dblclick", (event) => {
+        event.preventDefault();
+        fire(event);
+    }, { capture: true });
+    return button;
+}
+
+function addPressPreview(button, options = {}) {
+    if (!button || button._iamccsPressPreview) return button;
+    button._iamccsPressPreview = true;
+    const pressedBg = options.pressedBg || "linear-gradient(180deg,#FFE08A 0%,#E08B3E 100%)";
+    const pressedColor = options.pressedColor || "#120D08";
+    const pressedBorder = options.pressedBorder || "#FFE08A";
+    const pressedShadow = options.pressedShadow || "inset 0 3px 8px rgba(7,12,17,.75),0 0 0 2px rgba(255,224,138,.42),0 0 16px rgba(255,162,84,.28)";
+    const press = () => {
+        button.dataset.iamccsPressedPreview = "true";
+        button.style.transform = "";
+        button.style.background = pressedBg;
+        button.style.color = pressedColor;
+        button.style.borderColor = pressedBorder;
+        button.style.boxShadow = pressedShadow;
+        button.style.filter = "brightness(1.18) saturate(1.16)";
+        window.setTimeout(() => {
+            if (button.dataset.iamccsPressedPreview === "true") release();
+        }, Number(options.duration || 280));
+    };
+    const release = () => {
+        button.dataset.iamccsPressedPreview = "false";
+        button.style.transform = "";
+        if (button._iamccsPressBg) button.style.background = button._iamccsPressBg;
+        if (button._iamccsPressColor) button.style.color = button._iamccsPressColor;
+        if (button._iamccsPressBorder) button.style.borderColor = button._iamccsPressBorder;
+        button.style.boxShadow = button._iamccsPressShadow || "";
+        button.style.filter = button._iamccsPressFilter || "";
+    };
+    button.addEventListener("pointerdown", () => {
+        button._iamccsPressBg = button.style.background;
+        button._iamccsPressColor = button.style.color;
+        button._iamccsPressBorder = button.style.borderColor;
+        button._iamccsPressShadow = button.style.boxShadow;
+        button._iamccsPressFilter = button.style.filter;
+        press();
+    }, { capture: true });
+    button.addEventListener("click", () => {
+        button._iamccsPressBg = button._iamccsPressBg || button.style.background;
+        button._iamccsPressColor = button._iamccsPressColor || button.style.color;
+        button._iamccsPressBorder = button._iamccsPressBorder || button.style.borderColor;
+        button._iamccsPressShadow = button._iamccsPressShadow || button.style.boxShadow;
+        button._iamccsPressFilter = button._iamccsPressFilter || button.style.filter;
+        press();
+    }, { capture: true });
+    button.addEventListener("pointerup", release, { capture: true });
+    button.addEventListener("pointercancel", release, { capture: true });
+    button.addEventListener("mouseleave", () => {
+        if (button.dataset.iamccsPressedPreview === "true") release();
+    });
+    return button;
+}
+
+function installRootPressFeedback(root, palette) {
+    if (!root || root._iamccsRootPressFeedback) return;
+    root._iamccsRootPressFeedback = true;
+    const pressTarget = (event) => {
+        const button = event.target?.closest?.("button");
+        if (!button || !root.contains(button)) return;
+        if (button.dataset.iamccsRootPressed !== "true") {
+            button._iamccsRootPressTransform = button.style.transform;
+            button._iamccsRootPressFilter = button.style.filter;
+            button._iamccsRootPressBorder = button.style.borderColor;
+        button._iamccsRootPressShadow = button.style.boxShadow;
+        }
+        button.dataset.iamccsRootPressed = "true";
+        button.style.transform = button._iamccsRootPressTransform || "";
+        button.style.filter = "brightness(1.22) saturate(1.22)";
+        button.style.borderColor = palette?.accent || "#FFE08A";
+        button.style.boxShadow = "inset 0 0 0 2px rgba(255,255,255,.32),0 0 0 3px rgba(255,224,138,.45),0 0 18px rgba(111,182,210,.34)";
+        window.setTimeout(() => {
+            if (button.dataset.iamccsRootPressed === "true") {
+                button.dataset.iamccsRootPressed = "false";
+                button.style.transform = button._iamccsRootPressTransform || "";
+                button.style.filter = button._iamccsRootPressFilter || "";
+                button.style.borderColor = button._iamccsRootPressBorder || button.style.borderColor;
+                button.style.boxShadow = button._iamccsRootPressShadow || button.style.boxShadow;
+            }
+        }, 300);
+    };
+    root.addEventListener("pointerdown", pressTarget, { capture: true });
+    root.addEventListener("click", pressTarget, { capture: true });
 }
 
 function isNumericStepDragTarget(event) {
@@ -1316,7 +1434,7 @@ function boardFromWorkflowJson(data) {
         max_guides: widgets[6],
         default_force: widgets[7],
         promptrelay_epsilon: isLite ? 0.65 : widgets[8],
-        ltx_round_mode: isLite ? "up_8n_plus_1" : widgets[9],
+        wan_frame_round_mode: isLite ? "up_8n_plus_1" : widgets[9],
         image_width: widgets[isLite ? 9 : 11],
         image_height: widgets[isLite ? 10 : 12],
         image_resize_method: isLite ? "crop" : cineResizeMethodValue(widgets[13]),
@@ -2966,7 +3084,9 @@ function toggleFullscreenEditor(root, node) {
     const klass = nodeClassName(node);
     title.textContent = klass === "IAMCCS_BoardMaker"
         ? "IAMCCS BoardMaker Editor"
-        : klass === "IAMCCS_CineShotboardPlannerV3"
+        : isWanShotboardV3Class(klass)
+            ? "IAMCCS Shotboard WAN PURE"
+            : klass === "IAMCCS_WanLegacyPlannerDisabled"
                 ? "IAMCCS Shotboard V3 Full Frame"
             : "IAMCCS Shotboard Full Frame";
     title.style.cssText = "font-weight:700;letter-spacing:0;color:#ffffff;";
@@ -3276,13 +3396,13 @@ function numberStepperControl(value, step, min, max, onChange, options = {}) {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.textContent = label;
-        btn.style.cssText = "height:30px;min-width:32px;padding:0;border:1px solid #405664;border-radius:5px;background:#0b1116;color:#e8eef2;font-size:15px;font-weight:900;line-height:1;cursor:pointer;margin:0 2px;";
+        btn.style.cssText = "height:30px;min-width:32px;padding:0;border:1px solid #8DE7FF;border-radius:5px;background:linear-gradient(180deg,#216077,#0B2E42);color:#EAF8FF;font-size:15px;font-weight:900;line-height:1;cursor:pointer;margin:0 2px;box-shadow:inset 0 1px 0 rgba(255,255,255,.18),0 0 0 1px rgba(0,0,0,.35);";
         btn.onclick = (event) => {
             event.preventDefault();
             const current = Number(String(input.value).replace(",", ".")) || 0;
             apply(Math.round((current + delta) * 10000) / 10000);
         };
-        return protectControlDrag(btn);
+        return protectControlDrag(addPressPreview(btn));
     };
 
     input.oninput = () => {
@@ -3666,6 +3786,7 @@ function renderShotboardLite(node) {
         "image_resize_method",
         "image_multiple_of",
         "img_compression",
+        "debug_verbose",
     ].forEach((name) => hideWidget(getWidget(node, name)));
 
     let rows = parseJsonWidget(node, defaultLiteRows).map(normalizeLiteRow);
@@ -3726,7 +3847,7 @@ function renderShotboardLite(node) {
     selectSetting("Guide mode", "guide_policy", ["every_checked_row", "safe_core_guides"]);
     numberSetting("Max guides", "max_guides", "1", "1");
     numberSetting("Guide gap", "min_guide_gap_seconds", "0.1", "0");
-    numberSetting("Default force", "default_force", "0.1", "0");
+    numberSetting("Default motion", "default_force", "0.1", "1");
     numberSetting("Ref width", "image_width", "32", "64");
     numberSetting("Ref height", "image_height", "32", "64");
     settingsPanel.appendChild(settingsGrid);
@@ -4101,7 +4222,7 @@ function renderShotboardLite(node) {
             const forceLockCell = document.createElement("div");
             forceLockCell.style.cssText = "display:grid;grid-template-rows:auto auto;gap:6px;min-width:0;";
             const motionLabel = document.createElement("div");
-            motionLabel.textContent = "Guide Strength";
+            motionLabel.textContent = "Motion";
             motionLabel.style.cssText = "text-align:center;color:#D8BC80;font-size:9px;font-weight:800;";
             const motionGroup = document.createElement("div");
             motionGroup.style.cssText = "display:grid;gap:2px;";
@@ -4383,7 +4504,7 @@ function renderShotboardPro(node) {
     hideWidget(getWidget(node, "max_guides"));
     hideWidget(getWidget(node, "default_force"));
     hideWidget(getWidget(node, "promptrelay_epsilon"));
-    hideWidget(getWidget(node, "ltx_round_mode"));
+    hideWidget(getWidget(node, "wan_frame_round_mode"));
     hideWidget(getWidget(node, "tail_safety_frames"));
     hideWidget(getWidget(node, "image_paths"));
     hideWidget(getWidget(node, "image_width"));
@@ -4451,7 +4572,7 @@ function renderShotboardPro(node) {
         "max_guides",
         "default_force",
         "promptrelay_epsilon",
-        "ltx_round_mode",
+        "wan_frame_round_mode",
         "tail_safety_frames",
         "image_width",
         "image_height",
@@ -4532,9 +4653,9 @@ function renderShotboardPro(node) {
     selectSetting("Guide policy", "guide_policy", ["safe_core_guides", "prompt_only", "every_checked_row"], applyGuidePolicyToRows);
     numberSetting("Max guides", "max_guides", "1", "0");
     numberSetting("Guide gap", "min_guide_gap_seconds", "0.1", "0");
-    numberSetting("Default force", "default_force", "0.1", "0");
+    numberSetting("Default motion", "default_force", "0.1", "1");
     numberSetting("Relay softness", "promptrelay_epsilon", "0.0001", "0.0001");
-    selectSetting("LTX frames", "ltx_round_mode", ["up_8n_plus_1", "nearest_8n_plus_1", "none"]);
+    selectSetting("WAN frames", "wan_frame_round_mode", ["up_8n_plus_1", "nearest_8n_plus_1", "none"]);
     numberSetting("Ref width", "image_width", "32", "64");
     numberSetting("Ref height", "image_height", "32", "64");
     selectSetting("Resize", "image_resize_method", ["crop", "pad", "keep proportion", "stretch"]);
@@ -5244,7 +5365,7 @@ function renderShotboardPro(node) {
             max_guides: settings.max_guides,
             default_force: settings.default_force,
             promptrelay_epsilon: settings.promptrelay_epsilon,
-            ltx_round_mode: settings.ltx_round_mode,
+            wan_frame_round_mode: settings.wan_frame_round_mode,
             image_width: settings.image_width,
             image_height: settings.image_height,
             image_paths: imagePaths,
@@ -5890,7 +6011,7 @@ function renderShotboardPro(node) {
             const forceWrap = document.createElement("label");
             forceWrap.style.cssText = "display:grid;gap:4px;color:#b6cac3;font-size:10px;font-weight:800;";
             const motionLabel = document.createElement("span");
-            motionLabel.textContent = "Guide Strength";
+            motionLabel.textContent = "Motion";
             motionLabel.style.textAlign = "center";
             forceWrap.append(motionLabel, motion);
             forceNotesCell.append(forceWrap);
@@ -6336,10 +6457,10 @@ function renderCineMusicVideoPlanner(node) {
     title.textContent = "Cine Videoclip Maker";
     title.style.cssText = `font-weight:700;color:${CINE_FILM_LAB.text};margin-bottom:4px;font-size:13px;`;
     const body = document.createElement("div");
-    body.textContent = "Audio/shot sequencer planner. It creates one music-video shot: image prompt for Z-Image/Flux, PromptRelay local beats, LTX frame counts and music_linx for the future CINE_VIDEOCLIP_1 backend.";
+    body.textContent = "Audio/shot sequencer planner. It creates one music-video shot: image prompt for Z-Image/Flux, PromptRelay local beats, WAN frame counts and music_linx for the future CINE_VIDEOCLIP_1 backend.";
     body.style.cssText = `color:${CINE_FILM_LAB.muted};white-space:normal;margin-bottom:7px;`;
     const flow = document.createElement("div");
-    flow.textContent = "Use: shot_index -> image generator -> LTX I2V+A. For a full videoclip, iterate shot_index and concatenate rendered clips.";
+    flow.textContent = "Use: shot_index -> image generator -> WAN I2V. For a full videoclip, iterate shot_index and concatenate rendered clips.";
     flow.style.cssText = `color:${CINE_FILM_LAB.relay};white-space:normal;`;
     panel.append(title, body, flow);
     const widget = node.addDOMWidget("Videoclip Maker", "iamccs_cine_music_video", panel, { serialize: false });
@@ -6380,7 +6501,8 @@ function renderShotboardV3(node) {
     disposeShotboardV3Widget(node);
     node._iamccsCineShotboardV3Ready = true;
     node._iamccsCineShotboardV3Version = CINE_VERSION;
-    const chrome = applyCineChrome(node, "shotboardV3");
+    const isWanEdition = isWanShotboardV3Class(nodeClassName(node));
+    const chrome = applyCineChrome(node, isWanEdition ? "wanShotboardV3" : "shotboardV3");
     [
         "timeline_data",
         "global_prompt",
@@ -6391,7 +6513,7 @@ function renderShotboardV3(node) {
         "max_guides",
         "default_force",
         "promptrelay_epsilon",
-        "ltx_round_mode",
+        "wan_frame_round_mode",
         "image_paths",
         "image_width",
         "image_height",
@@ -6400,7 +6522,32 @@ function renderShotboardV3(node) {
         "img_compression",
     ].forEach((name) => hideWidget(getWidget(node, name)));
 
-    const purple = {
+    const purple = isWanEdition ? {
+        bg: "#061923",
+        panel: "linear-gradient(180deg,#0F3140 0%,#071D28 100%)",
+        panel2: "linear-gradient(180deg,#143F52 0%,#0A2634 100%)",
+        border: "#2D7A92",
+        borderSoft: "#1B4D63",
+        text: "#EAF8FF",
+        muted: "#B4D4DF",
+        image: "#6FB6D2",
+        image2: "linear-gradient(180deg,#6FB6D2 0%,#244F67 100%)",
+        textBlock: "linear-gradient(180deg,#111111 0%,#000000 100%)",
+        audio: "linear-gradient(180deg,#D7A84D 0%,#75582A 100%)",
+        danger: "#D56B5C",
+        button: "linear-gradient(180deg,#17445C 0%,#0B2838 100%)",
+        buttonHover: "linear-gradient(180deg,#215B75 0%,#10384D 100%)",
+        buttonPress: "linear-gradient(180deg,#FFE08A 0%,#E08B3E 100%)",
+        play: "#FFE08A",
+        accent: "#8DE7FF",
+        warm: "#F3B34B",
+        valueBg: "#F4EFE7",
+        valueText: "#181512",
+        relay: "#000000",
+        guide: "#92C46E",
+        imageAccent: "#6FB6D2",
+        audioAccent: "#D7A84D",
+    } : {
         bg: "#1E2022",
         panel: "#2A2D30",
         panel2: "#34383C",
@@ -6441,6 +6588,11 @@ function renderShotboardV3(node) {
             button.style.background = purple.button;
             button.style.color = purple.text;
             button.style.borderColor = purple.border;
+            addPressPreview(button, {
+                pressedBg: purple.buttonPress || "linear-gradient(180deg,#FFE08A,#E08B3E)",
+                pressedColor: purple.valueText || "#102018",
+                pressedBorder: purple.accent || "#D6E879",
+            });
         });
         return element;
     };
@@ -6475,6 +6627,7 @@ function renderShotboardV3(node) {
     const durationWidget = getWidget(node, "duration_seconds");
     const fpsWidget = getWidget(node, "frame_rate");
     const defaultForceWidget = getWidget(node, "default_force");
+    const debugVerboseWidget = getWidget(node, "debug_verbose");
     const imageWidthWidget = getWidget(node, "image_width");
     const imageHeightWidget = getWidget(node, "image_height");
     const removeStaleV3MultiInput = () => {
@@ -6490,7 +6643,7 @@ function renderShotboardV3(node) {
         "frame_rate",
         "default_force",
         "promptrelay_epsilon",
-        "ltx_round_mode",
+        "wan_frame_round_mode",
         "image_width",
         "image_height",
         "image_resize_method",
@@ -6521,7 +6674,7 @@ function renderShotboardV3(node) {
             return [name, name === "image_resize_method" ? cineResizeMethodValue(value) : value];
         }));
     clearV3BoardTransientState();
-    if (defaultForceWidget) defaultForceWidget.value = Math.max(0, Math.min(1, Number(defaultForceWidget.value || 0)));
+    if (defaultForceWidget) defaultForceWidget.value = clampGuideStrength(defaultForceWidget.value || 1);
     let collapsed = Boolean(node.properties?.iamccs_v3_collapsed);
     let promptTextScale = Math.max(0.85, Math.min(1.55, Number(node.properties?.iamccs_v3_prompt_text_scale || 1)));
     const promptFontSize = (base) => `${Math.max(8, Math.round(Number(base || 10) * promptTextScale * 10) / 10)}px`;
@@ -6538,7 +6691,7 @@ function renderShotboardV3(node) {
     let pendingImageTargetId = null;
     let timelineNotice = null;
     let timelineNoticeUntil = 0;
-    let lastDefaultForce = Math.max(0, Math.min(1, Number(defaultForceWidget?.value || 0.25)));
+    let lastDefaultForce = clampGuideStrength(defaultForceWidget?.value || 1);
     let durationValueControl = null;
 
     const positiveNumberOrNull = (value) => {
@@ -6572,10 +6725,10 @@ function renderShotboardV3(node) {
     const getDuration = () => Math.max(0.1, Number(durationWidget?.value || 20));
     const getFps = () => Math.max(1, Math.round(Number(fpsWidget?.value || 24)));
     const getTotalFrames = () => Math.max(1, Math.round(getDuration() * getFps()));
-    const clampGuideStrength = (value, fallback = 0) => {
+    function clampGuideStrength(value, fallback = 1) {
         const parsed = Number(value);
-        return Math.max(0, Math.min(1, Number.isFinite(parsed) ? parsed : Number(fallback) || 0));
-    };
+        return Math.max(1, Math.min(2, Number.isFinite(parsed) ? parsed : Number(fallback) || 1));
+    }
     const clampTimelineMeterSeconds = (value = timelineMeterSeconds) => {
         const duration = Math.max(0.5, getDuration());
         const rounded = Math.round((Number(value) || duration) * 2) / 2;
@@ -6915,7 +7068,8 @@ function renderShotboardV3(node) {
         seg.start = Math.max(0, Math.min(Math.round(Number(seg.start || 0)), Math.max(0, total - 1)));
         if (seg.start + seg.length > total) seg.length = Math.max(1, total - seg.start);
         if (String(seg.type || "image") !== "text" && String(seg.type || "image") !== "audio") {
-            const guideStrength = clampGuideStrength(seg.guideStrength ?? seg.guide_strength ?? seg.strength ?? seg.force ?? seg.motion_force ?? seg.imageLockStrength ?? seg.image_lock_strength ?? defaultForceWidget?.value ?? 0.25);
+            const guideStrength = clampGuideStrength(seg.motion ?? seg.guideStrength ?? seg.guide_strength ?? seg.strength ?? seg.force ?? seg.motion_force ?? seg.imageLockStrength ?? seg.image_lock_strength ?? defaultForceWidget?.value ?? 1);
+            seg.motion = guideStrength;
             seg.guideStrength = guideStrength;
             seg.guide_strength = guideStrength;
             seg.force = guideStrength;
@@ -7114,7 +7268,7 @@ function renderShotboardV3(node) {
         const fps = getFps();
         const isText = String(seg.type || "image") === "text";
         const truthPath = isText ? "" : String(seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path || "").trim();
-        const singleStrength = isText ? 0 : Math.max(0, Math.min(1, Number(seg.guideStrength ?? seg.guide_strength ?? seg.force ?? seg.strength ?? defaultForceWidget?.value ?? 0.25)));
+        const singleStrength = isText ? 0 : clampGuideStrength(seg.motion ?? seg.guideStrength ?? seg.guide_strength ?? seg.force ?? seg.strength ?? defaultForceWidget?.value ?? 1);
         return {
             second: Number((Number(seg.start || 0) / fps).toFixed(3)),
             frame: Math.round(Number(seg.start || 0)),
@@ -7128,6 +7282,7 @@ function renderShotboardV3(node) {
             force: singleStrength,
             strength: singleStrength,
             guide_strength: singleStrength,
+            motion: singleStrength,
             guideStrength: singleStrength,
             motion_force: singleStrength,
             image_lock_strength: singleStrength,
@@ -7422,11 +7577,11 @@ function renderShotboardV3(node) {
             image_multiple_of: Number(getWidget(node, "image_multiple_of")?.value || 32),
             promptrelay_epsilon: Number(getWidget(node, "promptrelay_epsilon")?.value || 0.001),
             img_compression: Number(getWidget(node, "img_compression")?.value || 0),
-            default_force: Number(defaultForceWidget?.value || 0.25),
+            default_force: clampGuideStrength(defaultForceWidget?.value || 1),
             guide_policy: String(getWidget(node, "guide_policy")?.value || "every_checked_row"),
             min_guide_gap_seconds: Number(getWidget(node, "min_guide_gap_seconds")?.value || 0),
             max_guides: Number(getWidget(node, "max_guides")?.value || 50),
-            ltx_round_mode: String(getWidget(node, "ltx_round_mode")?.value || "up_8n_plus_1"),
+            wan_frame_round_mode: String(getWidget(node, "wan_frame_round_mode")?.value || "up_8n_plus_1"),
             audioTrackCount: Math.max(1, Math.round(Number(timeline.audioTrackCount || 1))),
             masterAudioGain: Math.max(0, Math.min(2, Number(timeline.masterAudioGain ?? 1) || 1)),
             masterAudioNormalize: Boolean(timeline.masterAudioNormalize),
@@ -7516,15 +7671,15 @@ function renderShotboardV3(node) {
     topActions.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;";
     const v3ButtonColors = {
         normal: { bg: purple.button, hover: purple.buttonHover, border: purple.border, color: purple.text },
-        teal: { bg: "linear-gradient(180deg,#2F686A,#22474A)", hover: "linear-gradient(180deg,#397A7D,#29565A)", border: "#77BFC2", color: "#F2FFFB" },
-        amber: { bg: "linear-gradient(180deg,#6B5630,#493B24)", hover: "linear-gradient(180deg,#7C653A,#56462B)", border: "#D8A64C", color: "#FFF4D7" },
-        blue: { bg: "linear-gradient(180deg,#345C7E,#263E57)", hover: "linear-gradient(180deg,#3E6C93,#2D4B68)", border: "#78A9D2", color: "#F2F8FF" },
-        violet: { bg: "linear-gradient(180deg,#5A4D7C,#3D345B)", hover: "linear-gradient(180deg,#6A5B91,#493E6A)", border: "#A996D8", color: "#FAF6FF" },
-        olive: { bg: "linear-gradient(180deg,#586B35,#3D4A28)", hover: "linear-gradient(180deg,#687D40,#495831)", border: "#A4BF6C", color: "#F7FFE9" },
-        slate: { bg: "linear-gradient(180deg,#58616C,#3D444D)", hover: "linear-gradient(180deg,#68737F,#48515C)", border: "#9DABB8", color: "#F5FAFF" },
-        sand: { bg: "linear-gradient(180deg,#756246,#514532)", hover: "linear-gradient(180deg,#887352,#5F513B)", border: "#C7A875", color: "#FFF7EA" },
-        green: { bg: "linear-gradient(180deg,#3E6B4F,#2B4B39)", hover: "linear-gradient(180deg,#497E5D,#345A44)", border: "#8BC69E", color: "#F2FFF6" },
-        gold: { bg: "linear-gradient(180deg,#80672D,#56451F)", hover: "linear-gradient(180deg,#957835,#654F24)", border: "#E1B94F", color: "#FFF7D5" },
+        teal: { bg: "linear-gradient(180deg,#267E8E,#12475A)", hover: "linear-gradient(180deg,#3197A8,#195B72)", border: "#8DE7FF", color: "#EAFBFF" },
+        amber: { bg: "linear-gradient(180deg,#8D642C,#4F3518)", hover: "linear-gradient(180deg,#A67734,#60421E)", border: "#F3B34B", color: "#FFF4D5" },
+        blue: { bg: "linear-gradient(180deg,#205E82,#123B5D)", hover: "linear-gradient(180deg,#2A75A0,#194D75)", border: "#78B8E8", color: "#EFF9FF" },
+        violet: { bg: "linear-gradient(180deg,#554478,#352C59)", hover: "linear-gradient(180deg,#67528F,#443772)", border: "#B9A2F0", color: "#FAF5FF" },
+        olive: { bg: "linear-gradient(180deg,#5E7534,#394B24)", hover: "linear-gradient(180deg,#708B3D,#4B622D)", border: "#A8D36B", color: "#F7FFE9" },
+        slate: { bg: "linear-gradient(180deg,#405362,#273642)", hover: "linear-gradient(180deg,#50687A,#334655)", border: "#91AFC0", color: "#F2FAFF" },
+        sand: { bg: "linear-gradient(180deg,#7A6B4E,#4F4330)", hover: "linear-gradient(180deg,#8C7D5A,#60523C)", border: "#D4BE83", color: "#FFF8E6" },
+        green: { bg: "linear-gradient(180deg,#3C7B56,#244E3A)", hover: "linear-gradient(180deg,#4A9167,#2F644A)", border: "#92C46E", color: "#F2FFF6" },
+        gold: { bg: "linear-gradient(180deg,#99752E,#5A4219)", hover: "linear-gradient(180deg,#B58C39,#6D5321)", border: "#FFE08A", color: "#FFF7D5" },
         danger: { bg: "#6B302A", hover: "#8A3A32", border: purple.danger, color: purple.text },
     };
     const makeBtn = (label, tone = "normal") => {
@@ -7543,9 +7698,17 @@ function renderShotboardV3(node) {
             "font-weight:800",
             "cursor:pointer",
         ].join(";");
-        btn.onmouseenter = () => { btn.style.background = colors.hover; };
-        btn.onmouseleave = () => { btn.style.background = colors.bg; };
-        return protectControlDrag(btn);
+        btn.onmouseenter = () => {
+            if (btn.dataset.iamccsPressedPreview !== "true") btn.style.background = colors.hover;
+        };
+        btn.onmouseleave = () => {
+            if (btn.dataset.iamccsPressedPreview !== "true") btn.style.background = colors.bg;
+        };
+        return protectControlDrag(addPressPreview(btn, {
+            pressedBg: purple.buttonPress,
+            pressedColor: purple.valueText,
+            pressedBorder: purple.accent,
+        }));
     };
     const markToggleButton = (btn, active) => {
         btn.setAttribute("aria-pressed", active ? "true" : "false");
@@ -7771,8 +7934,10 @@ function renderShotboardV3(node) {
     const logBtn = makeBtn(timeline.verboseLog === false ? "Log: OFF" : "Log: ON", timeline.verboseLog === false ? "slate" : "blue");
     logBtn.title = "Toggle verbose ComfyUI backend logs for Shotboard V3 values, prompts, motion and image-lock strengths, and audio state.";
     markToggleButton(logBtn, timeline.verboseLog !== false);
+    setWidgetValue(node, "debug_verbose", timeline.verboseLog !== false);
     bindToolbarToggle(logBtn, () => {
         timeline.verboseLog = timeline.verboseLog === false;
+        setWidgetValue(node, "debug_verbose", timeline.verboseLog !== false);
         logBtn.textContent = timeline.verboseLog === false ? "Log: OFF" : "Log: ON";
         markToggleButton(logBtn, timeline.verboseLog !== false);
         writeTimeline({ force: true });
@@ -7795,7 +7960,7 @@ function renderShotboardV3(node) {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.textContent = label;
-        btn.style.cssText = `width:24px;height:22px;padding:0;border:1px solid ${purple.borderSoft};border-radius:4px;background:${purple.valueBg};color:${purple.valueText};font-size:15px;font-weight:900;line-height:1;cursor:pointer;`;
+        btn.style.cssText = `width:24px;height:22px;padding:0;border:1px solid ${purple.accent};border-radius:4px;background:linear-gradient(180deg,#EAF8FF,#6FB6D2);color:#071923;font-size:15px;font-weight:900;line-height:1;cursor:pointer;box-shadow:inset 0 1px 0 rgba(255,255,255,.62),0 0 0 1px rgba(0,0,0,.35);`;
         btn.onclick = (event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -7804,7 +7969,11 @@ function renderShotboardV3(node) {
             node.properties.iamccs_v3_prompt_text_scale = promptTextScale;
             draw();
         };
-        return protectControlDrag(btn);
+        return protectControlDrag(addPressPreview(btn, {
+            pressedBg: purple.buttonPress,
+            pressedColor: purple.valueText,
+            pressedBorder: "#FFE08A",
+        }));
     };
     const promptSizeReadout = document.createElement("span");
     promptSizeReadout.style.cssText = `min-width:34px;text-align:center;color:${purple.muted};font-size:9px;font-weight:900;`;
@@ -7817,7 +7986,7 @@ function renderShotboardV3(node) {
         btn.type = "button";
         btn.textContent = label;
         btn.title = label === "-" ? "Compress timeline visually" : "Expand timeline visually";
-        btn.style.cssText = `width:24px;height:22px;border:1px solid ${purple.border};border-radius:4px;background:${purple.valueBg};color:${purple.valueText};font-size:14px;font-weight:900;cursor:pointer;`;
+        btn.style.cssText = `width:24px;height:22px;border:1px solid ${purple.accent};border-radius:4px;background:linear-gradient(180deg,#EAF8FF,#6FB6D2);color:#071923;font-size:14px;font-weight:900;cursor:pointer;box-shadow:inset 0 1px 0 rgba(255,255,255,.62),0 0 0 1px rgba(0,0,0,.35);`;
         btn.onclick = (event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -7827,11 +7996,39 @@ function renderShotboardV3(node) {
             node.properties.iamccs_v3_timeline_meter_user_set = true;
             draw();
         };
-        return protectControlDrag(btn);
+        return protectControlDrag(addPressPreview(btn, {
+            pressedBg: purple.buttonPress,
+            pressedColor: purple.valueText,
+            pressedBorder: "#FFE08A",
+        }));
     };
     const timelineMeterReadout = document.createElement("span");
     timelineMeterReadout.style.cssText = `min-width:50px;text-align:center;color:${purple.muted};font-size:9px;font-weight:900;`;
     timelineMeterWrap.append(timelineMeterButton("-", -0.5), timelineMeterReadout, timelineMeterButton("+", 0.5));
+    const truthMeterWrap = document.createElement("div");
+    truthMeterWrap.title = "WAN timeline truth. Frames and seconds are synced from duration x FPS.";
+    truthMeterWrap.style.cssText = [
+        "display:grid",
+        "grid-template-rows:1fr 1fr",
+        "align-items:center",
+        "justify-items:center",
+        "height:28px",
+        "min-width:112px",
+        "padding:2px 8px",
+        `border:1px solid ${purple.accent}`,
+        "border-radius:5px",
+        "background:linear-gradient(180deg,rgba(12,55,75,.96),rgba(4,18,28,.98))",
+        "box-shadow:inset 0 1px 0 rgba(255,255,255,.20),0 0 0 1px rgba(0,0,0,.55),0 0 16px rgba(111,182,210,.22)",
+        "box-sizing:border-box",
+        "font:9px/1 monospace",
+        "font-weight:950",
+        "letter-spacing:0",
+    ].join(";");
+    const frameMeterReadout = document.createElement("span");
+    frameMeterReadout.style.cssText = `color:${purple.play};white-space:nowrap;text-shadow:0 0 8px rgba(255,224,138,.55),0 1px 2px #000;`;
+    const secondsMeterReadout = document.createElement("span");
+    secondsMeterReadout.style.cssText = `color:#EAF8FF;white-space:nowrap;opacity:1;text-shadow:0 1px 2px #000;`;
+    truthMeterWrap.append(frameMeterReadout, secondsMeterReadout);
     const multiTimelineControl = makeMultiTimelineControl();
     const addImageBtn = makeBtn("Add Image", "blue");
     const addTextBtn = makeBtn("Add Text", "violet");
@@ -7877,7 +8074,7 @@ function renderShotboardV3(node) {
         const span = document.createElement("span");
         span.textContent = label;
         const widget = getWidget(node, name);
-        const max = name === "default_force" ? "1" : null;
+        const max = name === "default_force" ? "2" : null;
         const ctrl = numberStepperControl(widget?.value ?? "", step, min, max, (value) => {
             const nextValue = name === "default_force" ? clampGuideStrength(value) : value;
             if (name === "default_force") applyDefaultForceToLinkedSegments(nextValue);
@@ -7899,7 +8096,7 @@ function renderShotboardV3(node) {
     };
     addSetting("Duration", "duration_seconds", "1", "1");
     addSetting("FPS", "frame_rate", "1", "1");
-    addSetting("Default force", "default_force", "0.01", "0");
+    addSetting("Default motion", "default_force", "0.01", "1");
     addSetting("Width", "image_width", "32", "64");
     addSetting("Height", "image_height", "32", "64");
     const addSelectSetting = (label, name, options) => {
@@ -7984,14 +8181,18 @@ function renderShotboardV3(node) {
         "min-width:0",
         "box-sizing:border-box",
     ].join(";");
+    const frameRuler = document.createElement("div");
+    frameRuler.title = "Frame ruler. This is synced to the same duration and FPS used by the WAN backend.";
+    frameRuler.style.cssText = `height:34px;position:relative;border:1px solid ${purple.accent};border-bottom:0;background:linear-gradient(180deg,#0F3E55 0%,#061923 100%);border-radius:6px 6px 0 0;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.18),0 0 0 1px rgba(0,0,0,.55);cursor:ew-resize;`;
     const ruler = document.createElement("div");
-    ruler.style.cssText = `height:36px;position:relative;border:1px solid ${purple.border};border-bottom:0;background:linear-gradient(180deg,#3D3A36 0%,#2D2C2A 58%,#242423 100%);border-radius:6px 6px 0 0;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.10);`;
+    ruler.title = "Seconds ruler. It shares the same timeline scale as the frame ruler above.";
+    ruler.style.cssText = `height:36px;position:relative;border:1px solid ${purple.border};border-bottom:0;background:linear-gradient(180deg,#12384B 0%,#082231 58%,#051722 100%);border-radius:0;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 0 0 1px rgba(0,0,0,.50);cursor:ew-resize;`;
     const timelineBox = document.createElement("div");
     timelineBox.title = "Double click in the image timeline to import a reference at that frame.";
-    timelineBox.style.cssText = `position:relative;height:344px;border:1px solid ${purple.border};background:#242220;overflow:hidden;border-radius:0 0 6px 6px;margin-bottom:6px;box-shadow:inset 0 0 0 1px rgba(216,155,69,.08);`;
+    timelineBox.style.cssText = `position:relative;height:344px;border:1px solid ${purple.border};background:#061923;overflow:hidden;border-radius:0 0 6px 6px;margin-bottom:6px;box-shadow:inset 0 0 0 1px rgba(111,182,210,.10);`;
     const imageTrack = document.createElement("div");
     // imageTrack fills full width; endEdge marker overlays the last 4px so there is no dark gap at the right — By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
-    imageTrack.style.cssText = `position:absolute;left:0;right:0;top:0;height:254px;border-bottom:1px solid ${purple.borderSoft};background:linear-gradient(180deg,rgba(85,184,178,.14),rgba(36,34,32,.16));`;
+    imageTrack.style.cssText = `position:absolute;left:0;right:0;top:0;height:254px;border-bottom:1px solid ${purple.borderSoft};background:linear-gradient(180deg,rgba(111,182,210,.15),rgba(6,25,35,.28));`;
     const actionTrack = document.createElement("div");
     actionTrack.style.cssText = "display:none;";
     const audioTracks = document.createElement("div");
@@ -8002,13 +8203,13 @@ function renderShotboardV3(node) {
     // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     const timelineStartEdge = document.createElement("div");
     timelineStartEdge.title = "Timeline start (frame 0)";
-    timelineStartEdge.style.cssText = "position:absolute;left:0;top:0;bottom:0;width:4px;background:linear-gradient(180deg,#40DCCE,rgba(64,220,206,.45));pointer-events:none;z-index:25;border-radius:2px 0 0 2px;box-shadow:2px 0 10px rgba(64,220,206,.5),0 0 0 1px rgba(64,220,206,.22);";
+    timelineStartEdge.style.cssText = "position:absolute;left:0;top:0;bottom:0;width:4px;background:linear-gradient(180deg,#8DE7FF,rgba(141,231,255,.42));pointer-events:none;z-index:25;border-radius:2px 0 0 2px;box-shadow:2px 0 12px rgba(141,231,255,.34),0 0 0 1px rgba(141,231,255,.22);";
     const timelineEndEdge = document.createElement("div");
     timelineEndEdge.title = "Timeline end";
-    timelineEndEdge.style.cssText = "position:absolute;right:0;top:0;bottom:0;width:4px;background:linear-gradient(180deg,#E09040,rgba(224,144,64,.45));pointer-events:none;z-index:25;border-radius:0 2px 2px 0;box-shadow:-2px 0 10px rgba(224,144,64,.5),0 0 0 1px rgba(224,144,64,.22);";
+    timelineEndEdge.style.cssText = "position:absolute;right:0;top:0;bottom:0;width:4px;background:linear-gradient(180deg,#F3B34B,rgba(243,179,75,.44));pointer-events:none;z-index:25;border-radius:0 2px 2px 0;box-shadow:-2px 0 12px rgba(243,179,75,.32),0 0 0 1px rgba(243,179,75,.22);";
     timelineBox.append(timelineStartEdge, timelineEndEdge);
     const playbar = document.createElement("div");
-    playbar.style.cssText = `display:flex;align-items:center;gap:9px;margin-bottom:8px;padding:8px 9px;border:1px solid ${purple.border};background:linear-gradient(180deg,#3B3834 0%,#2B2926 100%);border-radius:7px;box-shadow:inset 0 1px 0 rgba(255,255,255,.10), inset 0 -10px 18px rgba(0,0,0,.18);`;
+    playbar.style.cssText = `display:flex;align-items:center;gap:9px;margin-bottom:8px;padding:8px 9px;border:1px solid ${purple.border};background:linear-gradient(180deg,#102D3D 0%,#071C28 100%);border-radius:7px;box-shadow:inset 0 1px 0 rgba(255,255,255,.12), inset 0 -10px 18px rgba(0,0,0,.22);`;
     const playBtn = makeBtn("Play");
     const loopBtn = makeBtn("Loop");
     const timeReadout = document.createElement("div");
@@ -8043,9 +8244,9 @@ function renderShotboardV3(node) {
             border-radius: 999px;
             background:
                 linear-gradient(90deg, ${purple.play} 0%, ${purple.play} var(--iamccs-play-progress), transparent var(--iamccs-play-progress), transparent 100%),
-                repeating-linear-gradient(90deg, rgba(255,255,255,.16) 0, rgba(255,255,255,.16) 1px, transparent 1px, transparent 24px),
-                linear-gradient(180deg, #1F1D1A 0%, #3B362F 48%, #1E1C19 100%);
-            box-shadow: inset 0 2px 5px rgba(0,0,0,.55), 0 1px 0 rgba(255,255,255,.08);
+                repeating-linear-gradient(90deg, rgba(255,255,255,.22) 0, rgba(255,255,255,.22) 1px, transparent 1px, transparent 24px),
+                linear-gradient(180deg, #061923 0%, #12384B 48%, #04111A 100%);
+            box-shadow: inset 0 2px 5px rgba(0,0,0,.65), 0 0 0 1px rgba(141,231,255,.18);
             cursor: pointer;
         }
         .iamccs-v3-analog-scrub::-webkit-slider-runnable-track {
@@ -8058,10 +8259,10 @@ function renderShotboardV3(node) {
             width: 22px;
             height: 22px;
             margin-top: -1px;
-            border: 2px solid #F4EFE7;
+            border: 2px solid #EAF8FF;
             border-radius: 999px;
-            background: radial-gradient(circle at 35% 30%, #FFF8EC 0%, #D89B45 42%, #8F5427 100%);
-            box-shadow: 0 2px 8px rgba(0,0,0,.55);
+            background: radial-gradient(circle at 35% 30%, #FFF8EC 0%, #FFE08A 42%, #B06B2B 100%);
+            box-shadow: 0 2px 8px rgba(0,0,0,.65),0 0 12px rgba(255,224,138,.42);
         }
         .iamccs-v3-analog-scrub::-moz-range-track {
             height: 20px;
@@ -8071,10 +8272,10 @@ function renderShotboardV3(node) {
         .iamccs-v3-analog-scrub::-moz-range-thumb {
             width: 20px;
             height: 20px;
-            border: 2px solid #F4EFE7;
+            border: 2px solid #EAF8FF;
             border-radius: 999px;
-            background: #D89B45;
-            box-shadow: 0 2px 8px rgba(0,0,0,.55);
+            background: #FFE08A;
+            box-shadow: 0 2px 8px rgba(0,0,0,.65),0 0 12px rgba(255,224,138,.42);
         }
     `;
     let isPlaying = false;
@@ -8095,7 +8296,9 @@ function renderShotboardV3(node) {
     let drawRaf = 0;
     let transitionAppliedStamp = 0;
     playbar.append(scrubStyle, playBtn, loopBtn, timeReadout, audioPlaybarControls, scrub);
-    timelineCanvas.append(ruler, timelineBox);
+    bindMeterScrub(frameRuler);
+    bindMeterScrub(ruler);
+    timelineCanvas.append(frameRuler, ruler, timelineBox);
     timelineViewport.appendChild(timelineCanvas);
     // Timeline height resize handle — drag to expand/shrink timeline rows (slots + local prompts)
     // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
@@ -8163,13 +8366,75 @@ function renderShotboardV3(node) {
         return `${(frame / getFps()).toFixed(2)}s`;
     }
 
+    function chooseFrameRulerStep(total, viewportWidth) {
+        const px = Math.max(1, Number(viewportWidth || timelineViewport?.clientWidth || 0) || 1);
+        const targetLabels = Math.max(4, Math.min(14, Math.floor(px / 120)));
+        const raw = Math.max(1, total / targetLabels);
+        const steps = [1, 2, 4, 5, 8, 10, 12, 16, 20, 24, 30, 32, 40, 48, 60, 64, 80, 96, 120, 121, 160, 192, 240];
+        return steps.find((step) => step >= raw) || Math.ceil(raw / 60) * 60;
+    }
+
+    function drawFrameRuler() {
+        frameRuler.innerHTML = "";
+        const total = Math.max(1, getTotalFrames());
+        const fps = Math.max(1, getFps());
+        const visibleWidth = Math.max(1, Number(timelineViewport?.clientWidth || timelineCanvas?.clientWidth || 0) || 1);
+        const majorStep = chooseFrameRulerStep(total, visibleWidth);
+        const minorStep = Math.max(1, Math.round(majorStep / 4));
+        const baseLine = document.createElement("div");
+        baseLine.style.cssText = `position:absolute;left:0;right:0;bottom:0;height:2px;background:${purple.accent};opacity:.95;pointer-events:none;box-shadow:0 0 7px rgba(141,231,255,.38);`;
+        frameRuler.appendChild(baseLine);
+        for (let frame = 0; frame <= total; frame += minorStep) {
+            const major = frame % majorStep === 0 || frame === 0 || frame === total;
+            const pos = (frame / total) * 100;
+            const tick = document.createElement("div");
+            tick.style.cssText = [
+                "position:absolute",
+                `left:calc(${pos}% - ${major ? 1 : 0.5}px)`,
+                "bottom:0",
+                `width:${major ? 2 : 1}px`,
+                `height:${major ? 30 : 13}px`,
+                `background:${major ? purple.play : "#6FB6D2"}`,
+                `opacity:${major ? 1 : 0.70}`,
+                major ? "box-shadow:0 0 8px rgba(255,224,138,.45)" : "box-shadow:none",
+                "pointer-events:none",
+            ].join(";");
+            frameRuler.appendChild(tick);
+            if (!major) continue;
+            const label = document.createElement("div");
+            label.style.cssText = [
+                "position:absolute",
+                `left:${pos}%`,
+                "top:4px",
+                frame >= total - 1 ? "transform:translateX(calc(-100% - 6px))" : "transform:translateX(6px)",
+                `color:${frame % fps === 0 ? purple.play : "#EAF8FF"}`,
+                "font-size:11px",
+                "font-weight:950",
+                "line-height:1",
+                "text-shadow:0 1px 2px rgba(0,0,0,.72)",
+                "white-space:nowrap",
+                "pointer-events:none",
+            ].join(";");
+            label.textContent = `F${Math.round(frame)}`;
+            frameRuler.appendChild(label);
+        }
+        const playPos = (playFrame / total) * 100;
+        const marker = document.createElement("div");
+        marker.style.cssText = `position:absolute;left:calc(${playPos}% - 2px);top:0;bottom:0;width:4px;background:${purple.play};box-shadow:0 0 0 1px rgba(0,0,0,.72),0 0 14px rgba(255,224,138,.75);pointer-events:none;z-index:20;`;
+        frameRuler.appendChild(marker);
+        const info = document.createElement("div");
+        info.style.cssText = `position:absolute;right:7px;top:5px;color:#FFFFFF;font-size:10px;font-weight:950;background:rgba(0,0,0,.78);padding:3px 6px;border:1px solid ${purple.accent};border-radius:4px;pointer-events:none;text-shadow:0 1px 2px #000;`;
+        info.textContent = `${total}f / ${fps}fps`;
+        frameRuler.appendChild(info);
+    }
+
     function drawRuler() {
         ruler.innerHTML = "";
         const total = getTotalFrames();
         const seconds = Math.max(0.001, getDuration());
         const step = 0.5;
         const baseLine = document.createElement("div");
-        baseLine.style.cssText = `position:absolute;left:0;right:0;bottom:0;height:1px;background:${purple.border};opacity:.85;pointer-events:none;`;
+        baseLine.style.cssText = `position:absolute;left:0;right:0;bottom:0;height:2px;background:${purple.accent};opacity:.95;pointer-events:none;box-shadow:0 0 7px rgba(141,231,255,.38);`;
         ruler.appendChild(baseLine);
         for (let s = 0; s <= seconds + 0.001; s += step) {
             const major = Math.abs(s - Math.round(s)) < 0.001;
@@ -8181,9 +8446,10 @@ function renderShotboardV3(node) {
                 `left:calc(${pos}% - ${five ? 1 : 0.5}px)`,
                 "bottom:0",
                 `width:${five ? 2 : 1}px`,
-                `height:${five ? 32 : major ? 24 : 10}px`,
-                `background:${five ? purple.play : major ? purple.accent : "#7E766C"}`,
-                `opacity:${five ? 1 : major ? 0.82 : 0.46}`,
+                `height:${five ? 34 : major ? 27 : 12}px`,
+                `background:${five ? purple.play : major ? purple.accent : "#6FB6D2"}`,
+                `opacity:${five ? 1 : major ? 0.95 : 0.65}`,
+                five ? "box-shadow:0 0 8px rgba(255,224,138,.45)" : "box-shadow:none",
                 "pointer-events:none",
             ].join(";");
             ruler.appendChild(tick);
@@ -8194,9 +8460,9 @@ function renderShotboardV3(node) {
                 `left:${pos}%`,
                 "top:4px",
                 "transform:translateX(5px)",
-                `color:${five ? "#F4D59D" : "#D8E2E5"}`,
+                `color:${five ? purple.play : "#EAF8FF"}`,
                 "font-size:11px",
-                "font-weight:800",
+                "font-weight:950",
                 "line-height:1",
                 "text-shadow:0 1px 2px #000",
                 "pointer-events:none",
@@ -8204,9 +8470,13 @@ function renderShotboardV3(node) {
             label.textContent = `${s.toFixed(0)}s`;
             ruler.appendChild(label);
         }
+        const playPos = (playFrame / Math.max(1, total)) * 100;
+        const marker = document.createElement("div");
+        marker.style.cssText = `position:absolute;left:calc(${playPos}% - 2px);top:0;bottom:0;width:4px;background:${purple.play};box-shadow:0 0 0 1px rgba(0,0,0,.72),0 0 14px rgba(255,224,138,.75);pointer-events:none;z-index:20;`;
+        ruler.appendChild(marker);
         const last = document.createElement("div");
-        last.style.cssText = `position:absolute;right:6px;top:5px;color:${purple.muted};font-size:10px;font-weight:800;background:rgba(0,0,0,.42);padding:2px 5px;border-radius:4px;pointer-events:none;`;
-        last.textContent = `${total}f`;
+        last.style.cssText = `position:absolute;right:6px;top:5px;color:#FFFFFF;font-size:10px;font-weight:950;background:rgba(0,0,0,.78);padding:3px 6px;border:1px solid ${purple.accent};border-radius:4px;pointer-events:none;text-shadow:0 1px 2px #000;`;
+        last.textContent = `${seconds.toFixed(2)}s`;
         ruler.appendChild(last);
     }
 
@@ -8220,6 +8490,38 @@ function renderShotboardV3(node) {
         playBtn.textContent = isPlaying ? "Pause" : "Play";
         loopBtn.style.borderColor = isLooping ? purple.play : purple.border;
         loopBtn.style.color = isLooping ? "#FFF2B8" : purple.text;
+    }
+
+    function setPlayFrameFromMeterEvent(event, meterElement) {
+        if (!meterElement) return;
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        const rect = meterElement.getBoundingClientRect();
+        const ratio = Math.max(0, Math.min(1, (Number(event.clientX || 0) - rect.left) / Math.max(1, rect.width)));
+        playFrame = Math.max(0, Math.min(getTotalFrames(), Math.round(ratio * getTotalFrames())));
+        if (isPlaying) {
+            playbackStartFrame = playFrame;
+            playbackStartTimestamp = performance.now();
+            scheduleAudioFromFrame(playFrame);
+        }
+        draw();
+    }
+
+    function bindMeterScrub(meterElement) {
+        if (!meterElement || meterElement._iamccsMeterScrubBound) return;
+        meterElement._iamccsMeterScrubBound = true;
+        meterElement.addEventListener("pointerdown", (event) => {
+            setPlayFrameFromMeterEvent(event, meterElement);
+            const move = (moveEvent) => setPlayFrameFromMeterEvent(moveEvent, meterElement);
+            const finish = () => {
+                window.removeEventListener("pointermove", move, true);
+                window.removeEventListener("pointerup", finish, true);
+                window.removeEventListener("pointercancel", finish, true);
+            };
+            window.addEventListener("pointermove", move, { passive: false, capture: true });
+            window.addEventListener("pointerup", finish, { passive: false, capture: true });
+            window.addEventListener("pointercancel", finish, { passive: false, capture: true });
+        }, { passive: false, capture: true });
     }
 
     function audioPeakValue(raw) {
@@ -8892,9 +9194,10 @@ function renderShotboardV3(node) {
             note: "",
             camera: "cut to",
             transition: "hard_cut",
-            guideStrength: Number(defaultForceWidget?.value || 0.25),
-            imageLockStrength: Number(defaultForceWidget?.value || 0.25),
-            defaultForceSource: Number(defaultForceWidget?.value || 0.25),
+            motion: clampGuideStrength(defaultForceWidget?.value || 1),
+            guideStrength: clampGuideStrength(defaultForceWidget?.value || 1),
+            imageLockStrength: clampGuideStrength(defaultForceWidget?.value || 1),
+            defaultForceSource: clampGuideStrength(defaultForceWidget?.value || 1),
             forceCustom: false,
             use_guide: false,
             use_prompt: false,
@@ -9227,9 +9530,10 @@ function renderShotboardV3(node) {
                 note: "",
                 camera: "continuous dolly-in",
                 transition: "continuous_motion",
-                guideStrength: Number(defaultForceWidget?.value || 0.25),
-                imageLockStrength: Number(defaultForceWidget?.value || 0.25),
-                defaultForceSource: Number(defaultForceWidget?.value || 0.25),
+                motion: clampGuideStrength(defaultForceWidget?.value || 1),
+                guideStrength: clampGuideStrength(defaultForceWidget?.value || 1),
+                imageLockStrength: clampGuideStrength(defaultForceWidget?.value || 1),
+                defaultForceSource: clampGuideStrength(defaultForceWidget?.value || 1),
                 forceCustom: false,
                 use_guide: false,
                 use_prompt: false,
@@ -9255,9 +9559,10 @@ function renderShotboardV3(node) {
             note: "",
             camera: "continuous dolly-in",
             transition: "continuous_motion",
-            guideStrength: Number(defaultForceWidget?.value || 0.25),
-            imageLockStrength: Number(defaultForceWidget?.value || 0.25),
-            defaultForceSource: Number(defaultForceWidget?.value || 0.25),
+            motion: clampGuideStrength(defaultForceWidget?.value || 1),
+            guideStrength: clampGuideStrength(defaultForceWidget?.value || 1),
+            imageLockStrength: clampGuideStrength(defaultForceWidget?.value || 1),
+            defaultForceSource: clampGuideStrength(defaultForceWidget?.value || 1),
             forceCustom: false,
             use_guide: false,
             use_prompt: false,
@@ -9375,17 +9680,9 @@ function renderShotboardV3(node) {
             "z-index:2",
         ].join(";");
         block.textContent = "+";
-        block.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
-        block.onclick = (event) => {
-            event.preventDefault();
-            event.stopPropagation();
+        bindReliableTimelineButton(block, (event) => {
             openTimelineAddMenu(event, null, null);
-        };
-        block.ondblclick = (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            openTimelineAddMenu(event, null, null);
-        };
+        });
         return protectControlDrag(block);
     }
 
@@ -9448,12 +9745,9 @@ function renderShotboardV3(node) {
             addAfter.textContent = "+";
             addAfter.title = "Add text, image or audio after this slot";
             addAfter.style.cssText = `position:absolute;right:14px;top:${truthRailHeight + 8}px;width:24px;height:24px;border:1px solid ${purple.border};border-radius:999px;background:${purple.valueBg};color:${purple.valueText};font-size:17px;font-weight:900;line-height:1;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,.45);z-index:9;`;
-            addAfter.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
-            addAfter.onclick = (event) => {
-                event.preventDefault();
-                event.stopPropagation();
+            bindReliableTimelineButton(addAfter, (event) => {
                 openTimelineAddMenu(event, seg, null);
-            };
+            });
             block.appendChild(addAfter);
         };
         if (!isAudio && String(seg.type || "image") !== "text") {
@@ -9500,25 +9794,19 @@ function renderShotboardV3(node) {
                     "opacity:.78",
                     "z-index:8",
                 ].join(";");
-                replaceImage.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
-                replaceImage.onclick = (event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
+                bindReliableTimelineButton(replaceImage, () => {
                     openAppendImagePicker(seg.id);
-                };
+                });
                 block.appendChild(replaceImage);
             } else {
                 const plus = document.createElement("button");
                 plus.type = "button";
                 plus.textContent = "+";
                 plus.title = "Import image into this empty image slot";
-                plus.style.cssText = `position:absolute;left:calc(50% + 12px);top:${truthRailHeight + 44}px;transform:translate(-50%,-50%);width:38px;height:38px;border:1px solid ${purple.border};border-radius:999px;background:${purple.valueBg};color:${purple.valueText};font-size:24px;font-weight:900;line-height:1;cursor:pointer;box-shadow:0 4px 14px rgba(0,0,0,.35);z-index:3;`;
-                plus.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
-                plus.onclick = (event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
+                plus.style.cssText = `position:absolute;left:calc(50% + 12px);top:${truthRailHeight + 44}px;transform:translate(-50%,-50%);width:46px;height:46px;border:2px solid ${purple.border};border-radius:999px;background:${purple.valueBg};color:${purple.valueText};font-size:28px;font-weight:900;line-height:1;cursor:pointer;box-shadow:0 5px 18px rgba(0,0,0,.42),0 0 0 3px rgba(244,239,230,.08);z-index:12;touch-action:manipulation;`;
+                bindReliableTimelineButton(plus, () => {
                     openAppendImagePicker(seg.id);
-                };
+                });
                 block.appendChild(plus);
             }
         }
@@ -9586,8 +9874,14 @@ function renderShotboardV3(node) {
                             const appended = appendReferencePath(node, newPath);
                             const nextRef = Math.max(1, Number(appended?.refNumber || refIndex + 1));
                             const truthSeg = (timeline.segments || []).find((item) => String(item?.id || "") === String(seg.id || "")) || seg;
-                            applyEditedReferenceTruth(truthSeg, nextRef, newPath, { updateAutoLabel: false });
-                            if (truthSeg !== seg) applyEditedReferenceTruth(seg, nextRef, newPath, { updateAutoLabel: false });
+                            const propagated = applyEditedReferenceToMatches(currentRef, currentPath, nextRef, newPath, {
+                                updateAutoLabel: false,
+                                truthSource: "timeline_frame_editor_shared",
+                            });
+                            if (!propagated) {
+                                applyEditedReferenceTruth(truthSeg, nextRef, newPath, { updateAutoLabel: false });
+                                if (truthSeg !== seg) applyEditedReferenceTruth(seg, nextRef, newPath, { updateAutoLabel: false });
+                            }
                             if (newPath) refPreviewBusters.set(String(newPath), String(data?.cache_bust || Date.now()));
                             console.info("[IAMCCS V3 REF EDIT] applied edited reference to timeline truth", {
                                 segmentId: seg.id,
@@ -9598,6 +9892,7 @@ function renderShotboardV3(node) {
                                 truthPath: truthSeg?.imageFile || truthSeg?.path || "",
                                 savedTo: data?.absolute_path || data?.path || "",
                                 appended: Boolean(appended?.appended),
+                                propagated,
                             });
                             writeTimeline({ force: true });
                             draw();
@@ -10040,7 +10335,8 @@ function renderShotboardV3(node) {
             target.linkGuideLock = nextLinked;
             target.link_guide_lock = nextLinked;
             if (nextLinked) {
-                const nextStrength = Math.max(0, Math.min(1, Number(target.guideStrength ?? target.guide_strength ?? target.force ?? target.strength ?? defaultForceWidget?.value ?? 0.25)));
+                const nextStrength = clampGuideStrength(target.motion ?? target.guideStrength ?? target.guide_strength ?? target.force ?? target.strength ?? defaultForceWidget?.value ?? 1);
+                target.motion = nextStrength;
                 target.guideStrength = nextStrength;
                 target.guide_strength = nextStrength;
                 target.force = nextStrength;
@@ -10069,8 +10365,8 @@ function renderShotboardV3(node) {
             if (type === "number") {
                 const isStrengthKey = key === "guideStrength" || key === "imageLockStrength";
                 const step = isStrengthKey ? "0.01" : "1";
-                const min = "0";
-                const max = isStrengthKey ? "1" : null;
+                const min = isStrengthKey ? "1" : "0";
+                const max = isStrengthKey ? "2" : null;
                 const ctrl = numberStepperControl(seg[key] ?? "", step, min, max, (value) => {
                     const target = currentSegment();
                     let shouldRedraw = true;
@@ -10084,7 +10380,8 @@ function renderShotboardV3(node) {
                     }
                     else if (key === "ref") setSegmentReference(target, value);
                     else if (key === "guideStrength") {
-                        const nextStrength = Math.max(0, Math.min(1, Number(value || 0)));
+                        const nextStrength = clampGuideStrength(value);
+                        target.motion = nextStrength;
                         target.guideStrength = nextStrength;
                         target.guide_strength = nextStrength;
                         target.force = nextStrength;
@@ -10099,7 +10396,8 @@ function renderShotboardV3(node) {
                         shouldRedraw = false;
                     }
                     else if (key === "imageLockStrength") {
-                        const nextLock = Math.max(0, Math.min(1, Number(value || 0)));
+                        const nextLock = clampGuideStrength(value);
+                        target.motion = nextLock;
                         target.guideStrength = nextLock;
                         target.guide_strength = nextLock;
                         target.force = nextLock;
@@ -10159,7 +10457,8 @@ function renderShotboardV3(node) {
                     shouldRedraw = true;
                 }
                 else if (key === "guideStrength") {
-                    const nextStrength = Math.max(0, Math.min(1, Number(input.value || 0)));
+                    const nextStrength = clampGuideStrength(input.value);
+                    target.motion = nextStrength;
                     target.guideStrength = nextStrength;
                     target.guide_strength = nextStrength;
                     target.force = nextStrength;
@@ -10174,7 +10473,8 @@ function renderShotboardV3(node) {
                     shouldRedraw = true;
                 }
                 else if (key === "imageLockStrength") {
-                    const nextLock = Math.max(0, Math.min(1, Number(input.value || 0)));
+                    const nextLock = clampGuideStrength(input.value);
+                    target.motion = nextLock;
                     target.guideStrength = nextLock;
                     target.guide_strength = nextLock;
                     target.force = nextLock;
@@ -10472,9 +10772,9 @@ function renderShotboardV3(node) {
                 "gap:3px",
                 "min-width:0",
                 "padding:5px 8px",
-                "border:1px solid rgba(120,112,98,.44)",
+                `border:1px solid ${purple.borderSoft}`,
                 "border-radius:6px",
-                "background:linear-gradient(180deg, rgba(52,50,47,.78), rgba(28,28,27,.52))",
+                "background:linear-gradient(180deg, rgba(39,68,57,.70), rgba(23,42,34,.56))",
                 "box-shadow:inset 0 1px 0 rgba(255,255,255,.10), 0 4px 12px rgba(0,0,0,.14)",
                 "box-sizing:border-box",
                 "overflow:hidden",
@@ -10482,7 +10782,7 @@ function renderShotboardV3(node) {
             ].join(";");
             const title = document.createElement("div");
             title.textContent = "Segment";
-            title.style.cssText = `max-width:100%;padding:2px 7px;border-radius:999px;border:1px solid rgba(143,208,204,.22);background:rgba(143,208,204,.07);color:${purple.muted};font-size:7px;font-weight:900;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1;`;
+            title.style.cssText = `max-width:100%;padding:2px 7px;border-radius:999px;border:1px solid rgba(111,182,210,.32);background:rgba(111,182,210,.14);color:${purple.muted};font-size:7px;font-weight:900;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1;`;
             const range = document.createElement("div");
             range.textContent = `${(startFrame / fps).toFixed(2)}s -> ${(endFrame / fps).toFixed(2)}s`;
             range.style.cssText = `color:${purple.text};font-size:10px;font-weight:900;white-space:nowrap;line-height:1;`;
@@ -10528,23 +10828,28 @@ function renderShotboardV3(node) {
                 "align-items:stretch",
                 "margin:0 0 8px 46px",
                 "padding:8px 10px",
-                (selectedId === seg.id ? "border:2px solid #F9C859" : "border:1px solid rgba(143,208,204,.42)"),
+                (selectedId === seg.id ? `border:2px solid ${purple.accent}` : "border:1px solid rgba(111,182,210,.42)"),
                 "border-radius:6px",
-                "background:linear-gradient(180deg,rgba(18,37,38,.88),rgba(37,35,31,.86))",
-                (selectedId === seg.id ? "box-shadow:0 0 0 2px rgba(249,200,89,.3),inset 0 1px 0 rgba(255,255,255,.08),0 4px 10px rgba(0,0,0,.14)" : "box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 4px 10px rgba(0,0,0,.14)"),
+                "background:linear-gradient(180deg,rgba(8,28,40,.96),rgba(0,0,0,.92))",
+                (selectedId === seg.id ? "box-shadow:0 0 0 2px rgba(141,231,255,.20),inset 0 1px 0 rgba(255,255,255,.08),0 4px 10px rgba(0,0,0,.18)" : "box-shadow:inset 0 1px 0 rgba(255,255,255,.08),0 4px 10px rgba(0,0,0,.18)"),
                 "box-sizing:border-box",
             ].join(";");
             const badge = document.createElement("button");
             badge.type = "button";
             badge.textContent = "R";
             badge.title = "Select this relay bridge";
-            badge.style.cssText = `align-self:center;justify-self:center;display:flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid rgba(143,208,204,.64);border-radius:999px;background:rgba(7,18,20,.82);color:#CFF2EE;font-size:10px;font-weight:900;cursor:pointer;box-shadow:inset 0 1px 0 rgba(255,255,255,.10);`;
+            badge.style.cssText = `align-self:center;justify-self:center;display:flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid rgba(111,182,210,.58);border-radius:999px;background:#000;color:${purple.accent};font-size:10px;font-weight:900;cursor:pointer;box-shadow:inset 0 1px 0 rgba(255,255,255,.10);`;
             badge.onclick = () => { selectedId = seg.id; draw(); };
+            addPressPreview(badge, {
+                pressedBg: purple.buttonPress,
+                pressedColor: purple.valueText,
+                pressedBorder: purple.accent,
+            });
             const meta = document.createElement("div");
             meta.style.cssText = "display:flex;flex-direction:column;gap:5px;justify-content:center;min-width:0;";
             const title = document.createElement("div");
             title.textContent = "Relay Bridge";
-            title.style.cssText = "display:flex;align-items:center;justify-content:center;height:18px;border-radius:999px;border:1px solid rgba(143,208,204,.48);background:rgba(41,132,142,.20);color:#CFF2EE;font-size:8px;font-weight:900;text-transform:uppercase;";
+            title.style.cssText = `display:flex;align-items:center;justify-content:center;height:18px;border-radius:999px;border:1px solid rgba(111,182,210,.44);background:linear-gradient(180deg,rgba(111,182,210,.20),rgba(0,0,0,.32));color:${purple.accent};font-size:8px;font-weight:900;text-transform:uppercase;`;
             const range = document.createElement("div");
             range.textContent = `${(startFrame / fps).toFixed(2)}s -> ${(endFrame / fps).toFixed(2)}s`;
             range.style.cssText = `color:${purple.text};font:10px/1 monospace;font-weight:900;text-align:center;white-space:nowrap;`;
@@ -10552,7 +10857,7 @@ function renderShotboardV3(node) {
             name.type = "text";
             name.value = String(seg.label || "relay_bridge");
             name.title = "Relay bridge label";
-            name.style.cssText = inputBase() + `height:22px;background:${purple.valueBg};border-color:rgba(143,208,204,.42);color:${purple.valueText};font:${promptFontSize(9)}/1 monospace;font-weight:800;text-align:center;`;
+            name.style.cssText = inputBase() + `height:22px;background:${purple.valueBg};border-color:rgba(95,169,130,.44);color:${purple.valueText};font:${promptFontSize(9)}/1 monospace;font-weight:800;text-align:center;`;
             name.onpointerdown = (event) => event.stopPropagation();
             name.oninput = () => {
                 seg.label = name.value || "relay_bridge";
@@ -10565,7 +10870,7 @@ function renderShotboardV3(node) {
             prompt.placeholder = "PromptRelay text between the previous frame and the next frame...";
             prompt.dataset.iamccsV3SegmentId = String(seg.id);
             prompt.dataset.iamccsV3Key = "prompt";
-            prompt.style.cssText = `width:100%;height:68px;min-height:68px;box-sizing:border-box;padding:7px 9px;background:${purple.valueBg};border:1px solid rgba(143,208,204,.44);border-radius:5px;color:${purple.valueText};font:${promptFontSize(10)}/1.26 monospace;font-weight:700;outline:none;resize:none;overflow-y:auto;box-shadow:inset 0 1px 0 rgba(255,255,255,.56);`;
+            prompt.style.cssText = `width:100%;height:68px;min-height:68px;box-sizing:border-box;padding:7px 9px;background:${purple.valueBg};border:1px solid rgba(95,169,130,.42);border-radius:5px;color:${purple.valueText};font:${promptFontSize(10)}/1.26 monospace;font-weight:700;outline:none;resize:none;overflow-y:auto;box-shadow:inset 0 1px 0 rgba(255,255,255,.56);`;
             prompt.onpointerdown = (event) => event.stopPropagation();
             prompt.oninput = () => {
                 markPromptFieldEdited(prompt);
@@ -10605,7 +10910,7 @@ function renderShotboardV3(node) {
             const status = document.createElement("div");
             const active = Boolean(seg.use_prompt !== false && String(seg.prompt || "").trim());
             status.textContent = active ? "PromptRelay ON" : "PromptRelay off";
-            status.style.cssText = `display:flex;align-items:center;justify-content:center;height:22px;border-radius:5px;border:1px solid ${active ? "rgba(143,208,204,.58)" : purple.borderSoft};background:${active ? "rgba(41,132,142,.18)" : "rgba(0,0,0,.14)"};color:${active ? "#CFF2EE" : purple.muted};font:8px/1 monospace;font-weight:900;text-transform:uppercase;`;
+            status.style.cssText = `display:flex;align-items:center;justify-content:center;height:22px;border-radius:5px;border:1px solid ${active ? "rgba(141,231,255,.58)" : purple.borderSoft};background:${active ? "linear-gradient(180deg,rgba(111,182,210,.22),rgba(0,0,0,.34))" : "rgba(0,0,0,.22)"};color:${active ? purple.accent : purple.muted};font:8px/1 monospace;font-weight:900;text-transform:uppercase;`;
             timing.append(secondsTitle, seconds, status);
             const actions = document.createElement("div");
             actions.style.cssText = "display:grid;gap:5px;align-content:start;";
@@ -10622,7 +10927,11 @@ function renderShotboardV3(node) {
                 writeTimeline({ force: true });
                 draw();
             };
-            actions.append(protectControlDrag(remove));
+            actions.append(protectControlDrag(addPressPreview(remove, {
+                pressedBg: "linear-gradient(180deg,#E9A39F,#8A3A32)",
+                pressedColor: "#FFF8F0",
+                pressedBorder: "#FFC2BA",
+            })));
             card.append(badge, meta, prompt, timing, actions);
             return card;
         };
@@ -10674,10 +10983,10 @@ function renderShotboardV3(node) {
                 "margin-bottom:6px",
                 "padding:8px 9px",
                 "min-height:96px",
-                (selectedId === seg.id ? "border:2px solid #F9C859" : `border:1px solid ${purple.borderSoft}`),
+                (selectedId === seg.id ? `border:2px solid ${purple.accent}` : `border:1px solid ${purple.borderSoft}`),
                 "border-radius:6px",
-                `background:${selectedId === seg.id ? "linear-gradient(180deg,#3E3B35,#34312D)" : "linear-gradient(180deg,rgba(51,54,55,.98),rgba(42,43,42,.98))"}`,
-                (selectedId === seg.id ? "box-shadow:0 0 0 2px rgba(249,200,89,.3),inset 0 1px 0 rgba(255,255,255,.06),0 4px 10px rgba(0,0,0,.10)" : "box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 4px 10px rgba(0,0,0,.10)"),
+                `background:${selectedId === seg.id ? "linear-gradient(180deg,#12384B,#061923)" : "linear-gradient(180deg,rgba(13,48,64,.98),rgba(6,25,35,.98))"}`,
+                (selectedId === seg.id ? "box-shadow:0 0 0 2px rgba(141,231,255,.22),inset 0 1px 0 rgba(255,255,255,.06),0 4px 10px rgba(0,0,0,.16)" : "box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 4px 10px rgba(0,0,0,.16)"),
                 "box-sizing:border-box",
                 "width:100%",
                 "min-width:0",
@@ -10688,6 +10997,11 @@ function renderShotboardV3(node) {
             badge.title = "Select this box";
             badge.style.cssText = `align-self:center;justify-self:center;display:flex;align-items:center;justify-content:center;width:26px;height:26px;border:1px solid ${purple.border};border-radius:999px;background:${purple.button};color:${purple.text};font-size:10px;font-weight:900;cursor:pointer;box-shadow:inset 0 1px 0 rgba(255,255,255,.10);`;
             badge.onclick = () => { selectedId = seg.id; draw(); };
+            addPressPreview(badge, {
+                pressedBg: purple.buttonPress,
+                pressedColor: purple.valueText,
+                pressedBorder: purple.accent,
+            });
             const relayWrap = document.createElement("label");
             relayWrap.style.cssText = `display:grid;grid-template-columns:34px minmax(0,1fr);grid-template-rows:auto auto;column-gap:6px;row-gap:4px;align-items:center;color:${purple.muted};font-size:9px;font-weight:800;`;
             const relayLabel = document.createElement("span");
@@ -10717,7 +11031,7 @@ function renderShotboardV3(node) {
             const relayStatus = document.createElement("span");
             relayStatus.textContent = localRelayActive ? "LOCAL" : "OFF";
             relayStatus.title = "PromptRelay status for this box";
-            relayStatus.style.cssText = `display:flex;align-items:center;justify-content:center;min-width:44px;padding:2px 5px;border-radius:999px;border:1px solid ${localRelayActive ? "rgba(143,208,204,.62)" : purple.borderSoft};background:${localRelayActive ? "rgba(41,132,142,.24)" : "rgba(0,0,0,.12)"};color:${localRelayActive ? "#CFF2EE" : purple.muted};font-size:7px;font-weight:900;line-height:1;white-space:nowrap;`;
+            relayStatus.style.cssText = `display:flex;align-items:center;justify-content:center;min-width:44px;padding:2px 5px;border-radius:999px;border:1px solid ${localRelayActive ? "rgba(141,231,255,.62)" : purple.borderSoft};background:${localRelayActive ? "rgba(0,0,0,.72)" : "rgba(0,0,0,.18)"};color:${localRelayActive ? purple.accent : purple.muted};font-size:7px;font-weight:900;line-height:1;white-space:nowrap;`;
             relayStatus.style.gridColumn = "2";
             relayStatus.style.gridRow = "1";
             relayStatus.style.alignSelf = "end";
@@ -10725,7 +11039,7 @@ function renderShotboardV3(node) {
             const looksDialogue = /["â€œâ€]|\bsays?\b|\bspeak\b|\bdialog/i.test(String(seg.prompt || ""));
             dialogueHint.textContent = seg.dialogue_pin ? "PIN" : looksDialogue ? "DIALOG" : "PROMPT";
             dialogueHint.title = seg.dialogue_pin ? "Dialogue pin is active for this box" : looksDialogue ? "This prompt appears to contain dialogue timing or spoken text" : "No obvious dialogue marker detected";
-            dialogueHint.style.cssText = `display:flex;align-items:center;justify-content:center;min-width:44px;padding:2px 5px;border-radius:999px;border:1px solid ${looksDialogue || seg.dialogue_pin ? "rgba(223,164,81,.62)" : purple.borderSoft};background:${looksDialogue || seg.dialogue_pin ? "rgba(96,64,34,.28)" : "rgba(0,0,0,.10)"};color:${looksDialogue || seg.dialogue_pin ? "#F4D49E" : purple.muted};font-size:7px;font-weight:900;line-height:1;white-space:nowrap;`;
+            dialogueHint.style.cssText = `display:flex;align-items:center;justify-content:center;min-width:44px;padding:2px 5px;border-radius:999px;border:1px solid ${looksDialogue || seg.dialogue_pin ? "rgba(233,196,106,.58)" : purple.borderSoft};background:${looksDialogue || seg.dialogue_pin ? "rgba(233,196,106,.16)" : "rgba(0,0,0,.10)"};color:${looksDialogue || seg.dialogue_pin ? purple.accent : purple.muted};font-size:7px;font-weight:900;line-height:1;white-space:nowrap;`;
             dialogueHint.style.gridColumn = "2";
             dialogueHint.style.gridRow = "2";
             dialogueHint.style.alignSelf = "start";
@@ -10741,7 +11055,11 @@ function renderShotboardV3(node) {
                 b.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
                 b.onmousedown = (event) => { event.preventDefault(); event.stopPropagation(); };
                 b.onclick = (event) => { event.preventDefault(); action(); };
-                return protectControlDrag(b);
+                return protectControlDrag(addPressPreview(b, {
+                    pressedBg: purple.buttonPress,
+                    pressedColor: purple.valueText,
+                    pressedBorder: purple.accent,
+                }));
             };
             actions.append(
                 mini("D", "Duplicate", () => {
@@ -10770,7 +11088,7 @@ function renderShotboardV3(node) {
                 makeField(seg, "Frame", "start", "number"),
                 makeField(seg, "Len", "length", "number"),
                 makeField(seg, "Ref", "ref", "number"),
-                makeField(seg, "Guide Strength", "guideStrength", "number"),
+                makeField(seg, "Motion", "guideStrength", "number"),
                 makeSegmentSummary(seg, index, timeline.segments.length)
             );
             leftPane.append(numericRow);
@@ -10791,9 +11109,9 @@ function renderShotboardV3(node) {
             relayWrap.style.alignSelf = "center";
             relayWrap.style.minHeight = "58px";
             relayWrap.style.padding = "5px 6px";
-            relayWrap.style.border = `1px solid ${localRelayActive ? "rgba(143,208,204,.58)" : purple.borderSoft}`;
+            relayWrap.style.border = `1px solid ${localRelayActive ? "rgba(141,231,255,.58)" : purple.borderSoft}`;
             relayWrap.style.borderRadius = "6px";
-            relayWrap.style.background = localRelayActive ? "linear-gradient(180deg,rgba(41,132,142,.18),rgba(0,0,0,.12))" : "linear-gradient(180deg,rgba(255,238,205,.05),rgba(0,0,0,.10))";
+            relayWrap.style.background = localRelayActive ? "linear-gradient(180deg,rgba(0,0,0,.72),rgba(12,55,75,.42))" : "linear-gradient(180deg,rgba(234,248,255,.045),rgba(0,0,0,.14))";
             promptHeader.append(promptField);
             rightPane.append(promptHeader);
 
@@ -11037,11 +11355,14 @@ function renderShotboardV3(node) {
 
     function draw() {
         if (!dragState) writeTimeline();
+        drawFrameRuler();
         drawRuler();
         updatePlayUI();
         drawAudioPlaybarControls();
         timelineMeterSeconds = clampTimelineMeterSeconds(timelineMeterSeconds);
         promptSizeReadout.textContent = `${Math.round(promptTextScale * 100)}%`;
+        frameMeterReadout.textContent = `${getTotalFrames()}f @ ${getFps()}fps`;
+        secondsMeterReadout.textContent = `${getDuration().toFixed(3)}s`;
         const timelineZoomSteps = Math.round((timelineMeterSeconds - Math.max(0.5, getDuration())) * 2);
         timelineMeterReadout.textContent = `${Math.round(Math.max(0.2, Math.min(8, Math.pow(1.18, timelineZoomSteps))) * 100)}%`;
         promptArea.style.fontSize = promptFontSize(12);
@@ -11058,6 +11379,7 @@ function renderShotboardV3(node) {
         const canvasWidth = computeTimelineCanvasWidth(visualSegments);
         const previousScrollLeft = Number(timelineViewport.scrollLeft || 0);
         timelineCanvas.style.width = `${canvasWidth}px`;
+        frameRuler.style.width = "100%";
         ruler.style.width = "100%";
         timelineBox.style.width = "100%";
         timelineViewport.scrollLeft = Math.min(previousScrollLeft, Math.max(0, canvasWidth - Number(timelineViewport.clientWidth || 0)));
@@ -11105,14 +11427,11 @@ function renderShotboardV3(node) {
             if (plusIcon) plusIcon.style.cssText = "display:flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:999px;background:#1B1713;color:#F4EFE7;font-size:18px;font-weight:900;";
             const plusText = plus.querySelector("b");
             if (plusText) plusText.style.cssText = "display:block;justify-self:start;text-transform:uppercase;font-size:10px;letter-spacing:0;color:#181512;";
-            plus.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
-            plus.onclick = (event) => {
-                event.preventDefault();
-                event.stopPropagation();
+            bindReliableTimelineButton(plus, () => {
                 pendingAudioTrack = i;
                 pendingAudioInsertFrame = 0;
                 audioInput.click();
-            };
+            });
             if (!trackHasRealAudio(i)) lane.appendChild(plus);
             audioTracks.appendChild(lane);
         }
@@ -11192,6 +11511,9 @@ function renderShotboardV3(node) {
         if (targetId) {
         const target = (timeline.segments || []).find((seg) => seg.id === targetId);
         if (target) {
+            const oldTargetRef = Math.max(0, Math.round(Number(target.ref || 0)));
+            const oldTargetPath = segmentReferencePath(target);
+            const shouldPropagateReplacement = !target.placeholder && (oldTargetRef > 0 || Boolean(oldTargetPath));
             target.type = "image";
             target.placeholder = false;
             target.ref = current.length + 1;
@@ -11212,12 +11534,28 @@ function renderShotboardV3(node) {
             target.imageTruthSource = "upload_replace_slot";
             delete target.image_file;
             delete target.image_truth_path;
+            if (shouldPropagateReplacement) {
+                const propagated = applyEditedReferenceToMatches(oldTargetRef, oldTargetPath, target.ref, target.imageFile, {
+                    truthSource: "upload_replace_slot_shared",
+                    updateAutoLabel: true,
+                });
+                if (propagated > 0) {
+                    console.info("[IAMCCS WAN PURE REF SYNC] propagated uploaded replacement to matching timeline slots", {
+                        oldRef: oldTargetRef,
+                        oldPath: oldTargetPath,
+                        newRef: target.ref,
+                        newPath: target.imageFile,
+                        matches: propagated,
+                    });
+                }
+            }
             refPreviewBusters.set(String(target.imageFile), String(Date.now()));
             target.label = `ref_${current.length + 1}`;
                 target.use_guide = true;
-                target.guideStrength = Number(target.guideStrength ?? defaultForceWidget?.value ?? 0.25);
-                target.imageLockStrength = Number(target.guideStrength ?? defaultForceWidget?.value ?? 0.25);
-                target.defaultForceSource = Number(target.defaultForceSource ?? defaultForceWidget?.value ?? 0.25);
+                target.motion = clampGuideStrength(target.motion ?? target.guideStrength ?? defaultForceWidget?.value ?? 1);
+                target.guideStrength = target.motion;
+                target.imageLockStrength = target.motion;
+                target.defaultForceSource = clampGuideStrength(target.defaultForceSource ?? target.motion);
                 uploaded = uploaded.slice(1);
                 refOffset = 1;
                 cursor = endOfSegments(timeline.segments);
@@ -11248,9 +11586,10 @@ function renderShotboardV3(node) {
                 note: "",
                 camera: "continuous dolly-in",
                 transition: "continuous_motion",
-                guideStrength: Number(defaultForceWidget?.value || 0.25),
-                imageLockStrength: Number(defaultForceWidget?.value || 0.25),
-                defaultForceSource: Number(defaultForceWidget?.value || 0.25),
+                motion: clampGuideStrength(defaultForceWidget?.value || 1),
+                guideStrength: clampGuideStrength(defaultForceWidget?.value || 1),
+                imageLockStrength: clampGuideStrength(defaultForceWidget?.value || 1),
+                defaultForceSource: clampGuideStrength(defaultForceWidget?.value || 1),
                 forceCustom: false,
                 use_guide: true,
             });
@@ -11475,9 +11814,9 @@ function renderShotboardV3(node) {
             const isText = String(row.type || "").toLowerCase() === "text" || Number(row.ref ?? row.image_ref ?? row.reference_index ?? 1) <= 0;
             const rowTruthPath = isText ? "" : String(row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path || "").trim();
             const rowTruthName = isText ? "" : (String(row.imageTruthName || row.imageName || row.name || row.filename || "").trim() || rowTruthPath.split(/[\\/]/).pop() || "");
-            const defaultForceValue = Math.max(0, Math.min(1, Number(defaultForceWidget?.value ?? 0.25)));
-            const rowForceValue = Math.max(0, Math.min(1, Number(row.motion_force ?? row.force ?? row.strength ?? defaultForceValue)));
-            const rowGuideValue = Math.max(0, Math.min(1, Number(row.guide_strength ?? row.guideStrength ?? row.strength ?? row.force ?? row.motion_force ?? row.image_lock_strength ?? row.imageLockStrength ?? rowForceValue)));
+            const defaultForceValue = clampGuideStrength(defaultForceWidget?.value ?? 1);
+            const rowForceValue = clampGuideStrength(row.motion ?? row.motion_force ?? row.force ?? row.strength ?? defaultForceValue);
+            const rowGuideValue = clampGuideStrength(row.motion ?? row.guide_strength ?? row.guideStrength ?? row.strength ?? row.force ?? row.motion_force ?? row.image_lock_strength ?? row.imageLockStrength ?? rowForceValue);
             const explicitForceCustom = typeof row.forceCustom === "boolean"
                 ? row.forceCustom
                 : typeof row.force_custom === "boolean"
@@ -11502,6 +11841,7 @@ function renderShotboardV3(node) {
                 note: String(row.note ?? row.camera_note ?? ""),
                 camera: String(row.camera ?? row.camera_move ?? "cinematic motion"),
                 transition: String(row.transition ?? row.transition_intent ?? "continuous_motion"),
+                motion: isText ? 0 : rowGuideValue,
                 guideStrength: isText ? 0 : rowGuideValue,
                 guide_strength: isText ? 0 : rowGuideValue,
                 force: isText ? 0 : rowGuideValue,
@@ -11669,8 +12009,8 @@ function renderShotboardV3(node) {
         if (!importedDefaultForceExplicit) {
             const inferredDefaultForce = inferDefaultForceFromTimeline(loadedTimeline || board);
             if (Number.isFinite(Number(inferredDefaultForce))) {
-                setWidgetValue(node, "default_force", Math.max(0, Math.min(1, Number(inferredDefaultForce))));
-                showTimelineNotice(`Default force inferred from imported board: ${Number(inferredDefaultForce).toFixed(3)}`, "warn");
+                setWidgetValue(node, "default_force", clampGuideStrength(inferredDefaultForce));
+                showTimelineNotice(`Default motion inferred from imported board: ${Number(inferredDefaultForce).toFixed(3)}`, "warn");
                 console.log("[IAMCCS V3 BOARD IMPORT] default_force inferred", {
                     nodeId: node?.id,
                     value: Number(inferredDefaultForce),
@@ -12312,7 +12652,7 @@ function renderCinePromptArchitect(node) {
     title.textContent = "IAMCCS CinePrompt Architect";
     title.style.cssText = "font-size:18px;font-weight:900;letter-spacing:0;";
     const subtitle = document.createElement("div");
-    subtitle.textContent = "Build LTX 2.3 / PromptRelay-ready prompts, then send timing and text into Shotboard V3 or V2.";
+    subtitle.textContent = "Build WAN shotboard prompts, then send timing and text into Shotboard V3 or V2.";
     subtitle.style.cssText = "font-size:11px;font-weight:800;color:#DDE5DE;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
     titleBlock.append(title, subtitle);
     const headActions = document.createElement("div");
@@ -12759,7 +13099,7 @@ function renderBoardMaker(node) {
                 max_guides: Math.max(1, shotRows.length),
                 default_force: Number(defaultForceValue()) || 0.28,
                 promptrelay_epsilon: 0.6,
-                ltx_round_mode: "up_8n_plus_1",
+                wan_frame_round_mode: "up_8n_plus_1",
                 image_width: imageWidth,
                 image_height: imageHeight,
                 image_resize_method: "crop",
@@ -12878,7 +13218,7 @@ function renderBoardMaker(node) {
         labelWrap("FPS", fpsCtrl),
         labelWrap("Project width", widthCtrl),
         labelWrap("Project height", heightCtrl),
-        labelWrap("Default force", forceCtrl),
+        labelWrap("Default motion", forceCtrl),
         labelWrap("Guide policy", guidePolicy)
     );
 
@@ -13068,6 +13408,7 @@ function renderBoardMaker(node) {
 
 function renderForNode(node) {
     const klass = nodeClassName(node);
+    if (klass !== WAN_NODE_CLASS) return;
     try {
         const title = String(node?.title || "");
         if (klass === "IAMCCS_CineShotboardLite") {
@@ -13080,11 +13421,12 @@ function renderForNode(node) {
         if (klass === "IAMCCS_CineShotboardTimelinePro" || klass === "IAMCCS_CineShotboardPlannerPro" || klass === "IAMCCS_CineShotboardPlannerProV2" || klass === "IAMCCS_CineShotboardPlannerProLegacy") {
             lockNodeMinimumSize(node, SHOTBOARD_NODE_MIN_SIZE, { lockResize: true });
         }
-        if (klass === "IAMCCS_CineLTXSequencer") applyCineChrome(node, "flfEngine");
+        if (klass === "IAMCCS_WanLegacySequencerDisabled") applyCineChrome(node, "flfEngine");
         if (klass === "IAMCCS_CinePromptRelayLatentShapeSync") renderPromptRelayShapeSync(node);
-        if (klass === "IAMCCS_CineLTXSequencer") renderKeyframeEditor(node);
+        if (klass === "IAMCCS_WanLegacySequencerDisabled") renderKeyframeEditor(node);
         if (klass === "IAMCCS_CinePromptRelayTimeline") renderPromptRelayEditor(node);
         if (isShotboardV3Class(klass)) {
+            if (isWanShotboardV3Class(klass)) applyCineChrome(node, "wanShotboardV3");
             renderShotboardV3(node);
         }
         if (klass === "IAMCCS_CineShotboardLite") renderShotboardLite(node);
@@ -13101,7 +13443,7 @@ function renderForNode(node) {
 
 function scheduleRender(node, options = {}) {
     const klass = nodeClassName(node);
-    if (klass !== "IAMCCS_CineLTXSequencer" && klass !== "IAMCCS_CinePromptRelayLatentShapeSync" && klass !== "IAMCCS_CinePromptRelayTimeline" && klass !== "IAMCCS_CineShotboardLite" && klass !== "IAMCCS_CineShotboardTimelinePro" && klass !== "IAMCCS_CineShotboardPlannerPro" && klass !== "IAMCCS_CineShotboardPlannerProV2" && !isShotboardV3Class(klass) && klass !== "IAMCCS_CineShotboardPlannerProLegacy" && klass !== "IAMCCS_CineFLFEngineSimple" && klass !== "IAMCCS_CineInfo" && klass !== "IAMCCS_CinePromptArchitect" && klass !== "IAMCCS_BoardMaker" && klass !== "IAMCCS_CineMusicVideoPlanner") return;
+    if (klass !== WAN_NODE_CLASS) return;
     if (Array.isArray(node._iamccsCineRenderTimers)) {
         node._iamccsCineRenderTimers.forEach((timer) => window.clearTimeout(timer));
     }
@@ -13119,7 +13461,7 @@ function flushAllShotboardV3Timelines(reason = "flush") {
     const nodes = Array.isArray(app.graph?._nodes) ? app.graph._nodes : [];
     let flushed = 0;
     for (const node of nodes) {
-        if (!isShotboardV3Class(nodeClassName(node))) continue;
+        if (nodeClassName(node) !== WAN_NODE_CLASS) continue;
         if (typeof node._iamccsCineShotboardV3WriteTimeline !== "function") continue;
         try {
             node._iamccsCineShotboardV3WriteTimeline({ force: true });
@@ -13132,7 +13474,7 @@ function flushAllShotboardV3Timelines(reason = "flush") {
                 firstPrompt = String(data?.segments?.[0]?.prompt || data?.rows?.[0]?.relay_prompt || "");
                 containsCoastline = /\bcoastline\b/i.test(text);
             } catch {}
-            console.log("[IAMCCS V3 QUEUE FLUSH]", {
+            console.log("[IAMCCS WAN V3 QUEUE FLUSH]", {
                 reason,
                 nodeId: node?.id,
                 timelineLength: text.length,
@@ -13140,7 +13482,7 @@ function flushAllShotboardV3Timelines(reason = "flush") {
                 firstPrompt: firstPrompt.replace(/\s+/g, " ").slice(0, 220),
             });
         } catch (err) {
-            console.warn("[IAMCCS V3 QUEUE FLUSH] failed", { reason, nodeId: node?.id, err });
+            console.warn("[IAMCCS WAN V3 QUEUE FLUSH] failed", { reason, nodeId: node?.id, err });
         }
     }
     return flushed;
@@ -13148,7 +13490,7 @@ function flushAllShotboardV3Timelines(reason = "flush") {
 
 function wrapQueueFlush(target, methodName, label) {
     if (!target || typeof target[methodName] !== "function") return;
-    const guard = `_iamccsCineV3QueueFlushWrapped_${methodName}`;
+    const guard = `_iamccsWanV3QueueFlushWrapped_${methodName}`;
     if (target[guard]) return;
     target[guard] = true;
     const original = target[methodName];
@@ -13159,16 +13501,13 @@ function wrapQueueFlush(target, methodName, label) {
 }
 
 app.registerExtension({
-    name: "iamccs.cine.timeline.ui",
-    async setup() {
-        wrapQueueFlush(api, "queuePrompt", "api.queuePrompt");
-        wrapQueueFlush(app, "queuePrompt", "app.queuePrompt");
-    },
+    name: "iamccs.wan.v3.timeline.ui",
+    async setup() {},
     async beforeRegisterNodeDef(nodeType, nodeData) {
         const name = String(nodeData?.name || nodeData?.class_type || "");
-        if (name !== "IAMCCS_CineLTXSequencer" && name !== "IAMCCS_CinePromptRelayLatentShapeSync" && name !== "IAMCCS_CinePromptRelayTimeline" && name !== "IAMCCS_CineShotboardLite" && name !== "IAMCCS_CineShotboardTimelinePro" && name !== "IAMCCS_CineShotboardPlannerPro" && name !== "IAMCCS_CineShotboardPlannerProV2" && !isShotboardV3Class(name) && name !== "IAMCCS_CineShotboardPlannerProLegacy" && name !== "IAMCCS_CineFLFEngineSimple" && name !== "IAMCCS_CineInfo" && name !== "IAMCCS_CinePromptArchitect" && name !== "IAMCCS_BoardMaker" && name !== "IAMCCS_CineMusicVideoPlanner") return;
-        if (nodeType.prototype._iamccsCineTimelineWrapped) return;
-        nodeType.prototype._iamccsCineTimelineWrapped = true;
+        if (name !== WAN_NODE_CLASS) return;
+        if (nodeType.prototype._iamccsWanV3TimelineWrapped) return;
+        nodeType.prototype._iamccsWanV3TimelineWrapped = true;
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function (...args) {
             const result = onNodeCreated?.apply(this, args);
@@ -13192,7 +13531,7 @@ document.addEventListener("iamccs:planner_rows_updated", (ev) => {
     const plannerNode = app.graph?.getNodeById(nodeId);
     if (!plannerNode) return;
     const klass = String(plannerNode?.comfyClass || plannerNode?.type || "");
-    if (klass !== "IAMCCS_CineShotboardLite" && klass !== "IAMCCS_CineShotboardPlannerPro" && klass !== "IAMCCS_CineShotboardPlannerProV2" && !isShotboardV3Class(klass) && klass !== "IAMCCS_CineShotboardPlannerProLegacy" && klass !== "IAMCCS_CineShotboardTimelinePro") return;
+    if (klass !== WAN_NODE_CLASS) return;
     // Clear render guard so renderShotboardPro rebuilds the table
     plannerNode._iamccsCineShotboardReady = false;
     plannerNode._iamccsCineShotboardVersion = "";

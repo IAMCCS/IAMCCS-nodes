@@ -262,6 +262,7 @@ from .iamccs_audio_extender import (
 
 from .iamccs_cine_audio_dialogue import (
     IAMCCS_CineSpeech1PromptCompiler,
+    IAMCCS_CineAudioTranscriptPromptCompiler,
     IAMCCS_CineVideoToWooshInputs,
     IAMCCS_CineTimelineAudioMixer,
     IAMCCS_AudioBoardArranger,
@@ -556,6 +557,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_IdeoTranslate": IAMCCS_IdeoTranslate,
     "IAMCCS_CineVideoToWooshInputs": IAMCCS_CineVideoToWooshInputs,
     "IAMCCS_CineSpeech1PromptCompiler": IAMCCS_CineSpeech1PromptCompiler,
+    "IAMCCS_CineAudioTranscriptPromptCompiler": IAMCCS_CineAudioTranscriptPromptCompiler,
     "IAMCCS_CineSpeechLength": IAMCCS_CineSpeechLength,
     "IAMCCS_CineDialogueDurationPlanner": IAMCCS_CineDialogueDurationPlanner,
     "IAMCCS_CineAudioDurationProbe": IAMCCS_CineAudioDurationProbe,
@@ -844,6 +846,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_IdeoTranslate": "IAMCCS IdeoTranslate",
     "IAMCCS_CineVideoToWooshInputs": "IAMCCS Video To Woosh Inputs",
     "IAMCCS_CineSpeech1PromptCompiler": "IAMCCS Speech1 Prompt Compiler",
+    "IAMCCS_CineAudioTranscriptPromptCompiler": "IAMCCS Audio Transcript Prompt Compiler",
     "IAMCCS_CineSpeechLength": "IAMCCS Speech Length Calculator",
     "IAMCCS_CineDialogueDurationPlanner": "IAMCCS Dialogue Duration Planner",
     "IAMCCS_CineAudioDurationProbe": "IAMCCS Audio Duration Probe",
@@ -871,14 +874,14 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 }
 
 try:
-    from .cine_wan_edition_beta import (
-        NODE_CLASS_MAPPINGS as _IAMCCS_WAN_BETA_NODE_CLASS_MAPPINGS,
-        NODE_DISPLAY_NAME_MAPPINGS as _IAMCCS_WAN_BETA_NODE_DISPLAY_NAME_MAPPINGS,
+    from .cine_wan_shotboard_pure import (
+        NODE_CLASS_MAPPINGS as _IAMCCS_WAN_SHOTBOARD_PURE_NODE_CLASS_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as _IAMCCS_WAN_SHOTBOARD_PURE_NODE_DISPLAY_NAME_MAPPINGS,
     )
-    NODE_CLASS_MAPPINGS.update(_IAMCCS_WAN_BETA_NODE_CLASS_MAPPINGS)
-    NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_WAN_BETA_NODE_DISPLAY_NAME_MAPPINGS)
-except Exception as _iamccs_wan_beta_error:
-    print(f"[IAMCCS WAN BETA] optional module not loaded: {_iamccs_wan_beta_error}")
+    NODE_CLASS_MAPPINGS.update(_IAMCCS_WAN_SHOTBOARD_PURE_NODE_CLASS_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_WAN_SHOTBOARD_PURE_NODE_DISPLAY_NAME_MAPPINGS)
+except Exception as _iamccs_wan_shotboard_pure_error:
+    print(f"[IAMCCS WAN PURE] optional module not loaded: {_iamccs_wan_shotboard_pure_error}")
 
 try:
     from .cine_multigeneration import (
@@ -889,6 +892,33 @@ try:
     NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_MULTIGENERATION_NODE_DISPLAY_NAME_MAPPINGS)
 except Exception as _iamccs_multigeneration_error:
     print(f"[IAMCCS Multigeneration] optional module not loaded: {_iamccs_multigeneration_error}")
+
+try:
+    from .engine_v2v import (
+        NODE_CLASS_MAPPINGS as _IAMCCS_ENGINE_V2V_NODE_CLASS_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as _IAMCCS_ENGINE_V2V_NODE_DISPLAY_NAME_MAPPINGS,
+    )
+    NODE_CLASS_MAPPINGS.update(_IAMCCS_ENGINE_V2V_NODE_CLASS_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_ENGINE_V2V_NODE_DISPLAY_NAME_MAPPINGS)
+except Exception as _iamccs_engine_v2v_error:
+    print(f"[IAMCCS Engine V2V] optional module not loaded: {_iamccs_engine_v2v_error}")
+
+try:
+    import importlib.util as _iamccs_importlib_util
+
+    _iamccs_cine_pp_path = os.path.join(os.path.dirname(__file__), "cine-pp", "post_aa.py")
+    _iamccs_cine_pp_spec = _iamccs_importlib_util.spec_from_file_location(
+        "iamccs_cine_pp_post_aa",
+        _iamccs_cine_pp_path,
+    )
+    if _iamccs_cine_pp_spec is None or _iamccs_cine_pp_spec.loader is None:
+        raise ImportError(f"Cannot load IAMCCS Cine-PP module from {_iamccs_cine_pp_path}")
+    _iamccs_cine_pp_module = _iamccs_importlib_util.module_from_spec(_iamccs_cine_pp_spec)
+    _iamccs_cine_pp_spec.loader.exec_module(_iamccs_cine_pp_module)
+    NODE_CLASS_MAPPINGS.update(getattr(_iamccs_cine_pp_module, "NODE_CLASS_MAPPINGS", {}))
+    NODE_DISPLAY_NAME_MAPPINGS.update(getattr(_iamccs_cine_pp_module, "NODE_DISPLAY_NAME_MAPPINGS", {}))
+except Exception as _iamccs_cine_pp_error:
+    print(f"[IAMCCS Cine-PP] optional module not loaded: {_iamccs_cine_pp_error}")
 
 WEB_DIRECTORY = "./web"
 

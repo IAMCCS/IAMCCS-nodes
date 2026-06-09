@@ -870,6 +870,12 @@ class IAMCCS_SegmentPlannerSettings(IAMCCS_SegmentPlanner):
                 "segment_preset": (["5sec", "10sec", "15sec", "20sec", "videoclip", "monologue"], {"default": "10sec"}),
                 "overlap_frames": ("INT", {"default": 9, "min": 0, "max": 4096, "step": 1}),
                 "auto_sync_overlap": ("BOOLEAN", {"default": False}),
+            },
+            "optional": {
+                "segment_duration_s_in": ("FLOAT", {"forceInput": True, "default": 0.0, "min": 0.0, "max": 3600.0, "step": 0.01}),
+                "planning_mode_in": ("STRING", {"forceInput": True, "default": ""}),
+                "segment_preset_in": ("STRING", {"forceInput": True, "default": ""}),
+                "overlap_frames_in": ("INT", {"forceInput": True, "default": -1, "min": -1, "max": 4096, "step": 1}),
             }
         }
 
@@ -878,7 +884,27 @@ class IAMCCS_SegmentPlannerSettings(IAMCCS_SegmentPlanner):
     FUNCTION = "build"
     CATEGORY = "IAMCCS/LTX-2"
 
-    def build(self, segment_duration_s: float, planning_mode: str, segment_preset: str, overlap_frames: int, auto_sync_overlap: bool):
+    def build(
+        self,
+        segment_duration_s: float,
+        planning_mode: str,
+        segment_preset: str,
+        overlap_frames: int,
+        auto_sync_overlap: bool,
+        segment_duration_s_in: float = 0.0,
+        planning_mode_in: str = "",
+        segment_preset_in: str = "",
+        overlap_frames_in: int = -1,
+    ):
+        if segment_duration_s_in is not None and float(segment_duration_s_in) > 0.0:
+            segment_duration_s = float(segment_duration_s_in)
+        if planning_mode_in:
+            planning_mode = str(planning_mode_in)
+        if segment_preset_in:
+            segment_preset = str(segment_preset_in)
+        if overlap_frames_in is not None and int(overlap_frames_in) >= 0:
+            overlap_frames = int(overlap_frames_in)
+
         segment_duration_s = max(0.01, float(segment_duration_s))
         overlap_frames = max(0, int(overlap_frames))
         planning_mode = self._normalize_planning_mode(planning_mode)
@@ -1062,7 +1088,7 @@ class IAMCCS_SegmentPlannerLinked(IAMCCS_SegmentPlanner):
                 "planning_mode_in": ("STRING", {"default": "manual_segment_seconds", "forceInput": True}),
                 "segment_preset_in": ("STRING", {"default": "10sec", "forceInput": True}),
                 "overlap_frames_in": ("INT", {"default": 9, "min": 0, "max": 4096, "step": 1, "forceInput": True}),
-                "ltx_round_mode": (["up", "nearest", "down"], {"default": "up"}),
+                "ltx_round_mode_in": ("STRING", {"default": "up", "forceInput": True}),
                 "segment_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
             }
         }
@@ -1080,7 +1106,7 @@ class IAMCCS_SegmentPlannerLinked(IAMCCS_SegmentPlanner):
         planning_mode_in: str,
         segment_preset_in: str,
         overlap_frames_in: int,
-        ltx_round_mode: str,
+        ltx_round_mode_in: str,
         segment_index: int,
     ):
         return self.plan(
@@ -1090,7 +1116,7 @@ class IAMCCS_SegmentPlannerLinked(IAMCCS_SegmentPlanner):
             str(planning_mode_in or "manual_segment_seconds"),
             str(segment_preset_in or "10sec"),
             int(overlap_frames_in),
-            ltx_round_mode,
+            str(ltx_round_mode_in or "up"),
             segment_index,
         )
 

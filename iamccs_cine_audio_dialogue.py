@@ -1516,6 +1516,134 @@ class IAMCCS_CineSpeech1PromptCompiler:
         return linx, global_prompt, local_prompts, segment_lengths_s, dialogue_script, foley_prompt, report
 
 
+class IAMCCS_CineAudioTranscriptPromptCompiler:
+    """Transcribe audio and inject it into a filmmaker prompt with <speech1>/<Transcript1> tokens."""
+
+    _PIPELINE_CACHE: Dict[str, Any] = {}
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "text_prompt": ("STRING", {"default": "", "multiline": True, "forceInput": True}),
+                "fallback_speech_line": ("STRING", {"default": "", "multiline": True, "forceInput": True}),
+                "speech_template": ("STRING", {"default": 'The speaker says "<speech1>"', "multiline": True}),
+                "speech_token": ("STRING", {"default": "<speech1>"}),
+                "join_separator": ("STRING", {"default": " "}),
+                "model_size": (["tiny", "small", "medium", "medium.en", "base", "large", "large-v2", "large-v3", "large-v3-turbo"], {"default": "tiny"}),
+                "language": (["auto", "de", "en", "es", "fr", "it", "ja", "ko", "nl", "pt", "ru", "zh"], {"default": "auto"}),
+                "download_missing": ("BOOLEAN", {"default": False}),
+                "return_timestamps": ("BOOLEAN", {"default": False}),
+                "use_fallback_if_transcript_empty": ("BOOLEAN", {"default": True}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "STRING")
+    RETURN_NAMES = ("compiled_prompt", "transcript", "report")
+    FUNCTION = "compile"
+    CATEGORY = "IAMCCS/Cine/01 Prompting"
+
+    @staticmethod
+    def _clean(value: Any) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip())
+
+    @classmethod
+    def _replace_tokens(cls, text: Any, speech: Any, speech_token: str) -> str:
+        value = str(text or "")
+        speech_value = cls._clean(speech)
+        tokens = [
+            str(speech_token or "<speech1>"),
+            "<speech1>", "<Speech1>", "{speech1}", "[speech1]",
+            "<Transcript1>", "{Transcript1}", "[Transcript1]",
+        ]
+        for token in dict.fromkeys(tokens):
+            value = value.replace(token, speech_value)
+        return cls._clean(value)
+
+    @staticmethod
+    def _registered_node(class_name: str):
+        try:
+            import nodes as comfy_nodes  # type: ignore
+
+            node_class = getattr(comfy_nodes, "NODE_CLASS_MAPPINGS", {}).get(class_name)
+            if node_class is not None:
+                return node_class
+        except Exception:
+            return None
+        return None
+
+    @classmethod
+    def _pipeline(cls, model_size: str, download_missing: bool):
+        key = f"{model_size}|{bool(download_missing)}"
+        if key not in cls._PIPELINE_CACHE:
+            MTB_LoadWhisper = cls._registered_node("Load Whisper (mtb)")
+            if MTB_LoadWhisper is None:
+                try:
+                    from custom_nodes.comfy_mtb.nodes.audio import MTB_LoadWhisper  # type: ignore
+                except Exception:
+                    try:
+                        from comfy_mtb.nodes.audio import MTB_LoadWhisper  # type: ignore
+                    except Exception:
+                        raise ImportError("Cannot find comfy-mtb Load Whisper node. Install/enable comfy-mtb or keep the node package available.") from None
+            cls._PIPELINE_CACHE[key] = MTB_LoadWhisper().load(str(model_size), bool(download_missing))[0]
+        return cls._PIPELINE_CACHE[key]
+
+    @classmethod
+    def _transcribe(cls, audio: Any, model_size: str, language: str, download_missing: bool, return_timestamps: bool) -> str:
+        MTB_AudioToText = cls._registered_node("Audio To Text (mtb)")
+        if MTB_AudioToText is None:
+            try:
+                from custom_nodes.comfy_mtb.nodes.audio import MTB_AudioToText  # type: ignore
+            except Exception:
+                try:
+                    from comfy_mtb.nodes.audio import MTB_AudioToText  # type: ignore
+                except Exception:
+                    raise ImportError("Cannot find comfy-mtb Audio To Text node. Install/enable comfy-mtb or keep the node package available.") from None
+        pipeline = cls._pipeline(model_size, download_missing)
+        return MTB_AudioToText().transcribe(pipeline, audio, str(language or "auto"), bool(return_timestamps))[0]
+
+    def compile(
+        self,
+        audio,
+        text_prompt,
+        fallback_speech_line,
+        speech_template,
+        speech_token,
+        join_separator,
+        model_size,
+        language,
+        download_missing,
+        return_timestamps,
+        use_fallback_if_transcript_empty,
+    ):
+        warnings: List[str] = []
+        transcript = ""
+        try:
+            transcript = self._clean(self._transcribe(audio, model_size, language, bool(download_missing), bool(return_timestamps)))
+        except Exception as exc:
+            warnings.append(f"transcription_failed={exc!r}")
+        if not transcript and bool(use_fallback_if_transcript_empty):
+            transcript = self._clean(fallback_speech_line)
+            if transcript:
+                warnings.append("used_fallback_speech_line")
+
+        token = str(speech_token or "<speech1>")
+        speech_sentence = self._replace_tokens(speech_template, transcript, token)
+        base_prompt = self._replace_tokens(text_prompt, transcript, token)
+        compiled = self._clean(str(join_separator or " ").join(part for part in [base_prompt, speech_sentence] if part))
+        report = _json_report({
+            "node": "IAMCCS_CineAudioTranscriptPromptCompiler",
+            "model_size": str(model_size),
+            "language": str(language),
+            "has_transcript": bool(transcript),
+            "compiled_prompt_chars": len(compiled),
+            "warnings": warnings,
+            "truth": "One IAMCCS node replaces Load Whisper + Audio To Text + StringReplace + JoinString for transcript-driven speech prompt injection.",
+        })
+        return compiled, transcript, report
+
+
 class IAMCCS_CineDialogueLineRouter:
     """Split dialogue/foley board metadata into queue-ready line prompts."""
 
@@ -1771,6 +1899,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_BoardMaker_DialogueFoley": IAMCCS_BoardMaker_DialogueFoley,
     "IAMCCS_CineInfo3": IAMCCS_CineInfo3,
     "IAMCCS_CineSpeech1PromptCompiler": IAMCCS_CineSpeech1PromptCompiler,
+    "IAMCCS_CineAudioTranscriptPromptCompiler": IAMCCS_CineAudioTranscriptPromptCompiler,
     "IAMCCS_CineDialogueLineRouter": IAMCCS_CineDialogueLineRouter,
     "IAMCCS_CineTimelineAudioMixer": IAMCCS_CineTimelineAudioMixer,
     "IAMCCS_AudioBoardArranger": IAMCCS_AudioBoardArranger,
@@ -1791,6 +1920,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_BoardMaker_DialogueFoley": "IAMCCS BoardMaker Dialogue Foley",
     "IAMCCS_CineInfo3": "IAMCCS Cine Info 3",
     "IAMCCS_CineSpeech1PromptCompiler": "IAMCCS Speech1 Prompt Compiler",
+    "IAMCCS_CineAudioTranscriptPromptCompiler": "IAMCCS Audio Transcript Prompt Compiler",
     "IAMCCS_CineDialogueLineRouter": "IAMCCS Dialogue Line Router",
     "IAMCCS_CineTimelineAudioMixer": "IAMCCS Timeline Audio Mixer",
     "IAMCCS_AudioBoardArranger": "IAMCCS AudioBoard Arranger",
