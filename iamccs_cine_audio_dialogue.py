@@ -1517,7 +1517,7 @@ class IAMCCS_CineSpeech1PromptCompiler:
 
 
 class IAMCCS_CineAudioTranscriptPromptCompiler:
-    """Transcribe audio and inject it into a filmmaker prompt with <speech1>/<Transcript1> tokens."""
+    """Inject a Speech Line into a filmmaker prompt with the original <Transcript1> replacement flow."""
 
     _PIPELINE_CACHE: Dict[str, Any] = {}
 
@@ -1528,19 +1528,20 @@ class IAMCCS_CineAudioTranscriptPromptCompiler:
                 "audio": ("AUDIO",),
                 "text_prompt": ("STRING", {"default": "", "multiline": True, "forceInput": True}),
                 "fallback_speech_line": ("STRING", {"default": "", "multiline": True, "forceInput": True}),
-                "speech_template": ("STRING", {"default": 'The speaker says "<speech1>"', "multiline": True}),
-                "speech_token": ("STRING", {"default": "<speech1>"}),
+                "speech_template": ("STRING", {"default": 'The speaker says "<Transcript1>"', "multiline": True}),
+                "speech_token": ("STRING", {"default": "<Transcript1>"}),
                 "join_separator": ("STRING", {"default": " "}),
                 "model_size": (["tiny", "small", "medium", "medium.en", "base", "large", "large-v2", "large-v3", "large-v3-turbo"], {"default": "tiny"}),
                 "language": (["auto", "de", "en", "es", "fr", "it", "ja", "ko", "nl", "pt", "ru", "zh"], {"default": "auto"}),
                 "download_missing": ("BOOLEAN", {"default": False}),
                 "return_timestamps": ("BOOLEAN", {"default": False}),
                 "use_fallback_if_transcript_empty": ("BOOLEAN", {"default": True}),
+                "speech_source": (["manual_speech_line", "transcribe_then_fallback", "transcribe_audio_only", "speech_line_only"], {"default": "manual_speech_line"}),
             }
         }
 
     RETURN_TYPES = ("STRING", "STRING", "STRING")
-    RETURN_NAMES = ("compiled_prompt", "transcript", "report")
+    RETURN_NAMES = ("compiled_prompt", "speech_line", "report")
     FUNCTION = "compile"
     CATEGORY = "IAMCCS/Cine/01 Prompting"
 
@@ -1616,32 +1617,40 @@ class IAMCCS_CineAudioTranscriptPromptCompiler:
         download_missing,
         return_timestamps,
         use_fallback_if_transcript_empty,
+        speech_source="manual_speech_line",
     ):
         warnings: List[str] = []
-        transcript = ""
-        try:
-            transcript = self._clean(self._transcribe(audio, model_size, language, bool(download_missing), bool(return_timestamps)))
-        except Exception as exc:
-            warnings.append(f"transcription_failed={exc!r}")
-        if not transcript and bool(use_fallback_if_transcript_empty):
-            transcript = self._clean(fallback_speech_line)
-            if transcript:
-                warnings.append("used_fallback_speech_line")
+        speech_line = ""
+        source = str(speech_source or "manual_speech_line")
+        if source in {"manual_speech_line", "speech_line_only"}:
+            speech_line = self._clean(fallback_speech_line)
+            if speech_line:
+                warnings.append("used_manual_speech_line")
+        else:
+            try:
+                speech_line = self._clean(self._transcribe(audio, model_size, language, bool(download_missing), bool(return_timestamps)))
+            except Exception as exc:
+                warnings.append(f"transcription_failed={exc!r}")
+            if not speech_line and source == "transcribe_then_fallback":
+                speech_line = self._clean(fallback_speech_line)
+                if speech_line:
+                    warnings.append("used_fallback_speech_line")
 
-        token = str(speech_token or "<speech1>")
-        speech_sentence = self._replace_tokens(speech_template, transcript, token)
-        base_prompt = self._replace_tokens(text_prompt, transcript, token)
+        token = str(speech_token or "<Transcript1>")
+        speech_sentence = self._replace_tokens(speech_template, speech_line, token)
+        base_prompt = self._replace_tokens(text_prompt, speech_line, token)
         compiled = self._clean(str(join_separator or " ").join(part for part in [base_prompt, speech_sentence] if part))
         report = _json_report({
             "node": "IAMCCS_CineAudioTranscriptPromptCompiler",
             "model_size": str(model_size),
             "language": str(language),
-            "has_transcript": bool(transcript),
+            "speech_source": source,
+            "has_speech_line": bool(speech_line),
             "compiled_prompt_chars": len(compiled),
             "warnings": warnings,
-            "truth": "One IAMCCS node replaces Load Whisper + Audio To Text + StringReplace + JoinString for transcript-driven speech prompt injection.",
+            "truth": "Original IAMCCS behavior: Speech Line is the text injected into the prompt. Audio transcription is optional and is not used unless speech_source asks for it.",
         })
-        return compiled, transcript, report
+        return compiled, speech_line, report
 
 
 class IAMCCS_CineDialogueLineRouter:

@@ -2,6 +2,10 @@ import json
 import math
 import os
 import hashlib
+import importlib.util
+import re
+import sys
+import types
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -16,6 +20,7 @@ from comfy_api.latest import InputImpl
 
 WAN_SHOTBOARD_TYPE = "IAMCCS_WAN_SHOTBOARD"
 WAN_TIMELINE_PLAN_TYPE = "IAMCCS_WAN_TIMELINE_PLAN"
+_ORIGINAL_PROMPTRELAY_MODULE = None
 
 
 def _bool(value: Any) -> bool:
@@ -51,6 +56,45 @@ def _parse_json(value: Any) -> Dict[str, Any]:
         return parsed if isinstance(parsed, dict) else {}
     except Exception:
         return {}
+
+
+def _load_original_promptrelay_module():
+    global _ORIGINAL_PROMPTRELAY_MODULE
+    if _ORIGINAL_PROMPTRELAY_MODULE is not None:
+        return _ORIGINAL_PROMPTRELAY_MODULE
+
+    custom_nodes_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    promptrelay_dir = os.path.join(custom_nodes_dir, "ComfyUI-PromptRelay")
+    nodes_path = os.path.join(promptrelay_dir, "nodes.py")
+    if not os.path.exists(nodes_path):
+        raise ImportError(f"ComfyUI-PromptRelay nodes.py not found: {nodes_path}")
+
+    package_name = "_iamccs_wan_original_promptrelay"
+    if package_name not in sys.modules:
+        package = types.ModuleType(package_name)
+        package.__file__ = os.path.join(promptrelay_dir, "__init__.py")
+        package.__path__ = [promptrelay_dir]
+        package.__package__ = package_name
+        sys.modules[package_name] = package
+
+    module_name = f"{package_name}.nodes"
+    loaded = sys.modules.get(module_name)
+    if loaded is not None and hasattr(loaded, "_encode_relay"):
+        _ORIGINAL_PROMPTRELAY_MODULE = loaded
+        return loaded
+
+    spec = importlib.util.spec_from_file_location(module_name, nodes_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load ComfyUI-PromptRelay module from: {nodes_path}")
+    module = importlib.util.module_from_spec(spec)
+    module.__package__ = package_name
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    if not hasattr(module, "_encode_relay"):
+        raise ImportError("ComfyUI-PromptRelay module loaded, but _encode_relay is missing.")
+
+    _ORIGINAL_PROMPTRELAY_MODULE = module
+    return module
 
 
 def _split_paths(value: Any) -> List[str]:
@@ -106,9 +150,11 @@ def _is_visual_segment(row: Dict[str, Any]) -> bool:
 
 def _is_image_segment(row: Dict[str, Any]) -> bool:
     kind = str(row.get("type") or row.get("kind") or "").strip().lower()
+    if kind in {"audio", "sound", "voice", "music", "text", "relay", "prompt", "prompt_relay", "text_relay", "transition_relay", "slot_relay", "bridge"}:
+        return False
     if kind in {"image", "keyframe", "frame", "still", "shot"}:
         return True
-    if row.get("ref") is not None or row.get("image_ref") is not None:
+    if _segment_ref(row) is not None:
         return True
     return bool(row.get("path") or row.get("image_path") or row.get("imageFile") or row.get("imageTruthPath"))
 
@@ -134,11 +180,21 @@ def _segment_length(row: Dict[str, Any], fps: int) -> int:
 
 
 def _segment_prompt(row: Dict[str, Any]) -> str:
-    for key in ("prompt", "local_prompt", "localPrompt", "text", "caption"):
+    for key in ("relay_prompt", "local_prompt", "localPrompt", "prompt", "text", "caption", "note"):
         value = str(row.get(key) or "").strip()
         if value:
             return value
     return ""
+
+
+def _segment_prompt_enabled(row: Dict[str, Any]) -> bool:
+    if _bool(row.get("relay_manual_off")) or _bool(row.get("promptrelay_manual_off")):
+        return False
+    if "use_prompt" in row:
+        return _bool(row.get("use_prompt"))
+    if "usePrompt" in row:
+        return _bool(row.get("usePrompt"))
+    return bool(_segment_prompt(row))
 
 
 def _segment_ref(row: Dict[str, Any]) -> Optional[int]:
@@ -159,6 +215,34 @@ def _segment_path(row: Dict[str, Any], paths: List[str]) -> str:
     if ref is not None and 1 <= ref <= len(paths):
         return paths[ref - 1]
     return ""
+
+
+def _relay_kind(row: Dict[str, Any]) -> str:
+    raw = str(row.get("relay_kind") or row.get("relayKind") or "").strip().lower()
+    if raw:
+        return raw
+    if _bool(row.get("slotRelay")) or _bool(row.get("slot_relay")):
+        return "slot"
+    if _bool(row.get("transitionRelay")) or _bool(row.get("transition_relay")):
+        return "transition"
+    kind = str(row.get("type") or row.get("kind") or "").strip().lower()
+    if kind in {"slot_relay", "in_slot_relay"}:
+        return "slot"
+    if kind in {"transition_relay", "text", "prompt_relay", "text_relay"}:
+        return "transition"
+    return ""
+
+
+def _source_prompt_for_pair(segments: List[Dict[str, Any]], pair: Dict[str, Any]) -> str:
+    from_id = str(pair.get("from_id") or "")
+    for seg in segments:
+        if from_id and str(seg.get("id") or "") == from_id:
+            prompt = _segment_prompt(seg)
+            if prompt:
+                return prompt
+            break
+    pair_prompt = str(pair.get("prompt") or "").strip()
+    return pair_prompt or "maintain the current reference image composition and begin the motion cleanly"
 
 
 def _image_segment_triplet(image_segments: List[Dict[str, Any]]) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
@@ -208,6 +292,9 @@ def _flf_pairs(global_prompt: str, image_segments: List[Dict[str, Any]], global_
         start_seg = image_segments[index]
         end_seg = image_segments[index + 1]
         motion = max(1.0, min(2.0, _safe_float(start_seg.get("motion", 1.0), 1.0)))
+        chunk_start = int(start_seg.get("start") or 0)
+        next_image_start = int(end_seg.get("start") or (chunk_start + int(start_seg.get("length") or 1)))
+        chunk_length = max(1, next_image_start - chunk_start)
         pairs.append(
             {
                 "index": index,
@@ -217,14 +304,115 @@ def _flf_pairs(global_prompt: str, image_segments: List[Dict[str, Any]], global_
                 "to_id": end_seg.get("id"),
                 "from_path": start_seg.get("path") or "",
                 "to_path": end_seg.get("path") or "",
-                "start": int(start_seg.get("start") or 0),
-                "length": max(1, int(start_seg.get("length") or 1)),
-                "end": int(start_seg.get("end") or 0),
+                "start": chunk_start,
+                "length": chunk_length,
+                "end": chunk_start + chunk_length,
                 "motion": motion,
                 "prompt": _prompt_from_segments(global_prompt, start_seg, end_seg, global_only=global_only),
             }
         )
     return pairs
+
+
+def _relay_prompt_segments_for_pair(segments: List[Dict[str, Any]], pair: Dict[str, Any]) -> List[Dict[str, Any]]:
+    chunk_start = int(pair.get("start") or 0)
+    chunk_length = max(1, int(pair.get("length") or 1))
+    chunk_end = chunk_start + chunk_length
+    active: List[Dict[str, Any]] = []
+    for seg in sorted(segments, key=lambda item: (int(item.get("start") or 0), int(item.get("index") or 0))):
+        prompt = str(seg.get("prompt") or "").strip()
+        if not prompt or not _segment_prompt_enabled(seg):
+            continue
+        seg_start = int(seg.get("start") or 0)
+        seg_end = max(seg_start + 1, int(seg.get("end") or (seg_start + int(seg.get("length") or 1))))
+        if seg_end <= chunk_start or seg_start >= chunk_end:
+            continue
+        active.append(
+            {
+                **seg,
+                "prompt": prompt,
+                "_clamped_start": max(chunk_start, seg_start),
+                "_relay_kind": _relay_kind(seg),
+            }
+        )
+    if not active:
+        return []
+
+    relay_segments: List[Dict[str, Any]] = []
+    first_start = max(chunk_start, int(active[0].get("_clamped_start") or chunk_start))
+    if first_start > chunk_start:
+        relay_segments.append(
+            {
+                "prompt": _source_prompt_for_pair(segments, pair),
+                "length": max(1, first_start - chunk_start),
+                "start": 0,
+                "source_id": pair.get("from_id"),
+                "source_type": "image",
+                "relay_kind": "implicit_source",
+            }
+        )
+    for index, seg in enumerate(active):
+        start = max(chunk_start, int(seg.get("_clamped_start") or chunk_start))
+        if index + 1 < len(active):
+            end = max(start + 1, min(chunk_end, int(active[index + 1].get("_clamped_start") or chunk_end)))
+        else:
+            end = chunk_end
+        relay_segments.append(
+            {
+                "prompt": str(seg.get("prompt") or "").strip(),
+                "length": max(1, end - start),
+                "start": max(0, start - chunk_start),
+                "source_id": seg.get("id"),
+                "source_type": seg.get("type"),
+                "relay_kind": seg.get("_relay_kind") or ("base" if str(seg.get("type") or "") == "image" else "transition"),
+                "parent_segment_id": seg.get("parentSegmentId") or seg.get("parent_segment_id") or "",
+            }
+        )
+
+    diff = chunk_length - sum(int(seg["length"]) for seg in relay_segments)
+    if relay_segments:
+        relay_segments[-1]["length"] = max(1, int(relay_segments[-1]["length"]) + diff)
+    return relay_segments
+
+
+def _promptrelay_chunks(global_prompt: str, segments: List[Dict[str, Any]], pairs: List[Dict[str, Any]], epsilon: float, fps: int) -> List[Dict[str, Any]]:
+    chunks: List[Dict[str, Any]] = []
+    for pair in pairs:
+        relay_segments = _relay_prompt_segments_for_pair(segments, pair)
+        local_prompts = " | ".join(str(seg.get("prompt") or "").strip() for seg in relay_segments if str(seg.get("prompt") or "").strip())
+        segment_lengths = ",".join(str(int(seg.get("length") or 1)) for seg in relay_segments)
+        chunks.append(
+            {
+                "index": int(pair.get("index") or 0),
+                "chunk_index": int(pair.get("index") or 0),
+                "from_path": str(pair.get("from_path") or ""),
+                "to_path": str(pair.get("to_path") or ""),
+                "global_prompt": str(global_prompt or ""),
+                "local_prompts": local_prompts,
+                "segment_lengths": segment_lengths,
+                "timeline_data": json.dumps({"segments": relay_segments}, ensure_ascii=False),
+                "max_frames": max(1, int(pair.get("length") or 1)),
+                "epsilon": float(epsilon),
+                "fps": float(fps),
+                "promptrelay_enabled": bool(local_prompts.strip()),
+                "segments": relay_segments,
+            }
+        )
+    return chunks
+
+
+def _selected_relay_chunk(plan: Dict[str, Any], chunk_index: int) -> Dict[str, Any]:
+    board = dict(plan.get("board") or {})
+    chunks = plan.get("promptrelay_chunks") or board.get("promptrelay_chunks") or []
+    if not isinstance(chunks, list) or not chunks:
+        return {}
+    selected_index = min(max(0, int(chunk_index or 0)), max(0, len(chunks) - 1))
+    chunk = chunks[selected_index]
+    return chunk if isinstance(chunk, dict) else {}
+
+
+def _hash_text(text: Any) -> str:
+    return hashlib.sha1(str(text or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
 
 
 def _image_tensor_from_path(path: str, width: int, height: int, resize_method: str, multiple_of: int) -> torch.Tensor:
@@ -314,22 +502,57 @@ def _normalize_segments(payload: Dict[str, Any], image_paths: List[str], fps: in
         end = max(start + length, start + 1)
         max_end = max(max_end, end)
         ref = _segment_ref(row)
-        normalized.append(
-            {
-                "index": index,
-                "id": str(row.get("id") or row.get("label") or f"seg_{index:03d}"),
-                "type": str(row.get("type") or "image"),
-                "start": start,
-                "length": length,
-                "end": end,
-                "ref": ref,
-                "path": _segment_path(row, image_paths),
-                "prompt": _segment_prompt(row),
-                "use_guide": _bool(row.get("use_guide") if "use_guide" in row else row.get("useGuide")),
-                "motion": max(1.0, min(2.0, _safe_float(row.get("motion", row.get("guideStrength", row.get("guide_strength", 1.0))), 1.0))),
-                "guide_strength": max(1.0, min(2.0, _safe_float(row.get("motion", row.get("guideStrength", row.get("guide_strength", 1.0))), 1.0))),
-            }
-        )
+        normalized_row = {
+            "index": index,
+            "id": str(row.get("id") or row.get("label") or f"seg_{index:03d}"),
+            "type": str(row.get("type") or "image"),
+            "label": str(row.get("label") or ""),
+            "relay_kind": _relay_kind(row),
+            "parentSegmentId": str(row.get("parentSegmentId") or row.get("parent_segment_id") or ""),
+            "slotRelay": _bool(row.get("slotRelay") or row.get("slot_relay")),
+            "transitionRelay": _bool(row.get("transitionRelay") or row.get("transition_relay")),
+            "start": start,
+            "length": length,
+            "end": end,
+            "ref": ref,
+            "path": _segment_path(row, image_paths),
+            "prompt": _segment_prompt(row),
+            "use_guide": _bool(row.get("use_guide") if "use_guide" in row else row.get("useGuide")),
+            "use_prompt": _segment_prompt_enabled(row),
+            "motion": max(1.0, min(2.0, _safe_float(row.get("motion", row.get("guideStrength", row.get("guide_strength", 1.0))), 1.0))),
+            "guide_strength": max(1.0, min(2.0, _safe_float(row.get("motion", row.get("guideStrength", row.get("guide_strength", 1.0))), 1.0))),
+        }
+        normalized.append(normalized_row)
+        nested_relays = row.get("slot_relays") or row.get("slotRelays") or []
+        if isinstance(nested_relays, list) and _is_image_segment(normalized_row):
+            for relay_index, relay in enumerate(nested_relays):
+                if not isinstance(relay, dict):
+                    continue
+                relay_start = max(start, min(end - 1, _safe_int(relay.get("start"), start)))
+                relay_length = max(1, min(end - relay_start, _safe_int(relay.get("length"), max(1, end - relay_start))))
+                relay_prompt = _segment_prompt(relay)
+                normalized.append(
+                    {
+                        "index": index + (relay_index + 1) / 1000.0,
+                        "id": str(relay.get("id") or f"{normalized_row['id']}_slotrelay_{relay_index + 1}"),
+                        "type": "text",
+                        "label": str(relay.get("label") or "slot_relay"),
+                        "relay_kind": "slot",
+                        "parentSegmentId": str(normalized_row["id"]),
+                        "slotRelay": True,
+                        "transitionRelay": False,
+                        "start": relay_start,
+                        "length": relay_length,
+                        "end": relay_start + relay_length,
+                        "ref": None,
+                        "path": "",
+                        "prompt": relay_prompt,
+                        "use_guide": False,
+                        "use_prompt": _segment_prompt_enabled(relay),
+                        "motion": 1.0,
+                        "guide_strength": 1.0,
+                    }
+                )
     normalized.sort(key=lambda item: (item["start"], item["index"]))
     return normalized, max_end
 
@@ -475,9 +698,10 @@ class IAMCCS_WanShotboardPlannerPure:
 
         first_seg, middle_seg, last_seg = _image_segment_triplet(image_segments)
         pair_plan = _flf_pairs(str(global_prompt or ""), image_segments, global_only=global_prompt_only)
+        relay_chunks = _promptrelay_chunks(str(global_prompt or ""), segments, pair_plan, float(promptrelay_epsilon), fps)
         start_seg = first_seg
         end_seg = last_seg
-        local_prompts = [seg["prompt"] for seg in segments if str(seg.get("prompt") or "").strip()]
+        local_prompts = [seg["prompt"] for seg in segments if _segment_prompt_enabled(seg) and str(seg.get("prompt") or "").strip()]
         positive_parts = [str(global_prompt or "").strip()] if global_prompt_only else [str(global_prompt or "").strip()] + local_prompts
         positive_prompt = "\n".join(part for part in positive_parts if part)
 
@@ -493,10 +717,14 @@ class IAMCCS_WanShotboardPlannerPure:
             "segments": segments,
             "timeline_order": image_segments,
             "flf_pairs": pair_plan,
+            "promptrelay_chunks": relay_chunks,
+            "promptrelay_enabled": any(_bool(chunk.get("promptrelay_enabled")) for chunk in relay_chunks),
+            "promptrelay_epsilon": float(promptrelay_epsilon),
             "local_prompts": local_prompts,
             "global_prompt_only": bool(global_prompt_only),
             "globalPromptOnly": bool(global_prompt_only),
             "segment_lengths": [int(seg["length"]) for seg in segments],
+            "promptrelay_segment_lengths": [chunk.get("segment_lengths", "") for chunk in relay_chunks],
             "duration_frames": int(duration_frames),
             "duration_seconds": float(truth_seconds),
             "frame_rate": int(fps),
@@ -567,6 +795,25 @@ class IAMCCS_WanShotboardPlannerPure:
                     ensure_ascii=True,
                 )
             )
+            print(
+                "[IAMCCS WAN PURE][PromptRelayChunks] "
+                + json.dumps(
+                    [
+                        {
+                            "index": chunk.get("index"),
+                            "from_path": chunk.get("from_path"),
+                            "to_path": chunk.get("to_path"),
+                            "enabled": chunk.get("promptrelay_enabled"),
+                            "global_prompt_len": len(str(chunk.get("global_prompt") or "")),
+                            "local_prompts": chunk.get("local_prompts"),
+                            "segment_lengths": chunk.get("segment_lengths"),
+                            "segments": chunk.get("segments"),
+                        }
+                        for chunk in relay_chunks
+                    ],
+                    ensure_ascii=True,
+                )
+            )
         return (board,)
 
 
@@ -602,14 +849,19 @@ class IAMCCS_WanCineInfoPure:
         flf_pairs = board.get("flf_pairs") or []
         if not isinstance(flf_pairs, list):
             flf_pairs = []
+        promptrelay_chunks = board.get("promptrelay_chunks") or []
+        if not isinstance(promptrelay_chunks, list):
+            promptrelay_chunks = []
 
         chunk_count = len(flf_pairs)
+        active_chunk_count = chunk_count
         timeline_plan = {
             "schema": "iamccs.wan.timeline_plan",
             "schema_version": 1,
             "board": board,
             "timeline_order": timeline_order,
             "flf_pairs": flf_pairs,
+            "promptrelay_chunks": promptrelay_chunks,
             "frame_rate": float(board.get("frame_rate") or 16),
             "duration_frames": int(board.get("duration_frames") or 1),
             "image_width": int(board.get("image_width") or 832),
@@ -617,12 +869,15 @@ class IAMCCS_WanCineInfoPure:
             "image_resize_method": str(board.get("image_resize_method") or "crop"),
             "image_multiple_of": int(board.get("image_multiple_of") or 16),
             "chunk_count": chunk_count,
+            "active_chunk_count": active_chunk_count,
         }
         timeline_order_json = json.dumps(
             {
                 "timeline_order": timeline_order,
                 "flf_pairs": flf_pairs,
+                "promptrelay_chunks": promptrelay_chunks,
                 "chunk_count": chunk_count,
+                "active_chunk_count": active_chunk_count,
             },
             ensure_ascii=True,
         )
@@ -633,6 +888,9 @@ class IAMCCS_WanCineInfoPure:
                 "duration_frames": board.get("duration_frames"),
                 "frame_rate": board.get("frame_rate"),
                 "chunk_count": chunk_count,
+                "active_chunk_count": active_chunk_count,
+                "promptrelay_enabled": bool(board.get("promptrelay_enabled")),
+                "promptrelay_chunks": len(promptrelay_chunks),
                 "wan_pure_isolated": board.get("wan_pure_isolated"),
             },
             ensure_ascii=True,
@@ -661,8 +919,23 @@ class IAMCCS_WanCineInfoPure:
 
 class IAMCCS_WanFLFPairFromTimeline:
     CATEGORY = "IAMCCS/Wan/PURE"
-    RETURN_TYPES = ("IMAGE", "IMAGE", "STRING", "INT", "FLOAT", "FLOAT", "INT", "INT", "STRING")
-    RETURN_NAMES = ("start_image", "end_image", "prompt", "frames", "motion", "frame_rate", "chunk_index", "chunk_count", "report")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "STRING", "INT", "FLOAT", "FLOAT", "INT", "INT", "STRING", "STRING", "STRING", "INT", "FLOAT", "STRING")
+    RETURN_NAMES = (
+        "start_image",
+        "end_image",
+        "prompt",
+        "frames",
+        "motion",
+        "frame_rate",
+        "chunk_index",
+        "chunk_count",
+        "report",
+        "relay_local_prompts",
+        "relay_segment_lengths",
+        "relay_max_frames",
+        "relay_epsilon",
+        "relay_timeline_data",
+    )
     FUNCTION = "select"
 
     @classmethod
@@ -688,12 +961,16 @@ class IAMCCS_WanFLFPairFromTimeline:
         fallback_start = str(first_seg.get("path") or board.get("first_image_path") or board.get("start_image_path") or "")
         fallback_end = str(second_seg.get("path") or board.get("middle_image_path") or board.get("end_image_path") or fallback_start)
         chunk_count = len(pairs)
-        selected_index = min(max(0, int(chunk_index or 0)), max(0, chunk_count - 1))
-        selected = pairs[selected_index] if pairs else {
+        requested_index = max(0, int(chunk_index or 0))
+        inactive = requested_index >= chunk_count
+        selected_index = requested_index if not inactive else requested_index
+        selected = pairs[requested_index] if not inactive else {
             "from_path": fallback_start,
-            "to_path": fallback_end,
-            "prompt": str(board.get("positive_prompt") or board.get("global_prompt") or ""),
-            "length": int(plan.get("duration_frames") or board.get("duration_frames") or 1),
+            "to_path": fallback_start,
+            "prompt": "",
+            "length": 1,
+            "motion": 1.0,
+            "inactive": True,
         }
 
         width = int(plan.get("image_width") or board.get("image_width") or 832)
@@ -704,14 +981,22 @@ class IAMCCS_WanFLFPairFromTimeline:
         end_path = str(selected.get("to_path") or fallback_end)
         start_image = _image_tensor_from_path(start_path, width, height, resize_method, multiple_of)
         end_image = _image_tensor_from_path(end_path, width, height, resize_method, multiple_of)
-        prompt = str(selected.get("prompt") or board.get("positive_prompt") or board.get("global_prompt") or "")
-        frames = int(selected.get("length") or plan.get("duration_frames") or 1)
+        prompt = "" if inactive else str(selected.get("prompt") or board.get("positive_prompt") or board.get("global_prompt") or "")
+        frames = int(selected.get("length") or 1) if inactive else int(selected.get("length") or plan.get("duration_frames") or 1)
         motion = max(1.0, min(2.0, _safe_float(selected.get("motion", 1.0), 1.0)))
         frame_rate = float(plan.get("frame_rate") or board.get("frame_rate") or 16)
+        relay_chunk = {} if inactive else _selected_relay_chunk(plan, selected_index)
+        relay_local_prompts = "" if inactive else str(relay_chunk.get("local_prompts") or "")
+        relay_segment_lengths = "" if inactive else str(relay_chunk.get("segment_lengths") or "")
+        relay_max_frames = 1 if inactive else int(relay_chunk.get("max_frames") or frames)
+        relay_epsilon = float(_safe_float(relay_chunk.get("epsilon", board.get("promptrelay_epsilon", 0.001)), 0.001))
+        relay_timeline_data = str(relay_chunk.get("timeline_data") or json.dumps({"segments": []}, ensure_ascii=False))
         report = json.dumps(
             {
                 "chunk_index": selected_index,
+                "requested_chunk_index": requested_index,
                 "chunk_count": chunk_count,
+                "active": not inactive,
                 "from_path": start_path,
                 "to_path": end_path,
                 "frames": frames,
@@ -724,6 +1009,9 @@ class IAMCCS_WanFLFPairFromTimeline:
                     "multiple_of": multiple_of,
                 },
                 "prompt": prompt,
+                "promptrelay_enabled": bool(relay_local_prompts.strip()),
+                "relay_local_count": len([part for part in relay_local_prompts.split("|") if part.strip()]),
+                "relay_segment_lengths": relay_segment_lengths,
                 "from_file": _path_debug(start_path),
                 "to_file": _path_debug(end_path),
             },
@@ -731,7 +1019,237 @@ class IAMCCS_WanFLFPairFromTimeline:
         )
         if _bool(board.get("debug_verbose")):
             print(f"[IAMCCS WAN PURE][PairFromTimeline] {report}")
-        return (start_image, end_image, prompt, frames, motion, frame_rate, selected_index, chunk_count, report)
+        return (
+            start_image,
+            end_image,
+            prompt,
+            frames,
+            motion,
+            frame_rate,
+            selected_index,
+            chunk_count,
+            report,
+            relay_local_prompts,
+            relay_segment_lengths,
+            relay_max_frames,
+            relay_epsilon,
+            relay_timeline_data,
+        )
+
+
+class IAMCCS_WanChunkGatePure:
+    CATEGORY = "IAMCCS/Wan/PURE"
+    RETURN_TYPES = ("IMAGE", "BOOLEAN", "STRING")
+    RETURN_NAMES = ("images", "active", "report")
+    FUNCTION = "gate"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline_plan": (WAN_TIMELINE_PLAN_TYPE,),
+                "chunk_index": ("INT", {"default": 0, "min": 0, "max": 999, "step": 1}),
+            },
+            "optional": {
+                "source_images": ("IMAGE", {"lazy": True}),
+                "generated_images": ("IMAGE", {"lazy": True}),
+            },
+        }
+
+    @staticmethod
+    def _active_count(timeline_plan: Dict[str, Any]) -> int:
+        plan = dict(timeline_plan or {})
+        try:
+            return max(0, int(plan.get("active_chunk_count", plan.get("chunk_count", 0)) or 0))
+        except Exception:
+            return 0
+
+    def check_lazy_status(self, timeline_plan, chunk_index=0, source_images=None, generated_images=None):
+        active = int(chunk_index or 0) < self._active_count(timeline_plan)
+        needed = []
+        if active:
+            if generated_images is None:
+                needed.append("generated_images")
+        elif source_images is None:
+            needed.append("source_images")
+        return needed
+
+    def gate(self, timeline_plan, chunk_index=0, source_images=None, generated_images=None):
+        plan = dict(timeline_plan or {})
+        index = int(chunk_index or 0)
+        active_count = self._active_count(plan)
+        active = index < active_count
+        if active and generated_images is not None:
+            images = generated_images
+            mode = "ACTIVE_GENERATED"
+        elif source_images is not None:
+            images = source_images
+            mode = "INACTIVE_PASSTHROUGH"
+        elif generated_images is not None:
+            images = generated_images
+            mode = "FALLBACK_GENERATED"
+        else:
+            raise ValueError("IAMCCS_WanChunkGatePure needs source_images or generated_images.")
+        report = json.dumps(
+            {
+                "node": "IAMCCS_WanChunkGatePure",
+                "chunk_index": index,
+                "active_chunk_count": active_count,
+                "active": bool(active),
+                "mode": mode,
+            },
+            ensure_ascii=True,
+        )
+        board = dict(plan.get("board") or {})
+        if _bool(board.get("debug_verbose")):
+            print(f"[IAMCCS WAN PURE][ChunkGate] {report}")
+        return images, bool(active), report
+
+
+class IAMCCS_WanRelayOrBypassPure:
+    CATEGORY = "IAMCCS/Wan/PURE"
+    RETURN_TYPES = ("MODEL", "CONDITIONING", "BOOLEAN", "STRING")
+    RETURN_NAMES = ("model", "positive", "promptrelay_enabled", "report")
+    FUNCTION = "execute"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline_plan": (WAN_TIMELINE_PLAN_TYPE,),
+                "model": ("MODEL",),
+                "positive": ("CONDITIONING",),
+                "chunk_index": ("INT", {"default": 0, "min": 0, "max": 999, "step": 1}),
+            },
+            "optional": {
+                "clip": ("CLIP", {"lazy": True}),
+                "latent": ("LATENT", {"lazy": True}),
+                "relay_options": ("RELAY_OPTIONS",),
+            },
+        }
+
+    @staticmethod
+    def _relay_data(timeline_plan: Dict[str, Any], chunk_index: int) -> Tuple[bool, str, str, str, float, Dict[str, Any]]:
+        plan = dict(timeline_plan or {})
+        board = dict(plan.get("board") or {})
+        chunk = _selected_relay_chunk(plan, chunk_index)
+        global_prompt = str(chunk.get("global_prompt") or board.get("global_prompt") or "")
+        local_prompts = str(chunk.get("local_prompts") or "")
+        segment_lengths = str(chunk.get("segment_lengths") or "")
+        epsilon = float(_safe_float(chunk.get("epsilon", board.get("promptrelay_epsilon", 0.001)), 0.001))
+        active = bool(local_prompts.strip())
+        return active, global_prompt, local_prompts, segment_lengths, epsilon, chunk
+
+    def check_lazy_status(
+        self,
+        timeline_plan,
+        model,
+        positive,
+        chunk_index,
+        clip=None,
+        latent=None,
+        relay_options=None,
+    ):
+        active, *_ = self._relay_data(timeline_plan, chunk_index)
+        needed = []
+        if active:
+            if clip is None:
+                needed.append("clip")
+            if latent is None:
+                needed.append("latent")
+        return needed
+
+    def execute(
+        self,
+        timeline_plan,
+        model,
+        positive,
+        chunk_index,
+        clip=None,
+        latent=None,
+        relay_options=None,
+    ):
+        active, global_prompt, local_prompts, segment_lengths, epsilon, chunk = self._relay_data(timeline_plan, chunk_index)
+        locals_list = [part.strip() for part in str(local_prompts or "").split("|") if part.strip()]
+        length_parts = [part for part in re.split(r"[,;\s]+", str(segment_lengths or "")) if part.strip()]
+        report_base = {
+            "node": "IAMCCS_WanRelayOrBypassPure",
+            "chunk_index": int(chunk_index or 0),
+            "global_hash": _hash_text(global_prompt),
+            "local_hash": _hash_text(local_prompts),
+            "local_prompt_count": len(locals_list),
+            "segment_count": len(length_parts),
+            "segment_lengths": segment_lengths,
+            "epsilon": float(epsilon),
+            "from_path": chunk.get("from_path"),
+            "to_path": chunk.get("to_path"),
+        }
+        if not active:
+            report = json.dumps({**report_base, "promptrelay_enabled": False, "mode": "BYPASS_NO_LOCAL_PROMPTS"}, ensure_ascii=True)
+            return model, positive, False, report
+
+        if clip is None or latent is None:
+            report = json.dumps(
+                {
+                    **report_base,
+                    "promptrelay_enabled": False,
+                    "mode": "BYPASS_MISSING_INPUTS",
+                    "warning": "Relay active but clip or latent is missing.",
+                },
+                ensure_ascii=True,
+            )
+            print(
+                "[IAMCCS WAN PURE][RelayOrBypass] WARNING mode=BYPASS_MISSING_INPUTS "
+                f"chunk={int(chunk_index or 0)} clip={'present' if clip is not None else 'MISSING'} "
+                f"latent={'present' if latent is not None else 'MISSING'}"
+            )
+            return model, positive, False, report
+
+        try:
+            promptrelay_nodes = _load_original_promptrelay_module()
+            patched_model, relay_positive = promptrelay_nodes._encode_relay(
+                model,
+                clip,
+                latent,
+                global_prompt,
+                local_prompts,
+                segment_lengths,
+                epsilon,
+                relay_options,
+            )
+        except Exception as exc:
+            report = json.dumps(
+                {
+                    **report_base,
+                    "promptrelay_enabled": False,
+                    "mode": "BYPASS_RELAY_ERROR",
+                    "error": str(exc),
+                },
+                ensure_ascii=True,
+            )
+            print(f"[IAMCCS WAN PURE][RelayOrBypass] ERROR _encode_relay failed: {exc}. Falling back to bypass.")
+            return model, positive, False, report
+
+        report = json.dumps(
+            {
+                **report_base,
+                "promptrelay_enabled": True,
+                "mode": "PROMPT_RELAY_ORIGINAL_1TO1",
+                "first_local": locals_list[0][:220] if locals_list else "",
+                "last_local": locals_list[-1][:220] if locals_list else "",
+            },
+            ensure_ascii=True,
+        )
+        print(
+            "[IAMCCS WAN PURE][RelayOrBypass] "
+            f"PROMPT_RELAY_APPLIED chunk={int(chunk_index or 0)} "
+            f"locals={len(locals_list)} segments={len(length_parts)} "
+            f"global_hash={_hash_text(global_prompt)} local_hash={_hash_text(local_prompts)}"
+        )
+        for index, prompt in enumerate(locals_list[:20]):
+            length = length_parts[index] if index < len(length_parts) else "<missing>"
+            print(f"[IAMCCS WAN PURE][RelayOrBypass] relay[{index:02d}] length={length} prompt={prompt[:260]!r}")
+        return patched_model, relay_positive, True, report
 
 
 class IAMCCS_WanLoadImageFromPath:
@@ -816,6 +1334,8 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_WanShotboardPlannerPure": IAMCCS_WanShotboardPlannerPure,
     "IAMCCS_WanCineInfoPure": IAMCCS_WanCineInfoPure,
     "IAMCCS_WanFLFPairFromTimeline": IAMCCS_WanFLFPairFromTimeline,
+    "IAMCCS_WanChunkGatePure": IAMCCS_WanChunkGatePure,
+    "IAMCCS_WanRelayOrBypassPure": IAMCCS_WanRelayOrBypassPure,
     "IAMCCS_WanLoadImageFromPath": IAMCCS_WanLoadImageFromPath,
     "IAMCCS_WanLoadImageFromBoard": IAMCCS_WanLoadImageFromBoard,
 }
@@ -824,6 +1344,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_WanShotboardPlannerPure": "IAMCCS WAN Shotboard Planner PURE",
     "IAMCCS_WanCineInfoPure": "IAMCCS WAN CineInfo PURE",
     "IAMCCS_WanFLFPairFromTimeline": "IAMCCS WAN FLF Pair From Timeline",
+    "IAMCCS_WanChunkGatePure": "IAMCCS WAN Chunk Gate PURE",
+    "IAMCCS_WanRelayOrBypassPure": "IAMCCS WAN Relay Or Bypass PURE",
     "IAMCCS_WanLoadImageFromPath": "IAMCCS WAN Load Image From Path PURE",
     "IAMCCS_WanLoadImageFromBoard": "IAMCCS WAN Load Image From Board PURE",
 }
