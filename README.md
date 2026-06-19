@@ -9,6 +9,8 @@
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows + general nodes 4 ComfyUI
 
+## Version: 1.4.9 (Frame Designer V2 added)
+
 ## Version: 1.4.8 (Audioboard and other audio utilities)
 
 ## Version: 1.4.7 (New functions, utilities and bug fixed)

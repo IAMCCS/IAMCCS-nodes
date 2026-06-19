@@ -9683,20 +9683,18 @@ function renderShotboardV3(node) {
     }
 
     function createSlotRelayInSegment(source) {
-        const target = isTimelineImageSegment(source)
-            ? source
-            : (timeline.segments || []).find((item) => item.id === selectedId && isTimelineImageSegment(item));
+        const sourceId = String(source?.id || selectedId || "");
+        const target = (timeline.segments || []).find((item) => String(item.id || "") === sourceId && isTimelineImageSegment(item))
+            || (timeline.segments || []).find((item) => String(item.id || "") === String(selectedId || "") && isTimelineImageSegment(item));
         if (!isTimelineImageSegment(target)) {
             showTimelineNotice("Select an image slot first. Slot Relay belongs inside one image slot.");
             return;
         }
-        const sourceStart = Math.max(0, Math.round(Number(target.start || 0)));
-        const sourceLength = Math.max(2, Math.round(Number(target.length || defaultLen())));
-        const start = sourceStart + Math.floor(sourceLength / 2);
+        const win = generationWindowForImage(target);
         const relay = {
             id: newId("slotrelay"),
-            start,
-            length: Math.max(1, sourceStart + sourceLength - start),
+            start: Math.max(win.start, win.end - 1),
+            length: 1,
             prompt: "",
             note: "",
             use_prompt: false,
@@ -9707,11 +9705,72 @@ function renderShotboardV3(node) {
         };
         if (!Array.isArray(target.slot_relays)) target.slot_relays = [];
         target.slot_relays.push(relay);
-        target.slot_relays.sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
+        const relays = relayoutNestedSlotRelaysForImage(target);
         selectedId = target.id;
+        previewSegments = null;
+        console.info("[IAMCCS WAN PURE][SlotRelay] added", {
+            segment_id: target.id,
+            relay_count: relays.length,
+            generation_window: win,
+            relays: relays.map((item, index) => ({
+                index,
+                start: Math.round(Number(item.start || 0)),
+                length: Math.max(1, Math.round(Number(item.length || 1))),
+                prompt: String(item.prompt || ""),
+            })),
+        });
         showTimelineNotice("Slot Relay added as a prompt division inside the selected image slot.");
         writeTimeline({ force: true });
         draw();
+    }
+
+    function relayoutNestedSlotRelaysForImage(target) {
+        if (!isTimelineImageSegment(target)) return [];
+        const win = generationWindowForImage(target);
+        const relays = Array.isArray(target.slot_relays)
+            ? target.slot_relays.filter((relay) => relay && relay.slotRelay !== false)
+            : [];
+        target.slot_relays = relays;
+        if (!relays.length) return relays;
+        relays.sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
+        const phaseCount = relays.length + 1;
+        relays.forEach((relay, index) => {
+            const start = win.start + Math.round((win.length * (index + 1)) / phaseCount);
+            const next = index + 1 < relays.length
+                ? win.start + Math.round((win.length * (index + 2)) / phaseCount)
+                : win.end;
+            relay.start = Math.max(win.start, Math.min(win.end - 1, start));
+            relay.length = Math.max(1, Math.min(win.end, next) - relay.start);
+            relay.parentSegmentId = String(target.id || "");
+            relay.relay_kind = "slot";
+            relay.relayKind = "slot";
+            relay.slotRelay = true;
+            relay.transitionRelay = false;
+            relay.label = relay.label || `slot_relay_${index + 1}`;
+            relay.note = String(relay.note ?? relay.prompt ?? "");
+            relay.prompt = String(relay.prompt ?? "");
+            relay.use_prompt = Boolean(relay.use_prompt !== false && String(relay.prompt || "").trim());
+        });
+        return relays;
+    }
+
+    function deleteNestedSlotRelay(parentSegmentId, relayId) {
+        const parent = (timeline.segments || []).find((item) => String(item.id || "") === String(parentSegmentId || "") && isTimelineImageSegment(item));
+        if (!parent || !Array.isArray(parent.slot_relays)) return false;
+        const before = parent.slot_relays.length;
+        parent.slot_relays = parent.slot_relays.filter((item) => String(item?.id || "") !== String(relayId || ""));
+        const changed = parent.slot_relays.length !== before;
+        if (changed) {
+            relayoutNestedSlotRelaysForImage(parent);
+            selectedId = parent.id;
+            previewSegments = null;
+            console.info("[IAMCCS WAN PURE][SlotRelay] deleted", {
+                segment_id: parent.id,
+                relay_id: relayId,
+                relay_count: parent.slot_relays.length,
+            });
+        }
+        return changed;
     }
 
     function createPlaceholderAfterSegment(seg, kind = "image") {
@@ -9989,9 +10048,10 @@ function renderShotboardV3(node) {
         };
         const appendNestedSlotRelayLines = () => {
             if (isAudio || !isTimelineImageSegment(seg) || !Array.isArray(seg.slot_relays) || !seg.slot_relays.length) return;
-            const segStart = Math.max(0, Math.round(Number(seg.start || 0)));
-            const segLength = Math.max(1, Math.round(Number(seg.length || 1)));
-            const segEnd = segStart + segLength;
+            const win = generationWindowForImage(seg);
+            const segStart = win.start;
+            const segLength = Math.max(1, Math.round(Number(win.length || 1)));
+            const segEnd = win.end;
             seg.slot_relays.forEach((relay) => {
                 const relayStart = Math.max(segStart, Math.min(segEnd - 1, Math.round(Number(relay.start ?? (segStart + Math.floor(segLength / 2))))));
                 const relayLength = Math.max(1, Math.round(Number(relay.length || Math.max(1, segEnd - relayStart))));
@@ -10006,13 +10066,18 @@ function renderShotboardV3(node) {
 
                 const leftPct = ((relayStart - segStart) / segLength) * 100;
                 const widthPct = Math.max(.8, ((relayEnd - relayStart) / segLength) * 100);
-                const contentLeftCss = `calc(${innerLeft}px + (100% - ${innerLeft + innerRight}px) * ${leftPct / 100})`;
-                const contentWidthCss = `calc((100% - ${innerLeft + innerRight}px) * ${widthPct / 100})`;
+                const contentFixed = innerLeft + innerRight;
+                const contentLeftOffsetPx = innerLeft - (contentFixed * (leftPct / 100));
+                const contentWidthOffsetPx = contentFixed * (widthPct / 100);
+                const contentLeftCss = `calc(${leftPct.toFixed(4)}% + ${contentLeftOffsetPx.toFixed(2)}px)`;
+                const contentWidthCss = `calc(${widthPct.toFixed(4)}% - ${contentWidthOffsetPx.toFixed(2)}px)`;
+                const lineLeftCss = `calc(${leftPct.toFixed(4)}% + ${(contentLeftOffsetPx - 3).toFixed(2)}px)`;
+                const badgeLeftCss = `calc(${leftPct.toFixed(4)}% + ${(contentLeftOffsetPx + 5).toFixed(2)}px)`;
                 const line = document.createElement("div");
                 line.title = `Slot Relay starts at generation frame ${localRelayStart}. Drag to move this prompt division.`;
                 line.style.cssText = [
                     "position:absolute",
-                    `left:calc(${contentLeftCss} - 3px)`,
+                    `left:${lineLeftCss}`,
                     `top:${truthRailHeight}px`,
                     `height:${promptTop + promptHeight - truthRailHeight}px`,
                     "width:6px",
@@ -10059,7 +10124,7 @@ function renderShotboardV3(node) {
                 frameBadge.title = line.title;
                 frameBadge.style.cssText = [
                     "position:absolute",
-                    `left:calc(${contentLeftCss} + 5px)`,
+                    `left:${badgeLeftCss}`,
                     `top:${truthRailHeight + 4}px`,
                     "height:15px",
                     "box-sizing:border-box",
@@ -10312,9 +10377,16 @@ function renderShotboardV3(node) {
                 ? seg.slot_relays.filter((relay) => relay && relay.slotRelay !== false)
                     .sort((a, b) => Number(a.start || 0) - Number(b.start || 0))
                 : [];
-            const segStart = Math.max(0, Math.round(Number(seg.start || 0)));
-            const segLength = Math.max(1, Math.round(Number(seg.length || 1)));
-            const segEnd = segStart + segLength;
+            const promptWin = isTimelineImageSegment(seg)
+                ? generationWindowForImage(seg)
+                : {
+                    start: Math.max(0, Math.round(Number(seg.start || 0))),
+                    length: Math.max(1, Math.round(Number(seg.length || 1))),
+                    end: Math.max(0, Math.round(Number(seg.start || 0))) + Math.max(1, Math.round(Number(seg.length || 1))),
+                };
+            const segStart = promptWin.start;
+            const segLength = Math.max(1, Math.round(Number(promptWin.length || 1)));
+            const segEnd = promptWin.end;
             const promptShell = document.createElement("div");
             promptShell.style.cssText = [
                 "position:absolute",
@@ -10802,6 +10874,50 @@ function renderShotboardV3(node) {
         const sorted = (timeline.segments || []).slice().sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
         const index = sorted.findIndex((item) => item.id === target?.id);
         if (index < 0) return;
+        const source = sorted[index];
+        if (isTimelineImageSegment(source)) {
+            const placeholder = {
+                ...source,
+                type: "image",
+                placeholder: true,
+                ref: 0,
+                imageTruthRef: 0,
+                image_truth_ref: 0,
+                imageTruthPinned: false,
+                image_truth_pinned: false,
+                imageTruthSource: "delete_to_placeholder",
+                image_truth_source: "delete_to_placeholder",
+                imageTruthPath: "",
+                image_truth_path: "",
+                imageTruthName: "",
+                image_truth_name: "",
+                imageFile: "",
+                image_file: "",
+                path: "",
+                imageName: "",
+                image_name: "",
+                label: "empty_slot",
+            };
+            delete placeholder.file;
+            delete placeholder.resolved;
+            delete placeholder.basename;
+            delete placeholder.slot_relays;
+            delete placeholder.slotRelays;
+            placeholder.relay_manual_off = true;
+            placeholder.promptrelay_manual_off = true;
+            sorted[index] = placeholder;
+            timeline.segments = sorted;
+            selectedId = placeholder.id;
+            previewSegments = null;
+            console.info("[IAMCCS WAN PURE][Timeline] image deleted to placeholder", {
+                segment_id: placeholder.id,
+                start: Math.max(0, Math.round(Number(placeholder.start || 0))),
+                length: Math.max(1, Math.round(Number(placeholder.length || 1))),
+            });
+            writeTimeline({ force: true });
+            draw();
+            return;
+        }
         const prev = index > 0 ? sorted[index - 1] : null;
         sorted.splice(index, 1);
         if (prev && String(prev.type || "image") !== "audio") {
@@ -11750,8 +11866,8 @@ function renderShotboardV3(node) {
                 mini("X", "Delete", () => {
                     rippleDeleteVisualSegment(seg);
                 }),
-                mini("+", "Add empty image slot after this box", () => {
-                    createPlaceholderAfterSegment(seg);
+                mini("+", "Add Slot Relay inside this image slot", () => {
+                    createSlotRelayInSegment(seg);
                 })
             );
             actions.style.alignSelf = "center";
@@ -11985,10 +12101,14 @@ function renderShotboardV3(node) {
                         removeRelay.style.cssText = `width:30px;height:26px;border:1px solid ${isBaseRelay ? "rgba(124,214,255,.42)" : purple.danger};border-radius:4px;background:${isBaseRelay ? "rgba(0,0,0,.28)" : "#6B302A"};color:${isBaseRelay ? "#9DEBFF" : "#FFF2E4"};font-size:10px;font-weight:900;cursor:${isBaseRelay ? "default" : "pointer"};`;
                         removeRelay.onclick = (event) => {
                             event.preventDefault();
+                            event.stopPropagation();
                             if (isBaseRelay) return;
-                            seg.slot_relays = (seg.slot_relays || []).filter((item) => item !== relay);
-                            writeTimeline({ force: true });
-                            draw();
+                            const parentId = String(seg.id || "");
+                            const relayId = String(relay?.id || "");
+                            if (deleteNestedSlotRelay(parentId, relayId)) {
+                                writeTimeline({ force: true });
+                                draw();
+                            }
                         };
                         relayCard.append(relaySpineVertical, relaySpineKnee, badgeRelay, startBox, lenBox, promptWrap, removeRelay);
                         boxList.appendChild(relayCard);

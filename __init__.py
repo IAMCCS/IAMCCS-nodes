@@ -284,8 +284,22 @@ from .audio.audio_control_efx import IAMCCS_ControlAudEfx
 from .audio.audio_control_efx_panel import IAMCCS_ControlAudEfxPanel
 from .audio.dialogue_tag_editor import IAMCCS_DialogueTagEditor, IAMCCS_DialogueAudioBoardBridge
 from .audio.cine_audio_info import IAMCCS_CineAudioInfo
-from .iamccs_ideogram_storyboard_frame_designer import IAMCCS_StoryboardFrameDesigner
+from .iamccs_ideogram_storyboard_frame_designer import (
+    IAMCCS_StoryboardFrameDesigner,
+    IAMCCS_StoryboardFrameDesignerV2,
+    IAMCCS_IdeoInfo,
+    IAMCCS_IdeoInpaintPrep,
+    IAMCCS_IdeoMaskedPixels,
+    IAMCCS_IdeogramJSONPreviewPass,
+)
 from .iamccs_ideo_translate import IAMCCS_IdeoTranslate
+from .iamccs_ideogram_storyboard_sheet import IAMCCS_IdeogramStoryboardSheet, IAMCCS_StoryboardCaptionSheet
+from .iamccs_ideogram_sheet_builder import IAMCCS_IdeogramSheetBuilder
+from .iamccs_storyboard_auto_crop import IAMCCS_StoryboardAutoCropGrid, IAMCCS_StoryboardAutoCropGridPRO
+from .iamccs_target_crop import IAMCCS_TargetCrop
+from .iamccs_gemma_assist import IAMCCS_GemmaAssistLazyGate, IAMCCS_GemmaAssistOutput
+from .iamccs_storyboard_prompt_contact_sheet import IAMCCS_StoryboardPromptContactSheet
+from .iamccs_goyai_paint import IAMCCS_GoyAICanvasPaint
 
 from .iamccs_ltx2_segment_queue import (
     IAMCCS_LTX2_BlendLatentBridge,
@@ -308,6 +322,8 @@ from .iamccs_value_monitor import (
 
 from .iamccs_flux_klein_multigen import (
     IAMCCS_FluxKleinMultiGen,
+    IAMCCS_FluxKleinRefine,
+    IAMCCS_ImageBatch6,
 )
 
 from .iamccs_qwen_multigen import (
@@ -354,6 +370,28 @@ from .iamccs_supernodes_exec import (
     IAMCCS_SuperNodes_AUIMG2VIDExecutableFinalize,
 )
 from .iamccs_supernodes_second_stage import IAMCCS_SuperNodes_SecondStage
+
+try:
+    from .iamccs_scail_identity import (
+        IAMCCS_ScailIdentitySeeder,
+        IAMCCS_ScailIdentityTracker,
+        IAMCCS_ScailMultiReference,
+    )
+except Exception as exc:
+    logging.warning("IAMCCS SCAIL Identity nodes unavailable: %s", exc)
+    IAMCCS_ScailIdentitySeeder = None
+    IAMCCS_ScailIdentityTracker = None
+    IAMCCS_ScailMultiReference = None
+
+try:
+    from .iamccs_scail_extends import (
+        IAMCCS_ScailExtends,
+        IAMCCS_ScailExtendPlan,
+    )
+except Exception as exc:
+    logging.warning("IAMCCS SCAIL Extends nodes unavailable: %s", exc)
+    IAMCCS_ScailExtends = None
+    IAMCCS_ScailExtendPlan = None
 
 # Nodi principali
 NODE_CLASS_MAPPINGS = {
@@ -554,7 +592,22 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_DialogueAudioBoardBridge": IAMCCS_DialogueAudioBoardBridge,
     "IAMCCS_CineAudioInfo": IAMCCS_CineAudioInfo,
     "IAMCCS_StoryboardFrameDesigner": IAMCCS_StoryboardFrameDesigner,
+    "IAMCCS_StoryboardFrameDesignerV2": IAMCCS_StoryboardFrameDesignerV2,
+    "IAMCCS_IdeoInfo": IAMCCS_IdeoInfo,
+    "IAMCCS_IdeoInpaintPrep": IAMCCS_IdeoInpaintPrep,
+    "IAMCCS_IdeoMaskedPixels": IAMCCS_IdeoMaskedPixels,
+    "IAMCCS_IdeogramJSONPreviewPass": IAMCCS_IdeogramJSONPreviewPass,
     "IAMCCS_IdeoTranslate": IAMCCS_IdeoTranslate,
+    "IAMCCS_IdeogramStoryboardSheet": IAMCCS_IdeogramStoryboardSheet,
+    "IAMCCS_IdeogramSheetBuilder": IAMCCS_IdeogramSheetBuilder,
+    "IAMCCS_StoryboardCaptionSheet": IAMCCS_StoryboardCaptionSheet,
+    "IAMCCS_StoryboardAutoCropGrid": IAMCCS_StoryboardAutoCropGrid,
+    "IAMCCS_StoryboardAutoCropGridPRO": IAMCCS_StoryboardAutoCropGridPRO,
+    "IAMCCS_TargetCrop": IAMCCS_TargetCrop,
+    "IAMCCS_GemmaAssistLazyGate": IAMCCS_GemmaAssistLazyGate,
+    "IAMCCS_GemmaAssistOutput": IAMCCS_GemmaAssistOutput,
+    "IAMCCS_StoryboardPromptContactSheet": IAMCCS_StoryboardPromptContactSheet,
+    "IAMCCS_GoyAICanvasPaint": IAMCCS_GoyAICanvasPaint,
     "IAMCCS_CineVideoToWooshInputs": IAMCCS_CineVideoToWooshInputs,
     "IAMCCS_CineSpeech1PromptCompiler": IAMCCS_CineSpeech1PromptCompiler,
     "IAMCCS_CineAudioTranscriptPromptCompiler": IAMCCS_CineAudioTranscriptPromptCompiler,
@@ -579,6 +632,8 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_IntValueMonitor": IAMCCS_IntValueMonitor,
     "IAMCCS_QwenMultiGen": IAMCCS_QwenMultiGen,
     "IAMCCS_FluxKleinMultiGen": IAMCCS_FluxKleinMultiGen,
+    "IAMCCS_FluxKleinRefine": IAMCCS_FluxKleinRefine,
+    "IAMCCS_ImageBatch6": IAMCCS_ImageBatch6,
     "IAMCCS_MultilinePromptSplitter8": IAMCCS_MultilinePromptSplitter8,
     "IAMCCS_SupernodeBase": IAMCCS_SupernodeBase,
     "IAMCCS_SupernodeModule": IAMCCS_SupernodeModule,
@@ -609,6 +664,17 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS-SuperNodes Second Stage": IAMCCS_SuperNodes_SecondStage,
     **({"IAMCCS-SuperNodes AU+IMG2VID Exec Finalize": IAMCCS_SuperNodes_AUIMG2VIDExecutableFinalize} if IAMCCS_SuperNodes_AUIMG2VIDExecutableFinalize is not None else {}),
 
+    **({
+        "IAMCCS_ScailIdentitySeeder": IAMCCS_ScailIdentitySeeder,
+        "IAMCCS_ScailIdentityTracker": IAMCCS_ScailIdentityTracker,
+        "IAMCCS_ScailMultiReference": IAMCCS_ScailMultiReference,
+    } if IAMCCS_ScailIdentityTracker is not None else {}),
+
+    **({
+        "IAMCCS_ScailExtends": IAMCCS_ScailExtends,
+        "IAMCCS_ScailExtendPlan": IAMCCS_ScailExtendPlan,
+    } if IAMCCS_ScailExtends is not None else {}),
+
     # QwenVL First/Last Frame (registered only if QwenVL is installed)
     **({"IAMCCS_QWEN_VL_FLF": IAMCCS_QWEN_VL_FLF,
         "IAMCCS_QWEN_VL_FLF_Advanced": IAMCCS_QWEN_VL_FLF_Advanced,
@@ -617,6 +683,11 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "IAMCCS_ScailExtends": "IAMCCS SCAIL Extends",
+    "IAMCCS_ScailExtendPlan": "IAMCCS SCAIL Extend Plan",
+    "IAMCCS_ScailIdentitySeeder": "IAMCCS SCAIL Identity Seeder",
+    "IAMCCS_ScailIdentityTracker": "IAMCCS SCAIL Identity Tracker",
+    "IAMCCS_ScailMultiReference": "IAMCCS SCAIL Multi-Reference (experimental)",
     "IAMCCS_WanLoRAStack": "LoRA Stack (WAN-style remap)",
     "IAMCCS_ModelWithLoRA": "Apply LoRA to MODEL (Native)",
     "IAMCCS_WanLoRAStackModelIO": "LoRA Stack (Model In?Out) WAN",
@@ -766,6 +837,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_IntValueMonitor": "INT Value Monitor",
     "IAMCCS_QwenMultiGen": "IAMCCS Qwen Multi-Gen",
     "IAMCCS_FluxKleinMultiGen": "Flux Klein Multi-Gen",
+    "IAMCCS_FluxKleinRefine": "Flux Klein Refine (Local NO PAID)",
+    "IAMCCS_ImageBatch6": "IAMCCS Image Batch 6",
+    "IAMCCS_StoryboardCaptionSheet": "IAMCCS Storyboard Caption Sheet",
+    "IAMCCS_StoryboardAutoCropGrid": "IAMCCS Storyboard Auto Crop Grid",
+    "IAMCCS_StoryboardAutoCropGridPRO": "IAMCCS Storyboard Auto Crop Grid PRO",
     "IAMCCS_MultilinePromptSplitter8": "Multiline Prompt Splitter (8 outputs)",
     "IAMCCS_SupernodeBase": "Supernode Base (contract + linx)",
     "IAMCCS_SupernodeModule": "Supernode Module (cascade contract + linx)",
@@ -843,7 +919,19 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_DialogueAudioBoardBridge": "IAMCCS Dialogue AudioBoard Bridge",
     "IAMCCS_CineAudioInfo": "IAMCCS CineAudioInfo",
     "IAMCCS_StoryboardFrameDesigner": "IAMCCS StoryboardFrame + TextInFrame Director",
+    "IAMCCS_StoryboardFrameDesignerV2": "IAMCCS StoryboardFrame V2 + Image Canvas i2i",
+    "IAMCCS_IdeoInfo": "IDEO_INFO",
+    "IAMCCS_IdeoInpaintPrep": "IAMCCS Ideo Inpaint Prep",
+    "IAMCCS_IdeoMaskedPixels": "IAMCCS Ideo Masked Pixels",
+    "IAMCCS_IdeogramJSONPreviewPass": "IAMCCS Ideogram JSON Preview / Pass",
+    "IAMCCS_TargetCrop": "IAMCCS Target Crop",
     "IAMCCS_IdeoTranslate": "IAMCCS IdeoTranslate",
+    "IAMCCS_IdeogramStoryboardSheet": "IAMCCS Ideogram Storyboard Sheet",
+    "IAMCCS_IdeogramSheetBuilder": "IAMCCS Ideogram Sheet Builder",
+    "IAMCCS_GemmaAssistLazyGate": "IAMCCS Gemma Assist Lazy Gate",
+    "IAMCCS_GemmaAssistOutput": "IAMCCS Gemma Assist Output",
+    "IAMCCS_StoryboardPromptContactSheet": "IAMCCS Storyboard Prompt Contact Sheet",
+    "IAMCCS_GoyAICanvasPaint": "GoyAIcanvas Paint (Image + Mask)",
     "IAMCCS_CineVideoToWooshInputs": "IAMCCS Video To Woosh Inputs",
     "IAMCCS_CineSpeech1PromptCompiler": "IAMCCS Speech1 Prompt Compiler",
     "IAMCCS_CineAudioTranscriptPromptCompiler": "IAMCCS Audio Transcript Prompt Compiler",
@@ -902,6 +990,7 @@ try:
     NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_ENGINE_V2V_NODE_DISPLAY_NAME_MAPPINGS)
 except Exception as _iamccs_engine_v2v_error:
     print(f"[IAMCCS Engine V2V] optional module not loaded: {_iamccs_engine_v2v_error}")
+
 
 try:
     import importlib.util as _iamccs_importlib_util

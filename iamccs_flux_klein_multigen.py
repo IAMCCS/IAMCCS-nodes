@@ -157,6 +157,9 @@ def _unique_path(directory, prefix, ext):
     i = 1
     while True:
         p = os.path.join(directory, f"{prefix}_{i:05d}.{ext}")
+        parent = os.path.dirname(p)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         if not os.path.exists(p):
             return p
         i += 1
@@ -166,6 +169,44 @@ def _prompt_slug(text, max_words=5):
     words = [re.sub(r"[^a-zA-Z0-9]", "", w) for w in re.sub(r"<[^>]+>", "", text or "").split()]
     words = [w for w in words if w][:max_words]
     return "_".join(words) or "prompt"
+
+
+def _node_ImageBatch(image1, image2):
+    """Node: ImageBatch"""
+    import nodes
+    return _unpack(nodes.ImageBatch().batch(image1, image2))
+
+
+def _resize_image_exact(image, width, height, upscale_method="lanczos"):
+    """Resize IMAGE tensor to an exact target size using Comfy's native scaler."""
+    import comfy.utils
+
+    width = max(16, int(width))
+    height = max(16, int(height))
+    method = str(upscale_method or "lanczos")
+    if method == "nearest-exact":
+        method = "nearest-exact"
+    return comfy.utils.common_upscale(
+        image.movedim(-1, 1),
+        width,
+        height,
+        method,
+        "center",
+    ).movedim(1, -1)
+
+
+def _sigmas_for_denoise(steps, width, height, denoise):
+    """Match Comfy's denoise scheduling: fewer final sigmas from a longer schedule."""
+    steps = max(1, int(steps))
+    denoise = float(denoise)
+    if denoise >= 0.999:
+        return _node_Flux2Scheduler(steps, width, height)
+    if denoise <= 0.0:
+        return None
+
+    total_steps = max(steps, int(steps / denoise))
+    sigmas = _node_Flux2Scheduler(total_steps, width, height)
+    return sigmas[-(steps + 1):]
 
 
 # ---------------------------------------------------------------------------
@@ -376,3 +417,248 @@ class IAMCCS_FluxKleinMultiGen:
         if defer_cpu_transfer:
             batched = batched.cpu()
         return (batched, len(prompts))
+
+
+class IAMCCS_ImageBatch6:
+    DISPLAY_NAME = "IAMCCS Image Batch 6"
+    CATEGORY = "IAMCCS/Image"
+    FUNCTION = "batch"
+    RETURN_TYPES = ("IMAGE", "INT")
+    RETURN_NAMES = ("images", "count")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image_1": ("IMAGE",),
+            },
+            "optional": {
+                "image_2": ("IMAGE",),
+                "image_3": ("IMAGE",),
+                "image_4": ("IMAGE",),
+                "image_5": ("IMAGE",),
+                "image_6": ("IMAGE",),
+            },
+        }
+
+    def batch(self, image_1, image_2=None, image_3=None, image_4=None, image_5=None, image_6=None):
+        images = [img for img in [image_1, image_2, image_3, image_4, image_5, image_6] if img is not None]
+        if not images:
+            return (image_1, 0)
+
+        batched = images[0]
+        for img in images[1:]:
+            batched = _node_ImageBatch(batched, img)
+        return (batched, int(batched.shape[0]))
+
+
+class IAMCCS_FluxKleinRefine:
+    DISPLAY_NAME = "IAMCCS Flux Klein Refine (Local NO PAID)"
+    CATEGORY = "IAMCCS/Flux"
+    FUNCTION = "refine"
+    RETURN_TYPES = ("IMAGE", "INT", "STRING")
+    RETURN_NAMES = ("images", "count", "report")
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        try:
+            import comfy.samplers
+            samplers = comfy.samplers.KSampler.SAMPLERS
+        except Exception:
+            samplers = ["euler"]
+
+        return {
+            "required": {
+                "model":        ("MODEL",),
+                "clip":         ("CLIP",),
+                "vae":          ("VAE",),
+                "image":        ("IMAGE",),
+                "multi_prompt": ("STRING", {"forceInput": True}),
+                "seed":         ("INT",   {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "control_after_generate": True}),
+                "steps":        ("INT",   {"default": 28, "min": 1, "max": 100}),
+                "denoise":      ("FLOAT", {"default": 0.58, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "cfg":          ("FLOAT", {"default": 4.0, "min": 0.0, "max": 100.0, "step": 0.01}),
+                "sampler_name": (samplers,),
+            },
+            "optional": {
+                "edit_mode": (
+                    ["img2img_refine", "kontext_reference_edit"],
+                    {"default": "kontext_reference_edit"},
+                ),
+                "separator":                ("STRING",  {"default": "\\n", "multiline": False}),
+                "reference_latents_method": (
+                    ["workflow_default", "index_timestep_zero", "offset", "index", "uxo/uno"],
+                    {"default": "workflow_default"},
+                ),
+                "use_reference_latent":      ("BOOLEAN", {"default": True}),
+                "upscale_method":           (["nearest-exact", "bilinear", "area", "bicubic", "lanczos"], {"default": "lanczos"}),
+                "negative_prompt":          ("STRING",  {"default": "low resolution, pixelated, blurry, jpeg artifacts, distorted face, extra characters, front-facing portrait, camera stare", "multiline": True}),
+                "output_prefix":            ("STRING",  {"default": "flux_klein_refine"}), 
+                "save_images":              ("BOOLEAN", {"default": False}),
+                "output_width":             ("INT",     {"default": 1280, "min": 16, "max": 8192, "step": 16}),
+                "output_height":            ("INT",     {"default": 720,  "min": 16, "max": 8192, "step": 16}),
+                "debug_enabled":            ("BOOLEAN", {"default": False}),
+                "debug_prefix":             ("STRING",  {"default": "flux_klein_refine_debug"}),
+                "defer_cpu_transfer":       ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    def refine(
+        self,
+        model,
+        clip,
+        vae,
+        image,
+        multi_prompt,
+        seed,
+        steps,
+        denoise,
+        cfg,
+        sampler_name,
+        edit_mode="img2img_refine",
+        separator="\\n",
+        reference_latents_method="workflow_default",
+        use_reference_latent=True,
+        upscale_method="lanczos",
+        negative_prompt="low resolution, pixelated, blurry, jpeg artifacts, distorted face, extra characters, front-facing portrait, camera stare",
+        output_prefix="flux_klein_refine",
+        save_images=False,
+        output_width=1280,
+        output_height=720,
+        debug_enabled=False,
+        debug_prefix="flux_klein_refine_debug",
+        defer_cpu_transfer=False,
+    ):
+        sep = separator.replace("\\n", "\n")
+        prompts = [p.strip() for p in (multi_prompt or "").split(sep) if p.strip()]
+        if not prompts:
+            prompts = ["refine this image, preserve composition, improve cinematic detail"]
+
+        width = int(output_width)
+        height = int(output_height)
+        batch_count = int(image.shape[0]) if hasattr(image, "shape") and len(image.shape) == 4 else 1
+        run_count = max(batch_count, len(prompts))
+        denoise = float(denoise)
+
+        if denoise <= 0.0:
+            resized = _resize_image_exact(image, width, height, upscale_method)
+            return (resized.cpu(), int(resized.shape[0]), "denoise=0: returned resized source images without sampling")
+
+        dbg = None
+        if debug_enabled:
+            out_dir = folder_paths.get_output_directory()
+            dbg = _unique_path(out_dir, debug_prefix, "jsonl")
+            _write_debug(dbg, {
+                "event": "run_start",
+                "mode": str(edit_mode),
+                "batch_count": batch_count,
+                "prompt_count": len(prompts),
+                "run_count": run_count,
+                "seed": int(seed),
+                "steps": int(steps),
+                "denoise": denoise,
+                "cfg": float(cfg),
+                "sampler_name": str(sampler_name),
+                "output_width": width,
+                "output_height": height,
+                "input_image_shape": _shape(image),
+            })
+            print(f"[IAMCCS_FluxKleinRefine] debug -> {dbg}")
+
+        sampler_obj = _node_KSamplerSelect(sampler_name)
+        save_dir = folder_paths.get_output_directory() if save_images else None
+        results = []
+        report = {
+            "mode_requested": str(edit_mode),
+            "mode_used": [],
+            "count": run_count,
+            "width": width,
+            "height": height,
+            "denoise": denoise,
+            "note": "Local Flux/Klein refine: no Ideogram API, no paid IdeogramV3 node.",
+        }
+
+        _method = None
+        if reference_latents_method and reference_latents_method != "workflow_default":
+            _method = "uxo" if ("uxo" in reference_latents_method or "uso" in reference_latents_method) else reference_latents_method
+
+        for idx in range(run_count):
+            src = image[idx % batch_count: (idx % batch_count) + 1]
+            prompt = prompts[idx % len(prompts)]
+            current_seed = int(seed) + idx
+
+            scaled = _resize_image_exact(src, width, height, upscale_method)
+            reference_latent = _node_VAEEncode(vae, scaled)
+            empty_latent = _node_EmptyFlux2LatentImage(width, height)
+
+            pos_cond = _node_CLIPTextEncode(clip, prompt)
+            neg_cond = _node_CLIPTextEncode(clip, negative_prompt)
+
+            if use_reference_latent:
+                pos_cond = _node_ReferenceLatent(pos_cond, reference_latent)
+                neg_cond = _node_ReferenceLatent(neg_cond, reference_latent)
+
+            if _method is not None:
+                pos_cond = node_helpers.conditioning_set_values(pos_cond, {"reference_latents_method": _method})
+                neg_cond = node_helpers.conditioning_set_values(neg_cond, {"reference_latents_method": _method})
+
+            ref_samples = reference_latent.get("samples") if isinstance(reference_latent, dict) else None
+            empty_samples = empty_latent.get("samples") if isinstance(empty_latent, dict) else None
+            use_img2img = (
+                str(edit_mode) == "img2img_refine"
+                and ref_samples is not None
+                and empty_samples is not None
+                and tuple(ref_samples.shape[1:]) == tuple(empty_samples.shape[1:])
+            )
+
+            if use_img2img:
+                sigmas = _sigmas_for_denoise(steps, width, height, denoise)
+                latent_img = reference_latent
+                mode_used = "img2img_refine"
+            else:
+                sigmas = _node_Flux2Scheduler(steps, width, height)
+                latent_img = empty_latent
+                mode_used = "kontext_reference_edit"
+
+            noise = _node_RandomNoise(current_seed)
+            guider = _node_CFGGuider(model, pos_cond, neg_cond, cfg)
+            output_latent = _node_SamplerCustomAdvanced(
+                noise, guider, sampler_obj, sigmas, latent_img
+            )
+            decoded = _node_VAEDecode(vae, output_latent)
+            if isinstance(decoded, (tuple, list)):
+                decoded = decoded[0]
+            if decoded.ndim == 3:
+                decoded = decoded.unsqueeze(0)
+
+            stored_decoded = decoded if defer_cpu_transfer else decoded.cpu()
+            results.append(stored_decoded)
+            report["mode_used"].append(mode_used)
+
+            if dbg:
+                _write_debug(dbg, {
+                    "event": "iteration_result",
+                    "idx": idx,
+                    "seed": current_seed,
+                    "prompt": prompt,
+                    "mode_used": mode_used,
+                    "reference_latent_shape": _shape(ref_samples),
+                    "empty_latent_shape": _shape(empty_samples),
+                    "decoded_shape": _shape(stored_decoded),
+                })
+
+            if save_images and save_dir:
+                slug = _prompt_slug(prompt)
+                path = _unique_path(save_dir, f"{output_prefix}_{idx + 1:02d}_{slug}", "png")
+                save_decoded = stored_decoded if not defer_cpu_transfer else decoded.detach().cpu()
+                arr = (save_decoded[0].numpy() * 255).clip(0, 255).astype(np.uint8)
+                _PILImage.fromarray(arr).save(path)
+
+        if dbg:
+            _write_debug(dbg, {"event": "run_end", "count": len(results)})
+            report["debug_path"] = dbg
+
+        batched = torch.cat(results, dim=0)
+        if defer_cpu_transfer:
+            batched = batched.cpu()
+        return (batched, len(results), json.dumps(report, ensure_ascii=False))
