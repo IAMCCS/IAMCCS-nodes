@@ -1,4 +1,4 @@
-import { app } from "../../scripts/app.js";
+﻿import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
@@ -12,7 +12,7 @@ const TYPE_V2 = "IAMCCS_StoryboardFrameDesignerV2";
 const TYPE_JSON_PASS = "IAMCCS_IdeogramJSONPreviewPass";
 const STYLE_ID = "iamccs-ideogram-storyboard-frame-style";
 const IDEOBOARD_SCHEMA = "iamccs.ideoboard.package";
-const JS_BUILD = "PRESET-GALLERY-DELETE-FIX-20260620";
+const JS_BUILD = "IAMCCS-GALLERY-LIVE-REFRESH-20260620";
 console.info("[IAMCCS FrameDesigner] loaded", JS_BUILD, import.meta.url);
 
 let lastIamccsResultImage = null;
@@ -410,6 +410,17 @@ function assignImportedPresets(target, entries) {
   });
 }
 
+function migrateImportedGalleryKeyCollisions() {
+  Object.entries({ ...IMPORTED_PRESETS }).forEach(([key, preset], index) => {
+    if (!Object.prototype.hasOwnProperty.call(PRESETS, key)) return;
+    const nextKey = uniqueImportedGalleryKey("", preset, index);
+    if (!nextKey || nextKey === key) return;
+    IMPORTED_PRESETS[nextKey] = preset;
+    delete IMPORTED_PRESETS[key];
+    console.info("[IAMCCS FrameDesigner] migrated imported gallery key collision", { from: key, to: nextKey });
+  });
+}
+
 const STYLE_PRESETS = {
   default_photoreal_cinema: {
     label: "Default Photorealistic Cinema",
@@ -425,6 +436,7 @@ const STYLE_PRESETS = {
 };
 
 const GRID_PRESETS = {
+  free_canvas: { label: "Free Canvas", width: 1280, height: 720, boxes: null, order: "free", summary: "Empty canvas. Add object, text, or image layers manually." },
   single_frame_1x1: { label: "Single Frame", width: 1280, height: 720, boxes: [1, 1], order: "row_major", summary: "One full-frame image." },
   story_2x3: { label: "Storyboard 2x3", width: 2560, height: 2160, boxes: [2, 3], order: "row_major", summary: "Six storyboard panels; import other grids from JSON preset files." },
 };
@@ -498,6 +510,7 @@ const IMPORTED_GRID_PRESETS = {};
 assignImportedPresets(IMPORTED_PRESETS, normalizePresetGallery(readPersistedObject(PERSISTED_PRESET_KEYS.gallery)));
 assignImportedPresets(IMPORTED_STYLE_PRESETS, normalizeStyleGallery(readPersistedObject(PERSISTED_PRESET_KEYS.styles)));
 assignImportedPresets(IMPORTED_GRID_PRESETS, normalizeGridGallery(readPersistedObject(PERSISTED_PRESET_KEYS.grids)));
+migrateImportedGalleryKeyCollisions();
 writePersistedObject(PERSISTED_PRESET_KEYS.gallery, IMPORTED_PRESETS);
 writePersistedObject(PERSISTED_PRESET_KEYS.styles, IMPORTED_STYLE_PRESETS);
 writePersistedObject(PERSISTED_PRESET_KEYS.grids, IMPORTED_GRID_PRESETS);
@@ -960,6 +973,13 @@ function presetByKey(key) {
   return presetEntries()[String(key || "")] || PRESETS.storyboard;
 }
 
+function uniqueImportedGalleryKey(preferredKey, preset, index = 0) {
+  const preferred = cleanText(preferredKey);
+  if (preferred && !Object.prototype.hasOwnProperty.call(PRESETS, preferred)) return preferred;
+  const label = cleanText(preset?.label || preset?.name || preferred || `Imported Preset ${index + 1}`);
+  return importablePresetKey(label || `imported_preset_${index + 1}`, index);
+}
+
 function importablePresetKey(label, index = 0) {
   const base = String(label || `preset_${index + 1}`)
     .toLowerCase()
@@ -1104,9 +1124,10 @@ function defaultData() {
   return {
   "schema": "iamccs.ideogram_storyboard_frame_designer",
   "schema_version": 1,
-  "preset_key": "storyboard",
-  "workflow_mode": "storyboard_grid",
-  "grid_key": "story_2x3",
+  "preset_key": "",
+  "workflow_mode": "single_image",
+  "grid_key": "free_canvas",
+  "__iamccs_user_applied_preset": false,
   "target_resolution_key": "hd_720",
   "json_export_mode": "json_perfect",
   "brief_to_json": {
@@ -1118,40 +1139,39 @@ function defaultData() {
     "strokes": []
   },
   "canvas": {
-    "width": 2560,
-    "height": 2160,
-    "aspect_label": "1280 x 720 - HD 16:9 target / Storyboard 2x3 canvas 2560x2160",
+    "width": 1280,
+    "height": 720,
+    "aspect_label": "Empty single canvas / 1280 x 720 - HD 16:9",
     "target_resolution_key": "hd_720",
     "target_width": 1280,
     "target_height": 720
   },
   "scene": {
-    "high_level_description": "A six-panel 2x3 cinematic storyboard contact sheet set on a frozen exoplanet, following one exhausted astronaut in a strange partly unsealed expedition suit crossing black ice plains, ruined research vehicles, and distant alien towers under two visible planets in the sky.",
-    "aesthetics": "extremely photoreal live-action science fiction cinema, tactile frozen surfaces, strange worn astronaut suit, partly open asymmetric suit collar, visible inner thermal layers, practical space gear, believable human fatigue, cinematic continuity",
-    "lighting": "cold blue planetary daylight, low amber rim light on ice crystals, breath vapor, long shadows, readable eyes, crisp silhouettes, clean subject separation in every panel",
-    "photo": "35mm anamorphic film stills, varied shot scale, wide exoplanet landscape, tight medium portrait, top-down equipment detail, medium action frame, long telephoto silhouette, macro visor reflection, fine analog grain",
+    "high_level_description": "",
+    "aesthetics": "",
+    "lighting": "",
+    "photo": "",
     "medium": "photograph",
     "art_style": "",
     "color_palette": [
-      "#06111A",
-      "#557C8A",
-      "#A8D8E8",
-      "#E6E1C6",
-      "#E87C45",
-      "#07080A"
+      "#101014",
+      "#2E3438",
+      "#7A6A58",
+      "#D6C7AA",
+      "#8C3F2E"
     ],
-    "background": "Clean storyboard contact sheet with exactly two columns and three rows. Six separate 16:9 cinematic stills show different beats of the same frozen-planet sequence with thin panel borders, readable horizon lines, alien planets in the sky, and clear physical action."
+    "background": ""
   },
   "i2i": {
     "enabled": false,
     "denoise": 0.28,
     "low_sigma_start_step": 12,
-    "scheduler_hint": "Storyboard grid generation. Use AutoCropGrid with 2 columns and 3 rows.",
+    "scheduler_hint": "",
     "source_mode": "canvas_composite"
   },
   "reference_mode": {
     "mode": "single",
-    "label": "Single / Storyboard",
+    "label": "Single",
     "panel_count": 1,
     "target_index": 0,
     "locked_indices": []
@@ -1164,98 +1184,7 @@ function defaultData() {
     "enabled": false,
     "text": ""
   },
-  "items": [
-    {
-      "id": "panel_01",
-      "kind": "obj",
-      "label": "Panel 1 - Ice Plain Arrival",
-      "text": "",
-      "x": 0,
-      "y": 0,
-      "w": 500,
-      "h": 333,
-      "desc": "ICE PLAIN ARRIVAL: wide establishing shot of a frozen exoplanet plain at sunrise, black ice road crossing toward ruined alien towers, one small astronaut figure walking alone, two planets hanging in the pale sky, long shadow, cold blue atmosphere.",
-      "color_palette": [
-        "#557C8A",
-        "#A8D8E8"
-      ]
-    },
-    {
-      "id": "panel_02",
-      "kind": "obj",
-      "label": "Panel 2 - Broken Suit Collar",
-      "text": "",
-      "x": 500,
-      "y": 0,
-      "w": 500,
-      "h": 333,
-      "desc": "BROKEN SUIT COLLAR: tight medium portrait of the same exhausted astronaut pulling a frost-covered breathing scarf across the mouth, strange expedition suit partly unsealed at the collar, inner thermal fabric visible, breath vapor around focused eyes.",
-      "color_palette": [
-        "#A8D8E8",
-        "#E87C45"
-      ]
-    },
-    {
-      "id": "panel_03",
-      "kind": "obj",
-      "label": "Panel 3 - Frozen Nav Module",
-      "text": "",
-      "x": 0,
-      "y": 333,
-      "w": 500,
-      "h": 334,
-      "desc": "FROZEN NAV MODULE: top-down close detail of a cracked wrist computer, circular oxygen gauge, folded star map, metal sample case, and frost crystals on white-blue ice, precise object clarity.",
-      "color_palette": [
-        "#06111A",
-        "#557C8A"
-      ]
-    },
-    {
-      "id": "panel_04",
-      "kind": "obj",
-      "label": "Panel 4 - Rover Drag",
-      "text": "",
-      "x": 500,
-      "y": 333,
-      "w": 500,
-      "h": 334,
-      "desc": "ROVER DRAG: medium wide action frame of the astronaut dragging a broken rover battery sled across an ice trench, bent posture, boots cutting into snow crust, torn suit panels and loose cables moving in the wind.",
-      "color_palette": [
-        "#557C8A",
-        "#E6E1C6"
-      ]
-    },
-    {
-      "id": "panel_05",
-      "kind": "obj",
-      "label": "Panel 5 - Footprints To Antenna",
-      "text": "",
-      "x": 0,
-      "y": 667,
-      "w": 500,
-      "h": 333,
-      "desc": "FOOTPRINTS TO ANTENNA: long telephoto silhouette of the astronaut walking along a frozen ridge toward a collapsed research antenna, clear footprints through powder snow, giant ringed planet low over the horizon.",
-      "color_palette": [
-        "#A8D8E8",
-        "#07080A"
-      ]
-    },
-    {
-      "id": "panel_06",
-      "kind": "obj",
-      "label": "Panel 6 - Visor Planet Reflection",
-      "text": "",
-      "x": 500,
-      "y": 667,
-      "w": 500,
-      "h": 333,
-      "desc": "VISOR PLANET REFLECTION: extreme close-up of a cracked astronaut visor, twin planets and broken towers reflected in the glass, frost on eyelashes, skin dust, sweat, sharp helmet texture, cinematic macro detail.",
-      "color_palette": [
-        "#07080A",
-        "#A8D8E8"
-      ]
-    }
-  ]
+  "items": []
 };
 }
 
@@ -1516,8 +1445,9 @@ function normalizeDesignObject(raw, fallback = defaultData()) {
   if (!raw || typeof raw !== "object") return cloneValue(fallback, fallback);
   return {
     ...fallback,
+    __iamccs_user_applied_preset: Boolean(raw.__iamccs_user_applied_preset || fallback.__iamccs_user_applied_preset),
     preset_key: hasPresetKey(raw.preset_key) ? raw.preset_key : fallback.preset_key,
-    workflow_mode: workflowModeEntries()[raw.workflow_mode] ? raw.workflow_mode : (workflowModeEntries()[fallback.workflow_mode] ? fallback.workflow_mode : "storyboard_grid"),
+    workflow_mode: workflowModeEntries()[raw.workflow_mode] ? raw.workflow_mode : (workflowModeEntries()[fallback.workflow_mode] ? fallback.workflow_mode : "single_image"),
     grid_key: cleanText(raw.grid_key || raw.gridKey || fallback.grid_key),
     target_resolution_key: cleanText(raw.target_resolution_key || raw.targetResolutionKey || raw.canvas?.target_resolution_key || fallback.target_resolution_key),
     preview: raw.preview && typeof raw.preview === "object" ? cloneValue(raw.preview, {}) : (fallback.preview && typeof fallback.preview === "object" ? cloneValue(fallback.preview, {}) : undefined),
@@ -1536,15 +1466,39 @@ function normalizeDesignObject(raw, fallback = defaultData()) {
   };
 }
 
+function isLegacyDefaultStoryboardSeed(raw) {
+  if (!raw || typeof raw !== "object" || raw.__iamccs_user_applied_preset) return false;
+  const scene = raw.scene || {};
+  const items = Array.isArray(raw.items) ? raw.items : [];
+  const high = cleanText(scene.high_level_description).toLowerCase();
+  const labels = items.map((item) => cleanText(item?.label).toLowerCase()).join(" | ");
+  return (
+    raw.workflow_mode === "storyboard_grid" &&
+    raw.grid_key === "story_2x3" &&
+    items.length === 6 &&
+    high.includes("frozen exoplanet") &&
+    labels.includes("ice plain arrival") &&
+    labels.includes("visor planet reflection")
+  );
+}
+
 function parseData(node) {
   const fallback = defaultData();
   try {
     const parsed = JSON.parse(String(widget(node, "design_data")?.value || ""));
     if (parsed && typeof parsed === "object") {
+      if (isLegacyDefaultStoryboardSeed(parsed)) {
+        console.info("[IAMCCS FrameDesigner] ignored legacy default storyboard seed", { build: JS_BUILD });
+        return fallback;
+      }
       if (parsed.boards && typeof parsed.boards === "object") {
         const activeKey = hasPresetKey(parsed.active_preset_key) ? parsed.active_preset_key : (hasPresetKey(parsed.preset_key) ? parsed.preset_key : fallback.preset_key);
         const activeBoard = parsed.boards[activeKey];
         if (activeBoard && typeof activeBoard === "object") {
+          if (isLegacyDefaultStoryboardSeed(activeBoard)) {
+            console.info("[IAMCCS FrameDesigner] ignored legacy default storyboard seed package", { build: JS_BUILD });
+            return fallback;
+          }
           return normalizeDesignObject({ ...activeBoard, preset_key: activeKey }, fallback);
         }
       }
@@ -1792,12 +1746,40 @@ function ensureStyles() {
     .iamccs-isf-gallery-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; max-height:320px; overflow:auto; padding-right:4px; }
     .iamccs-isf-gallery-card { text-align:left; border:1px solid rgba(97,177,173,.18); background:#0b1417; color:#eaf6f4; border-radius:10px; padding:8px; cursor:pointer; min-height:158px; display:flex; flex-direction:column; gap:7px; }
     .iamccs-isf-gallery-card:hover { border-color:rgba(244,184,104,.55); }
-    .iamccs-isf-gallery-card.selected { border-color:#f4b868; box-shadow:0 0 0 1px rgba(244,184,104,.35); background:linear-gradient(180deg,#18242a,#0b1417); }
+    .iamccs-isf-gallery-card.selected { border-color:#f4b868; box-shadow:0 0 0 2px rgba(244,184,104,.48), 0 0 24px rgba(244,184,104,.14); background:linear-gradient(180deg,#18242a,#0b1417); }
+    .iamccs-isf-gallery-card.imported { border-color:rgba(244,184,104,.52); }
+    .iamccs-isf-gallery-badges { display:flex; gap:5px; flex-wrap:wrap; align-items:center; min-height:16px; }
+    .iamccs-isf-gallery-badge { border:1px solid rgba(120,200,198,.26); background:#091215; color:#cfe8e4; border-radius:999px; padding:2px 6px; font-size:9px; line-height:1; font-weight:900; text-transform:uppercase; }
+    .iamccs-isf-gallery-badge.user { border-color:#f4b868; color:#ffe0a5; background:#21170b; }
     .iamccs-isf-gallery-thumb { height:76px; border-radius:8px; overflow:hidden; background:#05090b; border:1px solid rgba(255,255,255,.08); }
     .iamccs-isf-gallery-thumb img { width:100%; height:100%; object-fit:cover; display:block; }
     .iamccs-isf-gallery-name { color:#fff6e7; font-weight:900; font-size:11px; line-height:1.15; }
     .iamccs-isf-gallery-summary { color:#9cb8b5; font-size:10px; line-height:1.25; max-height:38px; overflow:hidden; }
-    .iamccs-isf-gallery-actions { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:8px; }
+    .iamccs-isf-gallery-actions { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; margin-top:8px; }
+    .iamccs-isf-gallery-actions .iamccs-isf-btn { min-height:32px; font-size:10px; }
+    .iamccs-isf-gallery-manager-card { width:min(1280px,96vw); height:min(860px,92vh); display:grid; grid-template-rows:auto auto minmax(0,1fr) auto; background:#071014; color:#eaf6f4; border:1px solid #5fb5b3; border-radius:16px; box-shadow:0 30px 90px rgba(0,0,0,.65); overflow:hidden; }
+    .iamccs-isf-gallery-manager-head { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; padding:14px 16px; border-bottom:1px solid rgba(120,200,198,.2); background:linear-gradient(180deg,#13262b,#0b1518); }
+    .iamccs-isf-gallery-manager-head strong { display:block; color:#fff6e7; font-size:18px; }
+    .iamccs-isf-gallery-manager-head span { display:block; color:#9cb8b5; margin-top:3px; max-width:720px; line-height:1.35; }
+    .iamccs-isf-gallery-manager-tags { display:flex; flex-wrap:wrap; gap:7px; padding:10px 16px; border-bottom:1px solid rgba(120,200,198,.14); background:#0a1417; }
+    .iamccs-isf-gallery-manager-tag { border:1px solid rgba(120,200,198,.28); background:#101d22; color:#d9fffb; border-radius:999px; padding:6px 10px; font-weight:850; cursor:pointer; font-size:11px; }
+    .iamccs-isf-gallery-manager-tag.selected { background:#f4b868; color:#1d1308; border-color:#ffd595; }
+    .iamccs-isf-gallery-manager-grid { overflow:auto; padding:14px 16px; display:grid; grid-template-columns:repeat(auto-fill,minmax(260px,1fr)); grid-auto-rows:376px; gap:12px; align-content:start; }
+    .iamccs-isf-gallery-manager-item { border:1px solid rgba(120,200,198,.22); background:#0d171b; border-radius:12px; overflow:hidden; display:grid; grid-template-rows:118px minmax(32px,auto) minmax(0,1fr) auto; min-height:376px; height:376px; }
+    .iamccs-isf-gallery-manager-item.user { border-color:rgba(244,184,104,.55); }
+    .iamccs-isf-gallery-manager-item.selected { border-color:#f4b868; box-shadow:0 0 0 2px rgba(244,184,104,.42), 0 0 28px rgba(244,184,104,.15); }
+    .iamccs-isf-gallery-manager-thumb { height:118px; background:#03080a; border-bottom:1px solid rgba(255,255,255,.08); }
+    .iamccs-isf-gallery-manager-thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+    .iamccs-isf-gallery-manager-title { padding:9px 10px 0; color:#fff6e7; font-weight:950; font-size:12px; line-height:1.2; }
+    .iamccs-isf-gallery-manager-meta { padding:7px 10px; color:#b8ceca; font-size:10.5px; line-height:1.35; display:grid; gap:4px; min-height:0; overflow:auto; align-content:start; }
+    .iamccs-isf-gallery-manager-chipline { display:flex; flex-wrap:wrap; gap:4px; }
+    .iamccs-isf-gallery-manager-chip { border:1px solid rgba(120,200,198,.22); background:#081114; color:#cfe8e4; border-radius:999px; padding:2px 6px; font-size:9.5px; font-weight:800; }
+    .iamccs-isf-gallery-manager-chip.user { border-color:#f4b868; color:#ffe0a5; }
+    .iamccs-isf-gallery-manager-actions { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; padding:10px; border-top:1px solid rgba(255,255,255,.08); background:#081114; align-self:end; position:relative; z-index:2; }
+    .iamccs-isf-gallery-manager-actions.two { grid-template-columns:repeat(2,minmax(0,1fr)); }
+    .iamccs-isf-gallery-manager-actions .iamccs-isf-btn[disabled] { opacity:.55; cursor:not-allowed; }
+    .iamccs-isf-gallery-manager-empty { padding:26px; color:#cfe8e4; font-weight:800; }
+    .iamccs-isf-gallery-manager-foot { padding:10px 16px; border-top:1px solid rgba(120,200,198,.14); color:#9cb8b5; background:#091316; font-size:11px; }
     .iamccs-isf-sheet-controls { display:grid; grid-template-columns:1fr; gap:8px; }
     .iamccs-isf-sheet-controls select { width:100%; border:1px solid #2b4d50; background:#091215; color:#f7fbfb; border-radius:9px; padding:7px 8px; outline:none; }
     .iamccs-isf-spec-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin:0 0 8px; }
@@ -1840,23 +1822,23 @@ function ensureStyles() {
     .iamccs-isf-stage-wrap { padding:12px; display:grid; grid-template-rows:auto minmax(0,1fr); gap:8px; align-items:stretch; background:#0b1013; overflow:hidden; min-height:0; height:100%; max-height:100%; }
     .iamccs-isf-stage-meta { display:flex; justify-content:space-between; align-items:center; gap:10px; color:#9eb8b7; }
     .iamccs-isf-stage-meta strong { color:#fff; font-size:13px; }
-    .iamccs-isf-kj-preview { min-height:0; height:100%; overflow:auto; border:1px solid rgba(120,200,198,.22); border-radius:10px; background:#ece9df; padding:12px; box-sizing:border-box; color:#111; }
-    .iamccs-isf-kj-sheet { min-height:100%; border:1px solid #c4c0b4; background:#f8f7f2; box-shadow:0 12px 28px rgba(0,0,0,.25); }
-    .iamccs-isf-kj-title { padding:14px 16px; border-bottom:2px solid #c9c3b6; font-size:28px; font-weight:950; line-height:1.05; color:#111; text-transform:uppercase; }
-    .iamccs-isf-kj-meta { padding:8px 16px; border-bottom:1px solid #d3cec1; color:#4a4a4a; font-size:13px; font-weight:800; }
-    .iamccs-isf-kj-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:0; border-top:1px solid #d4d0c7; border-left:1px solid #d4d0c7; }
-    .iamccs-isf-kj-card { min-height:230px; border-right:1px solid #d4d0c7; border-bottom:1px solid #d4d0c7; background:#fff; display:grid; grid-template-rows:auto minmax(96px,1fr) auto; }
-    .iamccs-isf-kj-card-head { padding:8px 10px; background:#f3f0e8; color:#111; font-weight:950; font-size:17px; line-height:1.12; border-bottom:1px solid #d8d2c4; }
-    .iamccs-isf-kj-card-body { padding:10px; color:#111; font-size:15px; line-height:1.34; font-weight:650; overflow:auto; }
-    .iamccs-isf-kj-card-foot { padding:7px 10px; background:#f7f6f1; color:#5a5a5a; font-size:12px; font-weight:800; border-top:1px solid #e1ddd2; }
-    .iamccs-isf-kj-image { width:100%; height:180px; object-fit:contain; display:block; background:#111; border-bottom:1px solid #d8d2c4; }
-    .iamccs-isf-kj-empty { padding:22px; color:#333; font-size:16px; line-height:1.45; font-weight:750; }
+    .iamccs-isf-board-preview { min-height:0; height:100%; overflow:auto; border:1px solid rgba(120,200,198,.22); border-radius:10px; background:#ece9df; padding:12px; box-sizing:border-box; color:#111; }
+    .iamccs-isf-board-sheet { min-height:100%; border:1px solid #c4c0b4; background:#f8f7f2; box-shadow:0 12px 28px rgba(0,0,0,.25); }
+    .iamccs-isf-board-title { padding:14px 16px; border-bottom:2px solid #c9c3b6; font-size:28px; font-weight:950; line-height:1.05; color:#111; text-transform:uppercase; }
+    .iamccs-isf-board-meta { padding:8px 16px; border-bottom:1px solid #d3cec1; color:#4a4a4a; font-size:13px; font-weight:800; }
+    .iamccs-isf-board-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:0; border-top:1px solid #d4d0c7; border-left:1px solid #d4d0c7; }
+    .iamccs-isf-board-card { min-height:230px; border-right:1px solid #d4d0c7; border-bottom:1px solid #d4d0c7; background:#fff; display:grid; grid-template-rows:auto minmax(96px,1fr) auto; }
+    .iamccs-isf-board-card-head { padding:8px 10px; background:#f3f0e8; color:#111; font-weight:950; font-size:17px; line-height:1.12; border-bottom:1px solid #d8d2c4; }
+    .iamccs-isf-board-card-body { padding:10px; color:#111; font-size:15px; line-height:1.34; font-weight:650; overflow:auto; }
+    .iamccs-isf-board-card-foot { padding:7px 10px; background:#f7f6f1; color:#5a5a5a; font-size:12px; font-weight:800; border-top:1px solid #e1ddd2; }
+    .iamccs-isf-board-image { width:100%; height:180px; object-fit:contain; display:block; background:#111; border-bottom:1px solid #d8d2c4; }
+    .iamccs-isf-board-empty { padding:22px; color:#333; font-size:16px; line-height:1.45; font-weight:750; }
 
-    .iamccs-isf-kj-preview { min-height:0; height:100%; overflow:auto; border:1px solid rgba(120,200,198,.22); border-radius:10px; background:#0b1013; padding:14px; box-sizing:border-box; color:#111; display:flex; justify-content:center; align-items:flex-start; }
-    .iamccs-isf-kj-artboard { position:relative; flex:0 0 auto; width:100%; max-width:1480px; aspect-ratio:var(--iamccs-artboard-aspect, 16 / 9); min-height:320px; background:linear-gradient(90deg,rgba(255,255,255,.035) 1px,transparent 1px),linear-gradient(0deg,rgba(255,255,255,.035) 1px,transparent 1px),#16282e; background-size:32px 32px; border:2px solid rgba(184,255,248,.9); box-shadow:0 16px 40px rgba(0,0,0,.38); overflow:hidden; isolation:isolate; }
-    .iamccs-isf-kj-artboard::before { content:""; position:absolute; inset:0; pointer-events:none; background:linear-gradient(180deg,rgba(255,255,255,.06),transparent 18%,rgba(0,0,0,.12)); z-index:0; }
-    .iamccs-isf-kj-artboard-meta { position:absolute; left:10px; top:8px; z-index:4; color:#d9fffb; background:rgba(2,9,12,.72); border:1px solid rgba(184,255,248,.35); border-radius:8px; padding:4px 8px; font-size:11px; font-weight:900; pointer-events:none; }
-    .iamccs-isf-kj-artboard-empty { position:absolute; inset:0; display:grid; place-items:center; text-align:center; padding:28px; color:#d9fffb; font-size:16px; line-height:1.4; font-weight:800; z-index:1; pointer-events:none; }
+    .iamccs-isf-board-preview { min-height:0; height:100%; overflow:auto; border:1px solid rgba(120,200,198,.22); border-radius:10px; background:#0b1013; padding:0; box-sizing:border-box; color:#111; display:flex; flex-direction:column; justify-content:flex-start; align-items:stretch; gap:0; }
+    .iamccs-isf-board-artboard { position:relative; flex:0 0 auto; width:100%; max-width:none; aspect-ratio:var(--iamccs-artboard-aspect, 16 / 9); min-height:320px; background:linear-gradient(90deg,rgba(255,255,255,.035) 1px,transparent 1px),linear-gradient(0deg,rgba(255,255,255,.035) 1px,transparent 1px),#16282e; background-size:32px 32px; border:0; box-shadow:none; overflow:hidden; isolation:isolate; }
+    .iamccs-isf-board-artboard::before { content:""; position:absolute; inset:0; pointer-events:none; background:linear-gradient(180deg,rgba(255,255,255,.06),transparent 18%,rgba(0,0,0,.12)); z-index:0; }
+    .iamccs-isf-board-artboard-meta { flex:0 0 auto; width:100%; max-width:none; color:#d9fffb; background:rgba(2,9,12,.72); border:0; border-bottom:1px solid rgba(184,255,248,.35); border-radius:0; padding:5px 8px; font-size:11px; font-weight:900; pointer-events:none; text-align:right; }
+    .iamccs-isf-board-artboard-empty { position:absolute; inset:0; display:grid; place-items:center; text-align:center; padding:28px; color:#d9fffb; font-size:16px; line-height:1.4; font-weight:800; z-index:1; pointer-events:none; }
     .iamccs-isf-mask-panel { border-color:rgba(255,90,115,.36); background:linear-gradient(180deg,rgba(45,16,24,.96),rgba(13,17,20,.94)); }
     .iamccs-isf-mask-panel h4 { color:#ffb8c4; }
     .iamccs-isf-mask-tools { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; margin-bottom:8px; }
@@ -1885,10 +1867,10 @@ function ensureStyles() {
     .iamccs-isf-item.mask-paint-active .iamccs-isf-item-body,
     .iamccs-isf-item.mask-paint-active .iamccs-isf-handle { pointer-events:none; }
     .iamccs-isf-item.mask-paint-active { box-shadow:0 0 0 2px rgba(255,70,100,.45),0 0 0 6px rgba(255,70,100,.18),0 14px 28px rgba(0,0,0,.3); cursor:crosshair; }
-    .iamccs-isf-kj-artboard .iamccs-isf-item { cursor:grab; }
-    .iamccs-isf-kj-artboard .iamccs-isf-item:active { cursor:grabbing; }
-    .iamccs-isf-kj-artboard .iamccs-isf-item-head { min-height:34px; }
-    .iamccs-isf-kj-artboard .iamccs-isf-item-body { max-height:calc(100% - 34px); overflow:auto; }
+    .iamccs-isf-board-artboard .iamccs-isf-item { cursor:grab; }
+    .iamccs-isf-board-artboard .iamccs-isf-item:active { cursor:grabbing; }
+    .iamccs-isf-board-artboard .iamccs-isf-item-head { min-height:34px; }
+    .iamccs-isf-board-artboard .iamccs-isf-item-body { max-height:calc(100% - 34px); overflow:auto; }
     .iamccs-isf-zoom-btn { flex:0 0 auto; display:inline-grid; place-items:center; width:26px; height:24px; min-width:26px; border:1px solid rgba(255,207,143,.55); background:#2a2115; color:#ffe2ac; border-radius:7px; cursor:pointer; font-size:15px; font-weight:900; line-height:1; padding:0; text-align:center; }
     .iamccs-isf-field-head { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:8px; margin-bottom:5px; }
     .iamccs-isf-field-head label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
@@ -2001,17 +1983,24 @@ function install(node) {
     liveResult: false,
     showSheetSpecs: false,
     paperMode: false,
-    gallerySelectedKey: "storyboard",
+    gallerySelectedKey: "",
     styleSelectedKey: "default_photoreal_cinema",
-    gridSelectedKey: "story_2x3",
-    targetResolutionKey: "hd_720",    workflowModeKey: "storyboard_grid",
+    gridSelectedKey: "free_canvas",
+    targetResolutionKey: "hd_720",
+    workflowModeKey: "single_image",
     paintTool: "select",
     paintDrawing: null,
     maskDebugLog: [],
   };
   state.paperMode = Boolean(state.data?.ui?.paper_mode);
-  state.workflowModeKey = inferWorkflowModeFromDesign(state.data, state.data?.workflow_mode || "storyboard_grid");
+  state.workflowModeKey = inferWorkflowModeFromDesign(state.data, state.data?.workflow_mode || "single_image");
   state.data.workflow_mode = state.workflowModeKey;
+  if (state.data?.grid_key && gridEntries()[state.data.grid_key]) {
+    state.gridSelectedKey = state.data.grid_key;
+  }
+  if (state.data?.preset_key && hasPresetKey(state.data.preset_key)) {
+    state.gallerySelectedKey = state.data.preset_key;
+  }
   if (state.data?.canvas?.target_resolution_key && targetResolutionEntries()[state.data.canvas.target_resolution_key]) {
     state.targetResolutionKey = state.data.canvas.target_resolution_key;
   }
@@ -2031,8 +2020,7 @@ function install(node) {
       </div>
       <div class="iamccs-isf-toolbar">
         <button class="iamccs-isf-btn" type="button" data-action="save-ideoboard">Save Ideoboard</button>
-        <button class="iamccs-isf-btn" type="button" data-action="import-ideoboard">Import Ideoboard</button>
-        <button class="iamccs-isf-btn" type="button" data-action="import-preset-gallery">Import Preset Gallery</button>
+        <button class="iamccs-isf-btn" type="button" data-action="import-ideoboard">Load Ideoboard (Replace)</button>
         <button class="iamccs-isf-btn" type="button" data-action="toggle-fullscreen">Open Editor</button>
         <button class="iamccs-isf-btn" type="button" data-action="toggle-paper">Paper</button>
         <button class="iamccs-isf-btn" type="button" data-action="copy-json">Copy Prompt JSON</button>
@@ -2049,10 +2037,10 @@ function install(node) {
       <div class="iamccs-isf-pane" data-pane="scene"></div>
       <div class="iamccs-isf-stage-wrap">
         <div class="iamccs-isf-stage-meta">
-          <strong>KJ Prompt Preview</strong>
+          <strong>IAMCCS Frame Preview</strong>
           <span data-stage-size></span>
         </div>
-        <div class="iamccs-isf-kj-preview" data-kj-preview></div>
+        <div class="iamccs-isf-board-preview" data-board-preview></div>
       </div>
       <div class="iamccs-isf-pane" data-pane="inspector"></div>
     </div>
@@ -2066,8 +2054,8 @@ function install(node) {
 
   const scenePane = root.querySelector('[data-pane="scene"]');
   const inspectorPane = root.querySelector('[data-pane="inspector"]');
-  const kjPreview = root.querySelector('[data-kj-preview]');
-  let artboard = kjPreview;
+  const boardPreview = root.querySelector('[data-board-preview]');
+  let artboard = boardPreview;
   const footStatus = root.querySelector('[data-foot-status]');
   const stageSize = root.querySelector('[data-stage-size]');
   const fullscreenButton = root.querySelector('[data-action="toggle-fullscreen"]');
@@ -2335,56 +2323,71 @@ function install(node) {
     reader.onload = () => {
       try {
         const parsed = parseJsonLoose(String(reader.result || ""));
-        const gallery = { ...normalizePresetGallery(parsed), ...directGalleryPresetsFromJson(parsed) };
-        const styles = { ...normalizeStyleGallery(parsed), ...directStylePresetsFromJson(parsed) };
-        const grids = { ...normalizeGridGallery(parsed), ...directGridPresetsFromJson(parsed) };
-        const galleryEntries = Object.entries(gallery);
-        const styleEntriesList = Object.entries(styles);
-        const gridEntriesList = Object.entries(grids);
-        if (!galleryEntries.length && !styleEntriesList.length && !gridEntriesList.length) {
-          throw new Error("no FrameDesigner, style, or grid presets found");
+        const schema = cleanText(parsed?.schema);
+        let gallery = {};
+        let importedType = "Preset Gallery";
+
+        if (schema === "iamccs.ideogram_storyboard_frame_designer") {
+          gallery = normalizePresetGallery(parsed);
+          importedType = "Ideoboard converted to Preset Gallery";
+        } else if (
+          schema === "iamccs.frame_v2.preset_gallery" ||
+          schema === "iamccs.frame_designer.preset_gallery" ||
+          parsed?.preset_gallery ||
+          parsed?.frame_presets ||
+          parsed?.gallery
+        ) {
+          gallery = normalizePresetMap(parsed.presets || parsed.gallery || parsed.preset_gallery || parsed.frame_presets, normalizePresetEntry, "gallery");
+        } else {
+          const styleCount = Object.keys({ ...normalizeStyleGallery(parsed), ...directStylePresetsFromJson(parsed) }).length;
+          const gridCount = Object.keys({ ...normalizeGridGallery(parsed), ...directGridPresetsFromJson(parsed) }).length;
+          if (styleCount || gridCount) {
+            throw new Error(`this is a ${styleCount ? "style" : "grid"} preset file; use Import ${styleCount ? "Style" : "Grid"}, not Import Preset`);
+          }
+          throw new Error("not a FrameDesigner Preset Gallery file");
         }
+
+        const galleryEntries = Object.entries(gallery);
+        if (!galleryEntries.length) throw new Error("empty preset gallery file");
+
+        const importedGalleryKeys = [];
         const persistedGallery = readPersistedObject(PERSISTED_PRESET_KEYS.gallery);
         const hiddenGallery = readPersistedObject(PERSISTED_PRESET_KEYS.hiddenGallery);
+
         galleryEntries.forEach(([key, preset], index) => {
-          const finalKey = cleanText(key) || importablePresetKey(preset.label, index);
+          const finalKey = uniqueImportedGalleryKey(key, preset, index);
           IMPORTED_PRESETS[finalKey] = preset;
           persistedGallery[finalKey] = preset;
           delete hiddenGallery[finalKey];
-          if (index === 0) state.gallerySelectedKey = finalKey;
+          importedGalleryKeys.push(finalKey);
         });
-        const persistedStyles = readPersistedObject(PERSISTED_PRESET_KEYS.styles);
-        styleEntriesList.forEach(([key, preset], index) => {
-          const finalKey = cleanText(key) || presetKeyFromLabel(preset.label, "style");
-          IMPORTED_STYLE_PRESETS[finalKey] = preset;
-          persistedStyles[finalKey] = preset;
-          if (index === 0) state.styleSelectedKey = finalKey;
-        });
-        const persistedGrids = readPersistedObject(PERSISTED_PRESET_KEYS.grids);
-        gridEntriesList.forEach(([key, preset], index) => {
-          const finalKey = cleanText(key) || presetKeyFromLabel(preset.label, "grid");
-          IMPORTED_GRID_PRESETS[finalKey] = preset;
-          persistedGrids[finalKey] = preset;
-          if (index === 0) state.gridSelectedKey = finalKey;
-        });
+
         const galleryOk = writePersistedObject(PERSISTED_PRESET_KEYS.gallery, persistedGallery);
         const hiddenOk = writeHiddenGalleryPresetKeys(hiddenGallery);
-        const stylesOk = writePersistedObject(PERSISTED_PRESET_KEYS.styles, persistedStyles);
-        const gridsOk = writePersistedObject(PERSISTED_PRESET_KEYS.grids, persistedGrids);
-        if (styleEntriesList.length || gridEntriesList.length) state.showSheetSpecs = true;
-        console.info("[IAMCCS FrameDesigner] import preset gallery", { file: file.name, galleryEntries, styleEntriesList, gridEntriesList });
-        render();
-        const message = `Imported ${galleryEntries.length} gallery, ${styleEntriesList.length} style, ${gridEntriesList.length} grid preset(s) from ${file.name}`;
+        const firstImportedKey = importedGalleryKeys[0];
+        state.gallerySelectedKey = firstImportedKey || state.gallerySelectedKey;
+        if (firstImportedKey) {
+          applyPresetToBoard(firstImportedKey, "replace");
+          refreshPresetGalleryViews(firstImportedKey, { revealUser: true });
+          window.setTimeout(() => refreshPresetGalleryViews(firstImportedKey, { revealUser: true }), 0);
+        } else {
+          refreshPresetGalleryViews("", { revealUser: true });
+          window.setTimeout(() => refreshPresetGalleryViews("", { revealUser: true }), 0);
+        }
+
+        const message = `${importedType}: imported ${galleryEntries.length} preset(s) from ${file.name}. Canvas reset and applied ${presetByKey(firstImportedKey)?.label || firstImportedKey || "preset"}.`;
         footStatus.textContent = message;
-        showToast(`${message}${galleryOk && hiddenOk && stylesOk && gridsOk ? "" : " (session only: browser cache blocked)"}`, { tone: galleryOk && hiddenOk && stylesOk && gridsOk ? "success" : "warn" });
+        console.info("[IAMCCS FrameDesigner] import preset gallery hard replace", { file: file.name, importedGalleryKeys, appliedToBoard: firstImportedKey || null });
+        showToast(`${message}${galleryOk && hiddenOk ? "" : " (session only: browser cache blocked)"}`, { tone: galleryOk && hiddenOk ? "success" : "warn", ms: 4600 });
       } catch (error) {
         const message = `Preset import failed: ${error?.message || file.name}`;
         footStatus.textContent = message;
-        showToast(message, { tone: "warn" });
+        showToast(message, { tone: "warn", ms: 5200 });
       }
     };
     reader.readAsText(file);
   }
+
 
   function applyRuntimeIdeoboard(payload, signature, usedIncoming) {
     if (!payload) return;
@@ -2725,9 +2728,9 @@ function install(node) {
     if (refMode.mode === "character_diptych") state.workflowModeKey = "character_diptych";
     else if (refMode.mode === "multi_ref_triptych") state.workflowModeKey = "multi_ref_triptych";
     else if (!modes[state.workflowModeKey]) state.workflowModeKey = inferWorkflowModeKey();
-    state.workflowModeKey = modes[state.workflowModeKey] ? state.workflowModeKey : "storyboard_grid";
+    state.workflowModeKey = modes[state.workflowModeKey] ? state.workflowModeKey : "single_image";
     state.data.workflow_mode = state.workflowModeKey;
-    return { key: state.workflowModeKey, ...(modes[state.workflowModeKey] || modes.storyboard_grid) };
+    return { key: state.workflowModeKey, ...(modes[state.workflowModeKey] || modes.single_image) };
   }
 
   function inferWorkflowModeKey() {
@@ -2736,7 +2739,7 @@ function install(node) {
     if (refMode.mode === "multi_ref_triptych") return "multi_ref_triptych";
     if (state.data.i2i?.enabled && state.data.i2i?.source_mode === "refine_source_image") return "image_refine";
     const grid = gridEntries()[state.gridSelectedKey] || null;
-    if (grid?.boxes) return "storyboard_grid";
+    if (grid?.boxes && state.gridSelectedKey !== "single_frame_1x1" && state.gridSelectedKey !== "free_canvas") return "storyboard_grid";
     return "single_image";
   }
 
@@ -2883,7 +2886,7 @@ function install(node) {
     if (state.workflowModeKey === "storyboard_grid") {
       state.gridSelectedKey = grids[requestedGrid] ? requestedGrid : "story_2x3";
     } else {
-      state.gridSelectedKey = grids[requestedGrid] ? requestedGrid : "single_frame_1x1";
+      state.gridSelectedKey = grids[requestedGrid] ? requestedGrid : "free_canvas";
     }
     const requestedTarget = cleanText(raw.target_resolution_key || applied.target_resolution_key || raw.canvas?.target_resolution_key || applied.canvas?.target_resolution_key);
     state.targetResolutionKey = targets[requestedTarget] ? requestedTarget : (state.workflowModeKey === "storyboard_grid" ? "hd_720" : "custom");
@@ -2911,31 +2914,76 @@ function install(node) {
     }
   }
 
+  function hardResetDesignForPreset(applied, key) {
+    const cleanBase = defaultData();
+    cleanBase.items = [];
+    cleanBase.mask_paint = normalizeMaskPaint({ brush_size: 48, strokes: [] });
+    cleanBase.json_override = normalizeJsonOverride({ enabled: false, text: "" });
+    cleanBase.direct_prompt = normalizeDirectPrompt({ enabled: false, text: "" }, cleanBase.scene, []);
+    cleanBase.i2i = normalizeI2I(cleanBase.i2i);
+    const normalized = normalizeDesignObject({
+      ...cloneValue(applied, {}),
+      preset_key: hasPresetKey(key) ? key : cleanText(applied?.preset_key || "storyboard"),
+      items: Array.isArray(applied?.items) ? applied.items : [],
+      mask_paint: { brush_size: 48, strokes: [] },
+      json_override: { enabled: false, text: "" },
+      direct_prompt: { enabled: false, text: "" },
+    }, cleanBase);
+    normalized.items = Array.isArray(applied?.items) ? applied.items.map((item, index) => normalizeItem({ ...item, id: "" }, index)) : [];
+    normalized.mask_paint = normalizeMaskPaint({ brush_size: 48, strokes: [] });
+    normalized.json_override = normalizeJsonOverride({ enabled: false, text: "" });
+    normalized.direct_prompt = normalizeDirectPrompt(normalized.direct_prompt, normalized.scene, normalized.items);
+    return normalized;
+  }
+
+  function compactPresetGridItems(items, key) {
+    const preset = presetByKey(key) || {};
+    const grid = gridEntries()[preset.grid_key || state.gridSelectedKey || ""] || null;
+    const expected = grid?.boxes ? Math.max(1, Number(grid.boxes[0]) || 1) * Math.max(1, Number(grid.boxes[1]) || 1) : 0;
+    const list = Array.isArray(items) ? items.map(normalizeItem) : [];
+    if (!expected || list.length <= expected) return list;
+    const panelLike = (item) => /^panel[\s_-]*\d+/i.test(cleanText(item?.label || item?.id || item?.desc));
+    const panelCount = list.filter(panelLike).length;
+    if (panelCount < expected * 2) return list;
+    const compacted = list.slice(-expected).map((item, index) => normalizeItem({ ...item, id: "" }, index));
+    console.info("[IAMCCS FrameDesigner] compacted duplicate preset grid items", {
+      build: JS_BUILD,
+      preset: key,
+      before: list.length,
+      after: compacted.length,
+      expected,
+    });
+    return compacted;
+  }
+
   function applyPresetToBoard(key, mode = "replace") {
-    const applied = presetData(key);
     if (mode === "append") {
-      const start = state.data.items?.length || 0;
-      const incoming = (applied.items || []).map((item, index) => normalizeItem({
-        ...item,
-        id: "",
-        label: item.label || `${applied.label || key} ${index + 1}`,
-        x: Math.min(980, Number(item.x || 0) + 18),
-        y: Math.min(980, Number(item.y || 0) + 18),
-      }, start + index));
-      state.data.items = [...(state.data.items || []).map(normalizeItem), ...incoming];
-      state.selectedId = incoming[incoming.length - 1]?.id || state.selectedId;
-      persist();
-      render();
-      footStatus.textContent = `Appended ${incoming.length} layer${incoming.length === 1 ? "" : "s"} from ${presetByKey(key).label}`;
-      return;
+      console.info("[IAMCCS FrameDesigner] append preset request converted to atomic replace", { build: JS_BUILD, preset: key });
+      mode = "replace";
     }
-    state.data = applied;
-    clearReferenceModeForStoryboard(false);
-    applyPresetRuntimeMetadata(key, applied);
+    const rawPreset = presetByKey(key);
+    const applied = rawPreset ? normalizeDesignObject({
+      ...cloneValue(rawPreset, {}),
+      preset_key: hasPresetKey(key) ? key : "storyboard",
+    }, { ...defaultData(), items: [] }) : presetData(key);
+    state.selectedId = null;
+    state.data = defaultData();
+    state.data.items = [];
+    writeData(node, state.data);
+    state.data = hardResetDesignForPreset(applied, key);
+    state.data.__iamccs_user_applied_preset = true;
+    applyPresetRuntimeMetadata(key, state.data);
+    state.data.items = compactPresetGridItems(state.data.items, key);
     state.selectedId = state.data.items?.[0]?.id || null;
+    console.info("[IAMCCS FrameDesigner] atomic preset replace", {
+      build: JS_BUILD,
+      preset: key,
+      items: state.data.items?.length || 0,
+      first: state.data.items?.[0] ? { x: state.data.items[0].x, y: state.data.items[0].y, w: state.data.items[0].w, h: state.data.items[0].h, label: state.data.items[0].label } : null,
+    });
     persist();
     render();
-    footStatus.textContent = `Applied preset gallery: ${presetByKey(key).label}`;
+    footStatus.textContent = `Applied preset gallery cleanly: ${presetByKey(key).label}`;
   }
 
   function applyWorkflowMode(modeKey, options = {}) {
@@ -2944,8 +2992,8 @@ function install(node) {
     state.workflowModeKey = modes[modeKey] ? modeKey : "storyboard_grid";
     state.data.workflow_mode = state.workflowModeKey;
     state.styleSelectedKey = "default_photoreal_cinema";
-    if (state.workflowModeKey === "storyboard_grid") state.gridSelectedKey = state.gridSelectedKey && gridEntries()[state.gridSelectedKey] ? state.gridSelectedKey : "story_2x3";
-    else state.gridSelectedKey = "single_frame_1x1";
+    if (state.workflowModeKey === "storyboard_grid") state.gridSelectedKey = state.gridSelectedKey && gridEntries()[state.gridSelectedKey] && state.gridSelectedKey !== "free_canvas" ? state.gridSelectedKey : "story_2x3";
+    else state.gridSelectedKey = "free_canvas";
     state.data.preset_key = "storyboard";
     state.data.scene = workflowDefaultScene(state.workflowModeKey);
     state.data.reference_mode = normalizeReferenceMode({ mode: mode.ref_mode || "single" });
@@ -2996,12 +3044,15 @@ function install(node) {
     container.innerHTML = "";
     Object.entries(presetEntries()).forEach(([key, preset]) => {
       const design = presetData(key);
+      const imported = Boolean(IMPORTED_PRESETS[key]);
+      const selected = selectedGalleryKey() === key;
       const card = document.createElement("button");
       card.type = "button";
-      card.className = `iamccs-isf-gallery-card ${selectedGalleryKey() === key ? "selected" : ""}`;
-      card.title = `${preset.label || key}\nDouble-click to replace the board`;
+      card.className = `iamccs-isf-gallery-card ${selected ? "selected" : ""} ${imported ? "imported" : "builtin"}`;
+      card.title = `${preset.label || key}\nClick to select. Double-click to replace the board.`;
       card.innerHTML = `
         <div class="iamccs-isf-gallery-thumb"><img alt="" src="${boardPreviewSvgDataUri(design)}"></div>
+        <div class="iamccs-isf-gallery-badges"><span class="iamccs-isf-gallery-badge ${imported ? "user" : ""}">${imported ? "Imported" : "Built-in"}</span><span class="iamccs-isf-gallery-badge">${design.workflow_mode || preset.workflow_mode || "storyboard_grid"}</span></div>
         <div class="iamccs-isf-gallery-name"></div>
         <div class="iamccs-isf-gallery-summary"></div>`;
       card.querySelector(".iamccs-isf-gallery-name").textContent = preset.label || key;
@@ -3011,7 +3062,7 @@ function install(node) {
         container.querySelectorAll(".iamccs-isf-gallery-card").forEach((entry) => {
           entry.classList.toggle("selected", entry === card);
         });
-        footStatus.textContent = `Selected preset: ${preset.label || key}`;
+        footStatus.textContent = `Selected preset: ${preset.label || key}. Double-click or press Replace Board to apply.`;
       });
       card.addEventListener("dblclick", (event) => {
         event.preventDefault();
@@ -3021,6 +3072,228 @@ function install(node) {
       });
       container.appendChild(card);
     });
+  }
+
+
+
+
+  function galleryPresetTags(key, preset, design) {
+    const text = [key, preset?.label, preset?.summary, preset?.grid_key, preset?.workflow_mode, design?.board_name, design?.scene?.high_level_description].join(" ").toLowerCase();
+    const tags = [];
+    if (IMPORTED_PRESETS[key]) tags.push("User");
+    else tags.push("Built-in");
+    if (text.includes("storyboard") || preset?.workflow_mode === "storyboard_grid" || preset?.grid_key) tags.push("Storyboard");
+    if (text.includes("character") || text.includes("infogram") || text.includes("profile")) tags.push("Character");
+    if (preset?.workflow_mode === "single_image" || text.includes("single")) tags.push("Single");
+    if (preset?.workflow_mode === "image_refine" || design?.i2i?.enabled) tags.push("i2i");
+    const grid = cleanText(preset?.grid_key || design?.canvas?.grid_key);
+    if (grid) tags.push(grid.replace(/_/g, " "));
+    const boxes = currentCanvasMultiplierFromDesign(design);
+    if (boxes) tags.push(boxes);
+    return [...new Set(tags.filter(Boolean))];
+  }
+
+  function currentCanvasMultiplierFromDesign(design) {
+    const items = Array.isArray(design?.items) ? design.items.filter((item) => normalizeItem(item).kind !== "image") : [];
+    if (!items.length) return "";
+    const xs = [...new Set(items.map((item) => Number(normalizeItem(item).x || 0).toFixed(3)))];
+    const ys = [...new Set(items.map((item) => Number(normalizeItem(item).y || 0).toFixed(3)))];
+    if (xs.length > 1 || ys.length > 1) return String(xs.length) + "x" + String(ys.length);
+    return "1x1";
+  }
+
+  function galleryPresetRows() {
+    const rank = { User: 0, Storyboard: 1, Character: 2, Single: 3, i2i: 4, "Built-in": 9 };
+    return Object.entries(presetEntries()).map(([key, preset]) => {
+      const design = presetData(key);
+      const tags = galleryPresetTags(key, preset, design);
+      return {
+        key,
+        preset,
+        design,
+        tags,
+        imported: Boolean(IMPORTED_PRESETS[key]),
+        primaryRank: Math.min(...tags.map((tag) => rank[tag] ?? 6)),
+      };
+    }).sort((a, b) => a.primaryRank - b.primaryRank || String(a.preset.label || a.key).localeCompare(String(b.preset.label || b.key)));
+  }
+
+  function deleteUserGalleryPreset(key, anchor = null, options = {}) {
+    const cleanKey = cleanText(key);
+    if (!cleanKey) return false;
+    if (!IMPORTED_PRESETS[cleanKey]) {
+      showToast("Only imported user gallery presets can be deleted here.", { anchor, tone: "warn", ms: 3000 });
+      return false;
+    }
+    delete IMPORTED_PRESETS[cleanKey];
+    const persisted = readPersistedObject(PERSISTED_PRESET_KEYS.gallery);
+    delete persisted[cleanKey];
+    const hidden = hiddenGalleryPresetKeys();
+    delete hidden[cleanKey];
+    const okA = writePersistedObject(PERSISTED_PRESET_KEYS.gallery, persisted);
+    const okB = writeHiddenGalleryPresetKeys(hidden);
+    const visible = Object.keys(presetEntries());
+    state.gallerySelectedKey = visible.includes(state.gallerySelectedKey) ? state.gallerySelectedKey : (visible[0] || "storyboard");
+    if (options.renderNode !== false) render();
+    else {
+      const gallery = root.querySelector('[data-preset-gallery]');
+      if (gallery) renderPresetGallery(gallery);
+    }
+    showToast("Deleted user preset: " + cleanKey + (okA && okB ? "" : " (session only: browser cache blocked)"), { anchor, tone: okA && okB ? "success" : "warn" });
+    return true;
+  }
+
+  let activePresetGalleryManager = null;
+
+  function refreshOpenPresetGalleryManager() {
+    try { activePresetGalleryManager?.render?.(); } catch (error) { console.warn("[IAMCCS FrameDesigner] gallery manager refresh failed", error); }
+  }
+
+  function refreshPresetGalleryViews(selectedKey = "", options = {}) {
+    const key = cleanText(selectedKey);
+    if (key && hasPresetKey(key)) state.gallerySelectedKey = key;
+    const gallery = root.querySelector('[data-preset-gallery]');
+    if (gallery) renderPresetGallery(gallery);
+    refreshPresetDropdowns();
+    try {
+      if (options.revealUser && activePresetGalleryManager?.showUser) activePresetGalleryManager.showUser();
+      else refreshOpenPresetGalleryManager();
+    } catch (error) {
+      console.warn("[IAMCCS FrameDesigner] gallery live refresh failed", error);
+    }
+  }
+
+  function openPresetGalleryManager(anchor = null) {
+    const modal = document.createElement("div");
+    modal.className = "iamccs-isf-zoom-modal";
+    let activeTag = "All";
+
+    const allTags = () => {
+      const tags = new Set(["All"]);
+      galleryPresetRows().forEach((row) => row.tags.forEach((tag) => tags.add(tag)));
+      const order = ["All", "User", "Storyboard", "Character", "Single", "i2i", "Built-in"];
+      return [...tags].sort((a, b) => {
+        const ai = order.indexOf(a);
+        const bi = order.indexOf(b);
+        return (ai < 0 ? 99 : ai) - (bi < 0 ? 99 : bi) || a.localeCompare(b);
+      });
+    };
+
+    const renderManager = () => {
+      const rows = galleryPresetRows();
+      const filtered = activeTag === "All" ? rows : rows.filter((row) => row.tags.includes(activeTag));
+      modal.innerHTML = [
+        '<div class="iamccs-isf-gallery-manager-card" role="dialog" aria-modal="true">',
+        '<div class="iamccs-isf-gallery-manager-head">',
+        '<div><strong>Preset Gallery Manager</strong><span>Browse imported and built-in presets by tag. Replace always clears the current board before loading the selected preset.</span></div>',
+        '<div style="display:flex; gap:8px; align-items:center;"><button class="iamccs-isf-btn primary" type="button" data-manager-action="import">Import Preset</button><button class="iamccs-isf-btn" type="button" data-manager-action="close">Close</button></div>',
+        '</div>',
+        '<div class="iamccs-isf-gallery-manager-tags" data-manager-tags></div>',
+        '<div class="iamccs-isf-gallery-manager-grid" data-manager-grid></div>',
+        '<div class="iamccs-isf-gallery-manager-foot">' + filtered.length + ' preset(s) shown. Double-click any card to replace the current board.</div>',
+        '</div>'
+      ].join("");
+
+      const tagBar = modal.querySelector("[data-manager-tags]");
+      allTags().forEach((tag) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "iamccs-isf-gallery-manager-tag " + (activeTag === tag ? "selected" : "");
+        button.textContent = tag;
+        button.addEventListener("click", () => {
+          activeTag = tag;
+          renderManager();
+        });
+        tagBar.appendChild(button);
+      });
+
+      const grid = modal.querySelector("[data-manager-grid]");
+      if (!filtered.length) {
+        const empty = document.createElement("div");
+        empty.className = "iamccs-isf-gallery-manager-empty";
+        empty.textContent = "No presets for this tag.";
+        grid.appendChild(empty);
+      }
+      filtered.forEach((row) => {
+        const card = document.createElement("div");
+        card.className = "iamccs-isf-gallery-manager-item " + (row.imported ? "user" : "builtin") + (state.gallerySelectedKey === row.key ? " selected" : "");
+        card.innerHTML = [
+          '<div class="iamccs-isf-gallery-manager-thumb"><img alt=""></div>',
+          '<div class="iamccs-isf-gallery-manager-title"></div>',
+          '<div class="iamccs-isf-gallery-manager-meta">',
+          '<div data-role="summary"></div>',
+          '<div><strong>Key:</strong> <span data-role="key"></span></div>',
+          '<div><strong>Mode:</strong> <span data-role="mode"></span></div>',
+          '<div class="iamccs-isf-gallery-manager-chipline" data-role="tags"></div>',
+          '</div>',
+          '<div class="iamccs-isf-gallery-manager-actions two">',
+          '<button class="iamccs-isf-btn primary" type="button" data-card-action="replace">Replace</button>',
+          '<button class="iamccs-isf-btn danger-lite" type="button" data-card-action="delete">Delete</button>',
+          '</div>'
+        ].join("");
+        card.querySelector("img").src = boardPreviewSvgDataUri(row.design);
+        card.querySelector(".iamccs-isf-gallery-manager-title").textContent = row.preset.label || row.key;
+        card.querySelector('[data-role="summary"]').textContent = row.preset.summary || row.design.scene?.high_level_description || "";
+        card.querySelector('[data-role="key"]').textContent = row.key;
+        card.querySelector('[data-role="mode"]').textContent = row.preset.workflow_mode || row.design.workflow_mode || "storyboard_grid";
+        const chipline = card.querySelector('[data-role="tags"]');
+        row.tags.forEach((tag) => {
+          const chip = document.createElement("span");
+          chip.className = "iamccs-isf-gallery-manager-chip " + (tag === "User" ? "user" : "");
+          chip.textContent = tag;
+          chipline.appendChild(chip);
+        });
+        card.addEventListener("dblclick", () => {
+          state.gallerySelectedKey = row.key;
+          applyPresetToBoard(row.key, "replace");
+          modal.remove();
+        });
+        card.querySelector('[data-card-action="replace"]')?.addEventListener("click", () => {
+          state.gallerySelectedKey = row.key;
+          applyPresetToBoard(row.key, "replace");
+          modal.remove();
+        });
+        const deleteButton = card.querySelector('[data-card-action="delete"]');
+        if (!row.imported) {
+          deleteButton.disabled = true;
+          deleteButton.textContent = "Built-in";
+          deleteButton.title = "Built-in presets are locked. Import a user preset pack to manage deletions here.";
+        } else {
+          deleteButton.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (deleteUserGalleryPreset(row.key, deleteButton, { renderNode: false })) renderManager();
+          });
+        }
+        grid.appendChild(card);
+      });
+
+      modal.querySelector('[data-manager-action="import"]')?.addEventListener("click", () => presetGalleryInput?.click());
+      modal.querySelector('[data-manager-action="close"]')?.addEventListener("click", () => modal.dispatchEvent(new Event("iamccs-close-manager")));
+    };
+
+    activePresetGalleryManager = {
+      render: renderManager,
+      modal,
+      showUser: () => {
+        activeTag = "User";
+        renderManager();
+      },
+    };
+    renderManager();
+    const closeManager = () => {
+      if (activePresetGalleryManager?.modal === modal) activePresetGalleryManager = null;
+      modal.remove();
+    };
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) closeManager();
+    });
+    modal.addEventListener("keydown", (event) => {
+      if (event.key === "Escape") closeManager();
+    });
+    modal.addEventListener("iamccs-close-manager", closeManager);
+    document.body.appendChild(modal);
+    showToast("Preset Gallery Manager opened", { anchor, tone: "success", ms: 1400 });
   }
 
 
@@ -3147,33 +3420,25 @@ function install(node) {
     const config = {
       gallery: { imported: IMPORTED_PRESETS, builtin: PRESETS, store: PERSISTED_PRESET_KEYS.gallery, stateKey: "gallerySelectedKey", fallback: "storyboard", label: "gallery" },
       style: { imported: IMPORTED_STYLE_PRESETS, builtin: STYLE_PRESETS, store: PERSISTED_PRESET_KEYS.styles, stateKey: "styleSelectedKey", fallback: "default_photoreal_cinema", label: "style" },
-      grid: { imported: IMPORTED_GRID_PRESETS, builtin: GRID_PRESETS, store: PERSISTED_PRESET_KEYS.grids, stateKey: "gridSelectedKey", fallback: "story_2x3", label: "grid" },
+      grid: { imported: IMPORTED_GRID_PRESETS, builtin: GRID_PRESETS, store: PERSISTED_PRESET_KEYS.grids, stateKey: "gridSelectedKey", fallback: "free_canvas", label: "grid" },
     }[kind];
     if (!config) return;
 
     if (kind === "gallery") {
-      let changed = false;
-      const persisted = readPersistedObject(config.store);
       if (config.imported[cleanKey]) {
-        delete config.imported[cleanKey];
-        delete persisted[cleanKey];
-        changed = true;
-      }
-      const hidden = hiddenGalleryPresetKeys();
-      if (config.builtin[cleanKey]) {
-        hidden[cleanKey] = true;
-        changed = true;
-      }
-      if (!changed) {
-        showToast(`No gallery preset selected: ${cleanKey}`, { anchor, tone: "warn" });
+        deleteUserGalleryPreset(cleanKey, anchor);
         return;
       }
-      const importOk = writePersistedObject(config.store, persisted);
-      const hiddenOk = writeHiddenGalleryPresetKeys(hidden);
-      const nextKey = Object.keys(presetEntries())[0] || config.fallback;
-      state[config.stateKey] = nextKey;
-      render();
-      showToast(`Deleted gallery preset: ${cleanKey}${importOk && hiddenOk ? "" : " (session only: browser cache blocked)"}`, { anchor, tone: importOk && hiddenOk ? "success" : "warn" });
+      if (config.builtin[cleanKey]) {
+        const hidden = hiddenGalleryPresetKeys();
+        hidden[cleanKey] = true;
+        const hiddenOk = writeHiddenGalleryPresetKeys(hidden);
+        state[config.stateKey] = Object.keys(presetEntries())[0] || config.fallback;
+        render();
+        showToast(`Hidden built-in gallery preset: ${cleanKey}${hiddenOk ? "" : " (session only: browser cache blocked)"}`, { anchor, tone: hiddenOk ? "success" : "warn" });
+        return;
+      }
+      showToast(`No gallery preset selected: ${cleanKey}`, { anchor, tone: "warn" });
       return;
     }
 
@@ -3215,11 +3480,26 @@ function install(node) {
   }
 
   function applyGridPreset(key) {
-    const preset = gridEntries()[key] || gridEntries().story_2x3;
+    const preset = gridEntries()[key] || gridEntries().free_canvas || gridEntries().story_2x3;
     if (!preset) return;
     state.gridSelectedKey = key;
+    if (key === "free_canvas" || !preset.boxes) {
+      state.workflowModeKey = "single_image";
+      state.data.workflow_mode = state.workflowModeKey;
+      state.data.grid_key = "free_canvas";
+      state.data.canvas.width = Number(preset.width || state.data.canvas.width || 1280);
+      state.data.canvas.height = Number(preset.height || state.data.canvas.height || 720);
+      state.data.canvas.aspect_label = preset.aspect_label || preset.label || "Free Canvas";
+      state.data.items = [];
+      state.selectedId = null;
+      persist();
+      render();
+      footStatus.textContent = `Applied grid preset: ${preset.label || key}`;
+      return;
+    }
     state.workflowModeKey = "storyboard_grid";
     state.data.workflow_mode = state.workflowModeKey;
+    state.data.grid_key = key;
     clearReferenceModeForStoryboard(false);
     state.data.preset_key = "storyboard";
     state.data.canvas.width = Number(preset.width || state.data.canvas.width || 1536);
@@ -3325,14 +3605,14 @@ function install(node) {
     scenePane.innerHTML = '';
     const presets = document.createElement('div');
     presets.className = 'iamccs-isf-panel';
-    presets.innerHTML = '<h4>Preset Gallery</h4><div class="iamccs-isf-gallery-grid" data-preset-gallery></div><div class="iamccs-isf-gallery-actions"><button class="iamccs-isf-btn primary" data-gallery-action="replace">Replace Board</button><button class="iamccs-isf-btn" data-gallery-action="append">Append Layers</button><button class="iamccs-isf-btn danger-lite" data-gallery-action="delete">Delete Preset</button></div>';
+    presets.innerHTML = '<h4>Preset Gallery</h4><div class="iamccs-isf-gallery-grid" data-preset-gallery></div><div class="iamccs-isf-gallery-actions"><button class="iamccs-isf-btn primary" data-gallery-action="replace">Replace Board</button><button class="iamccs-isf-btn" data-gallery-action="show-manager">Show Gallery</button><button class="iamccs-isf-btn" data-gallery-action="import">Import Preset</button></div>';
     scenePane.appendChild(presets);
 
     const presetGallery = presets.querySelector('[data-preset-gallery]');
     renderPresetGallery(presetGallery);
     presets.querySelector('[data-gallery-action="replace"]')?.addEventListener('click', () => applyPresetToBoard(selectedGalleryKey(), 'replace'));
-    presets.querySelector('[data-gallery-action="append"]')?.addEventListener('click', () => applyPresetToBoard(selectedGalleryKey(), 'append'));
-    presets.querySelector('[data-gallery-action="delete"]')?.addEventListener('click', (event) => deleteImportedPreset('gallery', selectedGalleryKey(), event.currentTarget));
+    presets.querySelector('[data-gallery-action="show-manager"]')?.addEventListener('click', (event) => openPresetGalleryManager(event.currentTarget));
+    presets.querySelector('[data-gallery-action="import"]')?.addEventListener('click', () => presetGalleryInput?.click());
 
     const modePanel = document.createElement('div');
     modePanel.className = 'iamccs-isf-panel mode-panel';
@@ -4617,7 +4897,7 @@ function install(node) {
   }
 
   function renderImageEditor() {
-    if (!kjPreview) return;
+    if (!boardPreview) return;
     const rawItems = Array.isArray(state.data.items) ? state.data.items : [];
     let items = rawItems.map((item, index) => normalizeItem(item, index));
     let imageItem = items.find((item) => item.kind === "image");
@@ -4667,7 +4947,7 @@ function install(node) {
     const aspect = canvasW / canvasH;
     const hasImage = Boolean(cleanText(imageItem.image_path));
     const src = hasImage ? imageViewUrl(imageItem.image_path) : "";
-    kjPreview.innerHTML = `
+    boardPreview.innerHTML = `
       <div class="iamccs-isf-image-editor" data-artboard>
         <div class="iamccs-isf-image-editor-meta">
           <span>Image Editor / i2i Inpaint - ${escapeXml(canvasW)} x ${escapeXml(canvasH)}</span>
@@ -4687,9 +4967,9 @@ function install(node) {
             </div>
           </div>`}
       </div>`;
-    artboard = kjPreview.querySelector('[data-artboard]') || kjPreview;
+    artboard = boardPreview.querySelector('[data-artboard]') || boardPreview;
     if (hasImage) {
-      const frame = kjPreview.querySelector('[data-item-id]');
+      const frame = boardPreview.querySelector('[data-item-id]');
       const maskCanvas = frame?.querySelector('[data-mask-canvas]');
       if (maskCanvas) bindImageEditorMaskCanvas(maskCanvas, imageItem);
       frame?.addEventListener('pointerdown', (event) => {
@@ -4701,7 +4981,7 @@ function install(node) {
         renderLayerList();
       });
     } else {
-      kjPreview.querySelector('[data-editor-load-image]')?.addEventListener('click', (event) => {
+      boardPreview.querySelector('[data-editor-load-image]')?.addEventListener('click', (event) => {
         event.preventDefault();
         event.stopPropagation();
         imageInput?.click();
@@ -4714,7 +4994,7 @@ function install(node) {
   }
 
   function renderArtboard() {
-    if (!kjPreview) return;
+    if (!boardPreview) return;
     if (state.workflowModeKey === "image_refine" || state.data?.workflow_mode === "image_refine") {
       renderImageEditor();
       return;
@@ -4754,12 +5034,12 @@ function install(node) {
           <div class="iamccs-isf-handle" data-drag-handle="resize" title="Resize"></div>
         </div>`;
     }).join("");
-    kjPreview.innerHTML = `
-      <div class="iamccs-isf-kj-artboard" data-artboard style="--iamccs-artboard-aspect:${aspect};">
-        <div class="iamccs-isf-kj-artboard-meta">${escapeXml(meta)}</div>
-        ${itemHtml || `<div class="iamccs-isf-kj-artboard-empty">Add Object, Add Text, or Add Image. Drag boxes directly on this board; resize with the white handle.</div>`}
+    boardPreview.innerHTML = `
+      <div class="iamccs-isf-board-artboard-meta">${escapeXml(meta)}</div>
+      <div class="iamccs-isf-board-artboard" data-artboard style="--iamccs-artboard-aspect:${aspect};">
+        ${itemHtml || `<div class="iamccs-isf-board-artboard-empty">Add Object, Add Text, or Add Image. Drag boxes directly on this board; resize with the white handle.</div>`}
       </div>`;
-    artboard = kjPreview.querySelector('[data-artboard]') || kjPreview;
+    artboard = boardPreview.querySelector('[data-artboard]') || boardPreview;
     footStatus.textContent = `Canvas layers visible: ${visibleItems.length}`;
     artboard.querySelectorAll('[data-item-id]').forEach((el) => {
       const id = el.getAttribute('data-item-id');
@@ -4938,11 +5218,11 @@ function install(node) {
     uploadImageFiles(event.target.files);
     event.target.value = '';
   });
-  kjPreview?.addEventListener('dragover', (event) => {
+  boardPreview?.addEventListener('dragover', (event) => {
     event.preventDefault();
     event.stopPropagation();
   });
-  kjPreview?.addEventListener('drop', (event) => {
+  boardPreview?.addEventListener('drop', (event) => {
     event.preventDefault();
     event.stopPropagation();
     uploadImageFiles(event.dataTransfer?.files);
@@ -5155,3 +5435,4 @@ app.registerExtension({
     };
   },
 });
+
