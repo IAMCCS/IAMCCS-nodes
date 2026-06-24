@@ -12,11 +12,13 @@ const TYPE_V2 = "IAMCCS_StoryboardFrameDesignerV2";
 const TYPE_JSON_PASS = "IAMCCS_IdeogramJSONPreviewPass";
 const STYLE_ID = "iamccs-ideogram-storyboard-frame-style";
 const IDEOBOARD_SCHEMA = "iamccs.ideoboard.package";
-const JS_BUILD = "IAMCCS-GALLERY-LIVE-REFRESH-20260620";
+const JS_BUILD = "IAMCCS-INTERNAL-GEMMA4-ASSISTANT-APPLY-20260622";
 console.info("[IAMCCS FrameDesigner] loaded", JS_BUILD, import.meta.url);
 
 let lastIamccsResultImage = null;
 let lastIamccsStoryboardSourceImage = null;
+let lastIamccsPrimaryResultImage = null;
+let iamccsActivePromptKey = "";
 const iamccsLiveFrameNodes = new Set();
 const iamccsFrameDesignerNodes = new Set();
 
@@ -47,26 +49,61 @@ function iamccsShouldIgnoreAutoCompareImage(img) {
   );
 }
 
+function iamccsEventPromptKey(event) {
+  return String(
+    event?.detail?.prompt_id ||
+    event?.detail?.promptId ||
+    event?.detail?.prompt?.id ||
+    iamccsActivePromptKey ||
+    "default"
+  );
+}
+
+function iamccsEventNode(event) {
+  const rawId = event?.detail?.node ?? event?.detail?.node_id ?? event?.detail?.nodeId;
+  if (rawId == null) return null;
+  const id = Number(rawId);
+  const graph = app?.graph;
+  return graph?.getNodeById?.(id) || graph?._nodes_by_id?.[id] || graph?._nodes_by_id?.[String(rawId)] || null;
+}
+
+function iamccsIsSaveImageEvent(event) {
+  const graphNode = iamccsEventNode(event);
+  const type = String(
+    graphNode?.type ||
+    graphNode?.comfyClass ||
+    graphNode?.properties?.["Node name for S&R"] ||
+    ""
+  ).toLowerCase();
+  return type === "saveimage" || type.endsWith(".saveimage");
+}
+
 try {
+  api?.addEventListener?.("execution_start", (event) => {
+    iamccsActivePromptKey = String(event?.detail?.prompt_id || event?.detail?.promptId || Date.now());
+    lastIamccsPrimaryResultImage = null;
+    lastIamccsStoryboardSourceImage = null;
+  });
   api?.addEventListener?.("executed", (event) => {
     const images = event?.detail?.output?.images;
     if (!Array.isArray(images) || !images.length) return;
-    lastIamccsResultImage = images[images.length - 1];
-    if (iamccsIsStoryboardSourceImage(lastIamccsResultImage)) lastIamccsStoryboardSourceImage = lastIamccsResultImage;
-    if (iamccsShouldIgnoreAutoCompareImage(lastIamccsResultImage)) return;
-    const url = iamccsResultViewUrl(lastIamccsResultImage);
+    if (!iamccsIsSaveImageEvent(event)) return;
+    const img = images[0];
+    if (iamccsShouldIgnoreAutoCompareImage(img)) return;
+    const promptKey = iamccsEventPromptKey(event);
+    if (lastIamccsPrimaryResultImage && promptKey === iamccsActivePromptKey) return;
+    iamccsActivePromptKey = promptKey;
+    lastIamccsPrimaryResultImage = img;
+    lastIamccsResultImage = img;
+    if (iamccsIsStoryboardSourceImage(img)) lastIamccsStoryboardSourceImage = img;
+    const url = iamccsResultViewUrl(img);
     iamccsLiveFrameNodes.forEach((node) => node?._iamccsSetResultBackground?.(url, true));
     // FrameDesigner compare overlays are intentionally disabled: results must not
     // inject extra UI/image layers into the editable canvas.
   });
   api?.addEventListener?.("b_preview", (event) => {
-    const blob = event?.detail;
-    if (!blob || !iamccsLiveFrameNodes.size) return;
-    const url = URL.createObjectURL(blob);
-    iamccsLiveFrameNodes.forEach((node) => node?._iamccsSetResultBackground?.(url, false));
-    window.setTimeout(() => {
-      try { URL.revokeObjectURL(url); } catch {}
-    }, 30000);
+    // Do not use live sampler previews as the under-box image. They can be
+    // sigma/debug previews and would replace the real first SaveImage result.
   });
 } catch {}
 
@@ -458,6 +495,59 @@ const TARGET_RESOLUTION_PRESETS = {
   custom: { label: "Custom - use Width / Height", width: 0, height: 0, note: "Manual canvas values stay editable." },
 };
 
+const PALETTE_PRESETS = {
+  custom: {
+    label: "Custom / Current",
+    colors: [],
+    summary: "Keep the palette currently typed in the field.",
+  },
+  photoreal_neutral_color: {
+    label: "Photoreal Neutral Color",
+    colors: ["#101014", "#2E3438", "#7A6A58", "#D6C7AA", "#8C3F2E"],
+    summary: "Grounded cinematic color for realistic faces, costume, and natural interiors.",
+  },
+  silver_halide_bw: {
+    label: "Silver Halide B/W",
+    colors: ["#050505", "#1A1A1A", "#444444", "#8A8A8A", "#D8D8D8", "#F5F5F5"],
+    summary: "True black-and-white documentary print values.",
+  },
+  faded_eastmancolor: {
+    label: "Faded Eastmancolor",
+    colors: ["#151718", "#47565B", "#8D7652", "#C7B383", "#B4563D", "#E4D6B5"],
+    summary: "Vintage 1960s-1970s film color with muted cyan, amber, and aged skin tones.",
+  },
+  cold_scifi_ice: {
+    label: "Cold Sci-Fi Ice",
+    colors: ["#06111A", "#244454", "#557C8A", "#A8D8E8", "#E6E1C6", "#E87C45"],
+    summary: "Frozen planet / space-survival palette with cold blues and small warm accents.",
+  },
+  candle_gothic: {
+    label: "Candle Gothic",
+    colors: ["#090706", "#241813", "#5E3B24", "#A26F3A", "#D9B978", "#F2E3C2"],
+    summary: "Low-key candlelit interiors, aged wood, stone, and warm practical light.",
+  },
+  desert_epic: {
+    label: "Desert Epic",
+    colors: ["#100D0A", "#4B3828", "#8F7048", "#C6A46A", "#E5D0A1", "#48646B"],
+    summary: "Dry sand, sun-baked fabric, dust, and restrained blue-green shadows.",
+  },
+  muted_fairytale_horror: {
+    label: "Muted Fairytale Horror",
+    colors: ["#0B0E10", "#273135", "#5B5245", "#91785D", "#BCA683", "#6E2328"],
+    summary: "Dirty storybook realism, sickly fabrics, old rooms, and restrained blood-red accents.",
+  },
+  neon_night_city: {
+    label: "Neon Night City",
+    colors: ["#05070A", "#102035", "#00A6B8", "#9D4EDD", "#F72585", "#F5F0D8"],
+    summary: "Wet night exteriors, signs, reflections, and graphic cyberpunk contrast.",
+  },
+  oz_sickly_green_gold: {
+    label: "Sickly Green / Gold",
+    colors: ["#08100A", "#27351E", "#5F6F35", "#A58D3D", "#D9C071", "#D8C8A8"],
+    summary: "Grotesque fairytale golds, green shadows, antique costume texture.",
+  },
+};
+
 const WORKFLOW_MODES = {
   single_image: {
     label: "Single Image",
@@ -534,6 +624,26 @@ function writeHiddenGalleryPresetKeys(value) {
 
 function targetResolutionEntries() {
   return { ...TARGET_RESOLUTION_PRESETS };
+}
+
+function paletteEntries() {
+  return { ...PALETTE_PRESETS };
+}
+
+function paletteKeyForColors(colors) {
+  const normalized = paletteList(colors, []).map((color) => color.toUpperCase()).join(",");
+  if (!normalized) return "custom";
+  for (const [key, preset] of Object.entries(PALETTE_PRESETS)) {
+    const value = paletteList(preset.colors, []).map((color) => color.toUpperCase()).join(",");
+    if (value && value === normalized) return key;
+  }
+  return "custom";
+}
+
+function applyPalettePresetToList(key, fallback = []) {
+  const preset = paletteEntries()[key];
+  if (!preset || key === "custom") return paletteList(fallback, []);
+  return paletteList(preset.colors, fallback);
 }
 
 function workflowModeEntries() {
@@ -1134,6 +1244,18 @@ function defaultData() {
     "brief": "",
     "instruction": "Enhance the current Ideogram JSON without changing layout, bbox coordinates, visible text, or panel count."
   },
+  "gemma_assistant": {
+    "enabled": false,
+    "provider": "local_gemma",
+    "mode": "full_json_enhance",
+    "speed": "fast",
+    "model": "text_encoders\\gemma4_e4b_it_fp8_scaled.safetensors",
+    "selected_id": "",
+    "target_field": "",
+    "current_text": "",
+    "brief": "",
+    "request_ready": false
+  },
   "mask_paint": {
     "brush_size": 48,
     "strokes": []
@@ -1520,6 +1642,22 @@ function toPrompt(data) {
     } catch {}
   }
   const items = Array.isArray(data?.items) ? data.items.map(normalizeItem).filter((item) => item.kind !== "image" && item.kind !== "mask") : [];
+  const monochrome = isMonochromeDesign(data);
+  const scenePalette = paletteList(data?.scene?.color_palette, []);
+  const fallbackMonoPalette = ["#050505", "#1A1A1A", "#777777", "#F2F2F2"];
+  const elementForItem = (item) => {
+    const palette = monochrome
+      ? (scenePalette.length ? scenePalette : fallbackMonoPalette)
+      : paletteList(item.color_palette, []);
+    const entry = {
+      type: item.kind === "text" ? "text" : "obj",
+      bbox: [item.y, item.x, Math.min(1000, item.y + item.h), Math.min(1000, item.x + item.w)],
+      desc: item.desc,
+      ...(item.kind === "text" ? { text: item.text || item.label } : {}),
+    };
+    if (palette.length) entry.color_palette = palette;
+    return entry;
+  };
   return {
     high_level_description: cleanText(data?.scene?.high_level_description),
     style_description: {
@@ -1532,15 +1670,23 @@ function toPrompt(data) {
     },
     compositional_deconstruction: {
       background: cleanText(data?.scene?.background),
-      elements: items.map((item) => ({
-        type: item.kind === "text" ? "text" : "obj",
-        bbox: [item.y, item.x, Math.min(1000, item.y + item.h), Math.min(1000, item.x + item.w)],
-        desc: item.desc,
-        color_palette: paletteList(item.color_palette, ["#FFE4B5", "#1A1A2E"]),
-        ...(item.kind === "text" ? { text: item.text || item.label } : {}),
-      })),
+      elements: items.map(elementForItem),
     },
   };
+}
+
+function isMonochromeDesign(data) {
+  const scene = data?.scene || {};
+  const text = [
+    scene.high_level_description,
+    scene.aesthetics,
+    scene.lighting,
+    scene.photo,
+    scene.medium,
+    scene.art_style,
+    scene.background,
+  ].map(cleanText).join(" ").toLowerCase();
+  return /\b(black and white|black-and-white|monochrome|grayscale|grey scale|silver halide|silver gelatin)\b/.test(text);
 }
 
 function safeFilename(value, fallback = "IAMCCS_Ideoboard") {
@@ -1711,6 +1857,8 @@ function ensureStyles() {
     .iamccs-isf-btn.primary { background:linear-gradient(180deg,#ffb65d,#f28b45); color:#24170b; border-color:#ffcb86; }
     .iamccs-isf-btn[data-action="toggle-fullscreen"] { background:linear-gradient(180deg,#9ad7ff,#3a8fd6); border-color:#b8e3ff; color:#071625; }
     .iamccs-isf.iamccs-isf-fullscreen .iamccs-isf-btn[data-action="toggle-fullscreen"] { background:linear-gradient(180deg,#ffd6a0,#e47a36); border-color:#ffe0b8; color:#241207; }
+    .iamccs-isf-btn[data-action="toggle-show-img"] { background:linear-gradient(180deg,#bfefff,#4898c8); border-color:#bdeaff; color:#071723; }
+    .iamccs-isf-btn[data-action="toggle-show-img"].off { background:#152329; border-color:#36545d; color:#8da7ad; }
     .iamccs-isf-btn[data-action="toggle-paper"] { background:linear-gradient(180deg,#fff7e7,#d9c49a); border-color:#ffe1a8; color:#17110a; }
     .iamccs-isf-btn[data-action="save-ideoboard"], .iamccs-isf-btn[data-action="copy-json"] { background:#173923; border-color:#3b8f5b; }
     .iamccs-isf-btn[data-action="import-ideoboard"], .iamccs-isf-btn[data-action="import-preset-gallery"] { background:#182d4f; border-color:#4d83d5; }
@@ -1726,6 +1874,23 @@ function ensureStyles() {
     .iamccs-isf-pane:last-child { border-right:none; border-left:1px solid rgba(120,200,198,.14); }
     .iamccs-isf-panel { border:1px solid rgba(100,188,184,.22); border-radius:12px; background:linear-gradient(180deg,rgba(18,30,34,.96),rgba(10,17,19,.96)); padding:12px; margin-bottom:12px; box-shadow:inset 0 1px 0 rgba(255,255,255,.035); }
     .iamccs-isf-panel h4 { margin:0 0 10px; font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:#ffcf8f; }
+    .iamccs-isf-panel-headline { display:flex; align-items:center; justify-content:space-between; gap:10px; margin:0 0 10px; }
+    .iamccs-isf-panel-headline h4 { margin:0; }
+    .iamccs-isf-beta { display:inline-flex; align-items:center; margin-left:6px; padding:2px 6px; border-radius:999px; border:1px solid rgba(255,184,196,.46); color:#ffd6de; background:#36121c; font-size:9px; letter-spacing:.08em; vertical-align:middle; }
+    .iamccs-isf-gemma-panel { border-color:rgba(151,229,171,.36); background:linear-gradient(180deg,rgba(16,43,28,.96),rgba(8,18,14,.94)); }
+    .iamccs-isf-gemma-panel h4 { color:#bff0c8; }
+    .iamccs-isf-gemma-body[hidden], .iamccs-isf-refine-body[hidden] { display:none !important; }
+    .iamccs-isf-gemma-result { margin-top:10px; border:1px solid rgba(129,230,170,.34); background:rgba(4,14,10,.72); border-radius:10px; padding:9px; }
+    .iamccs-isf-gemma-result[hidden] { display:none !important; }
+    .iamccs-isf-gemma-result-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:7px; }
+    .iamccs-isf-gemma-result-head strong { color:#d9ffe6; font-size:12px; }
+    .iamccs-isf-gemma-result-head span { color:#9ee7bd; font-size:10px; text-transform:uppercase; letter-spacing:.04em; }
+    .iamccs-isf-gemma-result textarea { width:100%; min-height:130px; max-height:260px; resize:vertical; border:1px solid rgba(129,230,170,.36); border-radius:8px; padding:8px; background:#06110d; color:#eafff1; font:11px/1.42 Consolas,monospace; outline:none; }
+    .iamccs-isf-scene-panel { border-color:rgba(119,188,255,.30); background:linear-gradient(180deg,rgba(14,30,42,.96),rgba(8,15,22,.94)); }
+    .iamccs-isf-scene-panel h4 { color:#b9dcff; }
+    .iamccs-isf-art-panel, .iamccs-isf-style-preset-panel { border-color:rgba(255,207,143,.30); background:linear-gradient(180deg,rgba(37,27,16,.96),rgba(14,17,18,.94)); }
+    .iamccs-isf-refine-panel { border-color:rgba(255,139,159,.34); background:linear-gradient(180deg,rgba(42,17,25,.96),rgba(14,16,19,.94)); }
+    .iamccs-isf-refine-panel h4 { color:#ffc1cc; }
     .iamccs-isf-panel.mode-panel { border-color:rgba(255,207,143,.42); background:linear-gradient(180deg,rgba(42,31,16,.96),rgba(13,18,20,.94)); }
     .iamccs-isf-mode-grid { display:grid; grid-template-columns:1fr; gap:7px; }
     .iamccs-isf-mode-btn { text-align:left; border:1px solid rgba(255,207,143,.24); background:#0b1417; color:#eaf6f4; border-radius:10px; padding:9px; cursor:pointer; }
@@ -1798,7 +1963,11 @@ function ensureStyles() {
     .iamccs-isf-field textarea { min-height:86px; resize:vertical; }
     .iamccs-isf-field-head { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-bottom:5px; }
     .iamccs-isf-field-head label { margin:0; }
+    .iamccs-isf-field-actions { display:inline-flex; align-items:center; justify-content:flex-end; gap:4px; flex:0 0 auto; min-width:0; }
     .iamccs-isf-zoom-btn { display:inline-grid; place-items:center; width:24px; height:22px; border:1px solid rgba(255,207,143,.45); background:#2a2115; color:#ffe2ac; border-radius:7px; cursor:pointer; font-weight:900; line-height:1; }
+    .iamccs-isf-gemma-mini { display:none; width:24px; height:22px; min-width:24px; border-color:rgba(129,230,170,.58); background:#143628; color:#ccffe1; font-size:11px; }
+    .iamccs-isf-gemma-mini.critic { border-color:rgba(159,144,255,.58); background:#2a244b; color:#eeeaff; }
+    .iamccs-isf.gemma-enabled .iamccs-isf-gemma-mini { display:inline-grid; }
     .iamccs-isf-zoom-modal { position:fixed; inset:0; background:rgba(0,0,0,.72); z-index:2147483646; display:flex; align-items:center; justify-content:center; padding:24px; box-sizing:border-box; }
     .iamccs-isf-zoom-card { width:min(1080px,94vw); max-height:92vh; display:grid; grid-template-rows:auto 1fr auto; background:#f7f2e8; color:#121212; border:1px solid #d5c4a3; border-radius:12px; box-shadow:0 30px 90px rgba(0,0,0,.55); overflow:hidden; }
     .iamccs-isf-zoom-head { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 16px; background:#fff9ec; border-bottom:1px solid #ddcaa8; }
@@ -1837,6 +2006,13 @@ function ensureStyles() {
     .iamccs-isf-board-preview { min-height:0; height:100%; overflow:auto; border:1px solid rgba(120,200,198,.22); border-radius:10px; background:#0b1013; padding:0; box-sizing:border-box; color:#111; display:flex; flex-direction:column; justify-content:flex-start; align-items:stretch; gap:0; }
     .iamccs-isf-board-artboard { position:relative; flex:0 0 auto; width:100%; max-width:none; aspect-ratio:var(--iamccs-artboard-aspect, 16 / 9); min-height:320px; background:linear-gradient(90deg,rgba(255,255,255,.035) 1px,transparent 1px),linear-gradient(0deg,rgba(255,255,255,.035) 1px,transparent 1px),#16282e; background-size:32px 32px; border:0; box-shadow:none; overflow:hidden; isolation:isolate; }
     .iamccs-isf-board-artboard::before { content:""; position:absolute; inset:0; pointer-events:none; background:linear-gradient(180deg,rgba(255,255,255,.06),transparent 18%,rgba(0,0,0,.12)); z-index:0; }
+    .iamccs-isf-result-bg { position:absolute; inset:0; z-index:1; pointer-events:none; background-position:center; background-size:cover; background-repeat:no-repeat; opacity:var(--iamccs-result-opacity,.82); filter:saturate(1.02); }
+    .iamccs-isf-result-bg::after { content:""; position:absolute; inset:0; background:rgba(0,0,0,.06); pointer-events:none; }
+    .iamccs-isf-show-img-panel { border-color:rgba(134,213,255,.38); background:linear-gradient(180deg,rgba(13,35,48,.96),rgba(8,17,23,.94)); }
+    .iamccs-isf-show-img-row { display:grid; grid-template-columns:1fr auto; gap:8px; align-items:center; }
+    .iamccs-isf-range-row { display:grid; grid-template-columns:1fr 42px; gap:8px; align-items:center; margin-top:10px; }
+    .iamccs-isf-range-row input[type="range"] { width:100%; accent-color:#8bdcff; }
+    .iamccs-isf-show-img-note { margin:8px 0 0; color:#9ec1c7; font-size:11px; line-height:1.35; }
     .iamccs-isf-board-artboard-meta { flex:0 0 auto; width:100%; max-width:none; color:#d9fffb; background:rgba(2,9,12,.72); border:0; border-bottom:1px solid rgba(184,255,248,.35); border-radius:0; padding:5px 8px; font-size:11px; font-weight:900; pointer-events:none; text-align:right; }
     .iamccs-isf-board-artboard-empty { position:absolute; inset:0; display:grid; place-items:center; text-align:center; padding:28px; color:#d9fffb; font-size:16px; line-height:1.4; font-weight:800; z-index:1; pointer-events:none; }
     .iamccs-isf-mask-panel { border-color:rgba(255,90,115,.36); background:linear-gradient(180deg,rgba(45,16,24,.96),rgba(13,17,20,.94)); }
@@ -1874,6 +2050,9 @@ function ensureStyles() {
     .iamccs-isf-zoom-btn { flex:0 0 auto; display:inline-grid; place-items:center; width:26px; height:24px; min-width:26px; border:1px solid rgba(255,207,143,.55); background:#2a2115; color:#ffe2ac; border-radius:7px; cursor:pointer; font-size:15px; font-weight:900; line-height:1; padding:0; text-align:center; }
     .iamccs-isf-field-head { display:grid; grid-template-columns:minmax(0,1fr) auto; align-items:center; gap:8px; margin-bottom:5px; }
     .iamccs-isf-field-head label { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .iamccs-isf-gemma-mini { width:26px; height:24px; min-width:26px; font-size:11px; }
+    .iamccs-isf .iamccs-isf-gemma-mini { display:none; }
+    .iamccs-isf.gemma-enabled .iamccs-isf-gemma-mini { display:inline-grid; }
 
     .iamccs-isf-toast { position:fixed; z-index:2147483647; max-width:420px; padding:12px 14px; border:1px solid rgba(154,215,255,.45); border-radius:12px; background:rgba(8,14,18,.94); color:#f4fbff; box-shadow:0 18px 44px rgba(0,0,0,.42); font:12px/1.35 "Segoe UI",system-ui,sans-serif; pointer-events:none; opacity:0; transform:translateY(6px); transition:opacity .18s ease,transform .18s ease; }
     .iamccs-isf-toast.visible { opacity:1; transform:translateY(0); }
@@ -1883,7 +2062,7 @@ function ensureStyles() {
     .iamccs-isf-direct-note { margin:8px 0 0; color:#a9c2bf; font-size:11px; }
     .iamccs-isf-direct-actions { display:grid; grid-template-columns:1fr 1fr; gap:6px; margin-top:8px; }
     .iamccs-isf-item { z-index:2; }
-    .iamccs-isf-item { position:absolute; display:block; min-width:48px; min-height:42px; border-radius:4px; border:3px solid rgba(190,255,248,.95); background:rgba(8,22,26,.82); box-shadow:0 0 0 1px rgba(0,0,0,.82),0 8px 22px rgba(0,0,0,.32); cursor:default; overflow:hidden; }
+    .iamccs-isf-item { position:absolute; display:block; min-width:48px; min-height:42px; border-radius:4px; border:3px solid rgba(190,255,248,.95); background:rgba(8,22,26,var(--iamccs-box-fill-opacity,.82)); box-shadow:0 0 0 1px rgba(0,0,0,.82),0 8px 22px rgba(0,0,0,.32); cursor:default; overflow:hidden; }
     .iamccs-isf-item.text { border-color:rgba(255,205,128,.96); background:rgba(38,22,8,.82); }
     .iamccs-isf-item.image { border-color:rgba(119,188,255,.98); background:rgba(10,28,52,.58); }
     .iamccs-isf-item.mask { border-color:rgba(255,255,255,.96); background:rgba(255,255,255,.25); box-shadow:0 0 0 2px rgba(255,77,109,.42), inset 0 0 18px rgba(255,255,255,.2), 0 8px 22px rgba(0,0,0,.22); }
@@ -1894,7 +2073,7 @@ function ensureStyles() {
     .iamccs-isf-item.image .iamccs-isf-item-head, .iamccs-isf-item.image .iamccs-isf-item-body { position:relative; z-index:1; }
     .iamccs-isf-item.image .iamccs-isf-item-body { background:linear-gradient(180deg,rgba(0,0,0,.15),rgba(0,0,0,.62)); position:absolute; left:0; right:0; bottom:0; max-height:54%; overflow:hidden; }
     .iamccs-isf-item.selected { z-index:900 !important; box-shadow:0 0 0 2px rgba(255,255,255,.18),0 0 0 5px rgba(72,194,186,.28),0 14px 28px rgba(0,0,0,.3); }
-    .iamccs-isf-item-head { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 10px; background:rgba(3,7,9,.86); font-weight:900; color:#fff8ea; text-shadow:0 1px 0 rgba(0,0,0,.55); cursor:grab; font-size:16px; line-height:1.05; }
+    .iamccs-isf-item-head { display:flex; justify-content:space-between; align-items:center; gap:8px; padding:8px 10px; background:rgba(3,7,9,var(--iamccs-box-head-opacity,.86)); font-weight:900; color:#fff8ea; text-shadow:0 1px 0 rgba(0,0,0,.55); cursor:grab; font-size:16px; line-height:1.05; }
     .iamccs-isf-item-kind { font-size:12px; letter-spacing:.05em; text-transform:uppercase; color:#96e8e2; }
     .iamccs-isf-item.text .iamccs-isf-item-kind { color:#ffd39e; }
     .iamccs-isf-item-body { padding:10px; color:#f4fffe; font-size:18px; line-height:1.22; font-weight:750; text-shadow:0 1px 2px rgba(0,0,0,.9); }
@@ -1924,7 +2103,7 @@ function ensureStyles() {
       border-color:#24494b;
       box-shadow:none;
     }
-    .iamccs-isf-item-body[contenteditable="true"] { cursor:text; outline:none; border-radius:8px; background:rgba(0,0,0,.22); min-height:28px; }
+    .iamccs-isf-item-body[contenteditable="true"] { cursor:text; outline:none; border-radius:8px; background:rgba(0,0,0,var(--iamccs-box-body-opacity,.22)); min-height:28px; }
     .iamccs-isf-item-body[contenteditable="true"]:focus { box-shadow:inset 0 0 0 1px rgba(255,207,143,.75); background:rgba(0,0,0,.38); color:#fff6e7; }
     .iamccs-isf-handle { position:absolute; z-index:3; width:20px; height:20px; right:8px; bottom:8px; border-radius:50%; border:2px solid rgba(20,30,38,.9); background:#fff; cursor:nwse-resize; box-shadow:0 2px 10px rgba(0,0,0,.42); }
     .iamccs-isf-list { display:flex; flex-direction:column; gap:8px; min-height:260px; max-height:430px; overflow:auto; }
@@ -1979,9 +2158,11 @@ function install(node) {
     resultOverlayOpacity: 0.82,
     resultOverlaySplit: 50,
     resultOverlayVisible: true,
+    showResultImage: true,
     autoResultCompare: true,
     liveResult: false,
     showSheetSpecs: false,
+    showRefineGuide: true,
     paperMode: false,
     gallerySelectedKey: "",
     styleSelectedKey: "default_photoreal_cinema",
@@ -1991,8 +2172,16 @@ function install(node) {
     paintTool: "select",
     paintDrawing: null,
     maskDebugLog: [],
+    gemmaRunning: false,
+    gemmaAbortController: null,
+    gemmaPending: null,
+    gemmaRunId: 0,
+    gemmaCanceledRunIds: new Set(),
   };
   state.paperMode = Boolean(state.data?.ui?.paper_mode);
+  state.showResultImage = state.data?.ui?.show_img !== false;
+  state.showRefineGuide = state.data?.ui?.show_refine_guide !== false;
+  state.resultOverlayOpacity = Math.max(0, Math.min(1, Number(state.data?.ui?.show_img_opacity ?? state.resultOverlayOpacity) || state.resultOverlayOpacity));
   state.workflowModeKey = inferWorkflowModeFromDesign(state.data, state.data?.workflow_mode || "single_image");
   state.data.workflow_mode = state.workflowModeKey;
   if (state.data?.grid_key && gridEntries()[state.data.grid_key]) {
@@ -2022,6 +2211,7 @@ function install(node) {
         <button class="iamccs-isf-btn" type="button" data-action="save-ideoboard">Save Ideoboard</button>
         <button class="iamccs-isf-btn" type="button" data-action="import-ideoboard">Load Ideoboard (Replace)</button>
         <button class="iamccs-isf-btn" type="button" data-action="toggle-fullscreen">Open Editor</button>
+        <button class="iamccs-isf-btn" type="button" data-action="toggle-show-img">Show Img</button>
         <button class="iamccs-isf-btn" type="button" data-action="toggle-paper">Paper</button>
         <button class="iamccs-isf-btn" type="button" data-action="copy-json">Copy Prompt JSON</button>
         <button class="iamccs-isf-btn" type="button" data-action="add-object">Add Object</button>
@@ -2059,6 +2249,7 @@ function install(node) {
   const footStatus = root.querySelector('[data-foot-status]');
   const stageSize = root.querySelector('[data-stage-size]');
   const fullscreenButton = root.querySelector('[data-action="toggle-fullscreen"]');
+  const showImgButton = root.querySelector('[data-action="toggle-show-img"]');
   const paperButton = root.querySelector('[data-action="toggle-paper"]');
   const importInput = root.querySelector('[data-role="ideoboard-import"]');
   const presetGalleryInput = root.querySelector('[data-role="preset-gallery-import"]');
@@ -2149,15 +2340,25 @@ function install(node) {
   }
 
   function setResultBackground(url, final = true, status = "") {
-    state.resultBgUrl = "";
-    state.resultBgFinal = false;
-    state.resultOverlayVisible = false;
-    if (status) footStatus.textContent = "Result compare disabled";
+    state.resultBgUrl = cleanText(url);
+    state.resultBgFinal = Boolean(final);
+    state.resultOverlayVisible = Boolean(state.resultBgUrl);
+    if (status) footStatus.textContent = status;
+    if (state.resultBgUrl && state.showResultImage && state.workflowModeKey !== "image_refine") {
+      renderArtboard();
+    } else {
+      applyResultCompareCss();
+    }
   }
 
-  node._iamccsSetResultBackground = () => {
-    // Result compare is disabled for FrameDesigner. Generated images must not
-    // auto-inject into the editable canvas while painting masks or arranging boxes.
+  node._iamccsSetResultBackground = (url, final = true) => {
+    if (!state.showResultImage) {
+      state.resultBgUrl = cleanText(url || state.resultBgUrl);
+      state.resultBgFinal = Boolean(final);
+      state.resultOverlayVisible = Boolean(state.resultBgUrl);
+      return;
+    }
+    setResultBackground(url, final, final ? "Generated image shown under boxes" : "Live preview shown under boxes");
   };
 
   function grabLastResultBackground(anchor = null) {
@@ -2177,6 +2378,8 @@ function install(node) {
     state.resultBgUrl = "";
     state.resultBgFinal = false;
     state.resultOverlayVisible = false;
+    syncShowImgControls();
+    renderArtboard();
   }
 
 
@@ -2194,6 +2397,32 @@ function install(node) {
   function syncPaperModeButton() {
     root.classList.toggle("iamccs-isf-paper", Boolean(state.paperMode));
     if (paperButton) paperButton.textContent = state.paperMode ? "Paper On" : "Paper";
+  }
+
+  function persistUiState() {
+    state.data.ui = state.data.ui && typeof state.data.ui === "object" ? state.data.ui : {};
+    state.data.ui.paper_mode = Boolean(state.paperMode);
+    state.data.ui.show_img = Boolean(state.showResultImage);
+    state.data.ui.show_refine_guide = Boolean(state.showRefineGuide);
+    state.data.ui.show_img_opacity = Math.max(0, Math.min(1, Number(state.resultOverlayOpacity) || 0));
+    writeData(node, state.data);
+  }
+
+  function syncShowImgControls() {
+    if (state.showResultImage) iamccsLiveFrameNodes.add(node);
+    else iamccsLiveFrameNodes.delete(node);
+    if (showImgButton) {
+      showImgButton.textContent = state.showResultImage ? "Show Img On" : "Show Img";
+      showImgButton.classList.toggle("off", !state.showResultImage);
+      showImgButton.setAttribute("aria-pressed", state.showResultImage ? "true" : "false");
+    }
+    const toggle = root.querySelector('[data-role="show-img-toggle"]');
+    const opacity = root.querySelector('[data-role="show-img-opacity"]');
+    const readout = root.querySelector('[data-role="show-img-opacity-readout"]');
+    if (toggle) toggle.checked = Boolean(state.showResultImage);
+    if (opacity) opacity.value = String(Math.round(Math.max(0, Math.min(1, Number(state.resultOverlayOpacity) || 0)) * 100));
+    if (readout) readout.textContent = `${Math.round(Math.max(0, Math.min(1, Number(state.resultOverlayOpacity) || 0)) * 100)}%`;
+    applyResultCompareCss();
   }
 
   function toggleFullscreen(force) {
@@ -2412,6 +2641,357 @@ function install(node) {
       footStatus.textContent = `Connected ideoboard input could not update UI: ${error?.message || error}`;
       showToast('Connected ideoboard used by backend, but UI parse failed', { tone: 'warn', ms: 4200 });
     }
+  }
+
+  function buildGemmaFrontendRequest(mode, brief, extra = {}) {
+    return {
+      mode: mode || "full_json_enhance",
+      brief: brief || "",
+      selected_id: extra.selectedId || state.selectedId || "",
+      target_field: extra.targetField || "",
+      current_text: extra.currentText || "",
+      speed: extra.speed || state.data.gemma_assistant?.speed || "fast",
+      design_data: state.data,
+      prompt_json: toPrompt(state.data),
+    };
+  }
+
+  function applyGemmaFieldPatch(payload, request) {
+    const field = cleanText(payload?.field_key || request?.target_field);
+    const text = cleanText(payload?.text || payload?.replacement || payload?.desc || payload?.description);
+    if (!field || !text) return false;
+    const selectedId = cleanText(payload?.selected_id || request?.selected_id || state.selectedId);
+    const item = selectedId ? state.data.items?.find((entry) => entry.id === selectedId) : currentItem();
+    if (field === "scene.high_level_description") state.data.scene.high_level_description = text;
+    else if (field === "scene.background") state.data.scene.background = text;
+    else if (field === "scene.aesthetics") state.data.scene.aesthetics = text;
+    else if (field === "scene.lighting") state.data.scene.lighting = text;
+    else if (field === "scene.medium") state.data.scene.medium = text;
+    else if (field === "scene.photo") state.data.scene.photo = text;
+    else if (field === "scene.color_palette") state.data.scene.color_palette = paletteList(text.split(","), state.data.scene.color_palette);
+    else if (field === "item.desc" && item) item.desc = text;
+    else if (field === "item.text" && item) item.text = text;
+    else if (field === "item.label" && item) item.label = text;
+    else if (field === "item.palette" && item) item.color_palette = paletteList(text.split(","), item.color_palette);
+    else return false;
+    if (selectedId) state.selectedId = selectedId;
+    return true;
+  }
+
+  function gemmaPendingPreview(payload, request, notes = "") {
+    const mode = cleanText(payload?.mode || request?.mode || "");
+    const rawText = cleanText(payload?.raw_text || "");
+    const withRaw = (mainText) => {
+      const main = cleanText(mainText);
+      if (!rawText || main.includes(rawText) || rawText.includes(main)) return main;
+      return `${main}\n\n--- RAW GEMMA OUTPUT ---\n${rawText}`;
+    };
+    if (payload?.field_patch) {
+      const patch = payload.field_patch;
+      return withRaw([
+        `MODE: ${mode || "field_enhance"}`,
+        `FIELD: ${cleanText(patch.field_key || request?.target_field || "")}`,
+        `SELECTED ID: ${cleanText(patch.selected_id || request?.selected_id || "") || "none"}`,
+        "",
+        cleanText(patch.text || patch.replacement || patch.desc || patch.description || ""),
+        "",
+        notes ? `NOTES: ${notes}` : "",
+      ].filter((line) => line !== "").join("\n"));
+    }
+    if (payload?.design_data) {
+      return withRaw([
+        `MODE: ${mode || "full_json_enhance"}`,
+        notes ? `NOTES: ${notes}` : "",
+        "",
+        JSON.stringify(payload.design_data, null, 2),
+      ].filter((line) => line !== "").join("\n"));
+    }
+    if (payload?.raw_response) {
+      return withRaw([
+        `MODE: ${mode || request?.mode || "gemma"}`,
+        notes ? `NOTES: ${notes}` : "",
+        "",
+        typeof payload.raw_response === "string" ? payload.raw_response : JSON.stringify(payload.raw_response, null, 2),
+      ].filter((line) => line !== "").join("\n"));
+    }
+    return rawText || notes || "Gemma returned an empty proposal.";
+  }
+
+  function renderGemmaPendingResult() {
+    const box = root.querySelector('[data-role="gemma-result"]');
+    if (!box) return;
+    const pending = state.gemmaPending;
+    const area = box.querySelector('[data-role="gemma-result-text"]');
+    const label = box.querySelector('[data-role="gemma-result-label"]');
+    const apply = box.querySelector('[data-role="gemma-apply"]');
+    const copy = box.querySelector('[data-role="gemma-copy-result"]');
+    const reject = box.querySelector('[data-role="gemma-reject"]');
+    if (!pending) {
+      box.hidden = true;
+      if (area) area.value = "";
+      if (label) label.textContent = "";
+      if (apply) apply.disabled = true;
+      if (copy) copy.disabled = true;
+      if (reject) reject.disabled = true;
+      return;
+    }
+    box.hidden = false;
+    if (label) label.textContent = pending.applicable ? "Ready to apply" : "Critic notes";
+    if (area) area.value = pending.preview || "";
+    if (apply) apply.disabled = !pending.applicable || state.gemmaRunning;
+    if (copy) copy.disabled = false;
+    if (reject) reject.disabled = false;
+  }
+
+  function setGemmaPending(payload, request, notes = "", anchor = null, statusHost = null) {
+    const mode = cleanText(request?.mode || payload?.mode || "");
+    const applicable = mode !== "prompt_critic" && Boolean(payload?.field_patch || payload?.design_data);
+    state.gemmaPending = {
+      mode,
+      payload,
+      request,
+      notes,
+      applicable,
+      preview: gemmaPendingPreview(payload, request, notes),
+      createdAt: Date.now(),
+    };
+    renderGemmaPendingResult();
+    const message = applicable
+      ? "Gemma proposal ready. Review it, then Apply / Reject / Copy."
+      : "Gemma critic ready. Review or Copy the notes.";
+    if (statusHost) statusHost.textContent = message;
+    showToast(message, { anchor, tone: "success", ms: 3600 });
+  }
+
+  function clearGemmaPending(statusHost = null, message = "Gemma proposal rejected.") {
+    state.gemmaPending = null;
+    renderGemmaPendingResult();
+    if (statusHost) statusHost.textContent = message;
+  }
+
+  function applyGemmaPending(anchor = null, statusHost = null) {
+    const pending = state.gemmaPending;
+    if (!pending) {
+      showToast("No Gemma proposal to apply.", { anchor, tone: "warn", ms: 2400 });
+      return;
+    }
+    if (!pending.applicable) {
+      showToast("This Gemma result is critic notes only; nothing to apply.", { anchor, tone: "warn", ms: 3200 });
+      return;
+    }
+    const payload = pending.payload || {};
+    const request = pending.request || {};
+    const mode = pending.mode || request.mode || "";
+    let applied = false;
+    if (payload.field_patch && mode !== "prompt_critic") {
+      applied = applyGemmaFieldPatch(payload.field_patch, request);
+      if (applied) writeInputSignature(node, `__gemma_field_${Date.now()}__`);
+    } else if (payload.design_data && mode !== "prompt_critic") {
+      const next = normalizeDesignObject(payload.design_data, state.data);
+      state.data = next;
+      state.workflowModeKey = inferWorkflowModeFromDesign(state.data, state.data.workflow_mode || state.workflowModeKey);
+      state.selectedId = payload.selected_id && state.data.items?.some((item) => item.id === payload.selected_id)
+        ? payload.selected_id
+        : (state.data.items?.[0]?.id || null);
+      writeInputSignature(node, `__gemma_${Date.now()}__`);
+      applied = true;
+    }
+    if (!applied) {
+      showToast("Gemma proposal could not be applied to this board.", { anchor, tone: "error", ms: 4200 });
+      return;
+    }
+    state.gemmaPending = null;
+    persist();
+    render();
+    if (statusHost) statusHost.textContent = "Gemma proposal applied.";
+    showToast("Gemma proposal applied to FrameDesigner.", { anchor, tone: "success", ms: 3200 });
+  }
+
+  async function copyGemmaPending(anchor = null) {
+    const pending = state.gemmaPending;
+    if (!pending) {
+      showToast("No Gemma proposal to copy.", { anchor, tone: "warn", ms: 2400 });
+      return;
+    }
+    const visibleArea = root.querySelector('[data-role="gemma-result-text"]');
+    const text = visibleArea?.value || pending.preview || JSON.stringify(pending.payload || {}, null, 2);
+    try {
+      await navigator.clipboard?.writeText(text);
+      showToast("Gemma proposal copied.", { anchor, tone: "success", ms: 2400 });
+    } catch (_) {
+      showToast("Clipboard copy failed.", { anchor, tone: "error", ms: 3000 });
+    }
+  }
+
+  function setGemmaRunning(running, statusHost = null, message = "") {
+    state.gemmaRunning = Boolean(running);
+    root.classList.toggle("gemma-running", state.gemmaRunning);
+    root.querySelectorAll('[data-role="gemma-run"], .iamccs-isf-gemma-mini').forEach((button) => {
+      button.disabled = state.gemmaRunning;
+    });
+    root.querySelectorAll('[data-role="gemma-stop"]').forEach((button) => {
+      button.disabled = !state.gemmaRunning;
+    });
+    renderGemmaPendingResult();
+    if (statusHost && message) statusHost.textContent = message;
+  }
+
+  async function stopGemmaAssistant(anchor = null, statusHost = null) {
+    if (!state.gemmaRunning && !state.gemmaAbortController) {
+      showToast("Gemma is not running.", { anchor, tone: "warn", ms: 2200 });
+      return;
+    }
+    const activeRunId = state.gemmaRunId;
+    if (activeRunId) state.gemmaCanceledRunIds.add(activeRunId);
+    state.gemmaAbortController = null;
+    setGemmaRunning(false, statusHost, "Gemma stop requested.");
+    showToast("Gemma stop requested.", { anchor, tone: "warn", ms: 2600 });
+    try {
+      await api.fetchApi("/iamccs/framedesigner/gemma_abort", { method: "POST" });
+    } catch (error) {
+      console.warn("[IAMCCS FrameDesigner] Gemma abort request failed", error);
+    }
+  }
+
+  async function runGemmaAssistant({ mode, model, brief, targetField = "", currentText = "", selectedId = "", speed = "", statusHost, anchor }) {
+    if (!state.data.gemma_assistant?.enabled) {
+      showToast("Enable Gemma Assistant first.", { anchor, tone: "warn", ms: 2600 });
+      return;
+    }
+    if (state.gemmaRunning) {
+      showToast("Gemma is already working. Press Stop Gemma first if you want to abort it.", { anchor, tone: "warn", ms: 3200 });
+      return;
+    }
+    const speedMode = cleanText(speed || state.data.gemma_assistant?.speed || gemmaPanelValue("gemma-speed", "fast")) || "fast";
+    state.data.gemma_assistant = {
+      ...(state.data.gemma_assistant || {}),
+      enabled: true,
+      provider: "local_gemma",
+      mode: mode || "full_json_enhance",
+      speed: speedMode === "detailed" ? "detailed" : "fast",
+      model: cleanText(model || state.data.gemma_assistant?.model) || "text_encoders\\gemma4_e4b_it_fp8_scaled.safetensors",
+      selected_id: selectedId || state.selectedId || "",
+      target_field: targetField || "",
+      current_text: currentText || "",
+      brief: cleanText(brief) || "",
+      request_ready: false,
+      updated_at: Date.now(),
+    };
+    persist();
+    const request = buildGemmaFrontendRequest(mode, brief, { targetField, currentText, selectedId, speed: state.data.gemma_assistant.speed });
+    request.model = state.data.gemma_assistant.model;
+    const runId = Date.now();
+    state.gemmaRunId = runId;
+    state.gemmaAbortController = new AbortController();
+    setGemmaRunning(true, statusHost, `Gemma is working (${state.data.gemma_assistant.speed}) with ${request.model}...`);
+    showToast("Gemma assistant started. It updates text/JSON only, not Ideogram.", { anchor, tone: "success", ms: 2600 });
+    try {
+      const response = await api.fetchApi("/iamccs/framedesigner/gemma_assist", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(request),
+        signal: state.gemmaAbortController.signal,
+      });
+      const payload = await response.json();
+      if (!response.ok || !payload?.ok) {
+        throw new Error(payload?.error || `HTTP ${response.status}`);
+      }
+      if (state.gemmaCanceledRunIds.has(runId) || state.gemmaRunId !== runId) {
+        state.gemmaCanceledRunIds.delete(runId);
+        if (statusHost) statusHost.textContent = "Gemma result ignored after stop.";
+        return;
+      }
+      const notes = cleanText(payload.notes || payload.report || "Gemma assistant finished.");
+      setGemmaPending(payload, request, notes, anchor, statusHost);
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        const message = "Gemma assistant stopped.";
+        if (statusHost) statusHost.textContent = message;
+        showToast(message, { anchor, tone: "warn", ms: 2600 });
+        return;
+      }
+      const message = `Gemma assistant failed: ${error?.message || error}`;
+      if (statusHost) statusHost.textContent = message;
+      showToast(message, { anchor, tone: "error", ms: 5200 });
+      console.error("[IAMCCS FrameDesigner] Gemma assistant failed", error);
+    } finally {
+      if (state.gemmaRunId === runId) {
+        state.gemmaRunId = 0;
+        state.gemmaAbortController = null;
+        setGemmaRunning(false);
+      }
+    }
+  }
+
+  function gemmaPanelValue(role, fallback = "") {
+    const el = root.querySelector(`[data-role="${role}"]`);
+    return el?.value ?? fallback;
+  }
+
+  async function loadGemmaModelOptions(select, statusHost = null) {
+    if (!select) return;
+    const current = cleanText(select.value || state.data.gemma_assistant?.model || "text_encoders\\gemma4_e4b_it_fp8_scaled.safetensors");
+    select.disabled = true;
+    select.innerHTML = '';
+    const loading = document.createElement('option');
+    loading.value = current;
+    loading.textContent = current ? `Loading models... (${current})` : 'Loading models...';
+    select.appendChild(loading);
+    try {
+      const response = await api.fetchApi("/iamccs/framedesigner/gemma_models", { method: "GET" });
+      const payload = await response.json();
+      if (!response.ok || !payload?.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
+      const models = Array.isArray(payload.models) ? payload.models.filter(Boolean) : [];
+      const selected = models.includes(current) ? current : (models.includes(payload.default) ? payload.default : (models[0] || current));
+      select.innerHTML = '';
+      models.forEach((name) => {
+        const option = document.createElement('option');
+        option.value = name;
+        option.textContent = name;
+        select.appendChild(option);
+      });
+      if (!models.length && current) {
+        const option = document.createElement('option');
+        option.value = current;
+        option.textContent = current;
+        select.appendChild(option);
+      }
+      select.value = selected;
+      state.data.gemma_assistant = {
+        ...(state.data.gemma_assistant || {}),
+        provider: "local_gemma",
+        model: selected || current,
+      };
+      persist();
+      if (statusHost) statusHost.textContent = models.length
+        ? `Gemma model list loaded: ${models.length} text encoder(s).`
+        : 'No text encoder model found by ComfyUI.';
+    } catch (error) {
+      select.innerHTML = '';
+      const option = document.createElement('option');
+      option.value = current;
+      option.textContent = current || 'text_encoders\\gemma4_e4b_it_fp8_scaled.safetensors';
+      select.appendChild(option);
+      select.value = option.value;
+      if (statusHost) statusHost.textContent = `Gemma model list failed: ${error?.message || error}`;
+      showToast(`Gemma model list failed: ${error?.message || error}`, { tone: "error", ms: 4200 });
+    } finally {
+      select.disabled = false;
+    }
+  }
+
+  function runOrPrepareGemma({ mode = "full_json_enhance", brief = "", targetField = "", currentText = "", selectedId = "", speed = "", anchor = null, statusHost = null } = {}) {
+    runGemmaAssistant({
+      mode,
+      model: gemmaPanelValue("gemma-model", state.data.gemma_assistant?.model || "text_encoders\\gemma4_e4b_it_fp8_scaled.safetensors"),
+      brief,
+      targetField,
+      currentText,
+      selectedId,
+      speed: speed || gemmaPanelValue("gemma-speed", state.data.gemma_assistant?.speed || "fast"),
+      statusHost: statusHost || root.querySelector('[data-role="gemma-status"]'),
+      anchor,
+    });
   }
 
   function updatePromptPreview() {
@@ -2658,11 +3238,52 @@ function install(node) {
       input.type = opts.type || 'text';
     }
     head.appendChild(lbl);
+    const actions = document.createElement('div');
+    actions.className = 'iamccs-isf-field-actions';
     input._iamccsFieldWrap = wrap;
     input._iamccsFieldLabel = lbl;
     if (opts.type === 'number') {
       lbl.dataset.dragNumber = 'true';
       lbl.title = 'Drag left/right to change value; press Enter or leave the field to apply typed values.';
+    }
+    if (opts.gemmaField) {
+      const enhance = document.createElement('button');
+      enhance.type = 'button';
+      enhance.className = 'iamccs-isf-zoom-btn iamccs-isf-gemma-mini';
+      enhance.textContent = 'G';
+      enhance.title = `Gemma enhance: ${label}`;
+      enhance.setAttribute('aria-label', `Gemma enhance ${label}`);
+      enhance.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        runOrPrepareGemma({
+          mode: "field_enhance",
+          targetField: opts.gemmaField,
+          currentText: input.value,
+          selectedId: opts.itemScoped ? state.selectedId : "",
+          brief: input.value,
+          anchor: event.currentTarget,
+        });
+      });
+      const critic = document.createElement('button');
+      critic.type = 'button';
+      critic.className = 'iamccs-isf-zoom-btn iamccs-isf-gemma-mini critic';
+      critic.textContent = 'C';
+      critic.title = `Gemma critic: ${label}`;
+      critic.setAttribute('aria-label', `Gemma critic ${label}`);
+      critic.addEventListener('click', (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        runOrPrepareGemma({
+          mode: "prompt_critic",
+          targetField: opts.gemmaField,
+          currentText: input.value,
+          selectedId: opts.itemScoped ? state.selectedId : "",
+          brief: input.value,
+          anchor: event.currentTarget,
+        });
+      });
+      actions.append(enhance, critic);
     }
     if (opts.multiline || ['high','background','aesthetics','lighting','photo','desc','text'].includes(String(key))) {
       const zoom = document.createElement('button');
@@ -2676,8 +3297,9 @@ function install(node) {
         event.stopPropagation();
         openFieldEditor(label, input);
       });
-      head.appendChild(zoom);
+      actions.appendChild(zoom);
     }
+    if (actions.childElementCount) head.appendChild(actions);
     wrap.append(head, input);
     container.appendChild(wrap);
     return input;
@@ -3699,7 +4321,7 @@ function install(node) {
     state.data.direct_prompt = { enabled: false, text: "" };
 
     const stylePresetPanel = document.createElement('div');
-    stylePresetPanel.className = 'iamccs-isf-panel';
+    stylePresetPanel.className = 'iamccs-isf-panel iamccs-isf-style-preset-panel';
     stylePresetPanel.innerHTML = `
       <h4>Style Preset</h4>
       <div class="iamccs-isf-sheet-controls">
@@ -3721,40 +4343,199 @@ function install(node) {
     styleSelect?.addEventListener('change', () => { state.styleSelectedKey = styleSelect.value; refreshPresetDropdowns("style select changed"); });
 
     const summary = document.createElement('div');
-    summary.className = 'iamccs-isf-panel';
+    summary.className = 'iamccs-isf-panel iamccs-isf-scene-panel';
     summary.innerHTML = '<h4>Scene Direction</h4>';
     scenePane.appendChild(summary);
-    sceneFields.high = makeField(summary, 'High-Level Description', 'high', { multiline: true });
-    sceneFields.background = makeField(summary, 'Background', 'background', { multiline: true, small: true });
+    sceneFields.high = makeField(summary, 'High-Level Description', 'high', { multiline: true, gemmaField: 'scene.high_level_description' });
+    sceneFields.background = makeField(summary, 'Background', 'background', { multiline: true, small: true, gemmaField: 'scene.background' });
 
     const style = document.createElement('div');
-    style.className = 'iamccs-isf-panel';
+    style.className = 'iamccs-isf-panel iamccs-isf-art-panel';
     style.innerHTML = '<h4>Art Direction</h4>';
     scenePane.appendChild(style);
-    sceneFields.aesthetics = makeField(style, 'Aesthetics', 'aesthetics', { multiline: true, small: true });
-    sceneFields.lighting = makeField(style, 'Lighting', 'lighting', { multiline: true, small: true });
-    sceneFields.medium = makeField(style, 'Medium', 'medium');
-    sceneFields.photo = makeField(style, 'Photo / Lens Notes', 'photo', { multiline: true, small: true });
-    sceneFields.palette = makeField(style, 'Global Palette', 'palette');
+    sceneFields.aesthetics = makeField(style, 'Aesthetics', 'aesthetics', { multiline: true, small: true, gemmaField: 'scene.aesthetics' });
+    sceneFields.lighting = makeField(style, 'Lighting', 'lighting', { multiline: true, small: true, gemmaField: 'scene.lighting' });
+    sceneFields.medium = makeField(style, 'Medium', 'medium', { gemmaField: 'scene.medium' });
+    sceneFields.photo = makeField(style, 'Photo / Lens Notes', 'photo', { multiline: true, small: true, gemmaField: 'scene.photo' });
+    sceneFields.palette = makeField(style, 'Global Palette', 'palette', { gemmaField: 'scene.color_palette' });
+    const scenePaletteTools = document.createElement('div');
+    scenePaletteTools.className = 'iamccs-isf-field iamccs-isf-palette-tools';
+    scenePaletteTools.innerHTML = `
+      <label>Palette Preset</label>
+      <select data-role="scene-palette-preset"></select>
+      <p class="iamccs-isf-direct-note" data-role="scene-palette-note"></p>
+    `;
+    style.appendChild(scenePaletteTools);
+    sceneFields.palettePreset = scenePaletteTools.querySelector('[data-role="scene-palette-preset"]');
+    sceneFields.paletteNote = scenePaletteTools.querySelector('[data-role="scene-palette-note"]');
+    renderSelectOptions(sceneFields.palettePreset, paletteEntries(), paletteKeyForColors(state.data.scene.color_palette));
+    sceneFields.palettePreset?.addEventListener('change', (event) => {
+      const key = event.currentTarget.value || "custom";
+      if (key === "custom") return;
+      state.data.scene.color_palette = applyPalettePresetToList(key, state.data.scene.color_palette);
+      persist();
+      render();
+      showToast(`Global palette: ${paletteEntries()[key]?.label || key}`, { anchor: event.currentTarget, tone: "success", ms: 1800 });
+    });
+
+    const gemmaPanel = document.createElement('div');
+    gemmaPanel.className = 'iamccs-isf-panel iamccs-isf-gemma-panel';
+    gemmaPanel.innerHTML = `
+      <div class="iamccs-isf-panel-headline">
+        <h4>Gemma Assistant</h4>
+        <label class="iamccs-isf-toggle"><input type="checkbox" data-role="gemma-enabled"> Enable</label>
+      </div>
+      <div class="iamccs-isf-gemma-body" data-role="gemma-body">
+        <p class="iamccs-isf-direct-note">Local Gemma 4 assistant for box enhancement, prompt critique, and full ideoboard JSON preparation. It updates text/JSON only; it never queues Ideogram image generation.</p>
+        <div class="iamccs-isf-field">
+          <label>Gemma Text Encoder</label>
+          <select data-role="gemma-model"></select>
+        </div>
+        <div class="iamccs-isf-field">
+          <label>Mode</label>
+          <select data-role="gemma-mode">
+            <option value="full_json_enhance">Enhance Full Board</option>
+            <option value="brief_to_ideoboard">Brief To Ideoboard</option>
+            <option value="prompt_critic">Prompt Critic Only</option>
+          </select>
+        </div>
+        <div class="iamccs-isf-field">
+          <label>Speed</label>
+          <select data-role="gemma-speed">
+            <option value="fast">Fast / shorter</option>
+            <option value="detailed">Detailed / slower</option>
+          </select>
+        </div>
+        <div class="iamccs-isf-field">
+          <label>Natural Language Direction</label>
+          <textarea data-role="gemma-brief" rows="5" placeholder="Example: make this a 2x3 photoreal storyboard with close-ups, one physical action beat, muted color, and one exhausted astronaut on an ice planet."></textarea>
+        </div>
+        <div class="iamccs-isf-mini-actions">
+          <button class="iamccs-isf-btn primary" type="button" data-role="gemma-run">Run Gemma</button>
+          <button class="iamccs-isf-btn danger-lite" type="button" data-role="gemma-stop" disabled>Stop Gemma</button>
+          <button class="iamccs-isf-btn" type="button" data-role="gemma-copy-request">Copy Request</button>
+        </div>
+        <div class="iamccs-isf-gemma-result" data-role="gemma-result" hidden>
+          <div class="iamccs-isf-gemma-result-head">
+            <strong>Gemma Proposal</strong>
+            <span data-role="gemma-result-label"></span>
+          </div>
+          <textarea data-role="gemma-result-text" readonly spellcheck="false"></textarea>
+          <div class="iamccs-isf-mini-actions">
+            <button class="iamccs-isf-btn primary" type="button" data-role="gemma-apply" disabled>Apply</button>
+            <button class="iamccs-isf-btn danger-lite" type="button" data-role="gemma-reject" disabled>Reject</button>
+            <button class="iamccs-isf-btn" type="button" data-role="gemma-copy-result" disabled>Copy</button>
+          </div>
+        </div>
+      </div>
+      <p class="iamccs-isf-direct-note" data-role="gemma-status">Ready. This does not queue image generation.</p>
+    `;
+    scenePane.insertBefore(gemmaPanel, stylePresetPanel);
+    const gemmaEnabled = gemmaPanel.querySelector('[data-role="gemma-enabled"]');
+    const gemmaBody = gemmaPanel.querySelector('[data-role="gemma-body"]');
+    const gemmaMode = gemmaPanel.querySelector('[data-role="gemma-mode"]');
+    const gemmaModel = gemmaPanel.querySelector('[data-role="gemma-model"]');
+    const gemmaSpeed = gemmaPanel.querySelector('[data-role="gemma-speed"]');
+    const gemmaBrief = gemmaPanel.querySelector('[data-role="gemma-brief"]');
+    const gemmaStatus = gemmaPanel.querySelector('[data-role="gemma-status"]');
+    if (gemmaSpeed) gemmaSpeed.value = state.data.gemma_assistant?.speed === "detailed" ? "detailed" : "fast";
+    renderGemmaPendingResult();
+    const syncGemmaEnabledUi = () => {
+      const enabled = Boolean(state.data.gemma_assistant?.enabled);
+      if (gemmaEnabled) gemmaEnabled.checked = enabled;
+      if (gemmaBody) gemmaBody.hidden = !enabled;
+      root.classList.toggle('gemma-enabled', enabled);
+      if (gemmaStatus) gemmaStatus.textContent = enabled
+        ? 'Ready. Uses local Gemma 4 TextGenerate backend only.'
+        : 'Disabled. Enable Gemma Assistant to show and use field buttons.';
+    };
+    syncGemmaEnabledUi();
+    loadGemmaModelOptions(gemmaModel, gemmaStatus);
+    gemmaEnabled?.addEventListener('change', () => {
+      state.data.gemma_assistant = {
+        ...(state.data.gemma_assistant || {}),
+        enabled: Boolean(gemmaEnabled.checked),
+        provider: "local_gemma",
+        model: gemmaModel?.value || "text_encoders\\gemma4_e4b_it_fp8_scaled.safetensors",
+      };
+      persist();
+      syncGemmaEnabledUi();
+    });
+    gemmaSpeed?.addEventListener('change', () => {
+      state.data.gemma_assistant = {
+        ...(state.data.gemma_assistant || {}),
+        speed: gemmaSpeed.value === "detailed" ? "detailed" : "fast",
+      };
+      persist();
+      if (gemmaStatus) gemmaStatus.textContent = `Gemma speed set to ${state.data.gemma_assistant.speed}.`;
+    });
+    gemmaModel?.addEventListener('change', () => {
+      state.data.gemma_assistant = {
+        ...(state.data.gemma_assistant || {}),
+        provider: "local_gemma",
+        model: gemmaModel.value || "text_encoders\\gemma4_e4b_it_fp8_scaled.safetensors",
+      };
+      persist();
+    });
+    gemmaPanel.querySelector('[data-role="gemma-run"]')?.addEventListener('click', (event) => {
+      runOrPrepareGemma({
+        mode: gemmaMode?.value || "full_json_enhance",
+        brief: gemmaBrief?.value || "",
+        speed: gemmaSpeed?.value || "fast",
+        statusHost: gemmaStatus,
+        anchor: event.currentTarget,
+      });
+    });
+    gemmaPanel.querySelector('[data-role="gemma-stop"]')?.addEventListener('click', (event) => {
+      stopGemmaAssistant(event.currentTarget, gemmaStatus);
+    });
+    gemmaPanel.querySelector('[data-role="gemma-apply"]')?.addEventListener('click', (event) => {
+      applyGemmaPending(event.currentTarget, gemmaStatus);
+    });
+    gemmaPanel.querySelector('[data-role="gemma-reject"]')?.addEventListener('click', (event) => {
+      clearGemmaPending(gemmaStatus, "Gemma proposal rejected.");
+      showToast("Gemma proposal rejected.", { anchor: event.currentTarget, tone: "warn", ms: 2400 });
+    });
+    gemmaPanel.querySelector('[data-role="gemma-copy-result"]')?.addEventListener('click', (event) => {
+      copyGemmaPending(event.currentTarget);
+    });
+    gemmaPanel.querySelector('[data-role="gemma-copy-request"]')?.addEventListener('click', (event) => {
+      const request = buildGemmaFrontendRequest(gemmaMode?.value || "full_json_enhance", gemmaBrief?.value || "", { speed: gemmaSpeed?.value || "fast" });
+      request.model = gemmaModel?.value || "text_encoders\\gemma4_e4b_it_fp8_scaled.safetensors";
+      navigator.clipboard?.writeText(JSON.stringify(request, null, 2));
+      showToast("Gemma request copied", { anchor: event.currentTarget, tone: "success" });
+    });
 
     if (isV2) {
       const i2iPanel = document.createElement('div');
-      i2iPanel.className = 'iamccs-isf-panel';
+      i2iPanel.className = 'iamccs-isf-panel iamccs-isf-refine-panel';
       i2iPanel.innerHTML = `
-        <h4>Refine / Image Guide</h4>
-        <button class="iamccs-isf-refine-hero" type="button" data-action="refine">
-          <strong>REFINE SELECTED GUIDE</strong>
-          <span>Preserve composition and identity: i2i on, denoise 0.28, 1280x720.</span>
-        </button>
+        <div class="iamccs-isf-panel-headline">
+          <h4>Refine / Image Guide <span class="iamccs-isf-beta">BETA</span></h4>
+          <label class="iamccs-isf-toggle"><input type="checkbox" data-role="toggle-refine-guide" ${state.showRefineGuide ? 'checked' : ''}> Show</label>
+        </div>
+        <div class="iamccs-isf-refine-body" data-role="refine-guide-body" ${state.showRefineGuide ? '' : 'hidden'}>
+          <button class="iamccs-isf-refine-hero" type="button" data-action="refine">
+            <strong>REFINE SELECTED GUIDE</strong>
+            <span>Preserve composition and identity: i2i on, denoise 0.28, 1280x720.</span>
+          </button>
+        </div>
       `;
       scenePane.appendChild(i2iPanel);
+      const refineBody = i2iPanel.querySelector('[data-role="refine-guide-body"]');
+      const refineToggle = i2iPanel.querySelector('[data-role="toggle-refine-guide"]');
+      refineToggle?.addEventListener('change', () => {
+        state.showRefineGuide = Boolean(refineToggle.checked);
+        if (refineBody) refineBody.hidden = !state.showRefineGuide;
+        persistUiState();
+      });
       i2iPanel.querySelector('[data-action="refine"]')?.addEventListener('click', applyRefinePreset);
-      i2iFields.enabled = makeField(i2iPanel, 'Use Canvas/Image as i2i Guide', 'i2i_enabled', { type: 'checkbox' });
+      i2iFields.enabled = makeField(refineBody || i2iPanel, 'Use Canvas/Image as i2i Guide', 'i2i_enabled', { type: 'checkbox' });
       i2iFields.enabled.type = 'checkbox';
       const i2iGuideNote = document.createElement('p');
       i2iGuideNote.className = 'iamccs-isf-direct-note';
       i2iGuideNote.textContent = 'ON: the current canvas or imported image keeps composition and subject placement. OFF: Ideogram follows the prompt more freely.';
-      i2iPanel.appendChild(i2iGuideNote);
+      (refineBody || i2iPanel).appendChild(i2iGuideNote);
       const denoiseGuide = document.createElement('div');
       denoiseGuide.className = 'iamccs-isf-denoise-guide';
       denoiseGuide.innerHTML = `
@@ -3772,13 +4553,13 @@ function install(node) {
         </div>
         <p class="iamccs-isf-denoise-help">This writes to the node output <strong>i2i_denoise</strong>. Lower values keep the canvas image; higher values let Ideogram rebuild more of the shot.</p>
       `;
-      i2iPanel.appendChild(denoiseGuide);
+      (refineBody || i2iPanel).appendChild(denoiseGuide);
 
-      i2iFields.denoise = makeField(i2iPanel, 'Manual Denoise Value', 'i2i_denoise', { type: 'number' });
+      i2iFields.denoise = makeField(refineBody || i2iPanel, 'Manual Denoise Value', 'i2i_denoise', { type: 'number' });
       i2iFields.denoise.min = '0';
       i2iFields.denoise.max = '1';
       i2iFields.denoise.step = '0.01';
-      i2iFields.step = makeField(i2iPanel, 'Low Sigma Start Step', 'low_sigma_start_step', { type: 'number' });
+      i2iFields.step = makeField(refineBody || i2iPanel, 'Low Sigma Start Step', 'low_sigma_start_step', { type: 'number' });
 
       i2iPanel.querySelectorAll('[data-denoise-preset]').forEach((button) => {
         button.addEventListener('click', () => {
@@ -3846,7 +4627,7 @@ function install(node) {
       enableNumberDrag(input, (value, fromDrag) => commitCanvasDimension(dimension, value, fromDrag), { step: 16, min: 256, max: 16384 });
     });
     Object.entries(sceneFields).forEach(([key, input]) => {
-      if (['width', 'height', 'targetResolution', 'targetResolutionNote'].includes(key)) return;
+      if (['width', 'height', 'targetResolution', 'targetResolutionNote', 'palettePreset', 'paletteNote'].includes(key)) return;
       input.addEventListener('input', () => {
         if (key === 'aspect') state.data.canvas.aspect_label = input.value;
         else if (key === 'high') state.data.scene.high_level_description = input.value;
@@ -3904,6 +4685,38 @@ function install(node) {
       });
       maskPanel.querySelector('[data-mask-clear]')?.addEventListener('click', (event) => clearCurrentImageMask(event.currentTarget));
     }
+    const showImgPanel = document.createElement('div');
+    showImgPanel.className = 'iamccs-isf-panel iamccs-isf-show-img-panel';
+    showImgPanel.innerHTML = `
+      <h4>Show Img Under Boxes</h4>
+      <div class="iamccs-isf-show-img-row">
+        <label class="iamccs-isf-toggle"><input type="checkbox" data-role="show-img-toggle"> Show Img</label>
+        <button class="iamccs-isf-btn" type="button" data-role="show-img-grab">Grab Last</button>
+      </div>
+      <div class="iamccs-isf-range-row">
+        <input type="range" min="0" max="100" step="1" data-role="show-img-opacity" />
+        <strong data-role="show-img-opacity-readout">82%</strong>
+      </div>
+      <div class="iamccs-isf-show-img-row" style="margin-top:8px;">
+        <span class="iamccs-isf-show-img-note">Visual only: this does not enter the JSON, IDEO_LINX, crops, or final render.</span>
+        <button class="iamccs-isf-btn danger-lite" type="button" data-role="show-img-clear">Clear</button>
+      </div>`;
+    inspectorPane.appendChild(showImgPanel);
+    showImgPanel.querySelector('[data-role="show-img-toggle"]')?.addEventListener('change', (event) => {
+      state.showResultImage = Boolean(event.currentTarget.checked);
+      if (state.showResultImage && state.resultBgUrl) state.resultOverlayVisible = true;
+      persistUiState();
+      syncShowImgControls();
+      renderArtboard();
+    });
+    showImgPanel.querySelector('[data-role="show-img-opacity"]')?.addEventListener('input', (event) => {
+      state.resultOverlayOpacity = Math.max(0, Math.min(1, Number(event.currentTarget.value || 0) / 100));
+      persistUiState();
+      syncShowImgControls();
+    });
+    showImgPanel.querySelector('[data-role="show-img-grab"]')?.addEventListener('click', (event) => grabLastResultBackground(event.currentTarget));
+    showImgPanel.querySelector('[data-role="show-img-clear"]')?.addEventListener('click', () => clearResultBackground());
+
     const layers = document.createElement('div');
     layers.className = 'iamccs-isf-panel layers-panel';
     layers.innerHTML = '<h4>Frame Layers</h4><div class="iamccs-isf-list" data-layer-list></div>';
@@ -3926,10 +4739,30 @@ function install(node) {
     itemPanel.className = 'iamccs-isf-panel editor-panel';
     itemPanel.innerHTML = '<h4>Selected Layer</h4>';
     inspectorPane.appendChild(itemPanel);
-    itemFields.label = makeField(itemPanel, 'Layer Label', 'label');
-    itemFields.text = makeField(itemPanel, 'Rendered Text', 'text', { multiline: true, small: true });
-    itemFields.desc = makeField(itemPanel, 'Visual Description', 'desc', { multiline: true });
-    itemFields.palette = makeField(itemPanel, 'Layer Palette', 'palette');
+    itemFields.label = makeField(itemPanel, 'Layer Label', 'label', { gemmaField: 'item.label', itemScoped: true });
+    itemFields.text = makeField(itemPanel, 'Rendered Text', 'text', { multiline: true, small: true, gemmaField: 'item.text', itemScoped: true });
+    itemFields.desc = makeField(itemPanel, 'Visual Description', 'desc', { multiline: true, gemmaField: 'item.desc', itemScoped: true });
+    itemFields.palette = makeField(itemPanel, 'Layer Palette', 'palette', { gemmaField: 'item.palette', itemScoped: true });
+    const layerPaletteTools = document.createElement('div');
+    layerPaletteTools.className = 'iamccs-isf-field iamccs-isf-palette-tools';
+    layerPaletteTools.innerHTML = `
+      <label>Layer Palette Preset</label>
+      <select data-role="layer-palette-preset"></select>
+      <p class="iamccs-isf-direct-note" data-role="layer-palette-note"></p>
+    `;
+    itemPanel.appendChild(layerPaletteTools);
+    itemFields.palettePreset = layerPaletteTools.querySelector('[data-role="layer-palette-preset"]');
+    itemFields.paletteNote = layerPaletteTools.querySelector('[data-role="layer-palette-note"]');
+    renderSelectOptions(itemFields.palettePreset, paletteEntries(), "custom");
+    itemFields.palettePreset?.addEventListener('change', (event) => {
+      const item = currentItem();
+      const key = event.currentTarget.value || "custom";
+      if (!item || key === "custom") return;
+      item.color_palette = applyPalettePresetToList(key, item.color_palette);
+      persist();
+      render();
+      showToast(`Layer palette: ${paletteEntries()[key]?.label || key}`, { anchor: event.currentTarget, tone: "success", ms: 1800 });
+    });
     itemFields.image_path = makeField(itemPanel, 'Image Path', 'image_path');
     itemFields.fit = makeField(itemPanel, 'Image Fit', 'fit');
     itemFields.opacity = makeField(itemPanel, 'Image Opacity', 'opacity', { type: 'number' });
@@ -3985,6 +4818,7 @@ function install(node) {
     });
 
     Object.entries(itemFields).forEach(([key, input]) => {
+      if (['palettePreset', 'paletteNote'].includes(key)) return;
       input.addEventListener('input', () => {
         const item = currentItem();
         if (!item) return;
@@ -4119,6 +4953,14 @@ function install(node) {
     sceneFields.medium.value = state.data.scene.medium || '';
     sceneFields.photo.value = state.data.scene.photo || '';
     sceneFields.palette.value = (state.data.scene.color_palette || []).join(', ');
+    if (sceneFields.palettePreset) {
+      renderSelectOptions(sceneFields.palettePreset, paletteEntries(), paletteKeyForColors(state.data.scene.color_palette));
+      sceneFields.palettePreset.value = paletteKeyForColors(state.data.scene.color_palette);
+    }
+    if (sceneFields.paletteNote) {
+      const key = paletteKeyForColors(state.data.scene.color_palette);
+      sceneFields.paletteNote.textContent = paletteEntries()[key]?.summary || "Typed hex palette is exported to Ideogram JSON.";
+    }
     state.data.reference_mode = normalizeReferenceMode(state.data.reference_mode);
     if (workflowModeEntries()[state.data.workflow_mode]) state.workflowModeKey = state.data.workflow_mode;
     state.workflowModeKey = currentWorkflowMode().key;
@@ -4648,6 +5490,15 @@ function install(node) {
     itemFields.text.disabled = item.kind !== 'text';
     itemFields.desc.value = item.desc || '';
     itemFields.palette.value = (item.color_palette || []).join(', ');
+    if (itemFields.palettePreset) {
+      renderSelectOptions(itemFields.palettePreset, paletteEntries(), paletteKeyForColors(item.color_palette));
+      itemFields.palettePreset.value = paletteKeyForColors(item.color_palette);
+      itemFields.palettePreset.disabled = disabled;
+    }
+    if (itemFields.paletteNote) {
+      const key = paletteKeyForColors(item.color_palette);
+      itemFields.paletteNote.textContent = paletteEntries()[key]?.summary || "Typed hex palette is exported on this layer.";
+    }
     itemFields.image_path.value = item.image_path || '';
     itemFields.fit.value = item.fit || 'cover';
     itemFields.opacity.value = item.opacity ?? 1;
@@ -5001,13 +5852,21 @@ function install(node) {
     }
     const rawItems = Array.isArray(state.data.items) ? state.data.items : [];
     const items = rawItems.map((item, index) => normalizeItem(item, index));
-    if (JSON.stringify(rawItems) !== JSON.stringify(items)) state.data.items = items;
+    state.data.items = items;
     const canvas = state.data.canvas || {};
     const canvasW = Math.max(1, Number(canvas.width || 1024));
     const canvasH = Math.max(1, Number(canvas.height || 1024));
     const aspect = canvasW / canvasH;
     const visibleItems = items.filter((item) => item?.kind !== "mask");
     const meta = `${canvasW} x ${canvasH} - ${canvas.aspect_label || "Canvas"} - ${visibleItems.length} layer${visibleItems.length === 1 ? "" : "s"}`;
+    const showResultBg = Boolean(state.showResultImage && state.resultOverlayVisible && cleanText(state.resultBgUrl));
+    const resultOpacity = Math.max(0, Math.min(1, Number(state.resultOverlayOpacity) || 0));
+    const boxFillOpacity = showResultBg ? Math.max(0.08, 0.82 - (resultOpacity * 0.74)) : 0.82;
+    const boxHeadOpacity = showResultBg ? Math.max(0.26, 0.86 - (resultOpacity * 0.58)) : 0.86;
+    const boxBodyOpacity = showResultBg ? Math.max(0.04, 0.22 - (resultOpacity * 0.18)) : 0.22;
+    const resultBgHtml = showResultBg
+      ? `<div class="iamccs-isf-result-bg" aria-hidden="true" style="background-image:url('${escapeXml(state.resultBgUrl)}');--iamccs-result-opacity:${resultOpacity};"></div>`
+      : "";
     const itemHtml = visibleItems.map((item, index) => {
       const kind = cleanText(item.kind || "obj") || "obj";
       const label = cleanText(item.label || item.id || `Layer ${index + 1}`);
@@ -5036,10 +5895,12 @@ function install(node) {
     }).join("");
     boardPreview.innerHTML = `
       <div class="iamccs-isf-board-artboard-meta">${escapeXml(meta)}</div>
-      <div class="iamccs-isf-board-artboard" data-artboard style="--iamccs-artboard-aspect:${aspect};">
-        ${itemHtml || `<div class="iamccs-isf-board-artboard-empty">Add Object, Add Text, or Add Image. Drag boxes directly on this board; resize with the white handle.</div>`}
+      <div class="iamccs-isf-board-artboard ${showResultBg ? "has-result-bg" : ""}" data-artboard style="--iamccs-artboard-aspect:${aspect};--iamccs-box-fill-opacity:${boxFillOpacity};--iamccs-box-head-opacity:${boxHeadOpacity};--iamccs-box-body-opacity:${boxBodyOpacity};">
+        ${resultBgHtml}
+        ${itemHtml || (showResultBg ? "" : `<div class="iamccs-isf-board-artboard-empty">Add Object, Add Text, or Add Image. Drag boxes directly on this board; resize with the white handle.</div>`)}
       </div>`;
     artboard = boardPreview.querySelector('[data-artboard]') || boardPreview;
+    applyResultCompareCss();
     footStatus.textContent = `Canvas layers visible: ${visibleItems.length}`;
     artboard.querySelectorAll('[data-item-id]').forEach((el) => {
       const id = el.getAttribute('data-item-id');
@@ -5063,14 +5924,46 @@ function install(node) {
         startDrag(event, item, mode);
       });
       const body = el.querySelector('[data-edit-body]');
+      const commitBodyEdit = () => {
+        const stored = (state.data.items || []).find((entry) => entry.id === item.id) || item;
+        const value = cleanText(body?.textContent || "");
+        if (stored.kind === 'text') {
+          stored.text = value;
+          item.text = value;
+        } else if (stored.kind !== 'image') {
+          stored.desc = value;
+          item.desc = value;
+        }
+        if (state.selectedId === stored.id) {
+          if (stored.kind === 'text' && itemFields.text && document.activeElement !== itemFields.text) itemFields.text.value = stored.text || "";
+          if (stored.kind !== 'image' && itemFields.desc && document.activeElement !== itemFields.desc) itemFields.desc.value = stored.desc || "";
+        }
+        writeData(node, state.data);
+        updatePromptPreview();
+      };
       body?.addEventListener('pointerdown', (event) => {
-        if (body.isContentEditable) event.stopPropagation();
+        if (body.isContentEditable) {
+          state.selectedId = item.id;
+          syncItemFields();
+          renderLayerList();
+          event.stopPropagation();
+        }
+      });
+      body?.addEventListener('input', () => {
+        commitBodyEdit();
+      });
+      body?.addEventListener('paste', () => {
+        window.setTimeout(commitBodyEdit, 0);
+      });
+      body?.addEventListener('keydown', (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+          event.preventDefault();
+          commitBodyEdit();
+          showToast("Box text saved to Visual Description", { anchor: body, tone: "success", ms: 1400 });
+        }
       });
       body?.addEventListener('blur', () => {
-        const value = cleanText(body.textContent || "");
-        if (item.kind === 'text') item.text = value;
-        else if (item.kind !== 'image') item.desc = value;
-        persist();
+        commitBodyEdit();
         syncItemFields();
         renderLayerList();
         updatePromptPreview();
@@ -5118,6 +6011,7 @@ function install(node) {
     renderLayerList();
     renderArtboard();
     updatePromptPreview();
+    syncShowImgControls();
   }
 
   async function uploadImageFiles(files) {
@@ -5316,7 +6210,16 @@ function install(node) {
       state.paperMode = !state.paperMode;
       state.data.ui = { ...(state.data.ui || {}), paper_mode: state.paperMode };
       syncPaperModeButton();
+      persistUiState();
       persist();
+      return;
+    } else if (action === 'toggle-show-img') {
+      state.showResultImage = !state.showResultImage;
+      if (state.showResultImage && state.resultBgUrl) state.resultOverlayVisible = true;
+      persistUiState();
+      syncShowImgControls();
+      renderArtboard();
+      showToast(state.showResultImage ? "Generated image will show under boxes" : "Generated image hidden under boxes", { anchor: button, tone: "success", ms: 2200 });
       return;
     } else if (action === 'copy-json') {
       updatePromptPreview();

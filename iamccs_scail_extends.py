@@ -78,7 +78,7 @@ class IAMCCS_ScailExtends:
                 "continuity_profile": (
                     ["external_1to1", "iamccs_boundary_ramp", "off"],
                     {
-                        "default": "iamccs_boundary_ramp",
+                        "default": "off",
                         "tooltip": "external_1to1 matches the source plugin behavior. boundary_ramp only grades the first seam frames.",
                     },
                 ),
@@ -99,7 +99,7 @@ class IAMCCS_ScailExtends:
                 "boundary_strength": (
                     "FLOAT",
                     {
-                        "default": 0.75,
+                        "default": 0.0,
                         "min": 0.0,
                         "max": 2.0,
                         "step": 0.05,

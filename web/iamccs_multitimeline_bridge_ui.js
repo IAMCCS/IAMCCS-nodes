@@ -82,9 +82,45 @@ function setTake(node, take) {
     setWidget(node, "active_take", safeTake);
     try {
         window.dispatchEvent(new CustomEvent("iamccs:multigeneration-active-take", {
-            detail: { nodeId: node?.id, activeTake: safeTake },
+            detail: {
+                nodeId: node?.id,
+                activeTake: safeTake,
+                timelineId: `T${String(safeTake).padStart(2, "0")}`,
+                audioLane: `A${safeTake}`,
+                source: "bridge",
+            },
         }));
     } catch {}
+}
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function queuePromptOnce() {
+    if (typeof app?.queuePrompt === "function") {
+        return await app.queuePrompt(0, 1);
+    }
+    const api = window?.comfyAPI?.api;
+    if (typeof api?.queuePrompt === "function") {
+        return await api.queuePrompt(0, 1);
+    }
+    throw new Error("ComfyUI queuePrompt API not available");
+}
+
+async function queueSingleBackendSequence(node, count, statusEl = null) {
+    const max = Math.max(1, Math.min(maxTakes(node), Math.round(Number(count) || 1)));
+    setWidget(node, "take_source_mode", "auto_detect_multi_lanes");
+    setWidget(node, "take_track_layout", "collapse_to_lane_1");
+    for (let take = 1; take <= max; take += 1) {
+        setTake(node, take);
+        if (statusEl) statusEl.textContent = `Queueing T${String(take).padStart(2, "0")} / A${take} on the single backend (${take}/${max})...`;
+        try { app.graph?.setDirtyCanvas?.(true, true); } catch {}
+        await sleep(120);
+        await queuePromptOnce();
+        await sleep(220);
+    }
+    if (statusEl) statusEl.textContent = `Queued ${max} takes on one backend: ${Array.from({ length: max }, (_, i) => `T${String(i + 1).padStart(2, "0")}/A${i + 1}`).join(" -> ")}.`;
 }
 
 function ensureStyle() {
@@ -306,7 +342,7 @@ function installBridgeUI(node, reason = "install") {
             const card = document.createElement("button");
             card.type = "button";
             card.className = `iamccs-mtb-take${take === active ? " is-active" : ""}`;
-            card.innerHTML = `<strong>T${String(take).padStart(2, "0")}</strong><span>${take === active ? "prepared now" : "click to prepare"}</span>`;
+            card.innerHTML = `<strong>T${String(take).padStart(2, "0")} / A${take}</strong><span>${take === active ? "prepared now" : "click to prepare"}</span>`;
             card.onclick = () => {
                 setTake(node, take);
                 render();
@@ -335,11 +371,32 @@ function installBridgeUI(node, reason = "install") {
             setTake(node, 1);
             render();
         };
-        actions.append(prepare, auto);
+        const queueSeq = document.createElement("button");
+        queueSeq.type = "button";
+        queueSeq.textContent = "Queue Sequence / 1 Backend";
+        queueSeq.title = "Queues T1/A1, T2/A2, etc. by changing this bridge active_take on the same single backend workflow.";
+        actions.append(prepare, auto, queueSeq);
 
         const ledger = document.createElement("div");
         ledger.className = "iamccs-mtb-ledger";
-        ledger.textContent = `Active T${String(active).padStart(2, "0")} | ${chunkTemplate === "custom" ? customSeconds + "s" : chunkTemplate} | Auto reads BusOut indexed T lanes: T1-A1, T2-A2, T3-A3. Use TakePicker branches to queue multiple generations in one run.`;
+        ledger.textContent = `Active T${String(active).padStart(2, "0")} / A${active} | ${chunkTemplate === "custom" ? customSeconds + "s" : chunkTemplate} | Contract: T1=A1, T2=A2, T3=A3. One backend only: queue sequence changes active take between queued prompts.`;
+        queueSeq.onclick = async () => {
+            queueSeq.disabled = true;
+            queueSeq.classList.add("is-primary");
+            try {
+                const countMode = String(widget(node, "take_count_mode")?.value || "auto_from_audio");
+                const desired = countMode === "fixed_take_count"
+                    ? Math.max(1, Math.round(num(widget(node, "fixed_take_count")?.value, 3)))
+                    : maxTakes(node);
+                await queueSingleBackendSequence(node, desired, ledger);
+            } catch (err) {
+                ledger.textContent = `Queue sequence failed: ${err?.message || err}`;
+                console.warn("[IAMCCS MultiTimelineBridge UI] single-backend queue failed", err);
+            } finally {
+                queueSeq.disabled = false;
+                queueSeq.classList.remove("is-primary");
+            }
+        };
         root.append(head, grid, takeRow, actions, ledger);
     };
 

@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import hashlib
 import json
@@ -10,6 +11,11 @@ from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
 import folder_paths
 import nodes as comfy_nodes
+
+_GEMMA_ASSIST_DEFAULT_MODEL = "text_encoders\\gemma4_e4b_it_fp8_scaled.safetensors"
+_GEMMA_ASSIST_CLIP_CACHE: Dict[Tuple[str, str], Any] = {}
+_GEMMA_ASSIST_RUNNING = False
+_GEMMA_ASSIST_ABORT_REQUESTED = False
 
 # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
 # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
@@ -109,6 +115,18 @@ def _default_design() -> Dict[str, Any]:
     "brief_to_json": {
         "brief": "",
         "instruction": "Enhance the current Ideogram JSON without changing layout, bbox coordinates, visible text, or panel count."
+    },
+    "gemma_assistant": {
+        "enabled": false,
+        "provider": "local_gemma",
+        "mode": "full_json_enhance",
+        "speed": "fast",
+        "model": "text_encoders\\gemma4_e4b_it_fp8_scaled.safetensors",
+        "selected_id": "",
+        "target_field": "",
+        "current_text": "",
+        "brief": "",
+        "request_ready": false
     },
     "mask_paint": {
         "brush_size": 48,
@@ -831,7 +849,7 @@ def _design_with_json_override(design: Dict[str, Any]) -> Tuple[Dict[str, Any], 
     if payload is None:
         return design, None
     converted = _from_ideogram_prompt(payload)
-    for key in ("canvas", "i2i", "reference_mode", "workflow_mode", "preset_key", "json_export_mode", "brief_to_json", "json_override", "mask_paint"):
+    for key in ("canvas", "i2i", "reference_mode", "workflow_mode", "preset_key", "json_export_mode", "brief_to_json", "gemma_assistant", "json_override", "mask_paint"):
         if key in design:
             converted[key] = copy.deepcopy(design[key])
     return converted, payload
@@ -842,7 +860,7 @@ def _design_from_runtime_source(source_data: Any, fallback_data: Any) -> Dict[st
     design = _normalize_design(source_data)
     if _is_ideogram_prompt_json(parsed_source):
         fallback = _normalize_design(fallback_data)
-        for key in ("canvas", "i2i", "reference_mode", "workflow_mode", "preset_key", "json_export_mode", "brief_to_json", "mask_paint"):
+        for key in ("canvas", "i2i", "reference_mode", "workflow_mode", "preset_key", "json_export_mode", "brief_to_json", "gemma_assistant", "mask_paint"):
             if key not in parsed_source and key in fallback:
                 design[key] = copy.deepcopy(fallback[key])
     return design
@@ -883,6 +901,7 @@ def _normalize_design(raw: Any) -> Dict[str, Any]:
     if merged["json_export_mode"] not in {"json_perfect", "standard"}:
         merged["json_export_mode"] = "json_perfect"
     merged["brief_to_json"] = _normalize_brief_to_json(data.get("brief_to_json") if isinstance(data.get("brief_to_json"), dict) else base.get("brief_to_json"))
+    merged["gemma_assistant"] = _normalize_gemma_assistant(data.get("gemma_assistant") if isinstance(data.get("gemma_assistant"), dict) else base.get("gemma_assistant"))
     merged["mask_paint"] = _normalize_mask_paint(
         data.get("mask_paint") if isinstance(data.get("mask_paint"), dict) else base.get("mask_paint"),
         base.get("mask_paint"),
@@ -1116,25 +1135,537 @@ def _normalize_brief_to_json(raw: Any) -> Dict[str, str]:
     }
 
 
+def _normalize_gemma_assistant(raw: Any) -> Dict[str, Any]:
+    data = raw if isinstance(raw, dict) else {}
+    mode = _clean_text(data.get("mode") or "full_json_enhance")
+    if mode not in {"full_json_enhance", "selected_box_enhance", "brief_to_ideoboard", "prompt_critic", "field_enhance"}:
+        mode = "full_json_enhance"
+    speed = _clean_text(data.get("speed") or data.get("detail_mode") or "fast").lower()
+    if speed not in {"fast", "detailed"}:
+        speed = "fast"
+    return {
+        "enabled": bool(data.get("enabled", False)),
+        "provider": "local_gemma",
+        "mode": mode,
+        "speed": speed,
+        "model": _clean_text(data.get("model")) or _GEMMA_ASSIST_DEFAULT_MODEL,
+        "selected_id": _clean_text(data.get("selected_id")),
+        "target_field": _clean_text(data.get("target_field")),
+        "current_text": _clean_text(data.get("current_text")),
+        "brief": _clean_text(data.get("brief")),
+        "request_ready": bool(data.get("request_ready", False)),
+    }
+
+
 def _gemma_json_request_for_design(design: Dict[str, Any], prompt_json: str) -> str:
     brief = _normalize_brief_to_json(design.get("brief_to_json"))
+    assistant = _normalize_gemma_assistant(design.get("gemma_assistant"))
+    mode = assistant["mode"] if assistant.get("request_ready") else "full_json_enhance"
+    selected_id = assistant.get("selected_id") or ""
+    direction = assistant.get("brief") or brief["brief"] or brief["instruction"]
+    selected_item = {}
+    for item in design.get("items", []) if isinstance(design.get("items"), list) else []:
+        if _clean_text(item.get("id")) == selected_id:
+            selected_item = item
+            break
+
+    contract = (
+        "OUTPUT CONTRACT\n"
+        "Return one valid JSON object only, no markdown.\n"
+    )
+    if mode == "prompt_critic":
+        contract += (
+            "Return {\"mode\":\"prompt_critic\",\"notes\":\"concise critique\",\"suggestions\":[\"specific improvement\", \"specific improvement\"]}.\n"
+            "Do not rewrite the full prompt in critic mode.\n"
+        )
+    else:
+        contract += (
+            "Return {\"mode\":\"" + mode + "\",\"ideogram_prompt\":{...},\"notes\":\"short reason\"}.\n"
+            "The ideogram_prompt must preserve the exact schema: high_level_description, style_description, compositional_deconstruction.\n"
+            "Preserve every element count, type, visible text, and bbox coordinate exactly unless mode is brief_to_ideoboard and the user asks for a new board.\n"
+            "For selected_box_enhance, improve only the selected element description inside the full returned ideogram_prompt.\n"
+        )
+
     return (
-        "You are an Ideogram 4 JSON prompt enhancer. Output JSON only, no markdown, no commentary.\n\n"
+        "You are an Ideogram 4 JSON prompt enhancer for IAMCCS FrameDesigner. Output JSON only.\n\n"
         "TASK\n"
         "Improve the supplied Ideogram 4 structured JSON for stronger cinematic visual quality, clearer subject descriptions, "
         "better material detail, lighting, camera language, and storyboard continuity.\n\n"
         "STRICT RULES\n"
-        "- Preserve the exact JSON schema: high_level_description, style_description, compositional_deconstruction.\n"
-        "- Preserve every element count, type, visible text, and bbox coordinate exactly.\n"
+        "- Use positive concrete visual language.\n"
+        "- Do not add negative prompts, banned lists, or lists of things to avoid.\n"
         "- Bbox order is [ymin, xmin, ymax, xmax] on a 0-1000 grid. Do not convert to x/y order.\n"
-        "- Do not add negative prompts or lists of things to avoid. Use positive concrete visual language.\n"
-        "- Do not add new characters, new panels, or extra objects unless the user brief explicitly asks for a replacement inside an existing bbox.\n"
-        "- Keep image/reference panels described as references if present.\n"
-        "- Keep color_palette arrays as hex colors when present.\n\n"
-        f"USER BRIEF OR ENHANCEMENT DIRECTION\n{brief['brief'] or brief['instruction']}\n\n"
+        "- Keep color_palette arrays as hex colors when present.\n"
+        "- Keep the result compatible with IAMCCS_IdeoTranslate.\n\n"
+        f"MODE\n{mode}\n\n"
+        f"SELECTED ELEMENT ID\n{selected_id or 'none'}\n\n"
+        "SELECTED ELEMENT JSON\n"
+        f"{json.dumps(selected_item, ensure_ascii=False, indent=2)}\n\n"
+        f"USER BRIEF OR ENHANCEMENT DIRECTION\n{direction}\n\n"
+        f"{contract}\n"
         "CURRENT IDEOGRAM JSON\n"
         f"{prompt_json}\n"
     )
+
+
+def _gemma_assistant_system_prompt() -> str:
+    return (
+        "You are Gemma running as the IAMCCS FrameDesigner assistant for Ideogram 4 structured prompting. "
+        "Return compact JSON only. No markdown. No commentary outside JSON. "
+        "Use positive, specific visual language. Do not write negative prompts, banned lists, or 'do not' instructions. "
+        "Preserve the Ideogram JSON structure when enhancing. Preserve bbox coordinates unless the user explicitly asks to build a new board. "
+        "Bbox order is [ymin, xmin, ymax, xmax] on a 0-1000 layout grid. "
+        "Prioritize cinematic clarity, subject identity, physical action, material detail, lighting, lens language, and readable composition. "
+        "When the user gives a general natural-language brief, infer whether they want a single image, image refinement, or storyboard grid, then produce a complete FrameDesigner ideoboard JSON. "
+        "When enhancing one field or one selected box, return only the improved text for that target plus brief notes. "
+        "After the closing JSON brace, immediately end the answer with <end_of_turn>."
+    )
+
+
+def _gemma_assistant_user_prompt(
+    design: Dict[str, Any],
+    mode: str,
+    brief: str,
+    selected_id: str,
+    target_field: str = "",
+    current_text: str = "",
+) -> str:
+    normalized = _normalize_design(design)
+    prompt_json = json.dumps(_to_ideogram_prompt(normalized), ensure_ascii=False, indent=2)
+    selected_item = None
+    for item in normalized.get("items", []):
+        if _clean_text(item.get("id")) == selected_id:
+            selected_item = item
+            break
+    selected_block = json.dumps(selected_item or {}, ensure_ascii=False, indent=2)
+    field = _clean_text(target_field)
+    text = _clean_text(current_text)
+    if mode == "field_enhance":
+        return (
+            "ASSISTANT MODE\n"
+            "field_enhance\n\n"
+            "TARGET FIELD KEY\n"
+            f"{field}\n\n"
+            "CURRENT FIELD TEXT\n"
+            f"{text}\n\n"
+            "USER DIRECTION\n"
+            f"{_clean_text(brief) or text or 'Improve this field for Ideogram 4.'}\n\n"
+            "CURRENT SELECTED BOX\n"
+            f"{selected_block}\n\n"
+            "CURRENT IDEOGRAM PROMPT JSON FOR CONTEXT\n"
+            f"{prompt_json}\n\n"
+            "OUTPUT CONTRACT\n"
+            "{"
+            "\"mode\":\"field_enhance\","
+            "\"field_key\":\"same target field key\","
+            "\"selected_id\":\"selected box id if any\","
+            "\"text\":\"improved replacement text only\","
+            "\"notes\":\"short reason\""
+            "}\n"
+            "Improve only the target field. Do not rewrite unrelated fields. Use positive concrete visual language and preserve user intent. "
+            "Keep the replacement text concise. End immediately after the JSON object with <end_of_turn>.\n"
+        )
+    return (
+        "ASSISTANT MODE\n"
+        f"{mode}\n\n"
+        "USER DIRECTION\n"
+        f"{_clean_text(brief) or 'Improve the current board for stronger Ideogram 4 results while preserving user intent.'}\n\n"
+        "CURRENT SELECTED BOX\n"
+        f"{selected_block}\n\n"
+        "TARGET FIELD KEY, IF A FIELD BUTTON WAS USED\n"
+        f"{field or 'none'}\n\n"
+        "CURRENT FIELD TEXT, IF A FIELD BUTTON WAS USED\n"
+        f"{text or 'none'}\n\n"
+        "CURRENT FRAMEDESIGNER IDEOBOARD JSON\n"
+        f"{json.dumps(normalized, ensure_ascii=False, indent=2)}\n\n"
+        "CURRENT IDEOGRAM PROMPT JSON\n"
+        f"{prompt_json}\n\n"
+        "OUTPUT CONTRACT\n"
+        "- For mode selected_box_enhance, output: {\"mode\":\"selected_box_enhance\",\"selected_id\":\"...\",\"desc\":\"improved positive visual description\",\"notes\":\"short reason\"}.\n"
+        "- For mode prompt_critic, output: {\"mode\":\"prompt_critic\",\"notes\":\"concise critique\",\"suggestions\":[\"specific improvement\", \"specific improvement\"]}.\n"
+        "- For mode full_json_enhance, output: {\"mode\":\"full_json_enhance\",\"ideogram_prompt\":{...},\"notes\":\"short reason\"}. Preserve all element bbox coordinates and count.\n"
+        "- For mode brief_to_ideoboard, output: {\"mode\":\"brief_to_ideoboard\",\"ideoboard\":{...},\"notes\":\"short reason\"}. The ideoboard must use schema iamccs.ideogram_storyboard_frame_designer, canvas, scene, items, workflow_mode, grid_key, target_resolution_key.\n"
+        "Use compact JSON. Avoid whitespace-heavy formatting. End immediately after the JSON object with <end_of_turn>.\n"
+    )
+
+
+def _strip_gemma_response_noise(raw: Any) -> str:
+    text = _clean_text(raw)
+    if not text:
+        return ""
+    for marker in ("<end_of_turn>", "<eos>", "</s>"):
+        text = text.replace(marker, "")
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].strip().startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+    return stripped
+
+
+def _extract_balanced_json_object(raw: str) -> Dict[str, Any]:
+    text = _strip_gemma_response_noise(raw)
+    if not text:
+        return {}
+    for start in [idx for idx, char in enumerate(text) if char == "{"]:
+        depth = 0
+        in_string = False
+        escape = False
+        for pos in range(start, len(text)):
+            char = text[pos]
+            if in_string:
+                if escape:
+                    escape = False
+                elif char == "\\":
+                    escape = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char == "{":
+                depth += 1
+            elif char == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start:pos + 1]
+                    parsed = _safe_json(candidate, {})
+                    if isinstance(parsed, dict):
+                        return parsed
+                    break
+    return {}
+
+
+def _extract_json_object(raw: Any) -> Dict[str, Any]:
+    if isinstance(raw, dict):
+        return raw
+    cleaned = _strip_gemma_response_noise(raw)
+    parsed = _safe_json(cleaned, {})
+    if isinstance(parsed, dict):
+        return parsed
+    parsed = _extract_balanced_json_object(cleaned)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _apply_gemma_assistant_response(design: Dict[str, Any], response_payload: Dict[str, Any], selected_id: str, mode: str) -> Tuple[Dict[str, Any], str]:
+    current = _normalize_design(design)
+    payload = response_payload if isinstance(response_payload, dict) else {}
+    notes = _clean_text(payload.get("notes") or payload.get("report"))
+    response_mode = _clean_text(payload.get("mode") or mode)
+
+    if response_mode == "prompt_critic":
+        suggestions = payload.get("suggestions")
+        if isinstance(suggestions, list) and suggestions:
+            notes = (notes + " | " if notes else "") + " | ".join(_clean_text(x) for x in suggestions if _clean_text(x))
+        return current, notes or "Gemma critic returned notes only."
+
+    if response_mode == "field_enhance":
+        return current, notes or "Gemma returned a field patch."
+
+    if response_mode == "selected_box_enhance" or payload.get("desc"):
+        target_id = _clean_text(payload.get("selected_id") or selected_id)
+        desc = _clean_text(payload.get("desc") or payload.get("description"))
+        if desc:
+            for item in current.get("items", []):
+                if _clean_text(item.get("id")) == target_id:
+                    item["desc"] = desc
+                    if item.get("kind") == "text" and payload.get("text") is not None:
+                        item["text"] = _clean_text(payload.get("text"))
+                    return current, notes or f"Enhanced selected box {target_id}."
+        return current, notes or "Gemma returned no selected-box description to apply."
+
+    ideoboard = payload.get("ideoboard") or payload.get("design_data") or payload.get("board")
+    if isinstance(ideoboard, dict):
+        next_design = _normalize_design(ideoboard)
+        return next_design, notes or "Gemma returned a complete ideoboard."
+
+    ideogram_prompt = payload.get("ideogram_prompt") or payload.get("prompt_json") or payload.get("prompt")
+    if isinstance(ideogram_prompt, dict) and _is_ideogram_prompt_json(ideogram_prompt):
+        converted = _from_ideogram_prompt(ideogram_prompt)
+        for key in ("canvas", "i2i", "reference_mode", "workflow_mode", "preset_key", "json_export_mode", "gemma_assistant", "mask_paint"):
+            if key in current:
+                converted[key] = copy.deepcopy(current[key])
+        return _normalize_design(converted), notes or "Gemma returned enhanced Ideogram prompt JSON."
+
+    if _is_ideogram_prompt_json(payload):
+        converted = _from_ideogram_prompt(payload)
+        for key in ("canvas", "i2i", "reference_mode", "workflow_mode", "preset_key", "json_export_mode", "gemma_assistant", "mask_paint"):
+            if key in current:
+                converted[key] = copy.deepcopy(current[key])
+        return _normalize_design(converted), notes or "Gemma returned raw Ideogram prompt JSON."
+
+    return current, notes or "Gemma response was valid JSON but did not contain an applicable ideoboard, prompt, or box patch."
+
+
+def _normalize_gemma_model_name(value: Any) -> str:
+    model = _clean_text(value) or _GEMMA_ASSIST_DEFAULT_MODEL
+    return model.replace("/", "\\")
+
+
+def _gemma_model_candidates(value: Any) -> List[str]:
+    model = _normalize_gemma_model_name(value)
+    candidates = [model]
+    lower = model.lower()
+    if lower.startswith("text_encoders\\"):
+        candidates.append(model.split("\\", 1)[1])
+    else:
+        candidates.append(f"text_encoders\\{model}")
+    out: List[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in out:
+            out.append(candidate)
+    return out
+
+
+def _list_gemma_assist_models() -> List[str]:
+    try:
+        names = folder_paths.get_filename_list("text_encoders")
+    except Exception:
+        names = []
+    cleaned: List[str] = []
+    for name in names:
+        text = _clean_text(name).replace("/", "\\")
+        if text and text not in cleaned:
+            cleaned.append(text)
+    preferred = [name for name in cleaned if "gemma" in name.lower()]
+    others = [name for name in cleaned if name not in preferred]
+    return preferred + others
+
+
+def _load_gemma_assist_clip(model: str, device: str = "default") -> Tuple[Any, str]:
+    last_error: Exception | None = None
+    for candidate in _gemma_model_candidates(model):
+        key = (candidate, device)
+        if key in _GEMMA_ASSIST_CLIP_CACHE:
+            return _GEMMA_ASSIST_CLIP_CACHE[key], candidate
+        try:
+            clip = comfy_nodes.CLIPLoader().load_clip(candidate, "ideogram4", device)[0]
+            _GEMMA_ASSIST_CLIP_CACHE[key] = clip
+            return clip, candidate
+        except Exception as exc:
+            last_error = exc
+    raise RuntimeError(f"Could not load Gemma text encoder '{model}': {last_error}")
+
+
+def _extract_node_output_text(output: Any) -> str:
+    try:
+        result = getattr(output, "result", None)
+        if isinstance(result, (list, tuple)) and result:
+            return _clean_text(result[0])
+    except Exception:
+        pass
+    try:
+        return _clean_text(output[0])
+    except Exception:
+        pass
+    if isinstance(output, (list, tuple)) and output:
+        return _clean_text(output[0])
+    return _clean_text(output)
+
+
+def _set_gemma_interrupt(value: bool) -> None:
+    try:
+        import comfy.model_management as model_management
+        model_management.interrupt_current_processing(bool(value))
+    except Exception:
+        pass
+
+
+def _gemma_token_budget(mode: str, speed: str, requested: Any = None) -> int:
+    try:
+        explicit = int(requested)
+    except Exception:
+        explicit = 0
+    if explicit > 0:
+        return max(64, min(1400, explicit))
+    speed_key = _clean_text(speed).lower()
+    if speed_key not in {"fast", "detailed"}:
+        speed_key = "fast"
+    budgets = {
+        "field_enhance": {"fast": 128, "detailed": 220},
+        "selected_box_enhance": {"fast": 160, "detailed": 280},
+        "prompt_critic": {"fast": 180, "detailed": 300},
+        "full_json_enhance": {"fast": 420, "detailed": 720},
+        "brief_to_ideoboard": {"fast": 560, "detailed": 900},
+    }
+    return budgets.get(mode, budgets["full_json_enhance"])[speed_key]
+
+
+def _call_local_gemma_generate(model: str, system: str, prompt: str, max_length: int = 1400) -> Tuple[str, str]:
+    from comfy_extras.nodes_textgen import TextGenerate
+    from server import PromptServer
+
+    if _GEMMA_ASSIST_ABORT_REQUESTED:
+        raise RuntimeError("Gemma assistant was stopped before generation started.")
+    clip, loaded_model = _load_gemma_assist_clip(model)
+    formatted_prompt = (
+        f"<start_of_turn>system\n{system.strip()}<end_of_turn>\n"
+        f"<start_of_turn>user\n{prompt.strip()}<end_of_turn>\n"
+        "<start_of_turn>model\n"
+    )
+    server_instance = getattr(PromptServer, "instance", None)
+    old_prompt_id = getattr(server_instance, "last_prompt_id", None) if server_instance is not None else None
+    old_node_id = getattr(server_instance, "last_node_id", None) if server_instance is not None else None
+    had_prompt_id = hasattr(server_instance, "last_prompt_id") if server_instance is not None else False
+    had_node_id = hasattr(server_instance, "last_node_id") if server_instance is not None else False
+    if server_instance is not None:
+        server_instance.last_prompt_id = "iamccs_gemma_assistant"
+        server_instance.last_node_id = "iamccs_framedesigner_gemma"
+    try:
+        _set_gemma_interrupt(False)
+        output = TextGenerate.execute(
+            clip=clip,
+            prompt=formatted_prompt,
+            max_length=max(64, min(1400, int(max_length or 1400))),
+            sampling_mode={"sampling_mode": "off"},
+            thinking=False,
+            use_default_template=False,
+        )
+    finally:
+        if server_instance is not None:
+            if had_prompt_id:
+                server_instance.last_prompt_id = old_prompt_id
+            else:
+                try:
+                    delattr(server_instance, "last_prompt_id")
+                except Exception:
+                    pass
+            if had_node_id:
+                server_instance.last_node_id = old_node_id
+            else:
+                try:
+                    delattr(server_instance, "last_node_id")
+                except Exception:
+                    pass
+    return _extract_node_output_text(output), loaded_model
+
+
+def _field_patch_from_gemma_response(response_json: Dict[str, Any], raw_text: str, target_field: str, selected_id: str) -> Dict[str, str]:
+    payload = response_json if isinstance(response_json, dict) else {}
+    text = _clean_text(payload.get("text") or payload.get("replacement") or payload.get("desc") or payload.get("description"))
+    if not text:
+        text = _strip_gemma_response_noise(raw_text)
+    if text.startswith("{") and text.endswith("}"):
+        parsed = _extract_json_object(text)
+        text = _clean_text(parsed.get("text") or parsed.get("replacement") or parsed.get("desc") or parsed.get("description"))
+    return {
+        "field_key": _clean_text(payload.get("field_key") or target_field),
+        "selected_id": _clean_text(payload.get("selected_id") or selected_id),
+        "text": text,
+    }
+
+
+def _register_framedesigner_gemma_route() -> None:
+    try:
+        from aiohttp import web
+        from server import PromptServer
+    except Exception:
+        return
+    instance = getattr(PromptServer, "instance", None)
+    routes = getattr(instance, "routes", None)
+    if routes is None or getattr(instance, "_iamccs_framedesigner_gemma_route", False):
+        return
+
+    @routes.get("/iamccs/framedesigner/gemma_models")
+    async def iamccs_framedesigner_gemma_models(request):
+        models = _list_gemma_assist_models()
+        default_model = _GEMMA_ASSIST_DEFAULT_MODEL
+        if default_model not in models:
+            for candidate in _gemma_model_candidates(default_model):
+                if candidate in models:
+                    default_model = candidate
+                    break
+        return web.json_response({
+            "ok": True,
+            "models": models,
+            "default": default_model if default_model in models else (models[0] if models else _GEMMA_ASSIST_DEFAULT_MODEL),
+        })
+
+    @routes.post("/iamccs/framedesigner/gemma_abort")
+    async def iamccs_framedesigner_gemma_abort(request):
+        global _GEMMA_ASSIST_ABORT_REQUESTED
+        _GEMMA_ASSIST_ABORT_REQUESTED = True
+        _set_gemma_interrupt(True)
+        return web.json_response({
+            "ok": True,
+            "running": bool(_GEMMA_ASSIST_RUNNING),
+            "message": "Gemma assistant stop requested.",
+        })
+
+    @routes.post("/iamccs/framedesigner/gemma_assist")
+    async def iamccs_framedesigner_gemma_assist(request):
+        global _GEMMA_ASSIST_ABORT_REQUESTED, _GEMMA_ASSIST_RUNNING
+        try:
+            payload = await request.json()
+            design = payload.get("design_data") if isinstance(payload, dict) else {}
+            mode = _clean_text(payload.get("mode") if isinstance(payload, dict) else "") or "full_json_enhance"
+            if mode not in {"full_json_enhance", "selected_box_enhance", "brief_to_ideoboard", "prompt_critic", "field_enhance"}:
+                mode = "full_json_enhance"
+            brief = _clean_text(payload.get("brief") if isinstance(payload, dict) else "")
+            selected_id = _clean_text(payload.get("selected_id") if isinstance(payload, dict) else "")
+            target_field = _clean_text(payload.get("target_field") if isinstance(payload, dict) else "")
+            current_text = _clean_text(payload.get("current_text") if isinstance(payload, dict) else "")
+            model = _normalize_gemma_model_name(payload.get("model") if isinstance(payload, dict) else "")
+            speed = _clean_text(payload.get("speed") if isinstance(payload, dict) else "") or "fast"
+            max_tokens = _gemma_token_budget(mode, speed, payload.get("max_tokens") if isinstance(payload, dict) else None)
+            normalized = _normalize_design(design)
+            system_prompt = _gemma_assistant_system_prompt()
+            user_prompt = _gemma_assistant_user_prompt(normalized, mode, brief, selected_id, target_field, current_text)
+            _GEMMA_ASSIST_ABORT_REQUESTED = False
+            _GEMMA_ASSIST_RUNNING = True
+            response_text, loaded_model = await asyncio.to_thread(
+                _call_local_gemma_generate,
+                model,
+                system_prompt,
+                user_prompt,
+                max_tokens,
+            )
+            if _GEMMA_ASSIST_ABORT_REQUESTED:
+                return web.json_response({"ok": False, "error": "Gemma assistant was stopped."}, status=409)
+            response_json = _extract_json_object(response_text)
+            if mode == "field_enhance":
+                field_patch = _field_patch_from_gemma_response(response_json, response_text, target_field, selected_id)
+                return web.json_response({
+                    "ok": True,
+                    "mode": mode,
+                    "selected_id": selected_id,
+                    "target_field": target_field,
+                    "field_patch": field_patch,
+                    "notes": _clean_text(response_json.get("notes")) or "Gemma enhanced the selected field.",
+                    "raw_response": response_json or _strip_gemma_response_noise(response_text),
+                    "raw_text": _strip_gemma_response_noise(response_text),
+                    "model": loaded_model,
+                    "speed": speed,
+                    "max_tokens": max_tokens,
+                })
+            next_design, notes = _apply_gemma_assistant_response(normalized, response_json, selected_id, mode)
+            prompt_json = json.dumps(_to_ideogram_prompt(next_design), ensure_ascii=False, indent=2)
+            return web.json_response({
+                "ok": True,
+                "mode": mode,
+                "selected_id": selected_id,
+                "target_field": target_field,
+                "design_data": next_design,
+                "prompt_json": prompt_json,
+                "notes": notes,
+                "raw_response": response_json or _strip_gemma_response_noise(response_text),
+                "raw_text": _strip_gemma_response_noise(response_text),
+                "model": loaded_model,
+                "speed": speed,
+                "max_tokens": max_tokens,
+            })
+        except Exception as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+        finally:
+            _GEMMA_ASSIST_RUNNING = False
+            _GEMMA_ASSIST_ABORT_REQUESTED = False
+            _set_gemma_interrupt(False)
+
+    instance._iamccs_framedesigner_gemma_route = True
+
 
 
 def _resolve_image_path(path: str) -> str:
@@ -1854,3 +2385,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_IdeoMaskedPixels": "IAMCCS Ideo Masked Pixels",
     "IAMCCS_IdeogramJSONPreviewPass": "IAMCCS Ideogram JSON Preview / Pass",
 }
+
+
+_register_framedesigner_gemma_route()

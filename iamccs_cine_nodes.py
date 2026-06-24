@@ -4190,6 +4190,11 @@ class IAMCCS_CineFilmmakerBackend:
                 peak = float(torch.max(torch.abs(out_waveform)).detach().cpu().item())
                 if peak > 0.0001:
                     out_waveform = out_waveform * min(4.0, 0.92 / peak)
+            if out_waveform.numel():
+                peak = float(torch.max(torch.abs(out_waveform)).detach().cpu().item())
+                if peak > 0.985:
+                    out_waveform = torch.tanh(out_waveform) / max(0.0001, math.tanh(peak)) * 0.985
+                    print(f"[IAMCCS FilmmakerBackend] Audio soft peak guard applied peak_in={peak:.6f} peak_out=0.985000")
 
         if any(dsp_stats.values()):
             print(f"[IAMCCS FilmmakerBackend] Audio DSP applied muted={dsp_stats['muted']} eq={dsp_stats['eq']} pan={dsp_stats['pan']}")
@@ -4220,17 +4225,16 @@ class IAMCCS_CineFilmmakerBackend:
                 if strict:
                     raise RuntimeError("Encoded custom audio latent is empty.")
                 return {}
-            mask = torch.full(
+            mask = torch.zeros(
                 (1, latent_samples.shape[-2], latent_samples.shape[-1]),
-                0.0,
                 dtype=torch.float32,
-                device=comfy.model_management.intermediate_device(),
+                device=latent_samples.device,
             )
             return {
                 "samples": latent_samples,
                 "sample_rate": int(audio_out.get("sample_rate", getattr(audio_vae, "sample_rate", 44100))),
                 "type": "audio",
-                "noise_mask": mask.reshape((-1, 1, mask.shape[-2], mask.shape[-1])),
+                "noise_mask": mask,
             }
         except Exception as exc:
             if strict:
@@ -4353,9 +4357,11 @@ class IAMCCS_CineFilmmakerBackend:
         max_frames = _safe_int(resources.get("cine_max_frames", outputs.get("max_frames", payload.get("max_frames", 0))), 0)
         if max_frames <= 0:
             max_frames = _round_ltx_frames(int(round(duration_seconds * max(1, frame_rate))), str(payload.get("ltx_round_mode", "up_8n_plus_1")))
+        audio_end_frames = self._timeline_end_frames(audio_timeline_json, "audioSegments")
+        visual_end_frames = self._timeline_end_frames(visual_segments_json, "segments")
         timeline_end_frames = max(
-            self._timeline_end_frames(audio_timeline_json, "audioSegments"),
-            self._timeline_end_frames(visual_segments_json, "segments"),
+            audio_end_frames,
+            visual_end_frames,
         )
         duration_target_frames = int(round(float(duration_seconds) * max(1, int(frame_rate))))
         duration_clamp_applied = False
@@ -4376,8 +4382,16 @@ class IAMCCS_CineFilmmakerBackend:
                 "[IAMCCS FilmmakerBackend] "
                 f"DURATION_EFFECTIVE source=cine_linx duration={float(duration_seconds):.3f}s fps={int(frame_rate)} "
                 f"target_frames={int(duration_target_frames)} max_frames={int(max_frames)} "
-                f"timeline_end_frames={int(timeline_end_frames)} clamp_applied={bool(duration_clamp_applied)}"
+                f"timeline_end_frames={int(timeline_end_frames)} audio_end_frames={int(audio_end_frames)} visual_end_frames={int(visual_end_frames)} "
+                f"clamp_applied={bool(duration_clamp_applied)}"
             )
+            if audio_end_frames > 0:
+                print(
+                    "[IAMCCS FilmmakerBackend] "
+                    f"AUDIO_DURATION_TRUTH audio_end_frames={int(audio_end_frames)} "
+                    f"audio_duration={float(audio_end_frames) / max(1.0, float(frame_rate)):.3f}s "
+                    f"duration_used={float(duration_seconds):.3f}s max_frames={int(max_frames)}"
+                )
         epsilon = _safe_float(resources.get("cine_promptrelay_epsilon", outputs.get("promptrelay_epsilon", payload.get("promptrelay_epsilon", 0.001))), 0.001)
 
         latent = optional_latent if isinstance(optional_latent, dict) else self._empty_latent(width, height, max_frames)

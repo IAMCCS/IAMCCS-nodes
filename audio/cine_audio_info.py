@@ -107,6 +107,10 @@ def _speaker_order(dialogue: Dict[str, Any]) -> List[str]:
 
 
 def _dialogue_speaker_stem_start_frames(dialogue: Dict[str, Any], fps: float) -> Dict[str, int]:
+    settings = dialogue.get("settings") if isinstance(dialogue.get("settings"), dict) else {}
+    template = dialogue.get("audio_board_template") if isinstance(dialogue.get("audio_board_template"), dict) else {}
+    if bool(settings.get("speaker_stems_zero_start") or template.get("speakerStemsZeroStart")):
+        return {key: 0 for key in _speaker_order(dialogue)}
     explicit = dialogue.get("speaker_stem_start_frames") if isinstance(dialogue.get("speaker_stem_start_frames"), dict) else {}
     if explicit:
         out = {}
@@ -205,6 +209,18 @@ def _line_to_srt(index: int, start: float, end: float, text: str) -> str:
     return f"{index}\n{_srt_timestamp(start)} --> {_srt_timestamp(end)}\n{text.strip()}\n\n"
 
 
+def _speaker_stem_srt_local_zero(dialogue: Dict[str, Any]) -> bool:
+    """Keep generated per-speaker WAVs local, while timeline lanes store the real offset."""
+    settings = dialogue.get("settings") if isinstance(dialogue.get("settings"), dict) else {}
+    template = dialogue.get("audio_board_template") if isinstance(dialogue.get("audio_board_template"), dict) else {}
+    for key in ("speaker_stem_srt_local_zero", "speakerStemSrtLocalZero"):
+        if key in settings:
+            return bool(settings.get(key))
+        if key in template:
+            return bool(template.get(key))
+    return True
+
+
 def _strip_inline_tts_tags(text: str) -> str:
     # In plain dialogue mode, keep only words meant to be spoken. Metadata stays in cine_linx.
     clean = re.sub(r"<[^>]+>", "", str(text or ""))
@@ -212,11 +228,52 @@ def _strip_inline_tts_tags(text: str) -> str:
     return re.sub(r"\s+", " ", clean).strip()
 
 
+def _strip_angle_tts_tags(text: str) -> str:
+    clean = re.sub(r"<[^>]+>", "", str(text or ""))
+    return re.sub(r"\s+", " ", clean).strip()
+
+
+def _has_indextts_character_tags(text: str) -> bool:
+    return bool(re.search(r"\[[^\]\n:]+:[^\]\n]+\]", str(text or "")))
+
+
 def _line_text(line: Dict[str, Any], mode: str) -> str:
     text = str(line.get("ttsText") or line.get("text") or line.get("dialogueText") or "").strip()
     speaker = str(line.get("speaker") or line.get("speakerName") or "").strip()
     if mode == "plain_dialogue":
         return _strip_inline_tts_tags(text)
+    if mode == "index_tts_text_emotion":
+        return _strip_inline_tts_tags(text)
+    if mode == "index_tts_character_tags":
+        clean = _strip_angle_tts_tags(text)
+        if _has_indextts_character_tags(clean):
+            return clean
+        clean = _strip_inline_tts_tags(clean)
+        emotion = str(line.get("emotion") or "none").strip()
+        tag = speaker or str(line.get("speakerName") or "Speaker").strip() or "Speaker"
+        if emotion and emotion.lower() != "none":
+            tag = f"{tag}:{emotion}"
+        return f"[{tag}] {clean}".strip()
+    if mode == "chatterbox_v2_tokens":
+        clean = _strip_inline_tts_tags(text)
+        para = str(line.get("paralinguistic") or line.get("para") or "none").strip()
+        style = str(line.get("style") or "none").strip().lower()
+        tokens = []
+        token_map = {
+            "Breathing": "<inhale>",
+            "Laughter": "<laughter>",
+            "Sigh": "<sigh>",
+            "Surprise-oh": "<gasp>",
+            "Uhm": "<UM>",
+        }
+        if para in token_map:
+            tokens.append(token_map[para])
+        if "whisper" in style:
+            tokens.append("<whisper>")
+        if "murmur" in style or "mumble" in style:
+            tokens.append("<mumble>")
+        prefix = " ".join(tokens).strip()
+        return f"{prefix} {clean}".strip()
     if speaker and not text.startswith("[") and mode in {"speaker_tags", "tts_audio_suite_tags"}:
         text = f"[{speaker}|en] {text}"
     if mode == "tts_audio_suite_tags":
@@ -235,8 +292,19 @@ def _line_text(line: Dict[str, Any], mode: str) -> str:
 def _export_speaker_srts(dialogue: Dict[str, Any], segments: List[Dict[str, Any]], fps: float, mode: str) -> Dict[str, str]:
     order = _speaker_order(dialogue)
     grouped: Dict[str, List[str]] = {key: [] for key in order}
+    settings = dialogue.get("settings") if isinstance(dialogue.get("settings"), dict) else {}
+    template = dialogue.get("audio_board_template") if isinstance(dialogue.get("audio_board_template"), dict) else {}
+    zero_start_stems = _speaker_stem_srt_local_zero(dialogue)
     lines = dialogue.get("export_lines") if isinstance(dialogue.get("export_lines"), list) else dialogue.get("lines")
     if isinstance(lines, list) and lines:
+        offsets: Dict[str, float] = {}
+        if zero_start_stems:
+            for line in lines:
+                if not isinstance(line, dict):
+                    continue
+                key = str(line.get("speaker") or line.get("speakerName") or order[0])
+                start = max(0.0, _safe_float(line.get("start", 0.0), 0.0))
+                offsets[key] = min(offsets.get(key, start), start)
         counters: Dict[str, int] = {}
         for line in lines:
             if not isinstance(line, dict):
@@ -244,12 +312,23 @@ def _export_speaker_srts(dialogue: Dict[str, Any], segments: List[Dict[str, Any]
             key = str(line.get("speaker") or line.get("speakerName") or order[0])
             if key not in grouped:
                 grouped[key] = []
-            start = _safe_float(line.get("start", 0.0), 0.0)
+            absolute_start = _safe_float(line.get("start", 0.0), 0.0)
             duration = _safe_float(line.get("duration", 0.0), 0.0)
-            end = _safe_float(line.get("end", start + duration), start + max(0.8, duration))
+            absolute_end = _safe_float(line.get("end", absolute_start + duration), absolute_start + max(0.8, duration))
+            offset = offsets.get(key, 0.0)
+            start = max(0.0, absolute_start - offset)
+            end = max(start + 0.2, absolute_end - offset)
             counters[key] = counters.get(key, 0) + 1
-            grouped[key].append(_line_to_srt(counters[key], start, max(end, start + 0.2), _line_text(line, mode)))
+            grouped[key].append(_line_to_srt(counters[key], start, end, _line_text(line, mode)))
     else:
+        offsets: Dict[str, float] = {}
+        if zero_start_stems:
+            for seg in segments:
+                if not isinstance(seg, dict):
+                    continue
+                key = str(seg.get("speaker") or seg.get("speakerName") or order[0])
+                start = max(0.0, _safe_int(seg.get("start", 0), 0) / max(1.0, fps))
+                offsets[key] = min(offsets.get(key, start), start)
         counters: Dict[str, int] = {}
         for seg in segments:
             if not isinstance(seg, dict):
@@ -257,8 +336,9 @@ def _export_speaker_srts(dialogue: Dict[str, Any], segments: List[Dict[str, Any]
             key = str(seg.get("speaker") or seg.get("speakerName") or order[0])
             if key not in grouped:
                 grouped[key] = []
-            start = _safe_int(seg.get("start", 0), 0) / max(1.0, fps)
+            absolute_start = _safe_int(seg.get("start", 0), 0) / max(1.0, fps)
             length = max(1, _safe_int(seg.get("length", 1), 1)) / max(1.0, fps)
+            start = max(0.0, absolute_start - offsets.get(key, 0.0))
             counters[key] = counters.get(key, 0) + 1
             grouped[key].append(_line_to_srt(counters[key], start, start + length, _line_text(seg, mode)))
     return {key: "".join(parts).strip() for key, parts in grouped.items()}
@@ -420,6 +500,9 @@ class IAMCCS_CineAudioInfo:
                 "frame_rate": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 120.0, "step": 0.01}),
                 "tts_text_mode": ([
                     "tts_audio_suite_tags",
+                    "index_tts_text_emotion",
+                    "index_tts_character_tags",
+                    "chatterbox_v2_tokens",
                     "speaker_tags",
                     "plain_dialogue",
                 ], {"default": "tts_audio_suite_tags"}),
@@ -430,7 +513,7 @@ class IAMCCS_CineAudioInfo:
                     "attach_to_first_lane",
                 ], {"default": "slice_master_by_existing_lanes"}),
                 "save_subfolder": ("STRING", {"default": "IAMCCS_generated_audio", "multiline": False}),
-                "file_prefix": ("STRING", {"default": "dialogue_tts_master", "multiline": False}),
+                "file_prefix": ("STRING", {"default": "dialogue_tts_single_master", "multiline": False}),
             },
             "optional": {
                 "cine_linx": (SUPERNODE_LINX_TYPE,),
@@ -461,9 +544,14 @@ class IAMCCS_CineAudioInfo:
         speaker_order = _speaker_order(dialogue)
         speaker_a_srt = speaker_srts.get(speaker_order[0], "") if speaker_order else ""
         speaker_b_srt = speaker_srts.get(speaker_order[1], "") if len(speaker_order) > 1 else ""
+        effective_lane_injection_mode = str(lane_injection_mode)
         if str(mode) == "export_speaker_stems":
-            tts_srt = speaker_a_srt
+            # Keep tts_srt as the master dialogue export. Speaker-specific outputs
+            # must remain the only source for A/B stems, otherwise B can silently
+            # fall back to Speaker A in existing graphs.
             tts_text = "\n".join(part.strip() for part in [speaker_a_srt, speaker_b_srt] if part.strip())
+        if str(mode) == "inject_speaker_stems" and effective_lane_injection_mode == "slice_master_by_existing_lanes":
+            effective_lane_injection_mode = "speaker_full_timeline_clips"
 
         duration_frames = _max_end_frames(segments)
         duration_seconds = float(duration_frames) / fps if duration_frames else _safe_float(timeline.get("duration_seconds", outputs.get("duration_seconds", 0.0)), 0.0)
@@ -486,7 +574,7 @@ class IAMCCS_CineAudioInfo:
                 audio_frames = max(1, int(math.ceil(audio_duration * fps)))
                 duration_frames = max(duration_frames, audio_frames)
                 duration_seconds = max(duration_seconds, audio_duration)
-                if str(lane_injection_mode) == "speaker_full_timeline_clips" or not segments:
+                if effective_lane_injection_mode == "speaker_full_timeline_clips" or not segments:
                     speaker_start_frames = _dialogue_speaker_stem_start_frames(dialogue, fps)
                     for source_seg in source_segments:
                         key = str(source_seg.get("speaker") or source_seg.get("speakerName") or "")
@@ -555,7 +643,7 @@ class IAMCCS_CineAudioInfo:
                     segments = [{
                         "id": "dialogue_tts_master",
                         "type": "audio",
-                        "name": "Dialogue TTS Master",
+                        "name": "Dialogue TTS Single Master",
                         "track": 0,
                         "start": 0,
                         "length": audio_frames,
@@ -628,7 +716,8 @@ class IAMCCS_CineAudioInfo:
         resources.update({
             "cine_audio_info": {
                 "mode": str(mode),
-                "lane_injection_mode": str(lane_injection_mode),
+                "lane_injection_mode": effective_lane_injection_mode,
+                "requested_lane_injection_mode": str(lane_injection_mode),
                 "tts_text_mode": str(tts_text_mode),
                 "generated_audio_file": injected_file,
                 "speaker_stem_files": dict(([(str(speaker_order[0]), file_a if "file_a" in locals() else "")] if speaker_order else []) + ([(str(speaker_order[1]), file_b if "file_b" in locals() else "")] if len(speaker_order) > 1 else [])),
@@ -685,12 +774,19 @@ class IAMCCS_CineAudioInfo:
         report = json.dumps({
             "node": "IAMCCS_CineAudioInfo",
             "mode": str(mode),
+            "lane_injection_mode": effective_lane_injection_mode,
             "segments": len(segments),
             "tracks": track_count,
             "has_media": bool(has_media),
             "audio_file": injected_file,
+            "speaker_stem_files": resources.get("cine_audio_info", {}).get("speaker_stem_files", {}),
             "duration_seconds": float(duration_seconds),
             "tts_srt_chars": len(tts_srt),
+            "speaker_a_srt_chars": len(resources["cine_dialogue_speaker_a_srt"]),
+            "speaker_b_srt_chars": len(resources["cine_dialogue_speaker_b_srt"]),
+            "speaker_srts_identical": bool(resources["cine_dialogue_speaker_a_srt"] and resources["cine_dialogue_speaker_a_srt"] == resources["cine_dialogue_speaker_b_srt"]),
+            "speaker_a_srt_preview": str(resources["cine_dialogue_speaker_a_srt"])[:120],
+            "speaker_b_srt_preview": str(resources["cine_dialogue_speaker_b_srt"])[:120],
             "truth": "CineAudioInfo exports dialogue SRT to TTS and injects generated AUDIO back into Shotboard-compatible AudioBoard lanes through cine_linx.",
         }, ensure_ascii=False, indent=2)
 

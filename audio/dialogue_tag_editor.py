@@ -241,7 +241,7 @@ def _format_dialogue_text(line: Dict[str, Any], speaker: Dict[str, Any], engine_
 def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: float, min_line_seconds: float, default_gap_seconds: float, output_mode: str, inline_edit_mode: str) -> Dict[str, Any]:
     global_prompt = str(data.get("global_prompt") or data.get("prompt") or "").strip()
     if not global_prompt:
-        global_prompt = "cinematic night interior, two men in field and reverse-field dialogue, natural audio-driven lip sync, subtle listening reactions, no subtitles, no visible text"
+        global_prompt = "cinematic field and reverse-field dialogue, hard cut coverage, one dominant speaking face per shot, visible mouth movement, natural audio-driven performance, silent listener reaction, stable identities, coherent eyelines"
     speakers = data.get("speakers") if isinstance(data.get("speakers"), list) else []
     if not speakers:
         speakers = copy.deepcopy(DEFAULT_DIALOGUE["speakers"])
@@ -306,12 +306,14 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
         export_lines = lines
     settings_data = data.get("settings") if isinstance(data.get("settings"), dict) else {}
     zero_start_stems = bool(settings_data.get("speaker_stems_zero_start", False)) and not single_track_mode
-    stem_offsets: Dict[str, float] = {}
-    if zero_start_stems:
-        for line in export_lines:
-            key = str(line.get("speaker") or line.get("speaker_name") or "A")
-            start = max(0.0, _float(line.get("start"), 0.0))
-            stem_offsets[key] = min(stem_offsets.get(key, start), start)
+    # Speaker stem media should be generated on its own local timebase so the WAV
+    # does not contain leading silence. The AudioBoard lane start keeps the real
+    # timeline position unless the user explicitly enables A+B @ 0.
+    stem_media_offsets: Dict[str, float] = {}
+    for line in export_lines:
+        key = str(line.get("speaker") or line.get("speaker_name") or "A")
+        start = max(0.0, _float(line.get("start"), 0.0))
+        stem_media_offsets[key] = min(stem_media_offsets.get(key, start), start)
 
     engine_profile = _resolve_engine_profile(data.get("settings", {}).get("engine_profile"))
     master_srt_parts: List[str] = []
@@ -329,9 +331,9 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
         master_srt_parts.append(_line_to_srt(index, start, end, formatted))
         tagged_parts.append(formatted)
         key = str(speaker.get("id") or line.get("speaker") or "A")
-        stem_offset = stem_offsets.get(key, 0.0) if zero_start_stems else 0.0
-        stem_start = max(0.0, start - stem_offset)
-        stem_end = max(stem_start + 0.08, end - stem_offset)
+        stem_media_offset = stem_media_offsets.get(key, 0.0)
+        stem_start = max(0.0, start - stem_media_offset)
+        stem_end = max(stem_start + 0.08, end - stem_media_offset)
         stem_srt.setdefault(key, []).append(_line_to_srt(len(stem_srt.get(key, [])) + 1, stem_start, stem_end, formatted))
         stem_text.setdefault(key, []).append(formatted)
         visual_start_frames = int(round(start * float(frame_rate)))
@@ -365,7 +367,7 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
             "length": length_frames,
             "ref": int(line.get("ref", 1)),
             "label": str(line.get("label") or f"{key}_{index:02d}"),
-            "prompt": str(line.get("local_prompt") or line.get("shot_prompt") or f"cut to speaker {key}, natural dialogue performance, lip sync driven by external dialogue audio, coherent eyeline"),
+            "prompt": str(line.get("local_prompt") or line.get("shot_prompt") or f"hard cut, Speaker {key} close-up, Speaker {key} speaks clearly, visible mouth movement, coherent eyeline"),
             "dialogue": f'{key}: "{line.get("text", "")}"',
             "audio_or_dialogue": f'{key}: "{line.get("text", "")}"',
             "dialogue_pin": True,
@@ -447,7 +449,7 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
 class IAMCCS_DialogueTagEditor:
     """App-style dialogue/tag planner that writes one cine_linx payload for TTS, AudioBoard and Shotboard."""
 
-    DEFAULT_DATA = json.dumps({"schema": "iamccs.dialogue_tag_editor", "schema_version": 2, "global_prompt": "cinematic night interior, two men in field and reverse-field dialogue, natural audio-driven lip sync, controlled tension, subtle breathing and listening reactions, no subtitles, no visible text", "settings": {"engine_profile": "tts_audio_suite_chatterbox", "output_mode": "speaker_stems_for_overlap", "speaker_stems_zero_start": False, "inline_edit_mode": "metadata_only", "default_gap_seconds": 0.12, "text_theme": "light_boxes", "font_zoom": 1.0}, "speakers": [{"id": "A", "name": "Man A", "voice": "speaker_a_low_tense", "reference_text": "Keep your voice low. We do not know who is listening.", "language": "en"}, {"id": "B", "name": "Man B", "voice": "speaker_b_controlled_whisper", "reference_text": "Good. Now we finally have something worth protecting.", "language": "en"}], "lines": [{"id": "line_001", "speaker": "A", "text": "You said the signal was dead. Then why is that receiver still blinking?", "emotion": "tense", "style": "low", "paralinguistic": "Breathing", "overlap_after": 0.18, "ref": 1, "track": 0, "local_prompt": "field shot on Man A, tense close-up, controlled suspicion, natural lip sync driven by external dialogue audio"}, {"id": "line_002", "speaker": "B", "text": "Because someone on the other side wants us to think we are alone.", "emotion": "serious", "style": "whisper", "paralinguistic": "none", "overlap_after": 0.12, "ref": 2, "track": 1, "local_prompt": "reverse field shot on Man B, quiet answer, guarded fear under control, lips follow the external dialogue audio"}, {"id": "line_003", "speaker": "A", "text": "If we open that door, we may be giving them exactly what they came for.", "emotion": "fearful", "style": "dry", "paralinguistic": "Sigh", "overlap_after": 0.1, "ref": 1, "track": 0, "local_prompt": "cut back to Man A, tighter frame, fear hidden behind discipline, coherent eyeline, audio-driven speaking performance"}, {"id": "line_004", "speaker": "B", "text": "Then we do not open it. We make them knock twice.", "emotion": "coldness", "style": "authority", "paralinguistic": "none", "overlap_after": 0.0, "ref": 2, "track": 1, "local_prompt": "reverse close-up on Man B, decisive final line, controlled authority, natural lip sync driven by external audio"}]}, indent=2, ensure_ascii=False)
+    DEFAULT_DATA = json.dumps({"schema": "iamccs.dialogue_tag_editor", "schema_version": 2, "global_prompt": "cinematic field and reverse-field dialogue, hard cut coverage, one dominant speaking face per shot, visible mouth movement, natural audio-driven performance, silent listener reaction, stable identities, coherent eyelines", "settings": {"engine_profile": "tts_audio_suite_chatterbox", "output_mode": "speaker_stems_for_overlap", "speaker_stems_zero_start": False, "inline_edit_mode": "metadata_only", "default_gap_seconds": 0.12, "text_theme": "light_boxes", "font_zoom": 1.0}, "speakers": [{"id": "A", "name": "Man A", "voice": "speaker_a_low_tense", "reference_text": "Keep your voice low. We do not know who is listening.", "language": "en"}, {"id": "B", "name": "Man B", "voice": "speaker_b_controlled_whisper", "reference_text": "Good. Now we finally have something worth protecting.", "language": "en"}], "lines": [{"id": "line_001", "speaker": "A", "text": "You said the signal was dead. Then why is that receiver still blinking?", "emotion": "tense", "style": "low", "paralinguistic": "Breathing", "overlap_after": 0.18, "ref": 1, "track": 0, "local_prompt": "hard cut, Man A close-up, Man A speaks clearly, visible mouth movement, tense controlled delivery, Man B listens quietly"}, {"id": "line_002", "speaker": "B", "text": "Because someone on the other side wants us to think we are alone.", "emotion": "serious", "style": "whisper", "paralinguistic": "none", "overlap_after": 0.12, "ref": 2, "track": 1, "local_prompt": "hard cut, Man B close-up, Man B speaks clearly, visible mouth movement, guarded quiet answer, Man A listens quietly"}, {"id": "line_003", "speaker": "A", "text": "If we open that door, we may be giving them exactly what they came for.", "emotion": "fearful", "style": "dry", "paralinguistic": "Sigh", "overlap_after": 0.1, "ref": 1, "track": 0, "local_prompt": "hard cut, Man A tighter close-up, Man A speaks clearly, visible mouth movement, fear held under discipline"}, {"id": "line_004", "speaker": "B", "text": "Then we do not open it. We make them knock twice.", "emotion": "coldness", "style": "authority", "paralinguistic": "none", "overlap_after": 0.0, "ref": 2, "track": 1, "local_prompt": "hard cut, Man B close-up, Man B speaks clearly, visible mouth movement, decisive controlled authority"}]}, indent=2, ensure_ascii=False)
 
     @classmethod
     def INPUT_TYPES(cls):

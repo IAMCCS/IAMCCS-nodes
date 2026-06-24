@@ -284,6 +284,7 @@ from .audio.audio_control_efx import IAMCCS_ControlAudEfx
 from .audio.audio_control_efx_panel import IAMCCS_ControlAudEfxPanel
 from .audio.dialogue_tag_editor import IAMCCS_DialogueTagEditor, IAMCCS_DialogueAudioBoardBridge
 from .audio.cine_audio_info import IAMCCS_CineAudioInfo
+from .audio.audio_phase_lazy import IAMCCS_AudioPhaseLazyGate
 from .iamccs_ideogram_storyboard_frame_designer import (
     IAMCCS_StoryboardFrameDesigner,
     IAMCCS_StoryboardFrameDesignerV2,
@@ -392,6 +393,16 @@ except Exception as exc:
     logging.warning("IAMCCS SCAIL Extends nodes unavailable: %s", exc)
     IAMCCS_ScailExtends = None
     IAMCCS_ScailExtendPlan = None
+
+try:
+    from .iamccs_wananimate_extends import (
+        IAMCCS_WanAnimateExtends,
+        IAMCCS_WanAnimateExtendPlan,
+    )
+except Exception as exc:
+    logging.warning("IAMCCS WanAnimate Extends nodes unavailable: %s", exc)
+    IAMCCS_WanAnimateExtends = None
+    IAMCCS_WanAnimateExtendPlan = None
 
 # Nodi principali
 NODE_CLASS_MAPPINGS = {
@@ -591,6 +602,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_DialogueTagEditor": IAMCCS_DialogueTagEditor,
     "IAMCCS_DialogueAudioBoardBridge": IAMCCS_DialogueAudioBoardBridge,
     "IAMCCS_CineAudioInfo": IAMCCS_CineAudioInfo,
+    "IAMCCS_AudioPhaseLazyGate": IAMCCS_AudioPhaseLazyGate,
     "IAMCCS_StoryboardFrameDesigner": IAMCCS_StoryboardFrameDesigner,
     "IAMCCS_StoryboardFrameDesignerV2": IAMCCS_StoryboardFrameDesignerV2,
     "IAMCCS_IdeoInfo": IAMCCS_IdeoInfo,
@@ -675,6 +687,11 @@ NODE_CLASS_MAPPINGS = {
         "IAMCCS_ScailExtendPlan": IAMCCS_ScailExtendPlan,
     } if IAMCCS_ScailExtends is not None else {}),
 
+    **({
+        "IAMCCS_WanAnimateExtends": IAMCCS_WanAnimateExtends,
+        "IAMCCS_WanAnimateExtendPlan": IAMCCS_WanAnimateExtendPlan,
+    } if IAMCCS_WanAnimateExtends is not None else {}),
+
     # QwenVL First/Last Frame (registered only if QwenVL is installed)
     **({"IAMCCS_QWEN_VL_FLF": IAMCCS_QWEN_VL_FLF,
         "IAMCCS_QWEN_VL_FLF_Advanced": IAMCCS_QWEN_VL_FLF_Advanced,
@@ -685,6 +702,8 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_ScailExtends": "IAMCCS SCAIL Extends",
     "IAMCCS_ScailExtendPlan": "IAMCCS SCAIL Extend Plan",
+    "IAMCCS_WanAnimateExtends": "IAMCCS WanAnimate Extends",
+    "IAMCCS_WanAnimateExtendPlan": "IAMCCS WanAnimate Extend Plan",
     "IAMCCS_ScailIdentitySeeder": "IAMCCS SCAIL Identity Seeder",
     "IAMCCS_ScailIdentityTracker": "IAMCCS SCAIL Identity Tracker",
     "IAMCCS_ScailMultiReference": "IAMCCS SCAIL Multi-Reference (experimental)",
@@ -918,6 +937,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_DialogueTagEditor": "IAMCCS Dialogue Tag Editor",
     "IAMCCS_DialogueAudioBoardBridge": "IAMCCS Dialogue AudioBoard Bridge",
     "IAMCCS_CineAudioInfo": "IAMCCS CineAudioInfo",
+    "IAMCCS_AudioPhaseLazyGate": "IAMCCS Audio Phase Lazy Gate",
     "IAMCCS_StoryboardFrameDesigner": "IAMCCS StoryboardFrame + TextInFrame Director",
     "IAMCCS_StoryboardFrameDesignerV2": "IAMCCS StoryboardFrame V2 + Image Canvas i2i",
     "IAMCCS_IdeoInfo": "IDEO_INFO",
@@ -1676,6 +1696,18 @@ def setup_api_routes() -> None:
         # Never hard-fail ComfyUI startup due to optional API endpoints.
         logging.getLogger("IAMCCS.API").warning("Could not setup IAMCCS API routes: %r", e)
 
+
+
+# IAMCCS Shotboard V4 / Motion Sketch optional module
+try:
+    from .cine_shotboard_v4 import (
+        NODE_CLASS_MAPPINGS as _IAMCCS_SHOTBOARD_V4_NODE_CLASS_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as _IAMCCS_SHOTBOARD_V4_NODE_DISPLAY_NAME_MAPPINGS,
+    )
+    NODE_CLASS_MAPPINGS.update(_IAMCCS_SHOTBOARD_V4_NODE_CLASS_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_SHOTBOARD_V4_NODE_DISPLAY_NAME_MAPPINGS)
+except Exception as e:
+    logging.getLogger("IAMCCS").warning("IAMCCS Shotboard V4 MotionSketch nodes unavailable: %r", e)
 
 # Setup API routes when extension loads
 setup_api_routes()

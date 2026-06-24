@@ -37,17 +37,17 @@ function defaultData() {
   return {
     schema: "iamccs.dialogue_tag_editor",
     schema_version: 2,
-    global_prompt: "cinematic night interior, two men in field and reverse-field dialogue, natural audio-driven lip sync, controlled tension, subtle listening reactions, stable identities, coherent eyelines, no subtitles, no visible text",
-    settings: { engine_profile: "", output_mode: "speaker_stems_for_overlap", tts_generation_mode: "double_stem_ab", speaker_stems_zero_start: false, inline_edit_mode: "metadata_only", default_gap_seconds: 0.12, text_theme: "light_boxes", font_zoom: 1 },
+    global_prompt: "cinematic field and reverse-field dialogue, hard cut coverage, one dominant speaking face per shot, visible mouth movement, natural audio-driven performance, silent listener reaction, stable identities, coherent eyelines",
+    settings: { engine_profile: "", output_mode: "speaker_stems_for_overlap", tts_generation_mode: "double_stem_ab", speaker_stems_zero_start: false, speaker_stem_srt_local_zero: true, inline_edit_mode: "metadata_only", emotion_routing: "clean_metadata", default_gap_seconds: 0.12, text_theme: "light_boxes", font_zoom: 1 },
     speakers: [
       { id: "A", name: "Man A", voice: "speaker_a_low_tense", reference_text: "Keep your voice low. We do not know who is listening.", language: "en" },
       { id: "B", name: "Man B", voice: "speaker_b_controlled_whisper", reference_text: "Good. Now we finally have something worth protecting.", language: "en" },
     ],
     lines: [
-      { id: "line_001", speaker: "A", text: "You said the signal was dead. Then why is that receiver still blinking?", emotion: "tense", style: "low", paralinguistic: "Breathing", overlap_after: 0.18, ref: 1, track: 0, local_prompt: "field shot on Man A, tense close-up, controlled suspicion, natural lip sync driven by external dialogue audio" },
-      { id: "line_002", speaker: "B", text: "Because someone on the other side wants us to think we are alone.", emotion: "serious", style: "whisper", paralinguistic: "none", overlap_after: 0.12, ref: 2, track: 1, local_prompt: "reverse field shot on Man B, quiet answer, guarded fear under control, lips follow the external dialogue audio" },
-      { id: "line_003", speaker: "A", text: "If we open that door, we may be giving them exactly what they came for.", emotion: "fearful", style: "dry", paralinguistic: "Sigh", overlap_after: 0.1, ref: 1, track: 0, local_prompt: "cut back to Man A, tighter frame, fear hidden behind discipline, coherent eyeline, audio-driven speaking performance" },
-      { id: "line_004", speaker: "B", text: "Then we do not open it. We make them knock twice.", emotion: "coldness", style: "authority", paralinguistic: "none", overlap_after: 0, ref: 2, track: 1, local_prompt: "reverse close-up on Man B, decisive final line, controlled authority, natural lip sync driven by external audio" },
+      { id: "line_001", speaker: "A", text: "You said the signal was dead. Then why is that receiver still blinking?", emotion: "tense", style: "low", paralinguistic: "Breathing", overlap_after: 0.18, ref: 1, track: 0, local_prompt: "hard cut, Man A close-up, Man A speaks clearly, visible mouth movement, tense controlled delivery, Man B listens quietly" },
+      { id: "line_002", speaker: "B", text: "Because someone on the other side wants us to think we are alone.", emotion: "serious", style: "whisper", paralinguistic: "none", overlap_after: 0.12, ref: 2, track: 1, local_prompt: "hard cut, Man B close-up, Man B speaks clearly, visible mouth movement, guarded quiet answer, Man A listens quietly" },
+      { id: "line_003", speaker: "A", text: "If we open that door, we may be giving them exactly what they came for.", emotion: "fearful", style: "dry", paralinguistic: "Sigh", overlap_after: 0.1, ref: 1, track: 0, local_prompt: "hard cut, Man A tighter close-up, Man A speaks clearly, visible mouth movement, fear held under discipline" },
+      { id: "line_004", speaker: "B", text: "Then we do not open it. We make them knock twice.", emotion: "coldness", style: "authority", paralinguistic: "none", overlap_after: 0, ref: 2, track: 1, local_prompt: "hard cut, Man B close-up, Man B speaks clearly, visible mouth movement, decisive controlled authority" },
     ],
   };
 }
@@ -59,40 +59,40 @@ const DIALOGUE_TEMPLATES = [
 ];
 function templateGlobalPrompt(kind) {
   if (kind === "monologue_a_simple") {
-    return "cinematic single-speaker monologue, one person framed in an intimate close-up, natural audio-driven lip sync, quiet emotional focus, stable identity, no subtitles, no visible text";
+    return "cinematic single-speaker monologue, one dominant speaking face, visible mouth movement, quiet emotional focus, stable identity";
   }
   if (kind === "monologue_a") {
-    return "cinematic single-speaker monologue, Speaker A alone in frame, controlled emotional progression across hard-cut close-ups, natural audio-driven lip sync, stable identity, no subtitles, no visible text";
+    return "cinematic single-speaker monologue, Speaker A alone in frame, controlled emotional progression across hard-cut close-ups, visible mouth movement, stable identity";
   }
   if (kind === "simple_ab") {
-    return "cinematic simple two-person dialogue, clean field and reverse-field coverage, one short A/B exchange, natural audio-driven lip sync, coherent eyelines, no subtitles, no visible text";
+    return "cinematic simple two-person dialogue, clean field and reverse-field coverage, one short A/B exchange, visible mouth movement on the speaking face, coherent eyelines";
   }
-  return "cinematic reverse-shot dialogue scene, two people facing each other in a quiet tense space, strict field and reverse-field coverage based on shotboard references, hard cuts only, natural audio-driven lip sync, coherent eyelines, no subtitles, no visible text";
+  return "cinematic reverse-shot dialogue scene, two people facing each other in a quiet tense space, strict field and reverse-field coverage based on shotboard references, hard cuts only, one dominant speaking face per shot, coherent eyelines";
 }
 function templateLines(kind) {
   if (kind === "monologue_a_simple") {
     return [
-      { id: "line_001", speaker: "A", text: "I know exactly what I have to do now.", emotion: "resolved", style: "low, steady", paralinguistic: "none", overlap_after: 0, ref: 1, track: 0, local_prompt: "single close-up on Speaker A, calm resolved delivery, natural lip sync driven by external dialogue audio" },
+      { id: "line_001", speaker: "A", text: "I know exactly what I have to do now.", emotion: "resolved", style: "low, steady", paralinguistic: "none", overlap_after: 0, ref: 1, track: 0, local_prompt: "hard cut, Speaker A close-up, Speaker A speaks clearly, visible mouth movement, calm resolved delivery" },
     ];
   }
   if (kind === "monologue_a") {
     return [
-      { id: "line_001", speaker: "A", text: "I have carried this silence longer than I should.", emotion: "reflective", style: "soft, intimate", paralinguistic: "none", overlap_after: 0, ref: 1, track: 0, local_prompt: "field shot on Speaker A, intimate close-up, quiet confession, natural lip sync driven by external dialogue audio" },
-      { id: "line_002", speaker: "A", text: "If I say it now, everything in this room changes.", emotion: "uncertain", style: "quiet, close", paralinguistic: "Breathing", overlap_after: 0, ref: 1, track: 0, local_prompt: "hold on Speaker A, controlled hesitation, small breath before the line, stable identity and coherent eyeline" },
-      { id: "line_003", speaker: "A", text: "So listen carefully, because I will only say it once.", emotion: "resolved", style: "low, steady", paralinguistic: "none", overlap_after: 0, ref: 1, track: 0, local_prompt: "tight field shot on Speaker A, resolved final phrase, subtle mouth movement, audio-driven speaking performance" },
+      { id: "line_001", speaker: "A", text: "I have carried this silence longer than I should.", emotion: "reflective", style: "soft, intimate", paralinguistic: "none", overlap_after: 0, ref: 1, track: 0, local_prompt: "hard cut, Speaker A intimate close-up, Speaker A speaks clearly, visible mouth movement, quiet confession" },
+      { id: "line_002", speaker: "A", text: "If I say it now, everything in this room changes.", emotion: "uncertain", style: "quiet, close", paralinguistic: "Breathing", overlap_after: 0, ref: 1, track: 0, local_prompt: "hard cut, Speaker A close-up, Speaker A speaks clearly after a small breath, controlled hesitation, stable identity and coherent eyeline" },
+      { id: "line_003", speaker: "A", text: "So listen carefully, because I will only say it once.", emotion: "resolved", style: "low, steady", paralinguistic: "none", overlap_after: 0, ref: 1, track: 0, local_prompt: "hard cut, Speaker A tight close-up, Speaker A speaks clearly, visible mouth movement, resolved final phrase" },
     ];
   }
   if (kind === "simple_ab") {
     return [
-      { id: "line_001", speaker: "A", text: "Are you ready?", emotion: "calm", style: "natural", paralinguistic: "none", overlap_after: 0, ref: 1, track: 0, local_prompt: "field shot on Speaker A, clean question, natural lip sync driven by external dialogue audio" },
-      { id: "line_002", speaker: "B", text: "Yes. Let's begin.", emotion: "calm", style: "natural", paralinguistic: "none", overlap_after: 0, ref: 2, track: 1, local_prompt: "reverse field shot on Speaker B, simple answer, coherent eyeline, lips follow the external dialogue audio" },
+      { id: "line_001", speaker: "A", text: "Are you ready?", emotion: "calm", style: "natural", paralinguistic: "none", overlap_after: 0, ref: 1, track: 0, local_prompt: "hard cut, Speaker A close-up, Speaker A speaks clearly, visible mouth movement, clean question" },
+      { id: "line_002", speaker: "B", text: "Yes. Let's begin.", emotion: "calm", style: "natural", paralinguistic: "none", overlap_after: 0, ref: 2, track: 1, local_prompt: "hard cut, Speaker B close-up, Speaker B speaks clearly, visible mouth movement, coherent eyeline" },
     ];
   }
   return [
-    { id: "line_001", speaker: "A", text: "I have not seen you in such a long time.", emotion: "wistful", style: "soft, intimate", paralinguistic: "none", overlap_after: 0.12, ref: 1, track: 0, local_prompt: "field shot on Speaker A, intimate close-up, controlled expression, natural lip sync driven by external dialogue audio" },
-    { id: "line_002", speaker: "B", text: "No, that is not true. You are mistaken.", emotion: "calm denial", style: "quiet, certain", paralinguistic: "none", overlap_after: 0.12, ref: 2, track: 1, local_prompt: "reverse field shot on Speaker B, quiet correction, steady gaze, hard cut timing, lips follow the external dialogue audio" },
-    { id: "line_003", speaker: "A", text: "Maybe I saw you in my dreams.", emotion: "uncertain, haunted", style: "low, reflective", paralinguistic: "Breathing", overlap_after: 0.1, ref: 1, track: 0, local_prompt: "cut back to Speaker A, haunted pause, close controlled emotion, audio-driven speaking performance" },
-    { id: "line_004", speaker: "B", text: "No. You saw me in mine.", emotion: "mysterious", style: "slow, unsettling", paralinguistic: "none", overlap_after: 0, ref: 2, track: 1, local_prompt: "reverse close-up on Speaker B, slow final line, quiet mystery, natural lip sync driven by external audio" },
+    { id: "line_001", speaker: "A", text: "I have not seen you in such a long time.", emotion: "wistful", style: "soft, intimate", paralinguistic: "none", overlap_after: 0.12, ref: 1, track: 0, local_prompt: "hard cut, Speaker A intimate close-up, Speaker A speaks clearly, visible mouth movement, controlled expression" },
+    { id: "line_002", speaker: "B", text: "No, that is not true. You are mistaken.", emotion: "calm denial", style: "quiet, certain", paralinguistic: "none", overlap_after: 0.12, ref: 2, track: 1, local_prompt: "hard cut, Speaker B close-up, Speaker B speaks clearly, visible mouth movement, steady gaze" },
+    { id: "line_003", speaker: "A", text: "Maybe I saw you in my dreams.", emotion: "uncertain, haunted", style: "low, reflective", paralinguistic: "Breathing", overlap_after: 0.1, ref: 1, track: 0, local_prompt: "hard cut, Speaker A close-up, Speaker A speaks clearly, visible mouth movement, haunted controlled emotion" },
+    { id: "line_004", speaker: "B", text: "No. You saw me in mine.", emotion: "mysterious", style: "slow, unsettling", paralinguistic: "none", overlap_after: 0, ref: 2, track: 1, local_prompt: "hard cut, Speaker B close-up, Speaker B speaks clearly, visible mouth movement, quiet mystery" },
   ];
 }
 function parseData(node) {
@@ -195,6 +195,53 @@ function ttsExportText(data, mode) {
     lines.map((line) => {
       return String(line.speaker || "A") + " (" + lineDirection(line) + "): " + cleanDialogueText(line.text);
     }).join("\n");
+}
+function srtTime(seconds) {
+  const total = Math.max(0, Number(seconds || 0));
+  const whole = Math.floor(total);
+  const millis = Math.min(999, Math.max(0, Math.round((total - whole) * 1000)));
+  const h = Math.floor(whole / 3600);
+  const m = Math.floor((whole % 3600) / 60);
+  const s = whole % 60;
+  return String(h).padStart(2, "0") + ":" + String(m).padStart(2, "0") + ":" + String(s).padStart(2, "0") + "," + String(millis).padStart(3, "0");
+}
+function speakerLines(data, speakerIndex = 0) {
+  const speakerIds = Array.from(new Set((data?.lines || []).map((line) => String(line?.speaker || "A").toUpperCase()))).filter(Boolean);
+  const speaker = speakerIds[speakerIndex] || (speakerIndex === 0 ? "A" : "B");
+  return (Array.isArray(data?.lines) ? data.lines : []).filter((line) => String(line?.speaker || "A").toUpperCase() === speaker);
+}
+function speakerPlainText(data, speakerIndex = 0) {
+  return speakerLines(data, speakerIndex)
+    .map((line) => cleanDialogueText(line?.text || ""))
+    .filter(Boolean)
+    .join("\n");
+}
+function speakerSrtText(data, speakerIndex = 0) {
+  const speakerIds = Array.from(new Set((data?.lines || []).map((line) => String(line?.speaker || "A").toUpperCase()))).filter(Boolean);
+  const selectedSpeaker = speakerIds[speakerIndex] || (speakerIndex === 0 ? "A" : "B");
+  const allLines = Array.isArray(data?.lines) ? data.lines : [];
+  if (!allLines.length) return "";
+  let cursor = 0;
+  const selected = [];
+  allLines.forEach((line) => {
+    const duration = Number(line?.duration || 0) > 0 ? Number(line.duration) : estimateSeconds(line?.text);
+    const absoluteStart = line?.start !== undefined && line?.start !== "" ? Number(line.start || 0) : cursor;
+    if (String(line?.speaker || "A").toUpperCase() === selectedSpeaker) {
+      selected.push({ line, duration, absoluteStart });
+    }
+    cursor = Math.max(cursor, absoluteStart + duration + Number(data?.settings?.default_gap_seconds || 0.12) - Math.max(0, Number(line?.overlap_after || 0)));
+  });
+  if (!selected.length) return "";
+  const localSrt = data?.settings?.speaker_stem_srt_local_zero !== false && modeFromData(data) !== "tts_master_unico";
+  const offset = localSrt ? Math.min(...selected.map((item) => Number(item.absoluteStart) || 0).filter((value) => Number.isFinite(value))) : 0;
+  const parts = [];
+  selected.forEach(({ line, duration, absoluteStart }, index) => {
+    const start = Math.max(0, absoluteStart - Math.max(0, offset));
+    const end = Math.max(start + 0.2, start + duration);
+    const text = cleanDialogueText(line?.text || "");
+    if (text) parts.push(String(index + 1) + "\n" + srtTime(start) + " --> " + srtTime(end) + "\n" + text + "\n");
+  });
+  return parts.join("\n").trim();
 }
 async function copyTextToClipboard(text) {
   if (navigator.clipboard?.writeText) {
@@ -309,9 +356,28 @@ function firstSlotIndex(slots, names = [], typeHint = "") {
 function connectBySlotName(source, outputNames, target, inputNames, typeHint = "") {
   const out = firstSlotIndex(source?.outputs, outputNames, typeHint);
   const input = firstSlotIndex(target?.inputs, inputNames, typeHint);
-  if (out < 0 || input < 0) return false;
+  if (out < 0 || input < 0) {
+    console.warn("[IAMCCS DialogueTagEditor] rig slot not found", {
+      source: source?.title || source?.type,
+      target: target?.title || target?.type,
+      outputNames,
+      inputNames,
+      sourceOutputs: (source?.outputs || []).map((slot) => slot?.name || slot?.type),
+      targetInputs: (target?.inputs || []).map((slot) => slot?.name || slot?.type),
+    });
+    return false;
+  }
   try {
+    if (target?.inputs?.[input]?.link != null) {
+      target.disconnectInput?.(input);
+    }
     source.connect(out, target, input);
+    console.info("[IAMCCS DialogueTagEditor] rig connected", {
+      from: source?.title || source?.type,
+      output: source?.outputs?.[out]?.name,
+      to: target?.title || target?.type,
+      input: target?.inputs?.[input]?.name,
+    });
     return true;
   } catch (err) {
     console.warn("[IAMCCS DialogueTagEditor] rig connect failed", outputNames, inputNames, err);
@@ -344,22 +410,30 @@ function createGraphNode(lite, graph, type, pos, title = "") {
   graph.add(node);
   return node;
 }
-function configureRigTTSNode(node, type, speakerIndex = 0) {
+function configureRigTTSNode(node, type, speakerIndex = 0, data = null) {
   const lower = String(type || "").toLowerCase();
+  const routing = emotionRoutingValue(data || {});
   if (lower.includes("chatterbox")) {
     setNodeWidgetValue(node, ["language"], "English");
     setNodeWidgetValue(node, ["device"], "auto");
-    setNodeWidgetValue(node, ["exaggeration"], speakerIndex === 0 ? 0.5 : 0.35);
+    setNodeWidgetValue(node, ["model_version"], routing === "chatterbox_v2_tokens" ? "v2" : "v1");
+    setNodeWidgetValue(node, ["exaggeration"], routing === "chatterbox_v2_tokens" ? 0.78 : (speakerIndex === 0 ? 0.5 : 0.35));
     setNodeWidgetValue(node, ["temperature"], speakerIndex === 0 ? 0.75 : 0.88);
     setNodeWidgetValue(node, ["cfg_weight"], speakerIndex === 0 ? 0.5 : 0.45);
     setNodeWidgetValue(node, ["crash_protection_template"], "hmm ,, {seg} hmm ,,");
+  }
+  if (lower.includes("index")) {
+    const useTextEmotion = routing === "index_tts_text_emotion";
+    setNodeWidgetValue(node, ["use_emotion_text", "enable_emotion_text", "text_emotion_enabled"], useTextEmotion);
+    setNodeWidgetValue(node, ["emotion_text", "text_emotion", "emotion_prompt"], useTextEmotion ? "{seg}" : "");
+    setNodeWidgetValue(node, ["emotion_alpha", "emotion_strength", "emotion_weight"], useTextEmotion ? 1.0 : 0.75);
   }
 }
 function configureRigSRTNode(node, speakerIndex = 0) {
   setNodeWidgetValue(node, ["narrator_voice"], speakerIndex === 0 ? "voices_examples/Clint_Eastwood CC3 (enhanced2).wav" : "voices_examples/David_Attenborough CC3.wav");
   setNodeWidgetValue(node, ["seed"], speakerIndex === 0 ? 1284582220 : 1284582221);
   setNodeWidgetValue(node, ["timing_mode"], "pad_with_silence");
-  setNodeWidgetValue(node, ["enable_audio_cache"], true);
+  setNodeWidgetValue(node, ["enable_audio_cache"], false);
   setNodeWidgetValue(node, ["fade_for_StretchToFit"], 0.01);
   setNodeWidgetValue(node, ["max_stretch_ratio"], 1);
   setNodeWidgetValue(node, ["min_stretch_ratio"], 0.8);
@@ -455,8 +529,54 @@ function removeExistingAudioRigNodes(exportInfo, injectInfo) {
     .filter(Boolean)
     .forEach((targetNode) => {
       if (removeNodeSafely(graph, targetNode)) removed += 1;
-    });
+  });
   return removed;
+}
+function repairExistingDialogueRigLinks(editorNode, reason = "repair") {
+  if (!isEditor(editorNode)) return 0;
+  const graph = app?.graph;
+  const nodes = Array.isArray(graph?._nodes) ? graph._nodes : [];
+  const rigNodes = findExistingCineAudioRigNodes(editorNode);
+  const exportInfo = rigNodes.exportInfo;
+  if (!exportInfo) return 0;
+  const data = parseData(editorNode);
+  let fixed = 0;
+  nodes.forEach((targetNode) => {
+    if (nodeType(targetNode) !== "UnifiedTTSSRTNode") return;
+    const title = String(targetNode?.title || "").toLowerCase();
+    if (!title.includes("direct tts")) return;
+    let speakerIndex = -1;
+    if (/\bb\b|man b|speaker b/.test(title)) speakerIndex = 1;
+    else if (/\ba\b|man a|speaker a/.test(title)) speakerIndex = 0;
+    if (speakerIndex < 0) return;
+    const sourceName = speakerIndex === 0 ? "speaker_a_srt" : "speaker_b_srt";
+    const inputIndex = firstSlotIndex(targetNode.inputs, ["srt_content"], "");
+    const outputIndex = firstSlotIndex(exportInfo.outputs, [sourceName], "");
+    if (inputIndex < 0 || outputIndex < 0) {
+      console.warn("[IAMCCS DialogueTagEditor] existing A/B rig cannot be repaired", {
+        reason,
+        target: targetNode?.title || targetNode?.type,
+        wantedOutput: sourceName,
+      });
+      return;
+    }
+    const currentLink = targetNode.inputs?.[inputIndex]?.link;
+    const link = currentLink != null ? app?.graph?.links?.[currentLink] : null;
+    const currentOrigin = link ? graph.getNodeById?.(link.origin_id ?? link[1]) : null;
+    const currentOutputIndex = link ? (link.origin_slot ?? link[2]) : -1;
+    const currentOutputName = currentOrigin?.outputs?.[currentOutputIndex]?.name || "";
+    const alreadyCorrect = currentOrigin?.id === exportInfo.id && String(currentOutputName).toLowerCase() === sourceName;
+    if (!alreadyCorrect) {
+      if (connectBySlotName(exportInfo, [sourceName], targetNode, ["srt_content"], "")) fixed += 1;
+    }
+    setNodeWidgetValue(targetNode, ["enable_audio_cache"], false);
+    setNodeWidgetValue(targetNode, ["srt_content", "text", "dialogue", "prompt"], speakerSrtText(data, speakerIndex));
+  });
+  if (fixed) {
+    console.info("[IAMCCS DialogueTagEditor] repaired existing A/B SRT rig links", { reason, fixed });
+    graph?.setDirtyCanvas?.(true, true);
+  }
+  return fixed;
 }
 function addAvailableTTSStarterNodes(data, statusTarget, selectedTypes = []) {
   const graph = app.graph;
@@ -538,16 +658,17 @@ function createCineAudioRig(editorNode, data, statusTarget, selectedType) {
   }
   if (!reusableExport) created.push(exportInfo);
   if (!reusableInject) created.push(injectInfo);
+  const cineTtsTextMode = cineAudioTextModeFromEmotionRouting(data);
   setNodeWidgetValue(exportInfo, ["mode"], isMono ? "export_tts_srt" : "export_speaker_stems");
-  setNodeWidgetValue(exportInfo, ["tts_text_mode"], "plain_dialogue");
+  setNodeWidgetValue(exportInfo, ["tts_text_mode"], cineTtsTextMode);
   setNodeWidgetValue(exportInfo, ["frame_rate"], Number(widget(editorNode, "frame_rate")?.value || 24));
   setNodeWidgetValue(exportInfo, ["lane_injection_mode"], "speaker_full_timeline_clips");
   setNodeWidgetValue(exportInfo, ["file_prefix"], "dialogue_tts_export");
   setNodeWidgetValue(injectInfo, ["mode"], isMono ? "inject_generated_audio" : "inject_speaker_stems");
-  setNodeWidgetValue(injectInfo, ["tts_text_mode"], "plain_dialogue");
+  setNodeWidgetValue(injectInfo, ["tts_text_mode"], cineTtsTextMode);
   setNodeWidgetValue(injectInfo, ["lane_injection_mode"], isMono ? "single_master_clip" : "speaker_full_timeline_clips");
   setNodeWidgetValue(injectInfo, ["frame_rate"], Number(widget(editorNode, "frame_rate")?.value || 24));
-  setNodeWidgetValue(injectInfo, ["file_prefix"], isMono ? "dialogue_tts_master" : "dialogue_tts_stem");
+  setNodeWidgetValue(injectInfo, ["file_prefix"], isMono ? "dialogue_tts_single_master" : "dialogue_tts_stem");
   connectBySlotName(editorNode, ["cine_linx"], exportInfo, ["cine_linx"], "IAMCCS_SUPERNODE_LINX");
   if (registry.IAMCCS_DialogueAudioBoardBridge) {
     const bridge = rigNodes.bridge || createGraphNode(lite, graph, "IAMCCS_DialogueAudioBoardBridge", [baseX, baseY + 245], "Dialogue AudioBoard Bridge - placeholder lanes");
@@ -565,15 +686,15 @@ function createCineAudioRig(editorNode, data, statusTarget, selectedType) {
     const node = createGraphNode(lite, graph, selectedType, [baseX + 300, baseY + index * 245], "DIRECT TTS " + label + " - " + ttsNodeLabel(selectedType));
     if (!node) return null;
     created.push(node);
-    configureRigTTSNode(node, selectedType, index);
+    configureRigTTSNode(node, selectedType, index, data);
     const mode = String(data.settings?.tts_export_mode || "qwen");
-    setNodeWidgetValue(node, ["text", "dialogue", "prompt", "target_text", "srt_content"], isMono ? ttsExportText(data, mode) : "");
-    setNodeWidgetValue(node, ["instruct", "custom_instruct", "instruction", "system_prompt"], ttsExportText(data, "qwen"));
+    setNodeWidgetValue(node, ["text", "dialogue", "prompt", "target_text", "srt_content"], isMono ? ttsExportText(data, mode) : speakerPlainText(data, index));
+    setNodeWidgetValue(node, ["instruct", "custom_instruct", "instruction", "system_prompt"], isMono ? ttsExportText(data, "qwen") : speakerPlainText(data, index));
     return node;
   };
   const sourceFor = (speakerIndex) => {
     if (isMono) return ["tts_srt", "tts_text"];
-    return speakerIndex === 0 ? ["speaker_a_srt", "tts_srt"] : ["speaker_b_srt", "tts_srt"];
+    return speakerIndex === 0 ? ["speaker_a_srt"] : ["speaker_b_srt"];
   };
   const targetAudioInput = (speakerIndex) => isMono || speakerIndex === 0 ? ["generated_audio"] : ["generated_audio_b"];
 
@@ -584,11 +705,13 @@ function createCineAudioRig(editorNode, data, statusTarget, selectedType) {
     return created.length;
   }
   created.push(probe);
-  configureRigTTSNode(probe, selectedType, 0);
+  configureRigTTSNode(probe, selectedType, 0, data);
+  setNodeWidgetValue(probe, ["text", "dialogue", "prompt", "target_text", "srt_content"], isMono ? ttsExportText(data, String(data.settings?.tts_export_mode || "qwen")) : speakerPlainText(data, 0));
+  setNodeWidgetValue(probe, ["instruct", "custom_instruct", "instruction", "system_prompt"], isMono ? ttsExportText(data, "qwen") : speakerPlainText(data, 0));
   const selectedIsEngine = nodeHasOutputType(probe, "TTS_ENGINE");
   const selectedIsAudio = nodeHasOutputType(probe, "AUDIO");
   if (selectedIsEngine && registry.UnifiedTTSSRTNode) {
-    setNodeWidgetValue(probe, ["instruct", "custom_instruct", "instruction", "system_prompt"], ttsExportText(data, "qwen"));
+    setNodeWidgetValue(probe, ["instruct", "custom_instruct", "instruction", "system_prompt"], isMono ? ttsExportText(data, "qwen") : speakerPlainText(data, 0));
     const engineNodes = [probe];
     if (!isMono) {
       const secondEngine = makeSelected(1, "B");
@@ -600,8 +723,9 @@ function createCineAudioRig(editorNode, data, statusTarget, selectedType) {
       if (!srt) continue;
       created.push(srt);
       configureRigSRTNode(srt, i);
+      setNodeWidgetValue(srt, ["srt_content", "text", "dialogue", "prompt"], isMono ? ttsExportText(data, "chatterbox") : speakerSrtText(data, i));
       connectBySlotName(engineNodes[i] || probe, ["TTS_engine", "tts_engine"], srt, ["TTS_engine", "tts_engine"], "TTS_ENGINE");
-      connectBySlotName(exportInfo, sourceFor(i), srt, ["srt_content"], "STRING");
+      connectBySlotName(exportInfo, sourceFor(i), srt, ["srt_content"], isMono ? "STRING" : "");
       connectBySlotName(srt, ["audio"], injectInfo, targetAudioInput(i), "AUDIO");
       connectBySlotName(srt, ["Adjusted_SRT", "adjusted_srt"], injectInfo, isMono || i === 0 ? ["adjusted_srt"] : ["adjusted_srt_b"], "STRING");
       if (i === 0) connectBySlotName(srt, ["timing_report"], injectInfo, ["timing_report"], "STRING");
@@ -613,7 +737,7 @@ function createCineAudioRig(editorNode, data, statusTarget, selectedType) {
       if (second) nodes.push(second);
     }
     nodes.forEach((ttsNode, index) => {
-      connectBySlotName(exportInfo, sourceFor(index), ttsNode, ["text", "dialogue", "prompt", "target_text", "srt_content"], "STRING");
+      connectBySlotName(exportInfo, sourceFor(index), ttsNode, ["text", "dialogue", "prompt", "target_text", "srt_content"], isMono ? "STRING" : "");
       connectBySlotName(ttsNode, ["audio", "AUDIO"], injectInfo, targetAudioInput(index), "AUDIO");
     });
   } else {
@@ -624,7 +748,7 @@ function createCineAudioRig(editorNode, data, statusTarget, selectedType) {
   if (statusTarget) {
     const reuseText = reusableExport || reusableInject ? "Reused existing CineAudioInfo nodes. " : "";
     const removeText = removedOldRigNodes ? "Removed " + removedOldRigNodes + " old TTS rig node" + (removedOldRigNodes === 1 ? ". " : "s. ") : "";
-    statusTarget.textContent = reuseText + removeText + "Created " + (isMono ? "mono" : "A/B") + " rig for " + ttsNodeLabel(selectedType) + ".";
+    statusTarget.textContent = reuseText + removeText + "Created " + (isMono ? "mono" : "A/B") + " rig for " + ttsNodeLabel(selectedType) + ". Emotion routing: " + emotionRoutingLabel(emotionRoutingValue(data)) + ".";
   }
   return created.length;
 }
@@ -635,6 +759,7 @@ function parseScript(text, data) {
     const value = raw.trim();
     if (!value) return;
     const match = value.match(/^\[([^\]]+)\]\s*(.*)$/);
+    const atSpeakerMatch = value.match(/^@([A-Za-z])#\s*(.*)$/);
     const line = { ...(old[index] || {}), id: old[index]?.id || "line_" + String(index + 1).padStart(3, "0"), speaker: index % 2 ? "B" : "A", text: value, emotion: "none", style: "none", paralinguistic: "none", tts_model: "", extra_tags: [], overlap_after: 0, ref: index % 2 ? 2 : 1, track: index % 2 ? 1 : 0 };
     if (match) {
       line.text = match[2].trim();
@@ -656,9 +781,12 @@ function parseScript(text, data) {
           if (/style/i.test(key) && line.style === "none") line.style = val || "none";
         }
       });
+    } else if (atSpeakerMatch) {
+      line.speaker = String(atSpeakerMatch[1] || "A").toUpperCase();
+      line.text = String(atSpeakerMatch[2] || "").trim();
     }
     line.track = line.speaker === "B" ? 1 : 0;
-    line.local_prompt ||= line.speaker === "B" ? "reverse field shot on Man B, natural lip sync driven by external audio" : "field shot on Man A, natural lip sync driven by external audio";
+    line.local_prompt ||= line.speaker === "B" ? "hard cut, Man B close-up, Man B speaks clearly, visible mouth movement, Man A listens quietly" : "hard cut, Man A close-up, Man A speaks clearly, visible mouth movement, Man B listens quietly";
     lines.push(line);
   });
   return { ...data, lines };
@@ -756,6 +884,126 @@ function applyOverlapToTaggedLine(sourceText, caret, value) {
   const updatedText = text.slice(0, lineStart) + updatedLine + text.slice(lineEnd);
   const overlapIndex = updatedLine.indexOf(token);
   return { text: updatedText, caret: lineStart + overlapIndex + token.length };
+}
+
+function applyMetadataToTaggedLine(sourceText, caret, key, rawValue) {
+  const text = String(sourceText || "");
+  const cleanKey = String(key || "").trim();
+  const cleanValue = String(rawValue || "").trim();
+  const safeCaret = Math.max(0, Math.min(Number(caret || 0), text.length));
+  const lineStart = text.lastIndexOf("\n", Math.max(0, safeCaret - 1)) + 1;
+  const nextNewline = text.indexOf("\n", safeCaret);
+  const lineEnd = nextNewline === -1 ? text.length : nextNewline;
+  const line = text.slice(lineStart, lineEnd);
+  const bracketMatch = line.match(/^\[([^\]]*)\](\s*)(.*)$/);
+  const atSpeakerMatch = line.match(/^@([A-Za-z])#\s*(.*)$/);
+  const speaker = bracketMatch
+    ? String(bracketMatch[1] || "A").split("|")[0].trim().slice(0, 1).toUpperCase()
+    : atSpeakerMatch
+      ? String(atSpeakerMatch[1] || "A").toUpperCase()
+      : "A";
+  const body = bracketMatch ? (bracketMatch[3] || "") : atSpeakerMatch ? (atSpeakerMatch[2] || "") : line;
+  const rawParts = bracketMatch ? String(bracketMatch[1] || "").split("|").map((part) => part.trim()).filter(Boolean) : [speaker];
+  const parts = [];
+  let found = false;
+  rawParts.forEach((part, index) => {
+    if (index === 0 && !part.includes(":")) {
+      parts.push(speaker || part);
+      return;
+    }
+    const [partKey] = part.split(":");
+    if (partKey.trim() === cleanKey) {
+      parts.push(cleanKey + ":" + cleanValue);
+      found = true;
+    } else {
+      parts.push(part);
+    }
+  });
+  if (!parts.length || parts[0].includes(":")) parts.unshift(speaker || "A");
+  if (!found) parts.push(cleanKey + ":" + cleanValue);
+  const updatedLine = "[" + parts.join("|") + "] " + body.trimStart();
+  const updatedText = text.slice(0, lineStart) + updatedLine + text.slice(lineEnd);
+  const token = cleanKey + ":" + cleanValue;
+  const tokenIndex = updatedLine.indexOf(token);
+  return { text: updatedText, caret: lineStart + (tokenIndex >= 0 ? tokenIndex + token.length : updatedLine.length) };
+}
+
+function lineBoundsForCaret(text, caret) {
+  const value = String(text || "");
+  const safeCaret = Math.max(0, Math.min(Number(caret || 0), value.length));
+  const lineStart = value.lastIndexOf("\n", Math.max(0, safeCaret - 1)) + 1;
+  const nextNewline = value.indexOf("\n", safeCaret);
+  const lineEnd = nextNewline === -1 ? value.length : nextNewline;
+  return { safeCaret, lineStart, lineEnd, line: value.slice(lineStart, lineEnd), localCaret: safeCaret - lineStart };
+}
+
+function speakerFromTaggedLine(line) {
+  const bracket = String(line || "").match(/^\[([^\]]*)\]/);
+  if (bracket) {
+    const head = String(bracket[1] || "A").split(/[|:]/)[0].trim();
+    if (head) return head.slice(0, 1).toUpperCase();
+  }
+  const at = String(line || "").match(/^@([A-Za-z])#/);
+  if (at) return String(at[1] || "A").toUpperCase();
+  return "A";
+}
+
+function normalizeInlineTagValue(value) {
+  return String(value || "").trim().replace(/[\[\]<>|]/g, " ").replace(/\s+/g, "_");
+}
+
+function chatterboxTokenFor(kind, value) {
+  const raw = String(value || "").trim();
+  const key = raw.toLowerCase();
+  const map = {
+    breathing: "inhale", laughter: "laughter", sigh: "sigh", uhm: "UM", "surprise-oh": "gasp",
+    whisper: "whisper", murmur: "mumble", low: "mumble", shout: "gasp", excited: "gasp", surprised: "gasp", fearful: "gasp", sad: "sigh", angry: "groan"
+  };
+  const token = map[key] || (kind === "para" ? raw : "");
+  return token ? "<" + normalizeInlineTagValue(token) + "> " : "";
+}
+
+function performanceTagTokenFor(kind, value, routing, speaker) {
+  const clean = normalizeInlineTagValue(value);
+  const route = String(routing || "clean_metadata");
+  const who = normalizeInlineTagValue(speaker || "A") || "A";
+  if (!clean) return "";
+  if (route === "index_tts_character_tags") return "[" + who + ":" + clean + "] ";
+  if (route === "index_tts_text_emotion") return "[" + who + ":" + clean + "] ";
+  if (route === "chatterbox_v2_tokens") return chatterboxTokenFor(kind, clean) || "<" + clean + "> ";
+  if (route === "step_editx_tags") return kind === "para" ? "<" + clean + "> " : "<" + kind + ":" + clean + "> ";
+  return kind === "para" ? "<" + clean + "> " : "[" + who + ":" + clean + "] ";
+}
+
+function insertPerformanceTagAtTaggedCursor(sourceText, caret, kind, rawValue, routing) {
+  const text = String(sourceText || "");
+  const bounds = lineBoundsForCaret(text, caret);
+  const speaker = speakerFromTaggedLine(bounds.line);
+  const token = performanceTagTokenFor(kind, rawValue, routing, speaker);
+  if (!token) return { text, caret: bounds.safeCaret };
+  const structuralMatch = bounds.line.match(/^\[[^\]]*\]/);
+  const structuralEnd = structuralMatch ? structuralMatch[0].length : 0;
+  const tagRegex = /(\[[^\]]+:[^\]]+\]|<[^>]+>)/g;
+  let match;
+  while ((match = tagRegex.exec(bounds.line))) {
+    const start = match.index;
+    const end = start + match[0].length;
+    if (start === 0 && end <= structuralEnd && bounds.line.slice(0, end).includes("|")) continue;
+    if (bounds.localCaret >= start && bounds.localCaret <= end) {
+      const from = bounds.lineStart + start;
+      const to = bounds.lineStart + end;
+      const nextText = text.slice(0, from) + token + text.slice(to).replace(/^\s+/, "");
+      return { text: nextText, caret: from + token.length };
+    }
+  }
+  let insertAt = bounds.safeCaret;
+  if (structuralEnd && bounds.localCaret <= structuralEnd) insertAt = bounds.lineStart + structuralEnd + (bounds.line.charAt(structuralEnd) === " " ? 1 : 0);
+  const before = text.slice(0, insertAt);
+  const after = text.slice(insertAt);
+  const leftPad = before && !/[\s]$/.test(before) ? " " : "";
+  const rightTrimmed = after.replace(/^\s+/, "");
+  const nextText = before + leftPad + token + rightTrimmed;
+  return { text: nextText, caret: before.length + leftPad.length + token.length };
 }
 
 function escapeHtml(value) {
@@ -1001,7 +1249,7 @@ function buildInjectionPayload(data, fps = 24) {
   }
   const durationFrames = Math.max(0, ...segments.map((s) => s.start + s.length), ...audioSegments.map((s) => s.start + s.length));
   const audioTrackCount = modeFromData(data) === "tts_master_unico" ? 1 : 2;
-  const audioBoard = { schema: "iamccs.audio_board_arranger", schema_version: 1, audioSegments, audioTrackCount, audioSyncMode: "timeline_audio", duration_seconds: durationFrames / fps, frame_rate: fps, masterAudioGain: 1, masterAudioNormalize: false, speakerStemsZeroStart: zeroStartStems, bridgeStatus: { source: "DialogueTagEditor UI Inject", pending_tts: true } };
+  const audioBoard = { schema: "iamccs.audio_board_arranger", schema_version: 1, audioSegments, audioTrackCount, audioSyncMode: "timeline_audio", duration_seconds: durationFrames / fps, frame_rate: fps, masterAudioGain: 1, masterAudioNormalize: false, speakerStemsZeroStart: zeroStartStems, speakerStemSrtLocalZero: data.settings?.speaker_stem_srt_local_zero !== false, bridgeStatus: { source: "DialogueTagEditor UI Inject", pending_tts: true } };
   const timeline = { schema: "iamccs.cine.filmmaker_timeline", schema_version: 2, global_prompt: data.global_prompt || "", prompt: data.global_prompt || "", promptrelay_enabled: true, use_custom_audio: false, audioSyncMode: "timeline_audio", duration_seconds: durationFrames / fps, frame_rate: fps, director_local_prompts: localPrompts.join(" | "), local_prompts: localPrompts.join(" | "), director_segment_lengths: lengths.join(","), segment_lengths: lengths.join(","), segments, audioSegments, audioTrackCount, dialogue: data };
   return { audioBoard, timeline };
 }
@@ -1068,12 +1316,96 @@ function fieldLabel(text, extra = "") {
   label.innerHTML = "<span>" + text + "</span><span>" + extra + "</span>";
   return label;
 }
+function emotionRoutingValue(data) {
+  const value = String(data?.settings?.emotion_routing || "clean_metadata");
+  if (value === "index_tts_text_emotion") return "index_tts_text_emotion";
+  if (value === "index_tts_character_tags") return "index_tts_character_tags";
+  if (value === "chatterbox_v2_tokens") return "chatterbox_v2_tokens";
+  if (value === "step_editx_tags") return "step_editx_tags";
+  return "clean_metadata";
+}
+function cineAudioTextModeFromEmotionRouting(data) {
+  const value = emotionRoutingValue(data);
+  if (value === "step_editx_tags") return "tts_audio_suite_tags";
+  if (value === "index_tts_text_emotion") return "index_tts_text_emotion";
+  if (value === "index_tts_character_tags") return "index_tts_character_tags";
+  if (value === "chatterbox_v2_tokens") return "chatterbox_v2_tokens";
+  return "plain_dialogue";
+}
+function emotionRoutingLabel(value) {
+  const key = String(value || "");
+  if (key === "index_tts_text_emotion") return "IndexTTS text emotion";
+  if (key === "index_tts_character_tags") return "IndexTTS character tags";
+  if (key === "chatterbox_v2_tokens") return "ChatterBox v2 tokens";
+  if (key === "step_editx_tags") return "Step EditX tags";
+  return "Clean metadata";
+}
+function installDialogueLowZoomOverlay(node) {
+  if (node) node._iamccsDialogueLowZoomOverlay = true;
+  return;
+  if (!node || node._iamccsDialogueLowZoomOverlay) return;
+  const previous = node.onDrawForeground;
+  node.onDrawForeground = function(ctx) {
+    if (typeof previous === "function") previous.apply(this, arguments);
+    const scale = Math.max(0.12, Number(app?.canvas?.ds?.scale || 1));
+    if (!ctx || scale >= 0.62) return;
+    let data = {};
+    try { data = parseData(this); } catch {}
+    const lines = Array.isArray(data.lines) ? data.lines : [];
+    const speakers = Array.from(new Set(lines.map((line) => String(line?.speaker || "A").toUpperCase()))).filter(Boolean);
+    const mode = modeFromData(data);
+    const routing = emotionRoutingLabel(data.settings?.emotion_routing || "clean_metadata");
+    const drawLines = [
+      "Dialogue Tag Editor mini view",
+      `${lines.length} lines / ${speakers.length || 1} speaker${speakers.length === 1 ? "" : "s"}`,
+      mode === "tts_master_unico" ? "single master mode" : "A/B speaker stems mode",
+      `emotion routing: ${routing}`,
+    ];
+    const nodeW = Math.max(340, Number(this.size?.[0] || 420));
+    const nodeH = Math.max(180, Number(this.size?.[1] || 240));
+    const boost = Math.max(1.2, Math.min(3.4, 0.72 / scale));
+    const pad = 12 * boost;
+    const lineH = 18 * boost;
+    const titleFont = Math.round(13 * boost);
+    const bodyFont = Math.round(11 * boost);
+    const w = Math.max(240, Math.min(nodeW - pad * 2, 700 * boost));
+    const h = 34 * boost + drawLines.length * lineH;
+    const x = pad;
+    const y = Math.min(Math.max(64, 52 * boost), Math.max(46, nodeH - h - pad));
+    ctx.save();
+    ctx.globalAlpha = 0.96;
+    ctx.fillStyle = "rgba(7,17,18,.93)";
+    ctx.strokeStyle = "rgba(143,208,204,.72)";
+    ctx.lineWidth = Math.max(1.5, 1.2 * boost);
+    if (typeof ctx.roundRect === "function") {
+      ctx.beginPath();
+      ctx.roundRect(x, y, w, h, 8 * boost);
+      ctx.fill();
+      ctx.stroke();
+    } else {
+      ctx.fillRect(x, y, w, h);
+      ctx.strokeRect(x, y, w, h);
+    }
+    ctx.fillStyle = "rgba(239,204,139,.95)";
+    ctx.fillRect(x, y, Math.max(4, 3 * boost), h);
+    ctx.fillStyle = "#F4D49E";
+    ctx.font = `900 ${titleFont}px sans-serif`;
+    ctx.fillText(drawLines[0], x + 12 * boost, y + 21 * boost);
+    ctx.fillStyle = "#BFD7D5";
+    ctx.font = `800 ${bodyFont}px sans-serif`;
+    for (let i = 1; i < drawLines.length; i += 1) ctx.fillText(drawLines[i], x + 12 * boost, y + 21 * boost + i * lineH);
+    ctx.restore();
+  };
+  node._iamccsDialogueLowZoomOverlay = true;
+}
 function install(node, reason = "install") {
   if (!isEditor(node) || node._iamccsDialogueTagEditorReady) return;
   ensureStyle();
   node._iamccsDialogueTagEditorReady = true;
+  installDialogueLowZoomOverlay(node);
   ["dialogue_data", "frame_rate", "speech_wpm", "min_line_seconds", "default_gap_seconds", "output_mode", "inline_edit_mode"].forEach((name) => hideWidget(widget(node, name)));
   let data = parseData(node);
+  setTimeout(() => repairExistingDialogueRigLinks(node, reason), 0);
   let scriptText = linesToText(data);
   let zoom = Number(data.settings?.font_zoom || 1);
   let light = String(data.settings?.text_theme || "light_boxes") === "light_boxes";
@@ -1124,12 +1456,30 @@ function install(node, reason = "install") {
     side.append(fieldLabel("Template", "writes example"), templateSelect);
     // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     side.append(fieldLabel("TTS Mode"));
-    const ttsMode = select([["double_stem_ab", "Double stem A/B"], ["tts_master_unico", "TTS master unico"]], modeFromData(data));
+    const ttsMode = select([["double_stem_ab", "Double stem A/B"], ["tts_master_unico", "TTS single master"]], modeFromData(data));
     ttsMode.onchange = () => { data.settings.tts_generation_mode = ttsMode.value; data.settings.output_mode = outputMode(ttsMode.value); save(); render(); };
     side.append(ttsMode, fieldLabel("Tag Mode"));
     const tagMode = select([["metadata_only", "Metadata only"], ["tts_audio_suite_inline_tags", "Inline tags"]], data.settings.inline_edit_mode || "metadata_only");
     tagMode.onchange = () => { data.settings.inline_edit_mode = tagMode.value; save(); };
     side.append(tagMode);
+    side.append(fieldLabel("Emotion Routing", "working paths"));
+    const emotionRoute = select([
+      ["clean_metadata", "Clean metadata"],
+      ["index_tts_text_emotion", "IndexTTS text emotion"],
+      ["index_tts_character_tags", "IndexTTS character tags"],
+      ["chatterbox_v2_tokens", "ChatterBox v2 tokens"],
+      ["step_editx_tags", "Step EditX tags"],
+    ], emotionRoutingValue(data));
+    emotionRoute.title = "Clean metadata strips tags. IndexTTS text emotion sets emotion text on compatible IndexTTS rigs. IndexTTS character tags exports [Speaker:emotion]. ChatterBox v2 tokens are experimental. Step EditX tags are for the Step EditX inline path.";
+    emotionRoute.onchange = () => {
+      data.settings ||= {};
+      data.settings.emotion_routing = emotionRoute.value;
+      if (emotionRoute.value.startsWith("index_tts")) data.settings.tts_export_mode = "index";
+      if (emotionRoute.value === "chatterbox_v2_tokens") data.settings.tts_export_mode = "chatterbox";
+      save();
+      render();
+    };
+    side.append(emotionRoute);
     const speakersTitle = document.createElement("h4");
     speakersTitle.textContent = "Speakers";
     side.append(speakersTitle);
@@ -1161,7 +1511,7 @@ function install(node, reason = "install") {
     const ttsFormatStatus = document.createElement("div");
     ttsFormatStatus.className = "iamccs-overlap-hint";
     const refreshTtsFormatStatus = () => {
-      ttsFormatStatus.textContent = "Selected TTS profile: " + activeTtsMode + " | CineAudioInfo export stays plain_dialogue.";
+      ttsFormatStatus.textContent = "Selected TTS profile: " + activeTtsMode + " | Emotion routing: " + emotionRoutingLabel(emotionRoutingValue(data)) + " / " + cineAudioTextModeFromEmotionRouting(data) + ".";
     };
     let applyTtsModeToScript = null;
     const paintConvertButtons = (successMode = "") => {
@@ -1251,7 +1601,7 @@ function install(node, reason = "install") {
     scriptArea.addEventListener("blur", persistScriptHeight);
     const statusText = () => {
       const overlapCount = (data.lines || []).filter((line) => Number(line.overlap_after || 0) > 0).length;
-      return data.lines.length + " lines | " + (modeFromData(data) === "tts_master_unico" ? "TTS master unico" : "Double stem A/B") + " | overlap lines " + overlapCount;
+      return data.lines.length + " lines | " + (modeFromData(data) === "tts_master_unico" ? "TTS single master" : "Double stem A/B") + " | overlap lines " + overlapCount;
     };
     const overlapValue = document.createElement("input");
     overlapValue.type = "number";
@@ -1303,6 +1653,19 @@ function install(node, reason = "install") {
       renderCards(cardsGrid);
       scriptArea.focus();
     };
+    const insertPerformanceAtCursor = (key, rawValue) => {
+      const currentText = editorPlainText(scriptArea);
+      const offset = caretOffset(scriptArea);
+      const updated = insertPerformanceTagAtTaggedCursor(currentText, offset, key, rawValue, emotionRoutingValue(data));
+      scriptText = updated.text;
+      data = parseScript(scriptText, data);
+      save();
+      status.textContent = statusText();
+      paintScriptEditor(false);
+      setCaretOffset(scriptArea, updated.caret);
+      renderCards(cardsGrid);
+      scriptArea.focus();
+    };
     scriptSection.append(fieldLabel("Dialogue Script", "editor colorato"), scriptArea);
     const cardsSection = document.createElement("div");
     cardsSection.className = "iamccs-dte-section fill";
@@ -1341,9 +1704,12 @@ function install(node, reason = "install") {
     tags.className = "iamccs-dte-tags";
     // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     tags.append(
-      tagPanel("Emotion", EMOTIONS, (name) => modelAwareTagToken("emotion", name, activeTtsMode), () => scriptArea),
-      tagPanel("Style", STYLES, (name) => modelAwareTagToken("style", name, activeTtsMode), () => scriptArea),
-      tagPanel("Inline", PARAS, (name) => name.startsWith("pause") ? " [" + name + "]" : " <" + name + ">", () => scriptArea)
+      tagPanel("Emotion", EMOTIONS, (name) => modelAwareTagToken("emotion", name, activeTtsMode), () => scriptArea, (name) => insertPerformanceAtCursor("emotion", name)),
+      tagPanel("Style", STYLES, (name) => modelAwareTagToken("style", name, activeTtsMode), () => scriptArea, (name) => insertPerformanceAtCursor("style", name)),
+      tagPanel("Inline", PARAS, (name) => name.startsWith("pause") ? " [" + name + "]" : " <" + name + ">", () => scriptArea, (name) => {
+        if (name.startsWith("pause")) insertAt(scriptArea, " [" + name + "] ");
+        else insertPerformanceAtCursor("para", name);
+      })
     );
     main.append(side, center, tags);
     const foot = document.createElement("div");
@@ -1466,7 +1832,7 @@ function toolbarButtons(toolbar, target) {
   });
 }
 // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
-function tagPanel(title, values, makeToken, getFallbackTarget = null) {
+function tagPanel(title, values, makeToken, getFallbackTarget = null, onPick = null) {
   const panel = document.createElement("div");
   const h = document.createElement("h4");
   h.textContent = title;
@@ -1475,6 +1841,10 @@ function tagPanel(title, values, makeToken, getFallbackTarget = null) {
   values.forEach((value) => {
     const btn = button(value, "");
     btn.onclick = () => {
+      if (typeof onPick === "function") {
+        onPick(value);
+        return;
+      }
       const active = document.activeElement;
       const focused = active?.tagName === "TEXTAREA" || active?.isContentEditable ? active : null;
       const fallback = typeof getFallbackTarget === "function" ? getFallbackTarget() : null;
@@ -1553,7 +1923,10 @@ app.registerExtension({
   setup() {
     [300, 1200, 2500].forEach((delay) => setTimeout(() => {
       const nodes = Array.isArray(app?.graph?._nodes) ? app.graph._nodes : [];
-      nodes.forEach((node) => install(node, "scan+" + delay));
+      nodes.forEach((node) => {
+        install(node, "scan+" + delay);
+        if (isEditor(node)) repairExistingDialogueRigLinks(node, "scan+" + delay);
+      });
     }, delay));
   },
   nodeCreated(node) { [0, 180, 600].forEach((delay) => setTimeout(() => install(node, "nodeCreated+" + delay), delay)); },

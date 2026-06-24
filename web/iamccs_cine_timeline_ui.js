@@ -1,8 +1,8 @@
-﻿import { app } from "../../scripts/app.js";
+import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-console.info("[IAMCCS V3] Stable node UI mode active. AudioBoard UI is loaded directly by Comfy extension registry.");
-const CINE_VERSION = "2026-05-26-v3-perf-idle-sync";
+console.info("[IAMCCS V3] Stable node UI mode active. Shotboard audio duration floor build loaded.");
+const CINE_VERSION = "2026-06-23-v3-audio-duration-floor";
 const SHOTBOARD_V3_RIGID_WIDTH = 1920;
 const SHOTBOARD_V3_OPEN_HEIGHT = 900;
 const SHOTBOARD_V3_COLLAPSED_HEIGHT = 660; // increased to accommodate global prompt always visible in collapsed mode
@@ -2646,7 +2646,7 @@ function openReferenceFrameEditor(node, index, path, onApply) {
         "overflow:hidden",
         `background:${CINE_FILM_LAB.field}`,
         `border:1px solid ${CINE_FILM_LAB.border}`,
-        "border-radius:7px",
+        "border-radius:3px",
         "display:flex",
         "align-items:center",
         "justify-content:center",
@@ -6823,6 +6823,13 @@ function renderShotboardV3(node) {
     };
     const endOfSegments = (items) => (items || []).reduce((max, item) => Math.max(max, Number(item.start || 0) + Number(item.length || 1)), 0);
     const endOfVisualSegments = () => endOfSegments((timeline.segments || []).filter((seg) => String(seg.type || "image") !== "audio"));
+    const segmentHasAudioMedia = (seg) => Boolean(seg && (String(seg.audioFile || "").trim() || String(seg.audioB64 || "").trim()));
+    const endOfAudioSegments = () => endOfSegments((timeline.audioSegments || []).filter((seg) => segmentHasAudioMedia(seg) && !seg.placeholder));
+    const durationFloorFrames = () => Math.max(endOfVisualSegments(), endOfAudioSegments());
+    const durationFloorSeconds = () => {
+        const frames = durationFloorFrames();
+        return frames > 0 ? Number((frames / getFps()).toFixed(3)) : 0;
+    };
     const showTimelineNotice = (message, tone = "warn") => {
         if (!timelineNotice) return;
         if (!message && Date.now() < timelineNoticeUntil) return;
@@ -6833,13 +6840,18 @@ function renderShotboardV3(node) {
         timelineNotice.style.color = tone === "error" ? "#FFE3DD" : "#FFF1BE";
     };
     const setDurationSeconds = (seconds, reason = "manual") => {
-        const next = Math.max(0.1, Number(seconds) || 0.1);
+        const requested = Math.max(0.1, Number(seconds) || 0.1);
+        const floor = durationFloorSeconds();
+        const next = floor > 0 ? Math.max(requested, floor) : requested;
         if (durationWidget) durationWidget.value = next;
         setWidgetValue(node, "duration_seconds", next);
         timeline.duration_seconds = next;
         timelineMeterSeconds = clampTimelineMeterSeconds(timelineMeterSeconds);
         durationValueControl?._iamccsSetValue?.(next);
-        console.log("[IAMCCS V3 DURATION TRUTH]", { nodeId: node?.id, reason, duration_seconds: next, fps: getFps() });
+        if (next > requested + 0.0005) {
+            showTimelineNotice(`Duration locked to ${next.toFixed(3)}s because timeline audio/slots reach that point. Shorten or remove content before reducing duration.`, "warn");
+        }
+        console.log("[IAMCCS V3 DURATION TRUTH]", { nodeId: node?.id, reason, requested_duration_seconds: requested, duration_floor_seconds: floor, duration_seconds: next, fps: getFps() });
     };
     const setFrameRateValue = (fps, reason = "manual") => {
         const next = Math.max(1, Math.round(Number(fps) || 24));
@@ -6858,7 +6870,7 @@ function renderShotboardV3(node) {
     syncTimingWidgetsFromTimelineTruth("initial_timeline_load");
     const enforceDurationMinimum = () => {
         const fps = getFps();
-        const minFrames = endOfVisualSegments();
+        const minFrames = durationFloorFrames();
         if (!minFrames) {
             showTimelineNotice("");
             return false;
@@ -6869,8 +6881,9 @@ function renderShotboardV3(node) {
             return false;
         }
         const minSeconds = Number((minFrames / fps).toFixed(3));
-        showTimelineNotice(`Timeline content reaches ${minSeconds}s, but board duration remains ${getDuration().toFixed(3)}s. Change Duration explicitly or shorten/ripple-delete the extra space.`);
-        return false;
+        setDurationSeconds(minSeconds, "enforce_duration_floor");
+        showTimelineNotice(`Timeline duration restored to ${minSeconds}s because audio/slots reach that point.`, "warn");
+        return true;
     };
     const ensureDurationForFrames = (requiredFrames) => {
         const fps = getFps();
@@ -7608,7 +7621,13 @@ function renderShotboardV3(node) {
         try { widget.callback?.(take); } catch {}
         try {
             window.dispatchEvent(new CustomEvent("iamccs:multigeneration-active-take", {
-                detail: { nodeId: bridge.id, activeTake: take },
+                detail: {
+                    nodeId: bridge.id,
+                    activeTake: take,
+                    timelineId: multiTimelineId(take),
+                    audioLane: `A${take}`,
+                    source: "shotboard",
+                },
             }));
         } catch {}
     };
@@ -7720,6 +7739,18 @@ function renderShotboardV3(node) {
         showTimelineNotice(`Loaded ${nextId}. Visual boxes are independent for this generation.`, "info");
         draw();
     };
+    if (!root._iamccsV3BridgeTimelineListener) {
+        root._iamccsV3BridgeTimelineListener = true;
+        window.addEventListener("iamccs:multigeneration-active-take", (event) => {
+            const detail = event?.detail || {};
+            if (detail.source === "shotboard") return;
+            const take = Math.max(1, Math.round(Number(detail.activeTake || String(detail.timelineId || "").replace(/\D/g, "") || 1)));
+            const multi = timeline.multiGeneration && typeof timeline.multiGeneration === "object" ? timeline.multiGeneration : {};
+            const currentTake = Math.max(1, Math.round(Number(multi.activeTake || multiTimelineTakeFromId(multi.activeTimelineId) || 1)));
+            if (take === currentTake) return;
+            switchMultiTimeline(take);
+        });
+    }
     const makeMultiTimelineControl = () => {
         const multi = timeline.multiGeneration && typeof timeline.multiGeneration === "object" ? timeline.multiGeneration : {};
         const bridge = findMultiTimelineBridge();
@@ -7821,11 +7852,20 @@ function renderShotboardV3(node) {
         btn.onclick = (event) => {
             event.preventDefault();
             event.stopPropagation();
-            timelineMeterSeconds = clampTimelineMeterSeconds(timelineMeterSeconds + delta);
+            const current = Number.isFinite(Number(timelineMeterSeconds)) ? Number(timelineMeterSeconds) : Math.max(0.5, getDuration());
+            timelineMeterSeconds = clampTimelineMeterSeconds(current + delta);
             node.properties = node.properties || {};
             node.properties.iamccs_v3_timeline_meter_seconds = timelineMeterSeconds;
             node.properties.iamccs_v3_timeline_meter_user_set = true;
+            timelineNotice = label === "-" ? "Timeline meter compressed" : "Timeline meter expanded";
+            timelineNoticeUntil = Date.now() + 900;
             draw();
+            requestAnimationFrame(() => {
+                timelineMeterSeconds = clampTimelineMeterSeconds(timelineMeterSeconds);
+                draw();
+                try { node.setDirtyCanvas?.(true, true); } catch {}
+                try { app.graph?.setDirtyCanvas?.(true, true); } catch {}
+            });
         };
         return protectControlDrag(btn);
     };
@@ -7984,8 +8024,10 @@ function renderShotboardV3(node) {
         "min-width:0",
         "box-sizing:border-box",
     ].join(";");
+    const frameRuler = document.createElement("div");
+    frameRuler.style.cssText = `height:28px;position:relative;border:1px solid ${purple.border};border-bottom:0;background:linear-gradient(180deg,#18323A 0%,#13272F 60%,#101D23 100%);border-radius:6px 6px 0 0;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.10);cursor:ew-resize;user-select:none;`;
     const ruler = document.createElement("div");
-    ruler.style.cssText = `height:36px;position:relative;border:1px solid ${purple.border};border-bottom:0;background:linear-gradient(180deg,#3D3A36 0%,#2D2C2A 58%,#242423 100%);border-radius:6px 6px 0 0;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.10);`;
+    ruler.style.cssText = `height:36px;position:relative;border:1px solid ${purple.border};border-bottom:0;background:linear-gradient(180deg,#3D3A36 0%,#2D2C2A 58%,#242423 100%);overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.10);cursor:ew-resize;user-select:none;`;
     const timelineBox = document.createElement("div");
     timelineBox.title = "Double click in the image timeline to import a reference at that frame.";
     timelineBox.style.cssText = `position:relative;height:344px;border:1px solid ${purple.border};background:#242220;overflow:hidden;border-radius:0 0 6px 6px;margin-bottom:6px;box-shadow:inset 0 0 0 1px rgba(216,155,69,.08);`;
@@ -8095,7 +8137,7 @@ function renderShotboardV3(node) {
     let drawRaf = 0;
     let transitionAppliedStamp = 0;
     playbar.append(scrubStyle, playBtn, loopBtn, timeReadout, audioPlaybarControls, scrub);
-    timelineCanvas.append(ruler, timelineBox);
+    timelineCanvas.append(frameRuler, ruler, timelineBox);
     timelineViewport.appendChild(timelineCanvas);
     // Timeline height resize handle — drag to expand/shrink timeline rows (slots + local prompts)
     // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
@@ -8163,13 +8205,74 @@ function renderShotboardV3(node) {
         return `${(frame / getFps()).toFixed(2)}s`;
     }
 
+    function chooseFrameRulerStep(total, viewportWidth) {
+        const px = Math.max(1, Number(viewportWidth || timelineViewport?.clientWidth || 0) || 1);
+        const targetLabels = Math.max(4, Math.min(14, Math.floor(px / 120)));
+        const raw = Math.max(1, total / targetLabels);
+        const steps = [1, 2, 4, 5, 8, 10, 12, 16, 20, 24, 30, 32, 40, 48, 60, 64, 80, 96, 120, 121, 160, 192, 240];
+        return steps.find((step) => step >= raw) || Math.ceil(raw / 60) * 60;
+    }
+
+    function drawFrameRuler() {
+        frameRuler.innerHTML = "";
+        const total = Math.max(1, getTotalFrames());
+        const fps = Math.max(1, getFps());
+        const visibleWidth = Math.max(1, Number(timelineViewport?.clientWidth || timelineCanvas?.clientWidth || 0) || 1);
+        const majorStep = chooseFrameRulerStep(total, visibleWidth);
+        const baseLine = document.createElement("div");
+        baseLine.style.cssText = `position:absolute;left:0;right:0;bottom:0;height:2px;background:${purple.accent};opacity:.95;pointer-events:none;box-shadow:0 0 7px rgba(141,231,255,.38);`;
+        frameRuler.appendChild(baseLine);
+        for (let frame = 0; frame <= total; frame += 1) {
+            const major = frame % majorStep === 0 || frame === 0 || frame === total;
+            const pos = (frame / total) * 100;
+            const tick = document.createElement("div");
+            tick.style.cssText = [
+                "position:absolute",
+                `left:calc(${pos}% - ${major ? 1 : 0.5}px)`,
+                "bottom:0",
+                `width:${major ? 2 : 1}px`,
+                `height:${major ? 23 : 9}px`,
+                `background:${major ? purple.play : "#6FB6D2"}`,
+                `opacity:${major ? 1 : 0.64}`,
+                major ? "box-shadow:0 0 8px rgba(255,224,138,.45)" : "box-shadow:none",
+                "pointer-events:none",
+            ].join(";");
+            frameRuler.appendChild(tick);
+            if (!major) continue;
+            const label = document.createElement("div");
+            label.style.cssText = [
+                "position:absolute",
+                `left:${pos}%`,
+                "top:3px",
+                frame >= total - 1 ? "transform:translateX(calc(-100% - 6px))" : "transform:translateX(6px)",
+                `color:${frame % fps === 0 ? purple.play : "#EAF8FF"}`,
+                "font-size:10px",
+                "font-weight:950",
+                "line-height:1",
+                "text-shadow:0 1px 2px rgba(0,0,0,.72)",
+                "white-space:nowrap",
+                "pointer-events:none",
+            ].join(";");
+            label.textContent = `F${Math.round(frame)}`;
+            frameRuler.appendChild(label);
+        }
+        const playPos = (playFrame / total) * 100;
+        const marker = document.createElement("div");
+        marker.style.cssText = `position:absolute;left:calc(${playPos}% - 2px);top:0;bottom:0;width:4px;background:${purple.play};box-shadow:0 0 0 1px rgba(0,0,0,.72),0 0 14px rgba(255,224,138,.75);pointer-events:none;z-index:20;`;
+        frameRuler.appendChild(marker);
+        const info = document.createElement("div");
+        info.style.cssText = `position:absolute;right:7px;top:5px;color:#FFFFFF;font-size:10px;font-weight:950;background:rgba(0,0,0,.78);padding:3px 6px;border:1px solid ${purple.accent};border-radius:4px;pointer-events:none;text-shadow:0 1px 2px #000;`;
+        info.textContent = `${total}f / ${fps}fps`;
+        frameRuler.appendChild(info);
+    }
+
     function drawRuler() {
         ruler.innerHTML = "";
         const total = getTotalFrames();
         const seconds = Math.max(0.001, getDuration());
         const step = 0.5;
         const baseLine = document.createElement("div");
-        baseLine.style.cssText = `position:absolute;left:0;right:0;bottom:0;height:1px;background:${purple.border};opacity:.85;pointer-events:none;`;
+        baseLine.style.cssText = `position:absolute;left:0;right:0;bottom:0;height:2px;background:${purple.accent};opacity:.95;pointer-events:none;box-shadow:0 0 7px rgba(141,231,255,.38);`;
         ruler.appendChild(baseLine);
         for (let s = 0; s <= seconds + 0.001; s += step) {
             const major = Math.abs(s - Math.round(s)) < 0.001;
@@ -8181,9 +8284,10 @@ function renderShotboardV3(node) {
                 `left:calc(${pos}% - ${five ? 1 : 0.5}px)`,
                 "bottom:0",
                 `width:${five ? 2 : 1}px`,
-                `height:${five ? 32 : major ? 24 : 10}px`,
-                `background:${five ? purple.play : major ? purple.accent : "#7E766C"}`,
-                `opacity:${five ? 1 : major ? 0.82 : 0.46}`,
+                `height:${five ? 34 : major ? 27 : 12}px`,
+                `background:${five ? purple.play : major ? purple.accent : "#6FB6D2"}`,
+                `opacity:${five ? 1 : major ? 0.95 : 0.65}`,
+                five ? "box-shadow:0 0 8px rgba(255,224,138,.45)" : "box-shadow:none",
                 "pointer-events:none",
             ].join(";");
             ruler.appendChild(tick);
@@ -8194,9 +8298,9 @@ function renderShotboardV3(node) {
                 `left:${pos}%`,
                 "top:4px",
                 "transform:translateX(5px)",
-                `color:${five ? "#F4D59D" : "#D8E2E5"}`,
+                `color:${five ? purple.play : "#EAF8FF"}`,
                 "font-size:11px",
-                "font-weight:800",
+                "font-weight:950",
                 "line-height:1",
                 "text-shadow:0 1px 2px #000",
                 "pointer-events:none",
@@ -8204,9 +8308,13 @@ function renderShotboardV3(node) {
             label.textContent = `${s.toFixed(0)}s`;
             ruler.appendChild(label);
         }
+        const playPos = (playFrame / Math.max(1, total)) * 100;
+        const marker = document.createElement("div");
+        marker.style.cssText = `position:absolute;left:calc(${playPos}% - 2px);top:0;bottom:0;width:4px;background:${purple.play};box-shadow:0 0 0 1px rgba(0,0,0,.72),0 0 14px rgba(255,224,138,.75);pointer-events:none;z-index:20;`;
+        ruler.appendChild(marker);
         const last = document.createElement("div");
-        last.style.cssText = `position:absolute;right:6px;top:5px;color:${purple.muted};font-size:10px;font-weight:800;background:rgba(0,0,0,.42);padding:2px 5px;border-radius:4px;pointer-events:none;`;
-        last.textContent = `${total}f`;
+        last.style.cssText = `position:absolute;right:6px;top:5px;color:#FFFFFF;font-size:10px;font-weight:950;background:rgba(0,0,0,.78);padding:3px 6px;border:1px solid ${purple.accent};border-radius:4px;pointer-events:none;text-shadow:0 1px 2px #000;`;
+        last.textContent = `${seconds.toFixed(2)}s`;
         ruler.appendChild(last);
     }
 
@@ -8221,6 +8329,41 @@ function renderShotboardV3(node) {
         loopBtn.style.borderColor = isLooping ? purple.play : purple.border;
         loopBtn.style.color = isLooping ? "#FFF2B8" : purple.text;
     }
+
+    function setPlayFrameFromMeterEvent(event, meterElement) {
+        if (!meterElement) return;
+        event?.preventDefault?.();
+        event?.stopPropagation?.();
+        const rect = meterElement.getBoundingClientRect();
+        const ratio = Math.max(0, Math.min(1, (Number(event.clientX || 0) - rect.left) / Math.max(1, rect.width)));
+        playFrame = Math.max(0, Math.min(getTotalFrames(), Math.round(ratio * getTotalFrames())));
+        if (isPlaying) {
+            playbackStartFrame = playFrame;
+            playbackStartTimestamp = performance.now();
+            scheduleAudioFromFrame(playFrame);
+        }
+        draw();
+    }
+
+    function bindMeterScrub(meterElement) {
+        if (!meterElement || meterElement._iamccsMeterScrubBound) return;
+        meterElement._iamccsMeterScrubBound = true;
+        meterElement.addEventListener("pointerdown", (event) => {
+            setPlayFrameFromMeterEvent(event, meterElement);
+            const move = (moveEvent) => setPlayFrameFromMeterEvent(moveEvent, meterElement);
+            const finish = () => {
+                window.removeEventListener("pointermove", move, true);
+                window.removeEventListener("pointerup", finish, true);
+                window.removeEventListener("pointercancel", finish, true);
+            };
+            window.addEventListener("pointermove", move, { passive: false, capture: true });
+            window.addEventListener("pointerup", finish, { passive: false, capture: true });
+            window.addEventListener("pointercancel", finish, { passive: false, capture: true });
+        }, { passive: false, capture: true });
+    }
+
+    bindMeterScrub(frameRuler);
+    bindMeterScrub(ruler);
 
     function audioPeakValue(raw) {
         if (raw && typeof raw === "object") {
@@ -8619,6 +8762,30 @@ function renderShotboardV3(node) {
         });
     };
 
+    function normalizeTimelineDragPreviewItems(items, durationFrames) {
+        const total = Math.max(1, Math.round(Number(durationFrames || getTotalFrames())));
+        let cursor = 0;
+        return cloneSegments(items)
+            .sort((a, b) => Number(a.start || 0) - Number(b.start || 0))
+            .map((item) => {
+                const next = { ...item };
+                next.length = Math.max(1, Math.round(Number(next.length || 1)));
+                next.start = Math.max(0, Math.min(Math.round(Number(next.start || 0)), Math.max(0, total - 1)));
+                if (next.start < cursor) next.start = cursor;
+                if (next.start + next.length > total) next.length = Math.max(1, total - next.start);
+                cursor = next.start + next.length;
+                return next;
+            });
+    }
+
+    function timelineDragMetrics(isAudio = false) {
+        const target = isAudio ? audioTracks : imageTrack;
+        const rect = target?.getBoundingClientRect?.() || timelineBox.getBoundingClientRect();
+        const widthPx = Math.max(1, Number(rect.width || timelineBox.getBoundingClientRect().width || 1));
+        const leftPx = Number(rect.left || timelineBox.getBoundingClientRect().left || 0);
+        return { rect, widthPx, leftPx };
+    }
+
     function applyCenterDragPhysics(initItems, targetId, targetStart, pointerFrame, durationFrames) {
         const items = cloneSegments(initItems);
         const targetIndex = items.findIndex((item) => item.id === targetId);
@@ -8673,11 +8840,11 @@ function renderShotboardV3(node) {
             leftCursor = Number(test[i].start || 0) + Number(test[i].length || 1);
         }
 
-        return test.map((item) => {
+        return normalizeTimelineDragPreviewItems(test.map((item) => {
             const clean = { ...item, start: Math.round(Number(item.start || 0)) };
             delete clean.original_start;
             return clean;
-        });
+        }), durationFrames);
     }
 
     function edgeDragPreview(initItems, targetId, dragDelta, edge, durationFrames) {
@@ -8717,7 +8884,7 @@ function renderShotboardV3(node) {
                 target.length = Math.max(minLength, oldLength - (nextStart - oldStart));
             }
         }
-        return items;
+        return normalizeTimelineDragPreviewItems(items, durationFrames);
     }
 
     function audioDragPreview(initItems, targetId, dragDelta, edge, durationFrames) {
@@ -8778,14 +8945,13 @@ function renderShotboardV3(node) {
                 finishDrag();
                 return;
             }
-            const rect = timelineBox.getBoundingClientRect();
-            const widthPx = rect.width || 1;
+            const { widthPx, leftPx } = timelineDragMetrics(isAudio);
             const deltaFrames = Math.round(((move.clientX - startX) / widthPx) * getTotalFrames());
             let next;
             if (isAudio) {
                 next = audioDragPreview(dragState.initial, dragState.targetId, deltaFrames, edge, getTotalFrames());
             } else if (edge === "center") {
-                const pointerFrame = Math.round(((move.clientX - rect.left) / Math.max(1, widthPx)) * getTotalFrames());
+                const pointerFrame = Math.round(((move.clientX - leftPx) / Math.max(1, widthPx)) * getTotalFrames());
                 next = applyCenterDragPhysics(dragState.initial, dragState.targetId, dragState.originalStart + deltaFrames, pointerFrame, getTotalFrames());
             } else {
                 next = edgeDragPreview(dragState.initial, dragState.targetId, deltaFrames, edge, getTotalFrames());
@@ -8809,7 +8975,7 @@ function renderShotboardV3(node) {
             } catch (_) {}
             if (dragState) {
                 if (isAudio && previewAudioSegments) timeline.audioSegments = previewAudioSegments;
-                if (!isAudio && previewSegments) timeline.segments = previewSegments;
+                if (!isAudio && previewSegments) timeline.segments = normalizeTimelineDragPreviewItems(previewSegments, getTotalFrames());
             }
             if (!isAudio) {
                 const moved = (timeline.segments || []).find((item) => item.id === seg.id);
@@ -8915,54 +9081,48 @@ function renderShotboardV3(node) {
         const startIndex = allPeaks.length ? Math.max(0, Math.min(allPeaks.length - 1, Math.floor((trimStart / durationFrames) * allPeaks.length))) : 0;
         const endIndex = allPeaks.length ? Math.max(startIndex + 1, Math.min(allPeaks.length, Math.ceil((trimEnd / durationFrames) * allPeaks.length))) : 0;
         const peaks = allPeaks.slice(startIndex, endIndex);
-        const shell = document.createElement("div");
-        shell.style.cssText = [
-            "position:absolute",
-            "left:14px",
-            "right:14px",
-            "top:6px",
-            "bottom:6px",
-            "border-radius:7px",
-            "overflow:hidden",
-            "background:linear-gradient(180deg,rgba(9,19,22,.92),rgba(22,15,10,.88))",
-            "border:1px solid rgba(244,213,158,.22)",
-            "box-shadow:inset 0 1px 0 rgba(255,255,255,.08), inset 0 -10px 18px rgba(0,0,0,.20)",
-            "pointer-events:none",
-        ].join(";");
-        const name = document.createElement("div");
-        name.textContent = String(seg.fileName || seg.audioFile || "Audio").split(/[\\/]/).pop();
-        name.style.cssText = "position:absolute;left:8px;top:4px;right:8px;color:#F4E5C4;font:9px/1 monospace;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px rgba(0,0,0,.85);z-index:2;";
-        shell.appendChild(name);
-        const canvas = document.createElement("canvas");
-        canvas.style.cssText = "position:absolute;left:0;right:0;bottom:0;width:100%;height:100%;z-index:1;";
+        const rect = block.getBoundingClientRect?.() || { width: block.offsetWidth || 120, height: block.offsetHeight || 58 };
         const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
-        const cssW = Math.max(64, Math.round(Number(block.offsetWidth || 120)));
-        const cssH = Math.max(46, Math.round(Number(block.offsetHeight || 54)));
-        const w = Math.max(96, Math.min(4096, Math.round(cssW * dpr)));
-        const h = Math.max(50, Math.min(260, Math.round(cssH * dpr)));
+        const timelineCssWidth = Math.max(
+            0,
+            Number(timelineCanvas?.clientWidth || 0) || Number.parseFloat(timelineCanvas?.style?.width || "0") || 0
+        );
+        const clipCssWidth = timelineCssWidth > 0
+            ? (Math.max(1, Number(seg.length || 1)) / Math.max(1, getTotalFrames())) * timelineCssWidth
+            : 0;
+        const styledHeight = Number.parseFloat(block.style?.height || "0") || 0;
+        const cssW = Math.max(72, Math.round(Number(clipCssWidth || rect.width || block.offsetWidth || 120)));
+        const cssH = Math.max(50, Math.round(Number(styledHeight || rect.height || block.offsetHeight || 82)));
+        const w = Math.max(120, Math.min(4096, Math.round(cssW * dpr)));
+        const h = Math.max(58, Math.min(320, Math.round(cssH * dpr)));
+        const canvas = document.createElement("canvas");
+        canvas.className = "iamccs-v3-real-waveform-canvas";
+        canvas.dataset.waveformRenderer = "audio_board_op4";
         canvas.width = w;
         canvas.height = h;
+        canvas.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;z-index:1;image-rendering:auto;pointer-events:none;";
         const ctx = canvas.getContext("2d");
+        if (ctx) ctx.imageSmoothingEnabled = false;
         if (!ctx) {
-            shell.appendChild(canvas);
-            block.appendChild(shell);
+            block.appendChild(canvas);
             return;
         }
         const bg = ctx.createLinearGradient(0, 0, 0, h);
         bg.addColorStop(0, "#376a9b");
-        bg.addColorStop(.52, "#315f8f");
-        bg.addColorStop(1, "#23496f");
+        bg.addColorStop(.48, "#315f8f");
+        bg.addColorStop(1, "#22476c");
         ctx.fillStyle = bg;
         ctx.fillRect(0, 0, w, h);
-        ctx.strokeStyle = "rgba(255,255,255,.12)";
+        ctx.strokeStyle = "rgba(255,255,255,.10)";
         ctx.lineWidth = 1;
-        for (let x = 0; x <= w; x += Math.max(36, Math.round(w / 18))) {
+        const gridStep = Math.max(32, Math.round(w / 18));
+        for (let x = 0; x <= w; x += gridStep) {
             ctx.beginPath();
-            ctx.moveTo(x, 0);
-            ctx.lineTo(x, h);
+            ctx.moveTo(x + .5, 0);
+            ctx.lineTo(x + .5, h);
             ctx.stroke();
         }
-        ctx.strokeStyle = "rgba(255,255,255,.28)";
+        ctx.strokeStyle = "rgba(255,255,255,.30)";
         ctx.beginPath();
         ctx.moveTo(0, h * .5);
         ctx.lineTo(w, h * .5);
@@ -8979,89 +9139,89 @@ function renderShotboardV3(node) {
             return { min: -p, max: p, rms: p * .66 };
         };
         if (!peaks.length) {
-            ctx.fillStyle = "rgba(235,248,255,.76)";
+            ctx.fillStyle = "rgba(235,248,255,.80)";
             ctx.font = `900 ${Math.max(10, Math.round(12 * dpr))}px ui-monospace, Consolas, monospace`;
             ctx.textAlign = "center";
-            ctx.fillText(waveformLoading.has(seg.id) ? "decoding real waveform..." : "no waveform peaks", w * .5, h * .53);
-            shell.appendChild(canvas);
-            block.appendChild(shell);
-            return;
-        }
-        const peakValue = (raw) => {
-            const p = normPeak(raw);
-            return Math.max(Math.abs(p.min), Math.abs(p.max), p.rms);
-        };
-        const visualMax = Math.max(.05, ...peaks.map(peakValue));
-        const scale = Math.min(1.65, .94 / visualMax);
-        const columnPeak = (x) => {
-            const from = Math.floor((x / Math.max(1, w)) * peaks.length);
-            const to = Math.max(from + 1, Math.floor(((x + 1) / Math.max(1, w)) * peaks.length));
-            let min = 0;
-            let max = 0;
-            let rms = 0;
-            let n = 0;
-            for (let i = from; i < Math.min(peaks.length, to); i += 1) {
-                const p = normPeak(peaks[i]);
-                min = Math.min(min, p.min);
-                max = Math.max(max, p.max);
-                rms += p.rms;
-                n += 1;
+            ctx.textBaseline = "middle";
+            ctx.fillText(waveformLoading.has(seg.id) ? "DECODING REAL WAVEFORM..." : "REAL WAVEFORM UNAVAILABLE", w * .5, h * .55);
+            block.appendChild(canvas);
+        } else {
+            const peakValue = (raw) => {
+                const p = normPeak(raw);
+                return Math.max(Math.abs(p.min), Math.abs(p.max), p.rms);
+            };
+            const visualMax = Math.max(.05, ...peaks.map(peakValue));
+            const scale = Math.min(1.65, .94 / visualMax);
+            const columnPeak = (x) => {
+                const from = Math.floor((x / Math.max(1, w)) * peaks.length);
+                const to = Math.max(from + 1, Math.floor(((x + 1) / Math.max(1, w)) * peaks.length));
+                let min = 0;
+                let max = 0;
+                let rms = 0;
+                let n = 0;
+                for (let i = from; i < Math.min(peaks.length, to); i += 1) {
+                    const p = normPeak(peaks[i]);
+                    min = Math.min(min, p.min);
+                    max = Math.max(max, p.max);
+                    rms += p.rms;
+                    n += 1;
+                }
+                if (!n) return normPeak(peaks[Math.min(peaks.length - 1, Math.max(0, from))]);
+                return { min, max, rms: rms / n };
+            };
+            const center = h * .5;
+            const amp = h * .46;
+            const top = [];
+            const bottom = [];
+            const rmsTop = [];
+            const rmsBottom = [];
+            for (let x = 0; x < w; x += 1) {
+                const p = columnPeak(x);
+                top.push([x, center - Math.max(1, p.max * scale * amp)]);
+                bottom.unshift([x, center + Math.max(1, Math.abs(p.min) * scale * amp)]);
+                rmsTop.push([x, center - Math.max(.5, p.rms * scale * amp * .62)]);
+                rmsBottom.unshift([x, center + Math.max(.5, p.rms * scale * amp * .62)]);
             }
-            if (!n) {
-                const p = normPeak(peaks[Math.min(peaks.length - 1, Math.max(0, from))]);
-                return p;
-            }
-            return { min, max, rms: rms / n };
-        };
-        const center = h * .5;
-        const amp = h * .46;
-        const top = [];
-        const bottom = [];
-        const rmsTop = [];
-        const rmsBottom = [];
-        for (let x = 0; x < w; x += 1) {
-            const p = columnPeak(x);
-            top.push([x, center - Math.max(1, p.max * scale * amp)]);
-            bottom.unshift([x, center + Math.max(1, Math.abs(p.min) * scale * amp)]);
-            rmsTop.push([x, center - Math.max(.5, p.rms * scale * amp * .62)]);
-            rmsBottom.unshift([x, center + Math.max(.5, p.rms * scale * amp * .62)]);
-        }
-        const body = ctx.createLinearGradient(0, 0, 0, h);
-        body.addColorStop(0, "rgba(236,249,255,.96)");
-        body.addColorStop(.48, "rgba(178,221,245,.82)");
-        body.addColorStop(.52, "rgba(172,215,241,.80)");
-        body.addColorStop(1, "rgba(236,249,255,.94)");
-        ctx.fillStyle = "rgba(255,255,255,.16)";
-        ctx.beginPath();
-        rmsTop.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
-        rmsBottom.forEach(([x, y]) => ctx.lineTo(x, y));
-        ctx.closePath();
-        ctx.fill();
-        ctx.fillStyle = body;
-        ctx.beginPath();
-        top.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
-        bottom.forEach(([x, y]) => ctx.lineTo(x, y));
-        ctx.closePath();
-        ctx.fill();
-        ctx.strokeStyle = "rgba(255,255,255,.84)";
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        top.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
-        bottom.slice().reverse().forEach(([x, y]) => ctx.lineTo(x, y));
-        ctx.stroke();
-        ctx.strokeStyle = "rgba(255,255,255,.32)";
-        const detailStep = w > 2200 ? 2 : 1;
-        for (let x = 0; x < w; x += detailStep) {
-            const p = columnPeak(x);
-            const y1 = center - Math.max(1, p.max * scale * amp);
-            const y2 = center + Math.max(1, Math.abs(p.min) * scale * amp);
+            ctx.fillStyle = "rgba(255,255,255,.18)";
             ctx.beginPath();
-            ctx.moveTo(x + .5, y1);
-            ctx.lineTo(x + .5, y2);
+            rmsTop.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+            rmsBottom.forEach(([x, y]) => ctx.lineTo(x, y));
+            ctx.closePath();
+            ctx.fill();
+            const body = ctx.createLinearGradient(0, 0, 0, h);
+            body.addColorStop(0, "rgba(238,250,255,.98)");
+            body.addColorStop(.48, "rgba(183,224,247,.84)");
+            body.addColorStop(.52, "rgba(174,216,241,.82)");
+            body.addColorStop(1, "rgba(238,250,255,.96)");
+            ctx.fillStyle = body;
+            ctx.beginPath();
+            top.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+            bottom.forEach(([x, y]) => ctx.lineTo(x, y));
+            ctx.closePath();
+            ctx.fill();
+            ctx.strokeStyle = "rgba(255,255,255,.88)";
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            top.forEach(([x, y], i) => i ? ctx.lineTo(x, y) : ctx.moveTo(x, y));
+            bottom.slice().reverse().forEach(([x, y]) => ctx.lineTo(x, y));
             ctx.stroke();
+            ctx.strokeStyle = "rgba(255,255,255,.32)";
+            const detailStep = w > 2200 ? 2 : 1;
+            for (let x = 0; x < w; x += detailStep) {
+                const p = columnPeak(x);
+                const y1 = center - Math.max(1, p.max * scale * amp);
+                const y2 = center + Math.max(1, Math.abs(p.min) * scale * amp);
+                ctx.beginPath();
+                ctx.moveTo(x + .5, y1);
+                ctx.lineTo(x + .5, y2);
+                ctx.stroke();
+            }
+            block.appendChild(canvas);
         }
-        shell.appendChild(canvas);
-        block.appendChild(shell);
+        const name = document.createElement("div");
+        name.textContent = `REAL  ${String(seg.fileName || seg.audioFile || "Audio").split(/[\\/]/).pop()}`;
+        name.style.cssText = "position:absolute;left:7px;top:4px;right:7px;color:#F4E5C4;font:9px/1 monospace;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px rgba(0,0,0,.90);z-index:2;pointer-events:none;";
+        block.appendChild(name);
     }
 
     function openAppendImagePicker(targetId = null) {
@@ -9436,7 +9596,7 @@ function renderShotboardV3(node) {
             "cursor:grab",
             (selected ? "box-shadow:0 0 0 2px rgba(249,200,89,.35),0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,190,120,.08)" : "box-shadow:0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,190,120,.08)"),
             "user-select:none",
-            `z-index:${isAudio ? 14 : 4}`,
+            `z-index:${isAudio ? 14 : (selected || (dragState && dragState.targetId === seg.id) ? 18 : 4)}`,
         ].join(";");
         const content = document.createElement("div");
         content.style.cssText = isAudio
@@ -9528,7 +9688,7 @@ function renderShotboardV3(node) {
             removeAudio.type = "button";
             removeAudio.textContent = "X";
             removeAudio.title = "Remove this audio clip";
-            removeAudio.style.cssText = `position:absolute;right:5px;top:5px;width:22px;height:22px;border:1px solid ${purple.danger};border-radius:999px;background:#6B302A;color:#FFF2E4;font-size:10px;font-weight:900;line-height:1;cursor:pointer;box-shadow:0 2px 7px rgba(0,0,0,.40);z-index:20;`;
+            removeAudio.style.cssText = `position:absolute;right:6px;top:6px;width:24px;height:24px;border:1px solid ${purple.danger};border-radius:999px;background:#6B302A;color:#FFF2E4;font-size:10px;font-weight:900;line-height:1;cursor:pointer;box-shadow:0 2px 9px rgba(0,0,0,.55);z-index:140;pointer-events:auto;`;
             removeAudio.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
             removeAudio.onclick = (event) => {
                 event.preventDefault();
@@ -9538,8 +9698,9 @@ function renderShotboardV3(node) {
                 writeTimeline({ force: true });
                 draw();
             };
-            block.appendChild(removeAudio);
+            removeAudio.dataset.iamccsAudioRemoveButton = "1";
             renderAudioWaveform(block, seg);
+            block.appendChild(removeAudio);
         }
         content.textContent = isAudio ? String(seg.name || "audio") : (String(seg.type || "image") === "text" ? String(seg.label || "text") : "");
         if (isAudio || String(seg.type || "image") === "text") block.appendChild(content);
@@ -9796,8 +9957,8 @@ function renderShotboardV3(node) {
             "position:absolute",
             `left:calc(${pct}% - 9px)`,
             "top:8px",
+            "bottom:8px",
             "width:9px",
-            "height:222px",
             "box-sizing:border-box",
             "cursor:ew-resize",
             "z-index:58",
@@ -9842,11 +10003,11 @@ function renderShotboardV3(node) {
             const start = Math.round(Number(seg.start || 0));
             const end = Math.round(Number(seg.start || 0) + Number(seg.length || 1));
             const prev = sorted[index - 1];
+            const next = sorted[index + 1];
             const prevEnd = prev ? Math.round(Number(prev.start || 0) + Number(prev.length || 1)) : -1;
-            // Skip left handle at the very start of the timeline — By IAMCCS
-            if (start > 0 && (!prev || Math.abs(prevEnd - start) > 1)) appendVisualEdgeHandle(seg, "left", "left");
-            // Skip right handle at the very end of the timeline — By IAMCCS
-            if (end < total) appendVisualEdgeHandle(seg, "right", "right");
+            const nextStart = next ? Math.round(Number(next.start || 0)) : total + 1;
+            if (!prev || Math.abs(prevEnd - start) > 1) appendVisualEdgeHandle(seg, "left", "left");
+            appendVisualEdgeHandle(seg, "right", "right");
         });
     }
 
@@ -11037,6 +11198,7 @@ function renderShotboardV3(node) {
 
     function draw() {
         if (!dragState) writeTimeline();
+        drawFrameRuler();
         drawRuler();
         updatePlayUI();
         drawAudioPlaybarControls();
@@ -11058,6 +11220,7 @@ function renderShotboardV3(node) {
         const canvasWidth = computeTimelineCanvasWidth(visualSegments);
         const previousScrollLeft = Number(timelineViewport.scrollLeft || 0);
         timelineCanvas.style.width = `${canvasWidth}px`;
+        frameRuler.style.width = "100%";
         ruler.style.width = "100%";
         timelineBox.style.width = "100%";
         timelineViewport.scrollLeft = Math.min(previousScrollLeft, Math.max(0, canvasWidth - Number(timelineViewport.clientWidth || 0)));
@@ -13066,6 +13229,57 @@ function renderBoardMaker(node) {
     draw();
 }
 
+function installIamccsLowZoomOverlay(node, key, buildLines) {
+    if (node && key) node[key] = true;
+    return;
+    if (!node || node[key]) return;
+    const previous = node.onDrawForeground;
+    node.onDrawForeground = function(ctx) {
+        if (typeof previous === "function") previous.apply(this, arguments);
+        const scale = Math.max(0.12, Number(app?.canvas?.ds?.scale || 1));
+        if (!ctx || scale >= 0.62) return;
+        let lines = [];
+        try { lines = buildLines?.(this) || []; } catch { lines = []; }
+        lines = lines.map((item) => String(item || "").trim()).filter(Boolean).slice(0, 4);
+        if (!lines.length) return;
+        const nodeW = Math.max(320, Number(this.size?.[0] || 360));
+        const nodeH = Math.max(180, Number(this.size?.[1] || 240));
+        const boost = Math.max(1.2, Math.min(3.4, 0.72 / scale));
+        const pad = 12 * boost;
+        const lineH = 18 * boost;
+        const titleFont = Math.round(13 * boost);
+        const bodyFont = Math.round(11 * boost);
+        const w = Math.max(220, Math.min(nodeW - pad * 2, 660 * boost));
+        const h = 34 * boost + lines.length * lineH;
+        const x = pad;
+        const y = Math.min(Math.max(56, 46 * boost), Math.max(40, nodeH - h - pad));
+        ctx.save();
+        ctx.globalAlpha = 0.96;
+        ctx.fillStyle = "rgba(8,18,20,.92)";
+        ctx.strokeStyle = "rgba(143,208,204,.72)";
+        ctx.lineWidth = Math.max(1.5, 1.2 * boost);
+        if (typeof ctx.roundRect === "function") {
+            ctx.beginPath();
+            ctx.roundRect(x, y, w, h, 8 * boost);
+            ctx.fill();
+            ctx.stroke();
+        } else {
+            ctx.fillRect(x, y, w, h);
+            ctx.strokeRect(x, y, w, h);
+        }
+        ctx.fillStyle = "rgba(239,204,139,.95)";
+        ctx.fillRect(x, y, Math.max(4, 3 * boost), h);
+        ctx.fillStyle = "#F4D49E";
+        ctx.font = `900 ${titleFont}px sans-serif`;
+        ctx.fillText(lines[0], x + 12 * boost, y + 21 * boost);
+        ctx.fillStyle = "#BFD7D5";
+        ctx.font = `800 ${bodyFont}px sans-serif`;
+        for (let i = 1; i < lines.length; i += 1) ctx.fillText(lines[i], x + 12 * boost, y + 21 * boost + i * lineH);
+        ctx.restore();
+    };
+    node[key] = true;
+}
+
 function renderForNode(node) {
     const klass = nodeClassName(node);
     try {
@@ -13086,6 +13300,20 @@ function renderForNode(node) {
         if (klass === "IAMCCS_CinePromptRelayTimeline") renderPromptRelayEditor(node);
         if (isShotboardV3Class(klass)) {
             renderShotboardV3(node);
+            installIamccsLowZoomOverlay(node, "_iamccsShotboardLowZoomOverlay", () => {
+                let data = {};
+                try { data = JSON.parse(String(getWidget(node, "timeline_data")?.value || "{}")); } catch {}
+                const duration = Number(data.duration_seconds ?? getWidget(node, "duration_seconds")?.value ?? 0) || 0;
+                const fps = Number(data.frame_rate ?? getWidget(node, "frame_rate")?.value ?? 24) || 24;
+                const shots = Array.isArray(data.segments) ? data.segments.filter((seg) => String(seg?.type || "image") !== "audio").length : 0;
+                const audio = Array.isArray(data.audioSegments) ? data.audioSegments.length : 0;
+                return [
+                    "Shotboard V3 mini view",
+                    `${duration.toFixed(2)}s / ${Math.round(duration * fps)} frames`,
+                    `${shots} visual slots / ${audio} audio clips`,
+                    "Zoom in or open editor for full controls",
+                ];
+            });
         }
         if (klass === "IAMCCS_CineShotboardLite") renderShotboardLite(node);
         if (klass === "IAMCCS_CineShotboardTimelinePro" || klass === "IAMCCS_CineShotboardPlannerPro" || klass === "IAMCCS_CineShotboardPlannerProV2" || klass === "IAMCCS_CineShotboardPlannerProLegacy") renderShotboardPro(node);
