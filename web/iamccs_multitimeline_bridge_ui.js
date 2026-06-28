@@ -108,19 +108,68 @@ async function queuePromptOnce() {
     throw new Error("ComfyUI queuePrompt API not available");
 }
 
+function waitForShotboardTakeReady(take, timeoutMs = 2200) {
+    const wanted = Math.max(1, Math.round(Number(take) || 1));
+    return new Promise((resolve) => {
+        let finished = false;
+        const finish = (detail, timedOut = false) => {
+            if (finished) return;
+            finished = true;
+            window.removeEventListener("iamccs:multigeneration-shotboard-take-ready", onReady);
+            clearTimeout(timer);
+            resolve({ ok: !timedOut, detail: detail || null });
+        };
+        const onReady = (event) => {
+            const detail = event?.detail || {};
+            const eventTake = Math.max(1, Math.round(Number(detail.activeTake || String(detail.timelineId || "").replace(/\D/g, "") || 1)));
+            if (eventTake === wanted) finish(detail, false);
+        };
+        const timer = setTimeout(() => finish(null, true), timeoutMs);
+        window.addEventListener("iamccs:multigeneration-shotboard-take-ready", onReady);
+    });
+}
+
+async function waitForQueueIdle(statusEl = null, label = "", timeoutMs = 1000 * 60 * 90) {
+    const started = Date.now();
+    let sawBusy = false;
+    while (Date.now() - started < timeoutMs) {
+        try {
+            const response = await fetch("/queue", { cache: "no-store" });
+            const data = await response.json();
+            const running = Array.isArray(data?.queue_running) ? data.queue_running.length : 0;
+            const pending = Array.isArray(data?.queue_pending) ? data.queue_pending.length : 0;
+            const busy = running + pending > 0;
+            sawBusy = sawBusy || busy;
+            if (statusEl && (busy || sawBusy)) statusEl.textContent = `${label} running: ${running} / pending: ${pending}`;
+            if (sawBusy && !busy) return true;
+        } catch {
+            await sleep(900);
+        }
+        await sleep(1200);
+    }
+    return false;
+}
+
 async function queueSingleBackendSequence(node, count, statusEl = null) {
     const max = Math.max(1, Math.min(maxTakes(node), Math.round(Number(count) || 1)));
     setWidget(node, "take_source_mode", "auto_detect_multi_lanes");
     setWidget(node, "take_track_layout", "collapse_to_lane_1");
     for (let take = 1; take <= max; take += 1) {
         setTake(node, take);
-        if (statusEl) statusEl.textContent = `Queueing T${String(take).padStart(2, "0")} / A${take} on the single backend (${take}/${max})...`;
+        const takeLabel = `T${String(take).padStart(2, "0")} / A${take}`;
+        if (statusEl) statusEl.textContent = `Preparing ${takeLabel} on the single backend (${take}/${max})...`;
         try { app.graph?.setDirtyCanvas?.(true, true); } catch {}
-        await sleep(120);
+        const ready = await waitForShotboardTakeReady(take);
+        if (statusEl) {
+            const segs = ready?.detail?.audioSegments ?? "?";
+            statusEl.textContent = `${ready.ok ? "Ready" : "Timed wait"} ${takeLabel}: ${segs} audio segment(s). Queueing...`;
+        }
+        await sleep(260);
         await queuePromptOnce();
-        await sleep(220);
+        await waitForQueueIdle(statusEl, `${takeLabel}`);
+        await sleep(350);
     }
-    if (statusEl) statusEl.textContent = `Queued ${max} takes on one backend: ${Array.from({ length: max }, (_, i) => `T${String(i + 1).padStart(2, "0")}/A${i + 1}`).join(" -> ")}.`;
+    if (statusEl) statusEl.textContent = `Completed sequential queue: ${Array.from({ length: max }, (_, i) => `T${String(i + 1).padStart(2, "0")}/A${i + 1}`).join(" -> ")}.`;
 }
 
 function ensureStyle() {

@@ -2679,42 +2679,25 @@ function install(node) {
   }
 
   function gemmaPendingPreview(payload, request, notes = "") {
-    const mode = cleanText(payload?.mode || request?.mode || "");
     const rawText = cleanText(payload?.raw_text || "");
-    const withRaw = (mainText) => {
+    const rawResponse = payload?.raw_response;
+    const rawObject = rawResponse && typeof rawResponse === "object" ? rawResponse : null;
+    const noteText = cleanText(notes || rawObject?.notes || payload?.notes || "");
+    const compact = (mainText) => {
       const main = cleanText(mainText);
-      if (!rawText || main.includes(rawText) || rawText.includes(main)) return main;
-      return `${main}\n\n--- RAW GEMMA OUTPUT ---\n${rawText}`;
+      return [main, noteText ? `NOTES: ${noteText}` : ""].filter(Boolean).join("\n");
     };
     if (payload?.field_patch) {
       const patch = payload.field_patch;
-      return withRaw([
-        `MODE: ${mode || "field_enhance"}`,
-        `FIELD: ${cleanText(patch.field_key || request?.target_field || "")}`,
-        `SELECTED ID: ${cleanText(patch.selected_id || request?.selected_id || "") || "none"}`,
-        "",
-        cleanText(patch.text || patch.replacement || patch.desc || patch.description || ""),
-        "",
-        notes ? `NOTES: ${notes}` : "",
-      ].filter((line) => line !== "").join("\n"));
+      return compact(patch.text || patch.replacement || patch.desc || patch.description || rawObject?.text || rawText);
     }
     if (payload?.design_data) {
-      return withRaw([
-        `MODE: ${mode || "full_json_enhance"}`,
-        notes ? `NOTES: ${notes}` : "",
-        "",
-        JSON.stringify(payload.design_data, null, 2),
-      ].filter((line) => line !== "").join("\n"));
+      return compact(JSON.stringify(payload.design_data, null, 2));
     }
-    if (payload?.raw_response) {
-      return withRaw([
-        `MODE: ${mode || request?.mode || "gemma"}`,
-        notes ? `NOTES: ${notes}` : "",
-        "",
-        typeof payload.raw_response === "string" ? payload.raw_response : JSON.stringify(payload.raw_response, null, 2),
-      ].filter((line) => line !== "").join("\n"));
+    if (rawObject) {
+      return compact(rawObject.text || rawObject.replacement || rawObject.desc || rawObject.description || JSON.stringify(rawObject, null, 2));
     }
-    return rawText || notes || "Gemma returned an empty proposal.";
+    return compact(rawText || "Gemma returned an empty proposal.");
   }
 
   function renderGemmaPendingResult() {

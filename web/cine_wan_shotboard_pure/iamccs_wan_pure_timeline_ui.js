@@ -10336,13 +10336,15 @@ function renderShotboardV3(node) {
                             const appended = appendReferencePath(node, newPath);
                             const nextRef = Math.max(1, Number(appended?.refNumber || refIndex + 1));
                             const truthSeg = (timeline.segments || []).find((item) => String(item?.id || "") === String(seg.id || "")) || seg;
-                            const propagated = applyEditedReferenceToMatches(currentRef, currentPath, nextRef, newPath, {
+                            applyEditedReferenceTruth(truthSeg, nextRef, newPath, {
                                 updateAutoLabel: false,
-                                truthSource: "timeline_frame_editor_shared",
+                                truthSource: "timeline_frame_editor_slot",
                             });
-                            if (!propagated) {
-                                applyEditedReferenceTruth(truthSeg, nextRef, newPath, { updateAutoLabel: false });
-                                if (truthSeg !== seg) applyEditedReferenceTruth(seg, nextRef, newPath, { updateAutoLabel: false });
+                            if (truthSeg !== seg) {
+                                applyEditedReferenceTruth(seg, nextRef, newPath, {
+                                    updateAutoLabel: false,
+                                    truthSource: "timeline_frame_editor_slot",
+                                });
                             }
                             if (newPath) refPreviewBusters.set(String(newPath), String(data?.cache_bust || Date.now()));
                             console.info("[IAMCCS V3 REF EDIT] applied edited reference to timeline truth", {
@@ -10354,7 +10356,8 @@ function renderShotboardV3(node) {
                                 truthPath: truthSeg?.imageFile || truthSeg?.path || "",
                                 savedTo: data?.absolute_path || data?.path || "",
                                 appended: Boolean(appended?.appended),
-                                propagated,
+                                propagated: 1,
+                                slotOnly: true,
                             });
                             writeTimeline({ force: true });
                             draw();
@@ -12511,7 +12514,6 @@ function renderShotboardV3(node) {
         if (target) {
             const oldTargetRef = Math.max(0, Math.round(Number(target.ref || 0)));
             const oldTargetPath = segmentReferencePath(target);
-            const shouldPropagateReplacement = !target.placeholder && (oldTargetRef > 0 || Boolean(oldTargetPath));
             target.type = "image";
             target.placeholder = false;
             target.ref = current.length + 1;
@@ -12532,21 +12534,13 @@ function renderShotboardV3(node) {
             target.imageTruthSource = "upload_replace_slot";
             delete target.image_file;
             delete target.image_truth_path;
-            if (shouldPropagateReplacement) {
-                const propagated = applyEditedReferenceToMatches(oldTargetRef, oldTargetPath, target.ref, target.imageFile, {
-                    truthSource: "upload_replace_slot_shared",
-                    updateAutoLabel: true,
-                });
-                if (propagated > 0) {
-                    console.info("[IAMCCS WAN PURE REF SYNC] propagated uploaded replacement to matching timeline slots", {
-                        oldRef: oldTargetRef,
-                        oldPath: oldTargetPath,
-                        newRef: target.ref,
-                        newPath: target.imageFile,
-                        matches: propagated,
-                    });
-                }
-            }
+            console.info("[IAMCCS WAN PURE REF SYNC] uploaded replacement applied to selected timeline slot only", {
+                segmentId: target.id,
+                oldRef: oldTargetRef,
+                oldPath: oldTargetPath,
+                newRef: target.ref,
+                newPath: target.imageFile,
+            });
             refPreviewBusters.set(String(target.imageFile), String(Date.now()));
             target.label = `ref_${current.length + 1}`;
                 target.use_guide = true;

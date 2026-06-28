@@ -7611,6 +7611,24 @@ function renderShotboardV3(node) {
             return type === "IAMCCS_MultiTimelineBridge" || type.includes("MultiTimelineBridge");
         });
     };
+    const emitMultiTimelineReady = (takeIndex, reason = "switch") => {
+        const take = Math.max(1, Math.round(Number(takeIndex) || 1));
+        const timelineId = multiTimelineId(take);
+        const segments = Array.isArray(timeline.audioSegments) ? timeline.audioSegments : [];
+        try {
+            window.dispatchEvent(new CustomEvent("iamccs:multigeneration-shotboard-take-ready", {
+                detail: {
+                    activeTake: take,
+                    timelineId,
+                    audioLane: `A${take}`,
+                    audioSegments: segments.length,
+                    audioFrames: segments.reduce((max, seg) => Math.max(max, Number(seg?.start || 0) + Number(seg?.length || 0)), 0),
+                    reason,
+                    source: "shotboard",
+                },
+            }));
+        } catch {}
+    };
     const setBridgeTake = (takeIndex) => {
         const bridge = findMultiTimelineBridge();
         if (!bridge) return;
@@ -7657,6 +7675,7 @@ function renderShotboardV3(node) {
     });
     const multiAudioSegmentsForTake = (multi, takeIndex) => {
         const take = Math.max(1, Math.round(Number(takeIndex) || 1));
+        const sourceTrackForTake = take - 1;
         const timelineId = multiTimelineId(take);
         const normalizeMultiTimelineId = (value, fallbackTake = take) => {
             const raw = String(value || "").trim();
@@ -7668,8 +7687,15 @@ function renderShotboardV3(node) {
             : Array.isArray(multi?.allAudioSegments)
                 ? multi.allAudioSegments
                 : [];
-        if (!all.length) return [];
-        const matches = all.filter((seg) => {
+        const sourceAll = Array.isArray(multi?.audioSegmentsAllSource)
+            ? multi.audioSegmentsAllSource
+            : Array.isArray(multi?.sourceAudioSegmentsAll)
+                ? multi.sourceAudioSegmentsAll
+                : [];
+        const pool = all.length ? all : sourceAll;
+        if (!pool.length) return [];
+        const asTrack = (value) => Math.max(0, Math.round(Number(value || 0)));
+        const matches = pool.filter((seg) => {
             const segTake = Math.max(0, Math.round(Number(seg?.multiTakeIndex || 0)));
             const rawTimelineId = String(seg?.timelineId || "").trim();
             const segTimelineId = rawTimelineId ? normalizeMultiTimelineId(rawTimelineId, segTake || take) : "";
@@ -7677,22 +7703,31 @@ function renderShotboardV3(node) {
             if (!isMulti) return false;
             return segTimelineId === timelineId || segTake === take;
         });
-        return matches.map((seg) => {
+        const sourceMatches = matches.length ? matches : pool.filter((seg) => {
+            const explicitSourceTrack = seg?.sourceTrackOriginal ?? seg?.track;
+            return asTrack(explicitSourceTrack) === sourceTrackForTake;
+        });
+        return sourceMatches.map((seg) => {
             const localStart = Number(seg?.localStart);
             const next = cloneForMultiTimeline(seg, {});
             next.track = 0;
             next.start = Number.isFinite(localStart)
                 ? Math.max(0, Math.round(localStart))
-                : 0;
+                : (Boolean(seg?.multiGenerationClip) || /^T\d+/i.test(String(seg?.timelineId || ""))
+                    ? 0
+                    : Math.max(0, Math.round(Number(seg?.start || 0))));
             next.timelineId = timelineId;
             next.multiTakeIndex = take;
             next.shotboardActiveTakeAudio = true;
-            next.sourceTrackOriginal = Math.max(0, Math.round(Number(seg?.track || seg?.sourceTrackOriginal || 0)));
+            next.sourceTrackOriginal = asTrack(seg?.sourceTrackOriginal ?? seg?.track ?? sourceTrackForTake);
             return next;
         });
     };
     const applyMultiAudioForTake = (multi, takeIndex) => {
-        const sourceAll = Array.isArray(multi?.audioSegmentsAll) || Array.isArray(multi?.allAudioSegments);
+        const sourceAll = Array.isArray(multi?.audioSegmentsAll)
+            || Array.isArray(multi?.allAudioSegments)
+            || Array.isArray(multi?.audioSegmentsAllSource)
+            || Array.isArray(multi?.sourceAudioSegmentsAll);
         if (!sourceAll) return false;
         timeline.audioSegments = multiAudioSegmentsForTake(multi, takeIndex);
         timeline.audioTrackCount = 1;
@@ -7738,6 +7773,7 @@ function renderShotboardV3(node) {
         writeTimeline({ force: true });
         showTimelineNotice(`Loaded ${nextId}. Visual boxes are independent for this generation.`, "info");
         draw();
+        emitMultiTimelineReady(take, "switch");
     };
     if (!root._iamccsV3BridgeTimelineListener) {
         root._iamccsV3BridgeTimelineListener = true;
@@ -7747,7 +7783,16 @@ function renderShotboardV3(node) {
             const take = Math.max(1, Math.round(Number(detail.activeTake || String(detail.timelineId || "").replace(/\D/g, "") || 1)));
             const multi = timeline.multiGeneration && typeof timeline.multiGeneration === "object" ? timeline.multiGeneration : {};
             const currentTake = Math.max(1, Math.round(Number(multi.activeTake || multiTimelineTakeFromId(multi.activeTimelineId) || 1)));
-            if (take === currentTake) return;
+            if (take === currentTake) {
+                const updated = applyMultiAudioForTake(multi, take);
+                if (updated) {
+                    timeline.multiGeneration = { ...multi, activeTake: take, activeTimelineId: multiTimelineId(take), updatedAt: new Date().toISOString() };
+                    writeTimeline({ force: true });
+                    draw();
+                    emitMultiTimelineReady(take, "same-take-audio-refresh");
+                }
+                return;
+            }
             switchMultiTimeline(take);
         });
     }

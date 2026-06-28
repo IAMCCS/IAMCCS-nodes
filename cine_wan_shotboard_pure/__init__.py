@@ -20,6 +20,7 @@ from comfy_api.latest import InputImpl
 
 WAN_SHOTBOARD_TYPE = "IAMCCS_WAN_SHOTBOARD"
 WAN_TIMELINE_PLAN_TYPE = "IAMCCS_WAN_TIMELINE_PLAN"
+WAN_LOOP_STATE_TYPE = "IAMCCS_WAN_LOOP_STATE"
 _ORIGINAL_PROMPTRELAY_MODULE = None
 
 
@@ -1252,6 +1253,507 @@ class IAMCCS_WanRelayOrBypassPure:
         return patched_model, relay_positive, True, report
 
 
+class IAMCCS_WanShotboardLoopInfo:
+    CATEGORY = "IAMCCS/Wan/PURE/Loop"
+    RETURN_TYPES = (WAN_TIMELINE_PLAN_TYPE, "INT", "INT", "FLOAT", "STRING")
+    RETURN_NAMES = ("timeline_plan", "chunk_count", "total_frames", "frame_rate", "report")
+    FUNCTION = "info"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"cine_linx": (WAN_SHOTBOARD_TYPE,)}}
+
+    def info(self, cine_linx: Dict[str, Any]):
+        timeline_plan, frame_rate, chunk_count, duration_frames, _timeline_order_json, cine_report = IAMCCS_WanCineInfoPure().info(cine_linx)
+        board = dict(timeline_plan.get("board") or {})
+        pairs = timeline_plan.get("flf_pairs") or []
+        relay_chunks = timeline_plan.get("promptrelay_chunks") or []
+        report = json.dumps(
+            {
+                "node": "IAMCCS_WanShotboardLoopInfo",
+                "schema": board.get("schema"),
+                "truth": board.get("truth"),
+                "chunk_count": int(chunk_count),
+                "total_frames": int(duration_frames),
+                "frame_rate": float(frame_rate),
+                "timeline_images": len(timeline_plan.get("timeline_order") or []),
+                "flf_pairs": len(pairs) if isinstance(pairs, list) else 0,
+                "promptrelay_chunks": len(relay_chunks) if isinstance(relay_chunks, list) else 0,
+                "easyuse_total": max(1, int(chunk_count)),
+                "wan_pure_isolated": board.get("wan_pure_isolated"),
+            },
+            ensure_ascii=True,
+        )
+        if _bool(board.get("debug_verbose")):
+            print(f"[IAMCCS WAN PURE][LoopInfo] {report}")
+        return (timeline_plan, int(chunk_count), int(duration_frames), float(frame_rate), report)
+
+
+class IAMCCS_WanShotboardLoopChunkSelect:
+    CATEGORY = "IAMCCS/Wan/PURE/Loop"
+    RETURN_TYPES = (
+        "IMAGE",
+        "IMAGE",
+        "STRING",
+        "INT",
+        "FLOAT",
+        "FLOAT",
+        "INT",
+        "INT",
+        "STRING",
+        "STRING",
+        "STRING",
+        "INT",
+        "FLOAT",
+        "STRING",
+        "STRING",
+        "STRING",
+        WAN_TIMELINE_PLAN_TYPE,
+    )
+    RETURN_NAMES = (
+        "start_image",
+        "end_image",
+        "prompt",
+        "frames",
+        "motion",
+        "frame_rate",
+        "chunk_index",
+        "chunk_count",
+        "report",
+        "relay_local_prompts",
+        "relay_segment_lengths",
+        "relay_max_frames",
+        "relay_epsilon",
+        "relay_timeline_data",
+        "start_path",
+        "end_path",
+        "selected_timeline_plan",
+    )
+    FUNCTION = "select"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline_plan": (WAN_TIMELINE_PLAN_TYPE,),
+                "loop_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1, "lazy": True}),
+                "index_mode": (["direct", "clamp"], {"default": "direct"}),
+            }
+        }
+
+    def check_lazy_status(self, timeline_plan=None, loop_index=None, **kwargs):
+        if loop_index is None:
+            return ["loop_index"]
+        return []
+
+    def select(self, timeline_plan: Dict[str, Any], loop_index: int = 0, index_mode: str = "direct"):
+        plan = dict(timeline_plan or {})
+        pairs = plan.get("flf_pairs") or []
+        if not isinstance(pairs, list):
+            pairs = []
+        chunk_count = len(pairs)
+        requested_index = max(0, int(loop_index or 0))
+        if chunk_count <= 0:
+            raise ValueError("IAMCCS_WanShotboardLoopChunkSelect: no active FLF chunks. Add at least two image slots.")
+        if requested_index >= chunk_count:
+            if str(index_mode or "direct") == "clamp":
+                selected_index = chunk_count - 1
+            else:
+                raise IndexError(
+                    f"IAMCCS_WanShotboardLoopChunkSelect: loop_index {requested_index} is outside active chunk_count {chunk_count}."
+                )
+        else:
+            selected_index = requested_index
+
+        base = IAMCCS_WanFLFPairFromTimeline().select(plan, selected_index)
+        selected = pairs[selected_index]
+        start_path = str(selected.get("from_path") or "")
+        end_path = str(selected.get("to_path") or "")
+        relay_chunk = _selected_relay_chunk(plan, selected_index)
+        selected_pair = dict(selected)
+        selected_pair["index"] = 0
+        selected_pair["original_index"] = selected_index
+        selected_relay = dict(relay_chunk or {})
+        selected_relay["index"] = 0
+        selected_relay["original_index"] = selected_index
+        selected_plan = dict(plan)
+        selected_plan["flf_pairs"] = [selected_pair]
+        selected_plan["promptrelay_chunks"] = [selected_relay] if selected_relay else []
+        selected_plan["chunk_count"] = 1
+        selected_plan["active_chunk_count"] = 1
+        selected_plan["selected_original_chunk_index"] = selected_index
+        report_data = {
+            "node": "IAMCCS_WanShotboardLoopChunkSelect",
+            "requested_loop_index": requested_index,
+            "selected_chunk_index": selected_index,
+            "chunk_count": chunk_count,
+            "from_path": start_path,
+            "to_path": end_path,
+            "frames": int(base[3]),
+            "motion": float(base[4]),
+            "relay_local_prompts": str(base[9] or ""),
+            "relay_segment_lengths": str(base[10] or ""),
+            "relay_max_frames": int(base[11]),
+            "start_file": _path_debug(start_path),
+            "end_file": _path_debug(end_path),
+        }
+        board = dict(plan.get("board") or {})
+        if _bool(board.get("debug_verbose")):
+            print("[IAMCCS WAN PURE][LoopChunkSelect] " + json.dumps(report_data, ensure_ascii=True))
+        merged_report = json.dumps(report_data, ensure_ascii=True)
+        return (
+            base[0],
+            base[1],
+            base[2],
+            base[3],
+            base[4],
+            base[5],
+            base[6],
+            base[7],
+            merged_report,
+            base[9],
+            base[10],
+            base[11],
+            base[12],
+            base[13],
+            start_path,
+            end_path,
+            selected_plan,
+        )
+
+
+class IAMCCS_WanShotboardPrevSamplesLoopSelect:
+    CATEGORY = "IAMCCS/Wan/PURE/Loop"
+    RETURN_TYPES = ("LATENT", "BOOLEAN", "STRING")
+    RETURN_NAMES = ("prev_samples", "using_loop_state", "report")
+    FUNCTION = "select"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "anchor_samples": ("LATENT",),
+                "loop_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1, "lazy": True}),
+            },
+            "optional": {
+                "previous_samples": ("LATENT",),
+            },
+        }
+
+    def check_lazy_status(self, anchor_samples=None, loop_index=None, previous_samples=None, **kwargs):
+        needed = []
+        if anchor_samples is None:
+            needed.append("anchor_samples")
+        if loop_index is None:
+            needed.append("loop_index")
+        return needed
+
+    def select(self, anchor_samples: Dict[str, Any], loop_index: int = 0, previous_samples: Optional[Dict[str, Any]] = None):
+        index = max(0, int(loop_index or 0))
+        use_previous = index > 0 and isinstance(previous_samples, dict) and previous_samples.get("samples") is not None
+        selected = previous_samples if use_previous else anchor_samples
+        samples = selected.get("samples") if isinstance(selected, dict) else None
+        shape = list(samples.shape) if getattr(samples, "shape", None) is not None else None
+        report = json.dumps(
+            {
+                "node": "IAMCCS_WanShotboardPrevSamplesLoopSelect",
+                "loop_index": index,
+                "using_loop_state": bool(use_previous),
+                "shape": shape,
+            },
+            ensure_ascii=True,
+        )
+        print(f"[IAMCCS WAN PURE][PrevSamplesLoopSelect] {report}")
+        return (selected, bool(use_previous), report)
+
+
+class IAMCCS_WanShotboardLoopAccumulator:
+    CATEGORY = "IAMCCS/Wan/PURE/Loop"
+    RETURN_TYPES = ("IMAGE", "INT", "STRING")
+    RETURN_NAMES = ("images", "frame_count", "report")
+    FUNCTION = "accumulate"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "chunk_images": ("IMAGE",),
+                "loop_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1, "lazy": True}),
+                "trim_first_frames_after_first": ("INT", {"default": 1, "min": 0, "max": 512, "step": 1}),
+                "overlap_mode": (["linear_blend", "cut_trim"], {"default": "linear_blend"}),
+                "overlap_blend_frames": ("INT", {"default": 5, "min": 0, "max": 512, "step": 1}),
+            },
+            "optional": {
+                "previous_images": ("IMAGE",),
+            },
+        }
+
+    def check_lazy_status(self, chunk_images=None, loop_index=None, previous_images=None, **kwargs):
+        needed = []
+        if chunk_images is None:
+            needed.append("chunk_images")
+        if loop_index is None:
+            needed.append("loop_index")
+        return needed
+
+    def accumulate(
+        self,
+        chunk_images,
+        loop_index: int = 0,
+        trim_first_frames_after_first: int = 1,
+        overlap_mode: str = "linear_blend",
+        overlap_blend_frames: int = 5,
+        previous_images=None,
+    ):
+        index = max(0, int(loop_index or 0))
+        chunk_count = int(chunk_images.shape[0]) if getattr(chunk_images, "shape", None) is not None else 0
+        if chunk_count <= 0:
+            raise ValueError("IAMCCS_WanShotboardLoopAccumulator: chunk_images is empty.")
+        had_previous = previous_images is not None and getattr(previous_images, "shape", None) is not None and int(previous_images.shape[0]) > 0
+        previous_count = int(previous_images.shape[0]) if had_previous else 0
+        mode = str(overlap_mode or "linear_blend")
+        trim = max(0, int(trim_first_frames_after_first or 0)) if index > 0 else 0
+        if trim >= chunk_count:
+            trim = max(0, chunk_count - 1)
+        available_after_trim = max(0, chunk_count - trim)
+        blend_frames = max(0, int(overlap_blend_frames or 0)) if index > 0 and had_previous else 0
+        blend_frames = min(blend_frames, previous_count, available_after_trim)
+
+        if had_previous:
+            previous = previous_images.to(device=chunk_images.device, dtype=chunk_images.dtype)
+            if mode == "linear_blend" and blend_frames > 0:
+                blend_source = chunk_images[trim:trim + blend_frames]
+                if blend_frames == 1:
+                    weights = torch.tensor([0.5], device=chunk_images.device, dtype=chunk_images.dtype)
+                else:
+                    weights = torch.linspace(
+                        1.0 / float(blend_frames + 1),
+                        float(blend_frames) / float(blend_frames + 1),
+                        blend_frames,
+                        device=chunk_images.device,
+                        dtype=chunk_images.dtype,
+                    )
+                shape = [blend_frames] + [1] * (chunk_images.ndim - 1)
+                weights = weights.reshape(shape)
+                blended = previous[-blend_frames:] * (1.0 - weights) + blend_source * weights
+                skip = trim + blend_frames
+                contribution = chunk_images[skip:]
+                output = torch.cat([previous[:-blend_frames], blended, contribution], dim=0)
+            else:
+                contribution = chunk_images[trim:] if trim > 0 else chunk_images
+                output = torch.cat([previous, contribution], dim=0)
+        else:
+            contribution = chunk_images
+            output = contribution
+        report = json.dumps(
+            {
+                "node": "IAMCCS_WanShotboardLoopAccumulator",
+                "loop_index": index,
+                "previous_frames": previous_count,
+                "chunk_frames": chunk_count,
+                "trim_first_frames": trim,
+                "overlap_mode": mode,
+                "overlap_blend_frames": blend_frames,
+                "overlap_source_start_after_trim": trim,
+                "contributed_frames": int(contribution.shape[0]),
+                "total_frames": int(output.shape[0]),
+            },
+            ensure_ascii=True,
+        )
+        print(f"[IAMCCS WAN PURE][LoopAccumulator] {report}")
+        return (output, int(output.shape[0]), report)
+
+
+class IAMCCS_WanShotboardLoopAccumulatorLinear:
+    CATEGORY = "IAMCCS/Wan/PURE/Loop"
+    RETURN_TYPES = ("IMAGE", "INT", "STRING")
+    RETURN_NAMES = ("images", "frame_count", "report")
+    FUNCTION = "accumulate"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "chunk_images": ("IMAGE",),
+                "loop_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1, "lazy": True}),
+                "trim_first_frames_after_first": ("INT", {"default": 1, "min": 0, "max": 512, "step": 1}),
+                "overlap_mode": (
+                    ["cut", "linear_blend", "ease_in_out", "filmic_crossfade", "perceptual_crossfade"],
+                    {"default": "linear_blend"},
+                ),
+                "overlap_frames": ("INT", {"default": 5, "min": 0, "max": 512, "step": 1}),
+            },
+            "optional": {
+                "previous_images": ("IMAGE",),
+            },
+        }
+
+    def check_lazy_status(self, chunk_images=None, loop_index=None, previous_images=None, **kwargs):
+        needed = []
+        if chunk_images is None:
+            needed.append("chunk_images")
+        if loop_index is None:
+            needed.append("loop_index")
+        return needed
+
+    def accumulate(
+        self,
+        chunk_images,
+        loop_index: int = 0,
+        trim_first_frames_after_first: int = 1,
+        overlap_mode: str = "linear_blend",
+        overlap_frames: int = 5,
+        previous_images=None,
+    ):
+        index = max(0, int(loop_index or 0))
+        chunk_count = int(chunk_images.shape[0]) if getattr(chunk_images, "shape", None) is not None else 0
+        if chunk_count <= 0:
+            raise ValueError("IAMCCS_WanShotboardLoopAccumulatorLinear: chunk_images is empty.")
+
+        had_previous = previous_images is not None and getattr(previous_images, "shape", None) is not None and int(previous_images.shape[0]) > 0
+        previous_count = int(previous_images.shape[0]) if had_previous else 0
+        trim = max(0, int(trim_first_frames_after_first or 0)) if index > 0 else 0
+        if trim >= chunk_count:
+            trim = max(0, chunk_count - 1)
+
+        available_after_trim = max(0, chunk_count - trim)
+        mode = str(overlap_mode or "linear_blend")
+        valid_modes = {"cut", "linear_blend", "ease_in_out", "filmic_crossfade", "perceptual_crossfade"}
+        if mode not in valid_modes:
+            mode = "linear_blend"
+        blend_frames = max(0, int(overlap_frames or 0)) if index > 0 and had_previous else 0
+        blend_frames = min(blend_frames, previous_count, available_after_trim)
+
+        if had_previous:
+            previous = previous_images.to(device=chunk_images.device, dtype=chunk_images.dtype)
+            if blend_frames > 0:
+                blend_src = previous[-blend_frames:]
+                blend_dst = chunk_images[trim:trim + blend_frames]
+                prefix = previous[:-blend_frames]
+                suffix = chunk_images[trim + blend_frames:]
+                if mode == "cut":
+                    output = torch.cat([prefix, chunk_images[trim:]], dim=0)
+                    contribution = chunk_images[trim:]
+                else:
+                    alpha = torch.linspace(
+                        0,
+                        1,
+                        blend_frames + 2,
+                        device=chunk_images.device,
+                        dtype=chunk_images.dtype,
+                    )[1:-1]
+                    shape = [blend_frames] + [1] * (chunk_images.ndim - 1)
+                    alpha = alpha.reshape(shape)
+                    if mode == "ease_in_out":
+                        alpha = 3 * alpha * alpha - 2 * alpha * alpha * alpha
+                    if mode == "filmic_crossfade":
+                        gamma = 2.2
+                        linear_src = torch.pow(torch.clamp(blend_src, 0.0, 1.0), gamma)
+                        linear_dst = torch.pow(torch.clamp(blend_dst, 0.0, 1.0), gamma)
+                        blended = torch.pow((1.0 - alpha) * linear_src + alpha * linear_dst, 1.0 / gamma)
+                    elif mode == "perceptual_crossfade":
+                        try:
+                            import kornia
+                            src_nchw = blend_src.movedim(-1, 1)
+                            dst_nchw = blend_dst.movedim(-1, 1)
+                            lab_src = kornia.color.rgb_to_lab(src_nchw)
+                            lab_dst = kornia.color.rgb_to_lab(dst_nchw)
+                            blended_lab = (1.0 - alpha) * lab_src + alpha * lab_dst
+                            blended = kornia.color.lab_to_rgb(blended_lab).movedim(1, -1)
+                        except Exception:
+                            blended = (1.0 - alpha) * blend_src + alpha * blend_dst
+                    else:
+                        blended = (1.0 - alpha) * blend_src + alpha * blend_dst
+                    contribution = suffix
+                    output = torch.cat([prefix, blended, suffix], dim=0)
+            else:
+                contribution = chunk_images[trim:] if trim > 0 else chunk_images
+                output = torch.cat([previous, contribution], dim=0)
+        else:
+            contribution = chunk_images
+            output = contribution
+
+        report = json.dumps(
+            {
+                "node": "IAMCCS_WanShotboardLoopAccumulatorLinear",
+                "loop_index": index,
+                "previous_frames": previous_count,
+                "chunk_frames": chunk_count,
+                "trim_first_frames": trim,
+                "overlap_mode": mode,
+                "overlap_frames_requested": int(overlap_frames or 0),
+                "overlap_frames_used": blend_frames,
+                "overlap_source_start_after_trim": trim,
+                "contributed_frames": int(contribution.shape[0]),
+                "total_frames": int(output.shape[0]),
+            },
+            ensure_ascii=True,
+        )
+        print(f"[IAMCCS WAN PURE][LoopAccumulatorLinear] {report}")
+        return (output, int(output.shape[0]), report)
+
+
+class IAMCCS_WanShotboardLoopState:
+    CATEGORY = "IAMCCS/Wan/PURE/Loop"
+    RETURN_TYPES = (WAN_LOOP_STATE_TYPE, "STRING")
+    RETURN_NAMES = ("loop_state", "report")
+    FUNCTION = "state"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline_plan": (WAN_TIMELINE_PLAN_TYPE,),
+                "loop_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1, "lazy": True}),
+            },
+            "optional": {
+                "previous_state": (WAN_LOOP_STATE_TYPE,),
+                "chunk_report": ("STRING", {"forceInput": True, "default": ""}),
+                "accumulator_report": ("STRING", {"forceInput": True, "default": ""}),
+                "prev_samples_report": ("STRING", {"forceInput": True, "default": ""}),
+            },
+        }
+
+    def state(
+        self,
+        timeline_plan: Dict[str, Any],
+        loop_index: int = 0,
+        previous_state: Optional[Dict[str, Any]] = None,
+        chunk_report: str = "",
+        accumulator_report: str = "",
+        prev_samples_report: str = "",
+    ):
+        plan = dict(timeline_plan or {})
+        index = max(0, int(loop_index or 0))
+        state = dict(previous_state or {})
+        history = list(state.get("history") or [])
+        entry = {
+            "loop_index": index,
+            "chunk_report": str(chunk_report or ""),
+            "accumulator_report": str(accumulator_report or ""),
+            "prev_samples_report": str(prev_samples_report or ""),
+        }
+        history.append(entry)
+        out = {
+            "schema": "iamccs.wan.shotboard.loop_state",
+            "schema_version": 1,
+            "chunk_count": int(plan.get("chunk_count") or len(plan.get("flf_pairs") or [])),
+            "last_loop_index": index,
+            "history": history[-256:],
+        }
+        report = json.dumps(
+            {
+                "node": "IAMCCS_WanShotboardLoopState",
+                "loop_index": index,
+                "chunk_count": out["chunk_count"],
+                "history_count": len(out["history"]),
+            },
+            ensure_ascii=True,
+        )
+        print(f"[IAMCCS WAN PURE][LoopState] {report}")
+        return (out, report)
+
+
 class IAMCCS_WanLoadImageFromPath:
     CATEGORY = "IAMCCS/Wan/PURE"
     RETURN_TYPES = ("IMAGE", "INT", "INT", "STRING")
@@ -1336,6 +1838,12 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_WanFLFPairFromTimeline": IAMCCS_WanFLFPairFromTimeline,
     "IAMCCS_WanChunkGatePure": IAMCCS_WanChunkGatePure,
     "IAMCCS_WanRelayOrBypassPure": IAMCCS_WanRelayOrBypassPure,
+    "IAMCCS_WanShotboardLoopInfo": IAMCCS_WanShotboardLoopInfo,
+    "IAMCCS_WanShotboardLoopChunkSelect": IAMCCS_WanShotboardLoopChunkSelect,
+    "IAMCCS_WanShotboardPrevSamplesLoopSelect": IAMCCS_WanShotboardPrevSamplesLoopSelect,
+    "IAMCCS_WanShotboardLoopAccumulator": IAMCCS_WanShotboardLoopAccumulator,
+    "IAMCCS_WanShotboardLoopAccumulatorLinear": IAMCCS_WanShotboardLoopAccumulatorLinear,
+    "IAMCCS_WanShotboardLoopState": IAMCCS_WanShotboardLoopState,
     "IAMCCS_WanLoadImageFromPath": IAMCCS_WanLoadImageFromPath,
     "IAMCCS_WanLoadImageFromBoard": IAMCCS_WanLoadImageFromBoard,
 }
@@ -1346,6 +1854,12 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_WanFLFPairFromTimeline": "IAMCCS WAN FLF Pair From Timeline",
     "IAMCCS_WanChunkGatePure": "IAMCCS WAN Chunk Gate PURE",
     "IAMCCS_WanRelayOrBypassPure": "IAMCCS WAN Relay Or Bypass PURE",
+    "IAMCCS_WanShotboardLoopInfo": "IAMCCS WAN Shotboard Loop Info",
+    "IAMCCS_WanShotboardLoopChunkSelect": "IAMCCS WAN Shotboard Loop Chunk Select",
+    "IAMCCS_WanShotboardPrevSamplesLoopSelect": "IAMCCS WAN Prev Samples Loop Select",
+    "IAMCCS_WanShotboardLoopAccumulator": "IAMCCS WAN Shotboard Loop Accumulator",
+    "IAMCCS_WanShotboardLoopAccumulatorLinear": "IAMCCS WAN Shotboard Loop Accumulator Linear Blend",
+    "IAMCCS_WanShotboardLoopState": "IAMCCS WAN Shotboard Loop State",
     "IAMCCS_WanLoadImageFromPath": "IAMCCS WAN Load Image From Path PURE",
     "IAMCCS_WanLoadImageFromBoard": "IAMCCS WAN Load Image From Board PURE",
 }

@@ -1485,9 +1485,9 @@ def _gemma_token_budget(mode: str, speed: str, requested: Any = None) -> int:
     if speed_key not in {"fast", "detailed"}:
         speed_key = "fast"
     budgets = {
-        "field_enhance": {"fast": 128, "detailed": 220},
-        "selected_box_enhance": {"fast": 160, "detailed": 280},
-        "prompt_critic": {"fast": 180, "detailed": 300},
+        "field_enhance": {"fast": 96, "detailed": 160},
+        "selected_box_enhance": {"fast": 140, "detailed": 240},
+        "prompt_critic": {"fast": 160, "detailed": 260},
         "full_json_enhance": {"fast": 420, "detailed": 720},
         "brief_to_ideoboard": {"fast": 560, "detailed": 900},
     }

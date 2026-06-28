@@ -13,6 +13,7 @@ from comfy_api.latest import InputImpl, Types
 
 SUPERNODE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX"
 MAX_TRACK_OUTS = 5
+_VIDEO_TAKE_REGISTRY: Dict[str, Dict[int, Dict[str, Any]]] = {}
 
 
 def _safe_json_loads(value: Any, fallback: Any) -> Any:
@@ -410,8 +411,24 @@ def _apply_active_take(
     resources["cine_multigeneration_index_json"] = _json_dump(generation_index)
     resources["cine_multigeneration_active_take"] = active_take
     resources["cine_multigeneration_active_take_json"] = _json_dump(active_take)
+    take_timeline_json = _json_dump(take_timeline)
+    take_segments = copy.deepcopy(take_timeline.get("audioSegments", []))
     resources["cine_multigeneration_take_audio_timeline"] = take_timeline
-    resources["cine_multigeneration_take_audio_timeline_json"] = _json_dump(take_timeline)
+    resources["cine_multigeneration_take_audio_timeline_json"] = take_timeline_json
+    resources["cine_audio_timeline"] = copy.deepcopy(take_timeline)
+    resources["cine_audio_timeline_json"] = take_timeline_json
+    resources["cine_audio_tracks"] = {
+        "source": "IAMCCS_MultiTimelineBridge_active_take",
+        "shotboard_segments": copy.deepcopy(take_segments),
+        "segments": copy.deepcopy(take_segments),
+        "all_segments": copy.deepcopy(take_segments),
+        "audioTrackCount": int(take_timeline.get("audioTrackCount", 1)),
+        "duration_frames": int(duration_frames),
+        "source_end_frames": int(duration_frames),
+        "timeline_id": str(active_take.get("timeline_id", "")),
+        "active_take": int(active_take.get("take_index", generation_index.get("active_take", 1)) or 1),
+    }
+    resources["cine_use_custom_audio"] = bool(take_timeline.get("use_custom_audio", False))
     resources["cine_duration_seconds"] = float(duration_seconds)
     resources["cine_max_frames"] = int(duration_frames)
 
@@ -427,7 +444,9 @@ def _apply_active_take(
 
     outputs["generation_index_json"] = _json_dump(generation_index)
     outputs["active_take_json"] = _json_dump(active_take)
-    outputs["take_audio_timeline_json"] = _json_dump(take_timeline)
+    outputs["take_audio_timeline_json"] = take_timeline_json
+    outputs["audio_timeline_json"] = take_timeline_json
+    outputs["audio_segments_json"] = _json_dump(take_segments)
     outputs["duration_seconds"] = float(duration_seconds)
     outputs["max_frames"] = int(duration_frames)
 
@@ -1062,6 +1081,183 @@ def _mix_editor_audio_tracks(audio_tracks: List[Any]) -> Any:
     return {"waveform": mixed, "sample_rate": int(target_rate or 44100)}
 
 
+def _active_take_from_linx(cine_linx: Any, fallback: int = 1) -> int:
+    linx = cine_linx if isinstance(cine_linx, dict) else {}
+    resources = linx.get("resources", {}) if isinstance(linx.get("resources", {}), dict) else {}
+    active_take = resources.get("cine_multigeneration_active_take")
+    if isinstance(active_take, dict):
+        value = active_take.get("take_index") or active_take.get("source_take_index")
+        if _safe_int(value, 0) > 0:
+            return _safe_int(value, fallback)
+    index = resources.get("cine_multigeneration_index")
+    if isinstance(index, dict) and _safe_int(index.get("active_take"), 0) > 0:
+        return _safe_int(index.get("active_take"), fallback)
+    payload = resources.get("cine_payload") if isinstance(resources.get("cine_payload"), dict) else {}
+    for key in ("timeline_id", "active_timeline_id"):
+        raw = str(payload.get(key) or resources.get(key) or "")
+        digits = "".join(ch for ch in raw if ch.isdigit())
+        if digits:
+            return max(1, _safe_int(digits, fallback))
+    return max(1, _safe_int(fallback, 1))
+
+
+def _video_manifest_entry(slot: int, video: Any) -> Dict[str, Any]:
+    comp = _video_components(video)
+    fps = float(comp.frame_rate or 24.0)
+    frames = int(comp.images.shape[0])
+    return {
+        "slot": int(slot),
+        "timeline_id": _take_timeline_id(slot),
+        "audio_lane": _take_audio_lane_name(slot),
+        "frames": frames,
+        "fps": fps,
+        "duration_seconds": frames / max(1.0, fps),
+        "height": int(comp.images.shape[1]),
+        "width": int(comp.images.shape[2]),
+        "has_embedded_audio": comp.audio is not None,
+        "collected_runtime": True,
+    }
+
+
+def _audio_manifest_entry(slot: int, audio: Any) -> Dict[str, Any] | None:
+    waveform, sample_rate = _audio_waveform(audio)
+    if waveform is None:
+        return None
+    return {
+        "slot": int(slot),
+        "audio_lane": _take_audio_lane_name(slot),
+        "sample_rate": int(sample_rate),
+        "samples": int(waveform.shape[-1]),
+        "channels": int(waveform.shape[-2]),
+        "duration_seconds": int(waveform.shape[-1]) / max(1.0, float(sample_rate)),
+        "collected_runtime": True,
+    }
+
+
+class IAMCCS_VideoTakeCollector:
+    """Runtime collector that progressively registers generated timeline videos for the Video Editor."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "cine_linx": (SUPERNODE_LINX_TYPE,),
+                "video": ("VIDEO",),
+                "collect_mode": (["append_or_replace", "reset_then_collect", "pass_through"], {"default": "append_or_replace"}),
+                "take_index_mode": (["from_cine_linx_active_take", "manual"], {"default": "from_cine_linx_active_take"}),
+                "manual_take_index": ("INT", {"default": 1, "min": 1, "max": 64, "step": 1}),
+                "session_key": ("STRING", {"default": "shotboard_video_editor_live", "multiline": False}),
+                "max_takes": ("INT", {"default": 8, "min": 1, "max": 64, "step": 1}),
+            },
+            "optional": {
+                "audio": ("AUDIO",),
+                "concat_plan_json": ("STRING", {"default": "", "multiline": True}),
+            },
+        }
+
+    RETURN_TYPES = (SUPERNODE_LINX_TYPE, "STRING", "STRING")
+    RETURN_NAMES = ("cine_linx", "video_manifest_json", "report")
+    FUNCTION = "collect"
+    CATEGORY = "IAMCCS/Cine/Multigeneration"
+
+    def collect(
+        self,
+        cine_linx,
+        video,
+        collect_mode,
+        take_index_mode,
+        manual_take_index,
+        session_key,
+        max_takes,
+        audio=None,
+        concat_plan_json="",
+    ):
+        session = str(session_key or "shotboard_video_editor_live").strip() or "shotboard_video_editor_live"
+        if str(collect_mode) == "reset_then_collect":
+            _VIDEO_TAKE_REGISTRY[session] = {}
+        registry = _VIDEO_TAKE_REGISTRY.setdefault(session, {})
+        take_index = _safe_int(manual_take_index, 1)
+        if str(take_index_mode) == "from_cine_linx_active_take":
+            take_index = _active_take_from_linx(cine_linx, take_index)
+        take_index = max(1, min(_safe_int(max_takes, 8), take_index))
+
+        if str(collect_mode) != "pass_through":
+            registry[take_index] = {
+                "video": video,
+                "audio": audio,
+                "manifest": _video_manifest_entry(take_index, video),
+                "audio_manifest": _audio_manifest_entry(take_index, audio),
+            }
+
+        out_linx = _clone_linx(cine_linx, "iamccs_video_take_collector")
+        resources = _resources(out_linx)
+        video_inputs = []
+        video_manifest = []
+        audio_inputs = []
+        audio_manifest = []
+        for slot in sorted(registry):
+            if slot < 1 or slot > _safe_int(max_takes, 8):
+                continue
+            item = registry[slot]
+            if item.get("video") is not None:
+                video_inputs.append({
+                    "slot": slot,
+                    "timeline_id": _take_timeline_id(slot),
+                    "audio_lane": _take_audio_lane_name(slot),
+                    "video": item.get("video"),
+                    "source": "IAMCCS_VideoTakeCollector",
+                    "session_key": session,
+                })
+                video_manifest.append(item.get("manifest") or _video_manifest_entry(slot, item.get("video")))
+            if item.get("audio") is not None:
+                audio_inputs.append({
+                    "slot": slot,
+                    "audio_lane": _take_audio_lane_name(slot),
+                    "audio": item.get("audio"),
+                    "source": "IAMCCS_VideoTakeCollector",
+                    "session_key": session,
+                })
+                manifest = item.get("audio_manifest") or _audio_manifest_entry(slot, item.get("audio"))
+                if manifest:
+                    audio_manifest.append(manifest)
+
+        concat_plan = _safe_json_loads(concat_plan_json, {})
+        if not isinstance(concat_plan, dict):
+            concat_plan = resources.get("cine_multigeneration_concat_plan") if isinstance(resources.get("cine_multigeneration_concat_plan"), dict) else {}
+
+        resources["cine_info3_video_inputs"] = video_inputs
+        resources["cine_info3_video_manifest"] = video_manifest
+        resources["cine_info3_audio_inputs"] = audio_inputs
+        resources["cine_info3_audio_manifest"] = audio_manifest
+        resources["cine_info3_concat_plan"] = concat_plan if isinstance(concat_plan, dict) else {}
+        resources["cine_video_take_collector"] = {
+            "session_key": session,
+            "active_take_collected": int(take_index),
+            "collected_takes": sorted(registry),
+            "video_count": len(video_inputs),
+            "audio_count": len(audio_inputs),
+            "mode": str(collect_mode),
+            "truth": "Generated timeline videos are progressively collected in server runtime memory and exposed as CineInfo3-compatible video inputs for the Video Editor.",
+        }
+        out_linx.setdefault("chain", []).append({
+            "role": "video_take_collector",
+            "name": "IAMCCS_VideoTakeCollector",
+            "session_key": session,
+            "active_take_collected": int(take_index),
+        })
+        _refresh_linx_index(out_linx)
+        report = {
+            "node": "IAMCCS_VideoTakeCollector",
+            "session_key": session,
+            "collect_mode": str(collect_mode),
+            "active_take_collected": int(take_index),
+            "collected_takes": sorted(registry),
+            "video_count": len(video_inputs),
+            "note": "Use reset_then_collect for the first take of a new edit session; use append_or_replace for following takes.",
+        }
+        return out_linx, _json_dump(video_manifest), _json_dump(report)
+
+
 class IAMCCS_ShotboardVideoEditor:
     """Editorial hard-cut assembler. VIDEO/AUDIO inputs are gathered by CineInfo3 through cine_linx."""
 
@@ -1087,7 +1283,6 @@ class IAMCCS_ShotboardVideoEditor:
                 "global_trim_out_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 3600.0, "step": 0.01}),
             },
             "optional": {
-                "master_audio": ("AUDIO",),
                 "concat_plan_json": ("STRING", {"default": "", "multiline": True}),
                 "clip_edits_json": ("STRING", {"default": "", "multiline": True}),
                 "editor_manifest_json": ("STRING", {"default": "", "multiline": True}),
@@ -1110,7 +1305,6 @@ class IAMCCS_ShotboardVideoEditor:
         override_fps,
         global_trim_in_seconds,
         global_trim_out_seconds,
-        master_audio=None,
         concat_plan_json="",
         clip_edits_json="",
         editor_manifest_json="",
@@ -1176,7 +1370,7 @@ class IAMCCS_ShotboardVideoEditor:
         editor_audio_tracks = [item.get("audio") for item in audio_inputs if isinstance(item, dict) and item.get("audio") is not None]
         audio = None
         if str(audio_policy) == "use_master_audio":
-            audio = master_audio
+            audio = editor_audio_tracks[0] if editor_audio_tracks else None
         elif str(audio_policy) == "first_selected_audio":
             audio = audio_items[0][0]
         elif str(audio_policy) == "concat_clip_audio":
@@ -1403,7 +1597,6 @@ class IAMCCS_VideoHardConcat:
         video_3=None,
         video_4=None,
         video_5=None,
-        master_audio=None,
         concat_plan_json="",
     ):
         videos = [video for video in (video_1, video_2, video_3, video_4, video_5) if video is not None]
@@ -1466,6 +1659,7 @@ class IAMCCS_VideoHardConcat:
 NODE_CLASS_MAPPINGS = {
     "IAMCCS_MultiTimelineBridge": IAMCCS_MultiTimelineBridge,
     "IAMCCS_MultiTimelineTakePicker": IAMCCS_MultiTimelineTakePicker,
+    "IAMCCS_VideoTakeCollector": IAMCCS_VideoTakeCollector,
     "IAMCCS_ShotboardVideoEditor": IAMCCS_ShotboardVideoEditor,
     "IAMCCS_CineInfo3": IAMCCS_CineInfo3,
     "IAMCCS_VideoHardConcat": IAMCCS_VideoHardConcat,
@@ -1475,6 +1669,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_MultiTimelineBridge": "IAMCCS MultiTimeline Bridge",
     "IAMCCS_MultiTimelineTakePicker": "IAMCCS MultiTimeline Take Picker",
+    "IAMCCS_VideoTakeCollector": "IAMCCS Video Take Collector",
     "IAMCCS_ShotboardVideoEditor": "IAMCCS Shotboard Video Editor",
     "IAMCCS_CineInfo3": "IAMCCS CineInfo3",
     "IAMCCS_VideoHardConcat": "IAMCCS Video Hard Concat",
