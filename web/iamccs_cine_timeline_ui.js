@@ -1,8 +1,8 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-console.info("[IAMCCS V3] Stable node UI mode active. Shotboard audio duration floor build loaded.");
-const CINE_VERSION = "2026-06-23-v3-audio-duration-floor";
+console.info("[IAMCCS V3/V4] Stable Shotboard UI mode active. Multitimeline truth build loaded.");
+const CINE_VERSION = "2026-07-04-v3-multitimeline-truth";
 const SHOTBOARD_V3_RIGID_WIDTH = 1920;
 const SHOTBOARD_V3_OPEN_HEIGHT = 900;
 const SHOTBOARD_V3_COLLAPSED_HEIGHT = 660; // increased to accommodate global prompt always visible in collapsed mode
@@ -158,7 +158,11 @@ function nodeClassName(node) {
 }
 
 function isShotboardV3Class(klass) {
-    return klass === "IAMCCS_CineShotboardPlannerV3";
+    return klass === "IAMCCS_CineShotboardPlannerV3" || isShotboardV4Class(klass);
+}
+
+function isShotboardV4Class(klass) {
+    return klass === "IAMCCS_CineShotboardPlannerV4";
 }
 
 function getWidget(node, name) {
@@ -386,7 +390,7 @@ function healCineInfoImageBatchLink(node, state) {
 
 function traceLinkedCinePlanner(node) {
     const startInputs = ["timeline_data", "multi_input", "duration_seconds"];
-    const accepted = new Set(["IAMCCS_CineShotboardLite", "IAMCCS_CineShotboardPlannerPro", "IAMCCS_CineShotboardPlannerProV2", "IAMCCS_CineShotboardPlannerV3", "IAMCCS_CineShotboardPlannerProLegacy", "IAMCCS_CineShotboardTimelinePro", "IAMCCS_CineReferenceBoard"]);
+    const accepted = new Set(["IAMCCS_CineShotboardLite", "IAMCCS_CineShotboardPlannerPro", "IAMCCS_CineShotboardPlannerProV2", "IAMCCS_CineShotboardPlannerV3", "IAMCCS_CineShotboardPlannerV4", "IAMCCS_CineShotboardPlannerProLegacy", "IAMCCS_CineShotboardTimelinePro", "IAMCCS_CineReferenceBoard"]);
     for (const inputName of startInputs) {
         let current = getLinkedOriginNode(node, inputName);
         const visited = new Set();
@@ -1610,6 +1614,16 @@ function iamccsNameLookup(nameMap, value) {
     return hit ? hit[1] : "";
 }
 
+function boardIsMultiTimelinePackage(board) {
+    const markers = [
+        board?.kind,
+        board?.package?.kind,
+        board?.metadata?.package_kind,
+        board?.metadata?.schema,
+    ].map((value) => String(value || "").toLowerCase());
+    return markers.some((value) => value.includes("multi") && (value.includes("package") || value.includes("timeline")));
+}
+
 function collectActivePackageImagePaths(board) {
     const referencePaths = splitReferencePaths(board?.image_paths);
     const seen = new Set();
@@ -1642,6 +1656,49 @@ function collectActivePackageImagePaths(board) {
             add(rowPath);
             if (!rowPath) addFromRef(row.ref);
         }
+    }
+    if (boardIsMultiTimelinePackage(board)) {
+        const addFromReferenceList = (ref, refs = referencePaths) => {
+            const index = Math.round(Number(ref || 0)) - 1;
+            if (index >= 0 && index < refs.length) add(refs[index]);
+        };
+        const addPayload = (data, refs = referencePaths) => {
+            if (!data || typeof data !== "object") return;
+            const segments = Array.isArray(data?.segments) ? data.segments : [];
+            for (const seg of segments) {
+                if (!seg || typeof seg !== "object") continue;
+                const type = String(seg.type || "image");
+                if (type === "text" || type === "audio" || seg.textPlaceholder || seg.placeholder) continue;
+                const segPath = seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path;
+                add(segPath);
+                if (!segPath) addFromReferenceList(seg.ref, refs);
+            }
+            const rows = Array.isArray(data?.rows) ? data.rows : [];
+            for (const row of rows) {
+                if (!row || typeof row !== "object") continue;
+                if (row.use_guide === false || Number(row.force ?? row.strength ?? row.guideStrength ?? 0) <= 0) continue;
+                const rowPath = row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path;
+                add(rowPath);
+                if (!rowPath) addFromReferenceList(row.ref, refs);
+            }
+        };
+        const addMulti = (multi) => {
+            const visualTimelines = multi?.visualTimelines && typeof multi.visualTimelines === "object" ? multi.visualTimelines : {};
+            for (const visual of Object.values(visualTimelines)) {
+                const localRefs = splitReferencePaths(visual?.image_paths);
+                addPayload(visual, localRefs.length ? localRefs : referencePaths);
+            }
+        };
+        if (Array.isArray(board?.timelines)) {
+            for (const item of board.timelines) {
+                const timelineData = item?.timeline && typeof item.timeline === "object" ? item.timeline : item;
+                const localRefs = splitReferencePaths(item?.image_paths || timelineData?.image_paths);
+                addPayload(timelineData, localRefs.length ? localRefs : referencePaths);
+            }
+        }
+        addMulti(board?.multiGeneration);
+        addMulti(board?.timeline?.multiGeneration);
+        for (const data of parsedTimelineSourcesForBoard(board)) addMulti(data?.multiGeneration);
     }
     return paths;
 }
@@ -1831,7 +1888,7 @@ function rewritePackagedSegments(segments, pathMap, refMap = {}, originalReferen
     }
 }
 
-function rewritePackagedRows(rows, refMap = {}, originalReferencePaths = []) {
+function rewritePackagedRows(rows, refMap = {}, originalReferencePaths = [], pathMap = {}, nameMap = {}) {
     if (!Array.isArray(rows)) return;
     for (const row of rows) {
         if (!row || typeof row !== "object") continue;
@@ -1839,7 +1896,70 @@ function rewritePackagedRows(rows, refMap = {}, originalReferencePaths = []) {
         const explicitSource = String(row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path || "").trim();
         const refSource = sourcePathForRef(row.ref, originalReferencePaths);
         const nextRef = refMap[explicitSource] || refMap[refSource];
+        const nextPath = iamccsPathLookup(pathMap, explicitSource) || iamccsPathLookup(pathMap, refSource);
         if (nextRef) row.ref = nextRef;
+        if (nextPath) {
+            row.imageFile = nextPath;
+            row.path = nextPath;
+            row.imageTruthPath = nextPath;
+            row.imageTruthPinned = true;
+            row.imageTruthSource = "package_import_remap";
+            const nextName = iamccsNameLookup(nameMap, explicitSource) || iamccsNameLookup(nameMap, refSource) || iamccsPathBasename(nextPath);
+            if (nextName) {
+                row.imageTruthName = nextName;
+                row.imageName = nextName;
+            }
+            delete row.image_file;
+            delete row.image_truth_path;
+        }
+    }
+}
+
+function rewritePackagedMultiGeneration(container, pathMap, refMap = {}, originalReferencePaths = []) {
+    if (!container || typeof container !== "object") return;
+    const rewriteVisualMap = (visualTimelines) => {
+        if (!visualTimelines || typeof visualTimelines !== "object") return;
+        for (const visual of Object.values(visualTimelines)) {
+            if (!visual || typeof visual !== "object") continue;
+            const visualRefs = splitReferencePaths(visual.image_paths);
+            const refs = visualRefs.length ? visualRefs : originalReferencePaths;
+            if (visualRefs.length) {
+                visual.image_paths = visualRefs
+                    .map((path) => iamccsPathLookup(pathMap, path) || pathMap[path] || "")
+                    .filter(Boolean);
+                visual.images = visual.image_paths.map((path, index) => ({
+                    ref: index + 1,
+                    path,
+                    name: iamccsPathBasename(path) || `ref_${index + 1}`,
+                }));
+            }
+            rewritePackagedSegments(visual.segments, pathMap, refMap, refs);
+            rewritePackagedRows(visual.rows, refMap, refs, pathMap);
+        }
+    };
+    if (container.multiGeneration && typeof container.multiGeneration === "object") {
+        rewriteVisualMap(container.multiGeneration.visualTimelines);
+    }
+    rewriteVisualMap(container.visualTimelines);
+    if (Array.isArray(container.timelines)) {
+        for (const item of container.timelines) {
+            if (!item || typeof item !== "object") continue;
+            const timelineData = item.timeline && typeof item.timeline === "object" ? item.timeline : item;
+            const itemRefs = splitReferencePaths(item.image_paths || timelineData.image_paths);
+            const refs = itemRefs.length ? itemRefs : originalReferencePaths;
+            if (itemRefs.length) {
+                item.image_paths = itemRefs
+                    .map((path) => iamccsPathLookup(pathMap, path) || pathMap[path] || "")
+                    .filter(Boolean);
+                item.images = item.image_paths.map((path, index) => ({
+                    ref: index + 1,
+                    path,
+                    name: iamccsPathBasename(path) || `ref_${index + 1}`,
+                }));
+            }
+            rewritePackagedSegments(timelineData.segments, pathMap, refMap, refs);
+            rewritePackagedRows(timelineData.rows, refMap, refs, pathMap);
+        }
     }
 }
 
@@ -1867,11 +1987,13 @@ function rewriteBoardForPackage(board, orderedPaths, pathMap, manifestImages) {
         error: entry.error || undefined,
     }));
     rewritePackagedSegments(packagedBoard.segments, pathMap, refMap, originalReferencePaths);
-    rewritePackagedRows(packagedBoard.rows, refMap, originalReferencePaths);
+    rewritePackagedRows(packagedBoard.rows, refMap, originalReferencePaths, pathMap);
+    rewritePackagedMultiGeneration(packagedBoard, pathMap, refMap, originalReferencePaths);
     if (packagedBoard.timeline && typeof packagedBoard.timeline === "object") {
         if (packagedPaths.length) packagedBoard.timeline.image_paths = packagedPaths;
         rewritePackagedSegments(packagedBoard.timeline.segments, pathMap, refMap, originalReferencePaths);
-        rewritePackagedRows(packagedBoard.timeline.rows, refMap, originalReferencePaths);
+        rewritePackagedRows(packagedBoard.timeline.rows, refMap, originalReferencePaths, pathMap);
+        rewritePackagedMultiGeneration(packagedBoard.timeline, pathMap, refMap, originalReferencePaths);
     }
     if (typeof packagedBoard.timeline_data === "string" && packagedBoard.timeline_data.trim()) {
         try {
@@ -1879,7 +2001,8 @@ function rewriteBoardForPackage(board, orderedPaths, pathMap, manifestImages) {
             if (parsed && typeof parsed === "object") {
                 if (packagedPaths.length) parsed.image_paths = packagedPaths;
                 rewritePackagedSegments(parsed.segments, pathMap, refMap, originalReferencePaths);
-                rewritePackagedRows(parsed.rows, refMap, originalReferencePaths);
+                rewritePackagedRows(parsed.rows, refMap, originalReferencePaths, pathMap);
+                rewritePackagedMultiGeneration(parsed, pathMap, refMap, originalReferencePaths);
                 packagedBoard.timeline_data = JSON.stringify(parsed, null, 2);
             }
         } catch {}
@@ -6400,7 +6523,28 @@ function renderShotboardV3(node) {
         "img_compression",
     ].forEach((name) => hideWidget(getWidget(node, name)));
 
-    const purple = {
+    const isShotboardV4 = isShotboardV4Class(nodeClassName(node));
+    const purple = isShotboardV4 ? {
+        bg: "linear-gradient(126deg,rgba(32,77,54,.22) 0 1px,transparent 1px 34px),linear-gradient(32deg,transparent 0 52%,rgba(204,103,35,.18) 53%,transparent 56%),linear-gradient(145deg,#34383B 0%,#24282B 42%,#3A3B37 100%)",
+        panel: "linear-gradient(135deg,rgba(57,61,63,.96),rgba(37,41,43,.98) 54%,rgba(48,49,45,.96)),linear-gradient(32deg,transparent 0 62%,rgba(197,95,32,.10) 63%,transparent 66%)",
+        panel2: "linear-gradient(135deg,#45494A,#33383A 58%,#3C3D38)",
+        border: "#73806D",
+        borderSoft: "#4E5A50",
+        text: "#F4F0E7",
+        muted: "#D0D3C8",
+        image: "#526B65",
+        image2: "linear-gradient(180deg,#405A55,#2D3E3C 56%,#2A302F)",
+        textBlock: "linear-gradient(180deg,#4A4640,#343431)",
+        audio: "linear-gradient(180deg,#335943,#263D32)",
+        danger: "#B85B45",
+        button: "linear-gradient(145deg,#4A4E50,#34383A 58%,#3A3A35)",
+        buttonHover: "linear-gradient(145deg,#596061,#3F4748 58%,#48473E)",
+        play: "#D98332",
+        accent: "#2F724E",
+        warm: "#C96B2D",
+        valueBg: "#E8E2D6",
+        valueText: "#171B17",
+    } : {
         bg: "#1E2022",
         panel: "#2A2D30",
         panel2: "#34383C",
@@ -6462,7 +6606,7 @@ function renderShotboardV3(node) {
         "overflow-y:auto",
         "overflow-x:hidden",
         "scrollbar-gutter:stable",
-        `box-shadow:inset 0 1px 0 ${chrome.glow},0 0 0 1px rgba(0,0,0,.45)`,
+        `box-shadow:${isShotboardV4 ? "inset 0 1px 0 rgba(255,255,255,.13),inset 0 0 0 1px rgba(47,114,78,.12),0 0 0 1px rgba(0,0,0,.50),0 10px 28px rgba(0,0,0,.28)" : `inset 0 1px 0 ${chrome.glow},0 0 0 1px rgba(0,0,0,.45)`}`,
         "pointer-events:auto",
         "contain:layout paint style",
         "content-visibility:auto",
@@ -6525,17 +6669,17 @@ function renderShotboardV3(node) {
     let collapsed = Boolean(node.properties?.iamccs_v3_collapsed);
     let promptTextScale = Math.max(0.85, Math.min(1.55, Number(node.properties?.iamccs_v3_prompt_text_scale || 1)));
     const promptFontSize = (base) => `${Math.max(8, Math.round(Number(base || 10) * promptTextScale * 10) / 10)}px`;
-    const storedTimelineMeter = Number(node.properties?.iamccs_v3_timeline_meter_seconds);
-    const timelineMeterWasUserSet = Boolean(node.properties?.iamccs_v3_timeline_meter_user_set);
-    let timelineMeterSeconds = timelineMeterWasUserSet && Number.isFinite(storedTimelineMeter)
-        ? Math.max(0.5, storedTimelineMeter)
-        : Math.max(0.5, Number(durationWidget?.value || 20) || 20);
+    let timelineViewMode = String(node.properties?.iamccs_v3_timeline_view_mode || "fit") === "manual" ? "manual" : "fit";
+    let timelinePixelsPerSecond = Math.max(12, Math.min(900, Number(node.properties?.iamccs_v3_timeline_pixels_per_second || 0) || 80));
+    let timelineMeterSeconds = Math.max(0.5, Number(durationWidget?.value || 20) || 20);
     let selectedId = null;
     let timelineExtraH = 0; // extra px added by user timeline-height resize drag
     let _tlResizeDragStartY = null; // pointer Y at drag start
     let _tlResizeDragStartExtra = 0; // timelineExtraH value at drag start
     let pendingImageInsertFrame = null;
     let pendingImageTargetId = null;
+    let pendingVideoInsertFrame = null;
+    let pendingVideoTargetId = null;
     let timelineNotice = null;
     let timelineNoticeUntil = 0;
     let lastDefaultForce = Math.max(0, Math.min(1, Number(defaultForceWidget?.value || 0.25)));
@@ -6576,10 +6720,38 @@ function renderShotboardV3(node) {
         const parsed = Number(value);
         return Math.max(0, Math.min(1, Number.isFinite(parsed) ? parsed : Number(fallback) || 0));
     };
-    const clampTimelineMeterSeconds = (value = timelineMeterSeconds) => {
+    const clampTimelineMeterSeconds = (value = timelineMeterSeconds) => Math.max(0.5, Number(value) || getDuration());
+    const timelineViewportWidth = () => Math.max(1, Number(timelineViewport?.clientWidth || 0) || (SHOTBOARD_V3_RIGID_WIDTH - 32));
+    const setTimelineFitMode = (reason = "fit") => {
+        timelineViewMode = "fit";
+        timelineMeterSeconds = Math.max(0.5, getDuration());
+        node.properties = node.properties || {};
+        node.properties.iamccs_v3_timeline_view_mode = "fit";
+        node.properties.iamccs_v3_timeline_meter_seconds = timelineMeterSeconds;
+        node.properties.iamccs_v3_timeline_meter_user_set = false;
+        node.properties.iamccs_v3_timeline_pixels_per_second = timelinePixelsPerSecond;
+        if (reason) {
+            try { showTimelineNotice("Timeline fitted to current duration", "info"); } catch {}
+        }
+        return timelineMeterSeconds;
+    };
+    const setTimelineManualZoom = (multiplier = 1) => {
         const duration = Math.max(0.5, getDuration());
-        const rounded = Math.round((Number(value) || duration) * 2) / 2;
-        return Math.max(duration, Math.min(Math.max(duration * 3, duration + 0.5), rounded));
+        const viewportWidth = timelineViewportWidth();
+        const fitPps = viewportWidth / duration;
+        const base = timelineViewMode === "fit" ? fitPps : timelinePixelsPerSecond;
+        timelineViewMode = "manual";
+        timelinePixelsPerSecond = Math.max(fitPps, Math.min(900, Math.round((Number(base) || fitPps) * Number(multiplier || 1) * 100) / 100));
+        timelineMeterSeconds = duration;
+        node.properties = node.properties || {};
+        node.properties.iamccs_v3_timeline_view_mode = "manual";
+        node.properties.iamccs_v3_timeline_pixels_per_second = timelinePixelsPerSecond;
+        node.properties.iamccs_v3_timeline_meter_seconds = timelineMeterSeconds;
+        node.properties.iamccs_v3_timeline_meter_user_set = true;
+        return timelinePixelsPerSecond;
+    };
+    const fitTimelineMeterToDuration = () => {
+        return setTimelineFitMode("");
     };
     const defaultLen = () => Math.max(1, Math.round(getFps() * 3));
     const newId = (prefix) => `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
@@ -6664,11 +6836,25 @@ function renderShotboardV3(node) {
                 })),
             });
             if (data && typeof data === "object") {
+                const motionSegments = Array.isArray(data.motionSegments)
+                    ? data.motionSegments
+                    : Array.isArray(data.motionClips)
+                        ? data.motionClips
+                        : [];
                 return {
                     schema: data.schema || "iamccs.cine.filmmaker_timeline",
                     schema_version: Number(data.schema_version || 1),
                     segments: Array.isArray(data.segments) ? data.segments : [],
                     rows: Array.isArray(data.rows) ? data.rows : [],
+                    motionSegments,
+                    motionClips: motionSegments,
+                    motionTrackEnabled: data.motionTrackEnabled !== false,
+                    useCustomMotion: Boolean(data.useCustomMotion ?? data.use_custom_motion ?? motionSegments.length),
+                    use_custom_motion: Boolean(data.use_custom_motion ?? data.useCustomMotion ?? motionSegments.length),
+                    overrideAudio: Boolean(data.overrideAudio ?? data.override_audio),
+                    override_audio: Boolean(data.override_audio ?? data.overrideAudio),
+                    inpaintAudio: Boolean(data.inpaintAudio ?? data.inpaint_audio),
+                    inpaint_audio: Boolean(data.inpaint_audio ?? data.inpaintAudio),
                     audioSegments: Array.isArray(data.audioSegments) ? data.audioSegments : [],
                     audioTrackCount: Math.max(1, Number(data.audioTrackCount || 1)),
                     masterAudioGain: Math.max(0, Math.min(2, Number(data.masterAudioGain ?? data.master_audio_gain ?? 1) || 1)),
@@ -6685,12 +6871,82 @@ function renderShotboardV3(node) {
                 };
             }
         } catch {}
-        return { schema: "iamccs.cine.filmmaker_timeline", schema_version: 1, segments: [], rows: [], audioSegments: [], audioTrackCount: 1, duration_seconds: null, frame_rate: null, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
+        return { schema: "iamccs.cine.filmmaker_timeline", schema_version: 1, segments: [], rows: [], motionSegments: [], motionClips: [], motionTrackEnabled: isShotboardV4, useCustomMotion: false, use_custom_motion: false, overrideAudio: false, override_audio: false, inpaintAudio: false, inpaint_audio: false, audioSegments: [], audioTrackCount: 1, duration_seconds: null, frame_rate: null, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
     }
 
     let timeline = readTimeline();
+    const multiAudioTrackForTake = (seg, takeIndex = 1) => {
+        const fallback = Math.max(0, Math.round(Number(takeIndex || 1) - 1));
+        const candidates = [
+            seg?.shotboardTrack,
+            seg?.track_index,
+            seg?.trackIndex,
+            seg?.sourceTrackOriginal,
+            seg?.track,
+            seg?.sourceTrack,
+        ];
+        for (const value of candidates) {
+            const parsed = Number(value);
+            if (Number.isFinite(parsed) && parsed >= 0) return Math.max(0, Math.round(parsed));
+        }
+        return fallback;
+    };
+    const applyAudioTrackCountForSegments = (items) => {
+        const list = Array.isArray(items) ? items : [];
+        const maxTrack = list.reduce((max, seg) => {
+            const track = Math.max(0, Math.round(Number(seg?.track || 0) || 0));
+            return Math.max(max, track);
+        }, 0);
+        timeline.audioTrackCount = Math.max(1, maxTrack + 1);
+        timeline.audioBusMode = "timeline_audio";
+        timeline.onlyFirstTrack = false;
+    };
+    const repairInitialMultiAudioView = () => {
+        const multi = timeline?.multiGeneration && typeof timeline.multiGeneration === "object" ? timeline.multiGeneration : {};
+        const byTimeline = multi.audioByTimeline && typeof multi.audioByTimeline === "object" ? multi.audioByTimeline : {};
+        if (!Object.keys(byTimeline).length) return;
+        const rawTake = Number(String(multi.activeTimelineId || "").replace(/\D/g, "") || multi.activeTake || 1);
+        const take = Math.max(1, Math.round(Number.isFinite(rawTake) ? rawTake : 1));
+        const timelineId = `T${String(take).padStart(2, "0")}`;
+        const mapped = Array.isArray(byTimeline[timelineId])
+            ? byTimeline[timelineId]
+            : (Array.isArray(byTimeline[`T${take}`]) ? byTimeline[`T${take}`] : []);
+        if (!mapped.length) return;
+        timeline.audioSegments = mapped.map((seg) => {
+            const track = multiAudioTrackForTake(seg, take);
+            return {
+                ...(seg || {}),
+                timelineId,
+                multiTakeIndex: take,
+                multiGenerationClip: true,
+                shotboardActiveTakeAudio: true,
+                track,
+                sourceTrackOriginal: track,
+                start: Math.max(0, Math.round(Number(seg?.localStart ?? seg?.start ?? 0) || 0)),
+                localStart: Math.max(0, Math.round(Number(seg?.localStart ?? seg?.start ?? 0) || 0)),
+                length: Math.max(1, Math.round(Number(seg?.length ?? seg?.audioDurationFrames ?? 1) || 1)),
+                audioDurationFrames: Math.max(1, Math.round(Number(seg?.audioDurationFrames ?? seg?.length ?? 1) || 1)),
+            };
+        });
+        applyAudioTrackCountForSegments(timeline.audioSegments);
+        timeline.multiGeneration = {
+            ...multi,
+            enabled: true,
+            activeTake: take,
+            activeTimelineId: timelineId,
+            pluriPublishEnabled: multi.pluriPublishEnabled !== false,
+            audioByTimeline: byTimeline,
+        };
+    };
+    repairInitialMultiAudioView();
     node._iamccsCineShotboardV3LastTimelineText = String(timelineWidget?.value || "");
     const refPreviewBusters = new Map();
+    const videoPreviewSources = new Map();
+    const videoElementCache = new Map();
+    const videoFilmstripCanvasCache = new Map();
+    const videoThumbnailCache = new Map();
+    const videoThumbnailPromiseCache = new Map();
+    const videoStickyScrubPreview = new Map();
     const refPaths = () => getConnectedReferencePaths(node);
     const normalizeReferencePathKey = (value) => String(value || "").replace(/\\/g, "/").trim();
     const referencePathBasename = (value) => normalizeReferencePathKey(value).split("/").pop();
@@ -6825,7 +7081,9 @@ function renderShotboardV3(node) {
     const endOfVisualSegments = () => endOfSegments((timeline.segments || []).filter((seg) => String(seg.type || "image") !== "audio"));
     const segmentHasAudioMedia = (seg) => Boolean(seg && (String(seg.audioFile || "").trim() || String(seg.audioB64 || "").trim()));
     const endOfAudioSegments = () => endOfSegments((timeline.audioSegments || []).filter((seg) => segmentHasAudioMedia(seg) && !seg.placeholder));
-    const durationFloorFrames = () => Math.max(endOfVisualSegments(), endOfAudioSegments());
+    const segmentHasMotionMedia = (seg) => Boolean(seg && (String(seg.videoFile || seg.video_file || "").trim() || String(seg.videoB64 || seg.video_b64 || "").trim()));
+    const endOfMotionSegments = () => endOfSegments((timeline.motionSegments || []).filter((seg) => segmentHasMotionMedia(seg) && !seg.placeholder));
+    const durationFloorFrames = () => Math.max(endOfVisualSegments(), endOfAudioSegments(), isShotboardV4 ? endOfMotionSegments() : 0);
     const durationFloorSeconds = () => {
         const frames = durationFloorFrames();
         return frames > 0 ? Number((frames / getFps()).toFixed(3)) : 0;
@@ -6852,6 +7110,15 @@ function renderShotboardV3(node) {
             showTimelineNotice(`Duration locked to ${next.toFixed(3)}s because timeline audio/slots reach that point. Shorten or remove content before reducing duration.`, "warn");
         }
         console.log("[IAMCCS V3 DURATION TRUTH]", { nodeId: node?.id, reason, requested_duration_seconds: requested, duration_floor_seconds: floor, duration_seconds: next, fps: getFps() });
+    };
+    const setDurationSecondsDirect = (seconds, reason = "direct") => {
+        const next = Math.max(0.1, Number(seconds) || 0.1);
+        if (durationWidget) durationWidget.value = next;
+        setWidgetValue(node, "duration_seconds", next);
+        timeline.duration_seconds = next;
+        fitTimelineMeterToDuration();
+        durationValueControl?._iamccsSetValue?.(next);
+        console.log("[IAMCCS V3 DURATION TRUTH]", { nodeId: node?.id, reason, direct: true, duration_seconds: next, fps: getFps() });
     };
     const setFrameRateValue = (fps, reason = "manual") => {
         const next = Math.max(1, Math.round(Number(fps) || 24));
@@ -6890,9 +7157,29 @@ function renderShotboardV3(node) {
         const need = Math.max(1, Math.round(Number(requiredFrames || 1)));
         if (Math.round(getDuration() * fps) >= need) return false;
         const needSeconds = Number((need / fps).toFixed(3));
-        setDurationSeconds(needSeconds, "auto_expand_timeline_content");
-        showTimelineNotice(`Timeline duration auto-extended to ${needSeconds}s to keep the new slot inside the visible board.`);
-        return true;
+        showTimelineNotice(`Timeline duration is locked at ${getDuration().toFixed(3)}s. Set Duration to ${needSeconds}s or more to place content beyond the current end.`, "warn");
+        return false;
+    };
+    const fitTimelineContentToFrames = (maxFrames) => {
+        const total = Math.max(1, Math.round(Number(maxFrames || getTotalFrames()) || 1));
+        let changed = false;
+        const fitItems = (items, keepAudio = true) => (Array.isArray(items) ? items : []).map((item) => {
+            const next = item && typeof item === "object" ? { ...item } : item;
+            if (!next || typeof next !== "object") return next;
+            if (!keepAudio && String(next.type || "") === "audio") return next;
+            if (!Object.prototype.hasOwnProperty.call(next, "start") && !Object.prototype.hasOwnProperty.call(next, "length")) return next;
+            const start = Math.max(0, Math.min(total - 1, Math.round(Number(next.start || 0))));
+            const oldLength = Math.max(1, Math.round(Number(next.length || 1)));
+            const length = Math.max(1, Math.min(oldLength, total - start));
+            if (start !== Math.round(Number(next.start || 0)) || length !== oldLength) changed = true;
+            next.start = start;
+            next.length = length;
+            return next;
+        }).filter((item) => !item || typeof item !== "object" || Math.round(Number(item.start || 0)) < total);
+        timeline.segments = fitItems(timeline.segments, false);
+        timeline.rows = fitItems(timeline.rows, true);
+        timeline.motionSegments = fitItems(timeline.motionSegments, true);
+        return changed;
     };
     const followsDefaultForce = (seg, previousDefault) => {
         if (!seg || String(seg.type || "image") === "text") return false;
@@ -6927,6 +7214,19 @@ function renderShotboardV3(node) {
         seg.length = Math.max(1, Math.round(Number(seg.length || defaultLen())));
         seg.start = Math.max(0, Math.min(Math.round(Number(seg.start || 0)), Math.max(0, total - 1)));
         if (seg.start + seg.length > total) seg.length = Math.max(1, total - seg.start);
+        if (String(seg.type || "image") === "video") {
+            const videoDuration = Math.max(1, Math.round(Number(seg.videoDurationFrames || seg.video_duration_frames || seg.length || defaultLen())));
+            seg.videoDurationFrames = videoDuration;
+            seg.video_duration_frames = videoDuration;
+            seg.trimStart = Math.max(0, Math.min(videoDuration - 1, Math.round(Number(seg.trimStart || seg.trim_start || 0))));
+            seg.trim_start = seg.trimStart;
+            seg.length = Math.max(1, Math.min(seg.length, videoDuration - seg.trimStart, Math.max(1, total - seg.start)));
+            seg.videoFile = String(seg.videoFile || seg.video_file || seg.imageFile || seg.image_file || seg.path || "").trim();
+            seg.video_file = seg.videoFile;
+            seg.imageFile = seg.videoFile;
+            seg.image_file = seg.videoFile;
+            seg.path = seg.videoFile || seg.path || "";
+        }
         if (String(seg.type || "image") !== "text" && String(seg.type || "image") !== "audio") {
             const guideStrength = clampGuideStrength(seg.guideStrength ?? seg.guide_strength ?? seg.strength ?? seg.force ?? seg.motion_force ?? seg.imageLockStrength ?? seg.image_lock_strength ?? defaultForceWidget?.value ?? 0.25);
             seg.guideStrength = guideStrength;
@@ -6940,6 +7240,29 @@ function renderShotboardV3(node) {
             if (seg.defaultForceSource !== undefined) seg.defaultForceSource = clampGuideStrength(seg.defaultForceSource, guideStrength);
         }
         return seg;
+    };
+    const clampMotionSegment = (seg) => {
+        const total = getTotalFrames();
+        const next = seg || {};
+        next.type = String(next.type || "motion_video");
+        next.length = Math.max(1, Math.round(Number(next.length || defaultLen())));
+        next.start = Math.max(0, Math.min(Math.round(Number(next.start || 0)), Math.max(0, total - 1)));
+        if (next.start + next.length > total) next.length = Math.max(1, total - next.start);
+        const videoDuration = Math.max(1, Math.round(Number(next.videoDurationFrames || next.video_duration_frames || next.length || defaultLen())));
+        next.videoDurationFrames = videoDuration;
+        next.video_duration_frames = videoDuration;
+        next.trimStart = Math.max(0, Math.min(videoDuration - 1, Math.round(Number(next.trimStart || next.trim_start || 0))));
+        next.trim_start = next.trimStart;
+        next.length = Math.max(1, Math.min(next.length, videoDuration - next.trimStart));
+        next.videoStrength = Math.max(0, Math.min(2, Number(next.videoStrength ?? next.video_strength ?? next.strength ?? 1) || 0));
+        next.video_strength = next.videoStrength;
+        next.videoAttentionStrength = Math.max(0, Math.min(2, Number(next.videoAttentionStrength ?? next.video_attention_strength ?? next.attentionStrength ?? 1) || 0));
+        next.video_attention_strength = next.videoAttentionStrength;
+        next.controlMode = String(next.controlMode || next.control_mode || "ic_lora_video");
+        next.control_mode = next.controlMode;
+        next.icLoraRole = String(next.icLoraRole || next.ic_lora_role || "motion_reference");
+        next.ic_lora_role = next.icLoraRole;
+        return next;
     };
     const audioSegmentHasMedia = (seg) => Boolean(seg && (String(seg.audioFile || "").trim() || String(seg.audioB64 || "").trim()));
     const stripEmptyAudioForBoardExport = (payload) => {
@@ -7121,22 +7444,44 @@ function renderShotboardV3(node) {
             cursor = seg.start + seg.length;
         }
         timeline.audioSegments = (timeline.audioSegments || []).map((seg) => clampSegment(seg)).sort((a, b) => (Number(a.track || 0) - Number(b.track || 0)) || (Number(a.start || 0) - Number(b.start || 0)));
+        if (isShotboardV4) {
+            timeline.motionSegments = (timeline.motionSegments || []).map((seg) => clampMotionSegment(seg)).sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
+            timeline.motionClips = timeline.motionSegments;
+            timeline.motionTrackEnabled = timeline.motionTrackEnabled !== false;
+        }
     };
     const isGuideLockLinked = (_seg) => true;
     const segmentToRow = (seg, index) => {
         const fps = getFps();
         const isText = String(seg.type || "image") === "text";
+        const isVideo = String(seg.type || "image") === "video";
+        const startFrame = Math.max(0, Math.round(Number(seg.start || 0)));
+        const lengthFrames = Math.max(1, Math.round(Number(seg.length || 1)));
+        const endFrame = startFrame + lengthFrames;
         const truthPath = isText ? "" : String(seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path || "").trim();
+        const videoPath = isVideo ? videoPathForSegment(seg) : "";
         const singleStrength = isText ? 0 : Math.max(0, Math.min(1, Number(seg.guideStrength ?? seg.guide_strength ?? seg.force ?? seg.strength ?? defaultForceWidget?.value ?? 0.25)));
         return {
-            second: Number((Number(seg.start || 0) / fps).toFixed(3)),
-            frame: Math.round(Number(seg.start || 0)),
-            ref: Math.max(1, Number(seg.ref || index + 1)),
-            imageFile: truthPath,
-            path: truthPath,
+            type: isVideo ? "video" : isText ? "text" : "image",
+            second: Number((startFrame / fps).toFixed(3)),
+            frame: startFrame,
+            length: lengthFrames,
+            length_frames: lengthFrames,
+            duration_frames: lengthFrames,
+            duration_seconds: Number((lengthFrames / fps).toFixed(3)),
+            end_frame: endFrame,
+            end_second: Number((endFrame / fps).toFixed(3)),
+            ref: isVideo ? 0 : Math.max(1, Number(seg.ref || index + 1)),
+            imageFile: isVideo ? videoPath : truthPath,
+            image_file: isVideo ? videoPath : truthPath,
+            videoFile: videoPath,
+            video_file: videoPath,
+            path: isVideo ? videoPath : truthPath,
+            trimStart: isVideo ? Math.max(0, Math.round(Number(seg.trimStart || seg.trim_start || 0))) : undefined,
+            videoDurationFrames: isVideo ? Math.max(1, Math.round(Number(seg.videoDurationFrames || seg.video_duration_frames || seg.length || 1))) : undefined,
             imageTruthPath: truthPath,
-            imageTruthRef: Math.max(1, Number(seg.imageTruthRef || seg.ref || index + 1)),
-            imageTruthPinned: !isText,
+            imageTruthRef: isVideo ? 0 : Math.max(1, Number(seg.imageTruthRef || seg.ref || index + 1)),
+            imageTruthPinned: !isText && !isVideo,
             imageTruthSource: String(seg.imageTruthSource || "segment_to_row"),
             force: singleStrength,
             strength: singleStrength,
@@ -7307,11 +7652,9 @@ function renderShotboardV3(node) {
         timeline.duration_seconds = effectiveDurationSeconds;
         timeline.frame_rate = fps;
         const rows = timeline.segments.filter((seg) => !seg.placeholder).map(segmentToRow);
-        const promptRelayEnabled = rows.some((row) => {
-            const hasPrompt = row.use_prompt && String(row.relay_prompt || "").trim();
-            return hasPrompt;
-        });
         const audioHasMedia = (timeline.audioSegments || []).some((seg) => audioSegmentHasMedia(seg));
+        const motionHasMedia = isShotboardV4 && (timeline.motionSegments || []).some((seg) => segmentHasMotionMedia(seg) && !seg.placeholder);
+        const useCustomMotion = Boolean(isShotboardV4 && timeline.motionTrackEnabled !== false && (timeline.useCustomMotion || timeline.use_custom_motion || motionHasMedia));
         const durationFrames = getTotalFrames();
         const visual = (timeline.segments || [])
             .filter((seg) => String(seg.type || "image") !== "audio" && !seg.placeholder)
@@ -7334,14 +7677,11 @@ function renderShotboardV3(node) {
             pendingGap = 0;
             const prompt = String(seg.prompt ?? seg.local_prompt ?? seg.relay_prompt ?? "").trim();
             const promptActive = Boolean(prompt && seg.relay_manual_off !== true && seg.promptrelay_manual_off !== true);
-            if (promptActive) {
-                directorPrompts.push(prompt);
-                directorLengths.push(length);
-            } else if (directorLengths.length) {
-                directorLengths[directorLengths.length - 1] += length;
-            } else {
-                pendingGap += length;
-            }
+            // Keep the global prompt on its separate Relay input. An empty
+            // local slot must remain empty so the original Relay can preserve
+            // its position and apply the global context with its own logic.
+            directorPrompts.push(promptActive ? prompt : "");
+            directorLengths.push(length);
             cursor = start + Math.max(1, Math.round(Number(seg.length || 1)));
         }
         if (directorLengths.length && Math.min(cursor, durationFrames) < durationFrames) {
@@ -7364,7 +7704,7 @@ function renderShotboardV3(node) {
         const globalPromptOnly = Boolean(timeline.globalPromptOnly);
         const effectiveDirectorPrompts = globalPromptOnly ? [] : directorPrompts;
         const effectiveDirectorLengths = globalPromptOnly ? [] : directorLengths;
-        const effectivePromptRelayEnabled = globalPromptOnly ? false : promptRelayEnabled;
+        const effectivePromptRelayEnabled = globalPromptOnly ? false : directorLengths.length > 0;
         timeline.rows = rows;
         const timelineRows = rows;
         const multiGeneration = timeline.multiGeneration && typeof timeline.multiGeneration === "object"
@@ -7384,7 +7724,10 @@ function renderShotboardV3(node) {
                 frame_rate: fps,
                 image_paths: refPaths(),
                 segments: JSON.parse(JSON.stringify(timeline.segments || [])),
+                motionSegments: isShotboardV4 ? JSON.parse(JSON.stringify(timeline.motionSegments || [])) : [],
                 rows: JSON.parse(JSON.stringify(timelineRows)),
+                global_prompt: String(promptArea?.value || promptWidget?.value || ""),
+                prompt: String(promptArea?.value || promptWidget?.value || ""),
                 director_local_prompts: effectiveDirectorPrompts.join(" | "),
                 director_segment_lengths: effectiveDirectorLengths.join(","),
                 director_guide_strength: guideStrength,
@@ -7417,6 +7760,13 @@ function renderShotboardV3(node) {
             use_global_prompt_only: globalPromptOnly,
             promptrelay_enabled: effectivePromptRelayEnabled,
             use_custom_audio: audioHasMedia,
+            use_custom_motion: useCustomMotion,
+            useCustomMotion,
+            motionTrackEnabled: isShotboardV4 ? timeline.motionTrackEnabled !== false : undefined,
+            override_audio: isShotboardV4 ? Boolean(timeline.overrideAudio || timeline.override_audio) : undefined,
+            overrideAudio: isShotboardV4 ? Boolean(timeline.overrideAudio || timeline.override_audio) : undefined,
+            inpaint_audio: isShotboardV4 ? Boolean(timeline.inpaintAudio || timeline.inpaint_audio) : undefined,
+            inpaintAudio: isShotboardV4 ? Boolean(timeline.inpaintAudio || timeline.inpaint_audio) : undefined,
             audioSyncMode: String(timeline.audioSyncMode || "timeline_audio"),
             generationStrategy: String(timeline.generationStrategy || "single_timeline"),
             director_local_prompts: effectiveDirectorPrompts.join(" | "),
@@ -7444,6 +7794,8 @@ function renderShotboardV3(node) {
             masterAudioGain: Math.max(0, Math.min(2, Number(timeline.masterAudioGain ?? 1) || 1)),
             masterAudioNormalize: Boolean(timeline.masterAudioNormalize),
             segments: timeline.segments,
+            motionSegments: isShotboardV4 ? timeline.motionSegments : undefined,
+            motionClips: isShotboardV4 ? timeline.motionSegments : undefined,
             audioSegments: timeline.audioSegments,
             rows: timelineRows,
             multiGeneration,
@@ -7489,6 +7841,10 @@ function renderShotboardV3(node) {
         const nextRows = sourceRows.length
             ? sourceRows
             : reconciledSegments.filter((seg) => !seg?.placeholder).map(segmentToRow);
+        const importedMotionSegments = isShotboardV4
+            ? (Array.isArray(source.motionSegments) ? source.motionSegments : Array.isArray(source.motionClips) ? source.motionClips : timeline.motionSegments || [])
+                .map((seg) => clampMotionSegment({ ...(seg || {}), id: seg?.id || newId("mot") }))
+            : [];
         timeline = {
             ...timeline,
             ...source,
@@ -7496,6 +7852,15 @@ function renderShotboardV3(node) {
             schema_version: Math.max(2, Number(source.schema_version || timeline.schema_version || 2)),
             segments: reconciledSegments,
             rows: nextRows,
+            motionSegments: importedMotionSegments,
+            motionClips: importedMotionSegments,
+            motionTrackEnabled: isShotboardV4 ? source.motionTrackEnabled !== false : false,
+            useCustomMotion: Boolean(source.useCustomMotion ?? source.use_custom_motion ?? (Array.isArray(source.motionSegments) && source.motionSegments.length)),
+            use_custom_motion: Boolean(source.use_custom_motion ?? source.useCustomMotion ?? (Array.isArray(source.motionSegments) && source.motionSegments.length)),
+            overrideAudio: Boolean(source.overrideAudio ?? source.override_audio ?? timeline.overrideAudio),
+            override_audio: Boolean(source.override_audio ?? source.overrideAudio ?? timeline.override_audio),
+            inpaintAudio: Boolean(source.inpaintAudio ?? source.inpaint_audio ?? timeline.inpaintAudio),
+            inpaint_audio: Boolean(source.inpaint_audio ?? source.inpaintAudio ?? timeline.inpaint_audio),
             audioSegments: Array.isArray(source.audioSegments) ? source.audioSegments.map((seg) => ({ ...(seg || {}), id: seg?.id || newId("aud") })) : (timeline.audioSegments || []),
             audioTrackCount: Math.max(1, Number(source.audioTrackCount || timeline.audioTrackCount || 1)),
             audioSyncMode: String(source.audioSyncMode || timeline.audioSyncMode || "timeline_audio"),
@@ -7514,19 +7879,22 @@ function renderShotboardV3(node) {
     };
 
     if (!Array.isArray(timeline.segments)) timeline.segments = [];
+    if (isShotboardV4 && !Array.isArray(timeline.motionSegments)) timeline.motionSegments = [];
+    if (isShotboardV4) {
+        timeline.motionSegments = (timeline.motionSegments || []).map((seg) => clampMotionSegment({ ...(seg || {}), id: seg?.id || newId("mot") }));
+        timeline.motionClips = timeline.motionSegments;
+        if (timeline.motionTrackEnabled === undefined) timeline.motionTrackEnabled = true;
+    }
     const collapsedNodeHeight = () => {
         const tracks = Math.max(1, Math.round(Number(timeline.audioTrackCount || 1)));
-        return Math.max(SHOTBOARD_V3_COLLAPSED_HEIGHT, 450 + tracks * 90);
+        return Math.max(SHOTBOARD_V3_COLLAPSED_HEIGHT, 450 + tracks * 90 + (isShotboardV4 ? 118 : 0));
     };
     const currentNodeHeight = () => collapsed ? collapsedNodeHeight() : SHOTBOARD_V3_OPEN_HEIGHT;
 
     const head = document.createElement("div");
     head.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;";
-    const title = document.createElement("div");
-    title.textContent = "Cine Shotboard Planner V3";
-    title.style.cssText = `font-size:13px;font-weight:800;color:${purple.text};`;
     const topActions = document.createElement("div");
-    topActions.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;";
+    topActions.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;flex:1;";
     const v3ButtonColors = {
         normal: { bg: purple.button, hover: purple.buttonHover, border: purple.border, color: purple.text },
         teal: { bg: "linear-gradient(180deg,#2F686A,#22474A)", hover: "linear-gradient(180deg,#397A7D,#29565A)", border: "#77BFC2", color: "#F2FFFB" },
@@ -7540,6 +7908,21 @@ function renderShotboardV3(node) {
         gold: { bg: "linear-gradient(180deg,#80672D,#56451F)", hover: "linear-gradient(180deg,#957835,#654F24)", border: "#E1B94F", color: "#FFF7D5" },
         danger: { bg: "#6B302A", hover: "#8A3A32", border: purple.danger, color: purple.text },
     };
+    if (isShotboardV4) {
+        Object.assign(v3ButtonColors, {
+            normal: { bg: "linear-gradient(145deg,#4A4E50,#34383A 58%,#3A3A35)", hover: "linear-gradient(145deg,#596061,#3F4748 58%,#48473E)", border: "#6F7B6C", color: "#F4F0E7" },
+            teal: { bg: "linear-gradient(145deg,#315C48,#273F34 58%,#343A34)", hover: "linear-gradient(145deg,#3A6D55,#2D4C3E 58%,#3F473B)", border: "#78A17D", color: "#F2FFF6" },
+            amber: { bg: "linear-gradient(145deg,#765433,#4D3D2F 58%,#3A3A35)", hover: "linear-gradient(145deg,#8B613A,#5A4935 58%,#46463D)", border: "#D28A43", color: "#FFF3E4" },
+            blue: { bg: "linear-gradient(145deg,#465760,#343D42 58%,#343A38)", hover: "linear-gradient(145deg,#536872,#3F4C52 58%,#3E463F)", border: "#80928A", color: "#F1F5EE" },
+            violet: { bg: "linear-gradient(145deg,#56565A,#3D4144 58%,#3D3B36)", hover: "linear-gradient(145deg,#656568,#484F50 58%,#4A473E)", border: "#8A927F", color: "#F4F0E7" },
+            olive: { bg: "linear-gradient(145deg,#3D6148,#2D4335 58%,#333833)", hover: "linear-gradient(145deg,#497657,#354F3F 58%,#3D453A)", border: "#7EA36E", color: "#F4FFF0" },
+            slate: { bg: "linear-gradient(145deg,#575D5F,#3F4648 58%,#3D3D39)", hover: "linear-gradient(145deg,#666D6E,#4B5555 58%,#494940)", border: "#89918A", color: "#F6F4EC" },
+            sand: { bg: "linear-gradient(145deg,#6F5D45,#4A443A 58%,#3B3C37)", hover: "linear-gradient(145deg,#806C4F,#575044 58%,#46463E)", border: "#B59364", color: "#FFF4E2" },
+            green: { bg: "linear-gradient(145deg,#315D42,#253F31 58%,#333A34)", hover: "linear-gradient(145deg,#3A6D4E,#2D4C3B 58%,#3E463A)", border: "#7DA879", color: "#F2FFF6" },
+            gold: { bg: "linear-gradient(145deg,#875F31,#594632 58%,#3F3E38)", hover: "linear-gradient(145deg,#9C6D39,#684F37 58%,#4A493E)", border: "#D49345", color: "#FFF1DC" },
+            danger: { bg: "linear-gradient(145deg,#7B3F34,#56362F)", hover: "linear-gradient(145deg,#944B3C,#684035)", border: purple.danger, color: purple.text },
+        });
+    }
     const makeBtn = (label, tone = "normal") => {
         const btn = document.createElement("button");
         btn.type = "button";
@@ -7597,8 +7980,22 @@ function renderShotboardV3(node) {
             return fallback;
         }
     };
+    const clearTransientWaveformState = (seg) => {
+        if (!seg || typeof seg !== "object") return seg;
+        delete seg._iamccsWaveformFailedKey;
+        delete seg._iamccsWaveformFailedAt;
+        delete seg._iamccsWaveformLoadError;
+        delete seg.waveformCache;
+        delete seg.decodedWaveform;
+        return seg;
+    };
     const multiTimelineId = (takeIndex) => `T${String(Math.max(1, Math.round(Number(takeIndex) || 1))).padStart(2, "0")}`;
     const multiTimelineTakeFromId = (timelineId) => Math.max(1, Math.round(Number(String(timelineId || "T01").replace(/\D/g, "") || 1)));
+    const activeTakeFromMulti = (multi) => {
+        const fromTimelineId = String(multi?.activeTimelineId || "").trim();
+        if (fromTimelineId) return multiTimelineTakeFromId(fromTimelineId);
+        return Math.max(1, Math.round(Number(multi?.activeTake || 1) || 1));
+    };
     const multiTargetDurationSeconds = () => {
         const multi = timeline.multiGeneration && typeof timeline.multiGeneration === "object" ? timeline.multiGeneration : {};
         const chunk = Math.max(0, Number(multi.chunkSeconds || 0));
@@ -7659,6 +8056,8 @@ function renderShotboardV3(node) {
         image_paths: refPaths(),
         segments: cloneForMultiTimeline(timeline.segments || [], []),
         rows: cloneForMultiTimeline(timeline.rows || [], []),
+        global_prompt: String(promptArea?.value || promptWidget?.value || ""),
+        prompt: String(promptArea?.value || promptWidget?.value || ""),
         guide_strength: Number(defaultForceWidget?.value || 0.3),
     });
     const defaultVisualTimeline = (timelineId) => ({
@@ -7671,8 +8070,172 @@ function renderShotboardV3(node) {
         image_paths: [],
         segments: [],
         rows: [],
+        global_prompt: "",
+        prompt: "",
         guide_strength: Number(defaultForceWidget?.value || 0.3),
     });
+    const normalizeVisualTimelineMap = (map) => {
+        const output = {};
+        if (!map || typeof map !== "object") return output;
+        Object.entries(map).forEach(([key, value]) => {
+            const take = multiTimelineTakeFromId(value?.timeline_id || key);
+            const id = multiTimelineId(take);
+            output[id] = {
+                ...(value && typeof value === "object" ? cloneForMultiTimeline(value, {}) : {}),
+                timeline_id: id,
+            };
+        });
+        return output;
+    };
+    const imagePathSourceForSegment = (seg, referencePaths = refPaths()) => {
+        const explicit = String(seg?.imageTruthPath || seg?.image_truth_path || seg?.imageFile || seg?.image_file || seg?.path || "").trim();
+        if (explicit) return explicit;
+        const index = Math.round(Number(seg?.ref || 0)) - 1;
+        return index >= 0 && index < referencePaths.length ? String(referencePaths[index] || "").trim() : "";
+    };
+    const collectVisualTimelineImagePaths = (visual, fallbackPaths = refPaths()) => {
+        const localRefs = splitReferencePaths(visual?.image_paths);
+        const refs = localRefs.length ? localRefs : fallbackPaths;
+        const seen = new Set();
+        const paths = [];
+        const add = (value) => {
+            const clean = String(value || "").trim();
+            if (!clean || seen.has(clean)) return;
+            seen.add(clean);
+            paths.push(clean);
+        };
+        const segments = Array.isArray(visual?.segments) ? visual.segments : [];
+        for (const seg of segments) {
+            if (!seg || typeof seg !== "object") continue;
+            const type = String(seg.type || "image");
+            if (type === "text" || type === "audio" || seg.textPlaceholder || seg.placeholder) continue;
+            add(imagePathSourceForSegment(seg, refs));
+        }
+        const rows = Array.isArray(visual?.rows) ? visual.rows : [];
+        for (const row of rows) {
+            if (!row || typeof row !== "object") continue;
+            if (row.use_guide === false || Number(row.force ?? row.strength ?? row.guideStrength ?? 0) <= 0) continue;
+            add(imagePathSourceForSegment(row, refs));
+        }
+        return paths;
+    };
+    const buildMultiTimelinePackageBoard = (board, timelinePayload = {}) => {
+        const base = cloneJsonData(board || {});
+        const parsedTimeline = cloneJsonData(timelinePayload || {});
+        const multi = timeline.multiGeneration && typeof timeline.multiGeneration === "object"
+            ? cloneForMultiTimeline(timeline.multiGeneration, {})
+            : (parsedTimeline.multiGeneration && typeof parsedTimeline.multiGeneration === "object" ? cloneForMultiTimeline(parsedTimeline.multiGeneration, {}) : {});
+        const activeTake = activeTakeFromMulti(multi);
+        const activeTimelineId = multiTimelineId(activeTake);
+        const visualTimelines = normalizeVisualTimelineMap(multi.visualTimelines);
+        visualTimelines[activeTimelineId] = snapshotCurrentVisualTimeline(activeTimelineId);
+        const ids = Array.from(new Set([
+            ...(Array.isArray(multi.timelineIds) ? multi.timelineIds.map((id) => multiTimelineId(multiTimelineTakeFromId(id))) : []),
+            ...Object.keys(visualTimelines),
+            activeTimelineId,
+        ])).sort((a, b) => multiTimelineTakeFromId(a) - multiTimelineTakeFromId(b));
+        const allPaths = [];
+        const allSeen = new Set();
+        const addAllPath = (value) => {
+            const clean = String(value || "").trim();
+            if (!clean || allSeen.has(clean)) return;
+            allSeen.add(clean);
+            allPaths.push(clean);
+        };
+        const timelinePackages = ids.map((timelineId) => {
+            const take = multiTimelineTakeFromId(timelineId);
+            const visual = {
+                ...defaultVisualTimeline(timelineId),
+                ...(visualTimelines[timelineId] && typeof visualTimelines[timelineId] === "object" ? cloneForMultiTimeline(visualTimelines[timelineId], {}) : {}),
+                timeline_id: timelineId,
+                saved_at: new Date().toISOString(),
+            };
+            const localPaths = collectVisualTimelineImagePaths(visual, refPaths());
+            for (const path of localPaths) addAllPath(path);
+            const images = localPaths.map((path, index) => ({
+                ref: index + 1,
+                path,
+                name: String(path).split(/[\\/]/).pop() || `ref_${index + 1}`,
+            }));
+            visual.image_paths = localPaths;
+            visual.images = images;
+            visualTimelines[timelineId] = visual;
+            return {
+                timeline_id: timelineId,
+                take,
+                metadata: {
+                    schema: "iamccs.cine.shotboard.timeline.package_entry",
+                    schema_version: 1,
+                    saved_at: visual.saved_at,
+                    image_count: localPaths.length,
+                },
+                timeline: visual,
+                image_paths: localPaths,
+                images,
+            };
+        });
+        const nextMultiGeneration = {
+            ...multi,
+            enabled: true,
+            activeTake,
+            activeTimelineId,
+            timelineIds: ids,
+            visualTimelines,
+            exportedAt: new Date().toISOString(),
+        };
+        const activeTimeline = visualTimelines[activeTimelineId] || parsedTimeline;
+        const nextTimelinePayload = {
+            ...parsedTimeline,
+            ...activeTimeline,
+            multiGeneration: nextMultiGeneration,
+            image_paths: allPaths,
+            timelines: timelinePackages,
+        };
+        base.kind = "iamccs_cine_shotboard_multi_package";
+        base.metadata = {
+            ...(base.metadata || {}),
+            schema: "iamccs.cine.filmmaker_multi_board",
+            schema_version: 1,
+            package_kind: "multi_timeline_package",
+            saved_at: new Date().toISOString(),
+            timeline_count: timelinePackages.length,
+            active_timeline_id: activeTimelineId,
+            active_take: activeTake,
+        };
+        base.timeline = nextTimelinePayload;
+        base.timeline_data = JSON.stringify(nextTimelinePayload, null, 2);
+        base.multiGeneration = nextMultiGeneration;
+        base.visualTimelines = visualTimelines;
+        base.timelines = timelinePackages;
+        base.timeline_count = timelinePackages.length;
+        base.activeTimelineId = activeTimelineId;
+        base.activeTake = activeTake;
+        base.image_paths = allPaths;
+        base.images = allPaths.map((path, index) => ({
+            ref: index + 1,
+            path,
+            name: String(path).split(/[\\/]/).pop() || `ref_${index + 1}`,
+        }));
+        base.package = {
+            ...(base.package || {}),
+            kind: "multi_timeline_package",
+            includes_multi_timelines: true,
+            includes_images: true,
+            timeline_count: timelinePackages.length,
+        };
+        console.log("[IAMCCS V3 MULTI PACKAGE EXPORT]", {
+            nodeId: node?.id,
+            activeTimelineId,
+            timelines: timelinePackages.map((item) => ({
+                timeline_id: item.timeline_id,
+                segments: item.timeline?.segments?.length || 0,
+                rows: item.timeline?.rows?.length || 0,
+                images: item.image_paths.length,
+            })),
+            totalImages: allPaths.length,
+        });
+        return base;
+    };
     const multiAudioSegmentsForTake = (multi, takeIndex) => {
         const take = Math.max(1, Math.round(Number(takeIndex) || 1));
         const sourceTrackForTake = take - 1;
@@ -7682,6 +8245,32 @@ function renderShotboardV3(node) {
             const normalizedTake = Math.max(1, Math.round(Number(raw.replace(/\D/g, "")) || Number(fallbackTake) || 1));
             return multiTimelineId(normalizedTake);
         };
+        const byTimeline = multi?.audioByTimeline && typeof multi.audioByTimeline === "object" ? multi.audioByTimeline : {};
+        const mapped = Array.isArray(byTimeline[timelineId])
+            ? byTimeline[timelineId]
+            : (Array.isArray(byTimeline[`T${take}`]) ? byTimeline[`T${take}`] : []);
+        if (mapped.length) {
+            return mapped.map((seg) => {
+                const localStart = Number(seg?.localStart);
+                const next = cloneForMultiTimeline(seg, {});
+                const track = multiAudioTrackForTake(seg, take);
+                next.track = track;
+                next.start = Number.isFinite(localStart)
+                    ? Math.max(0, Math.round(localStart))
+                    : Math.max(0, Math.round(Number(next.start || 0)));
+                next.timelineId = timelineId;
+                next.multiTakeIndex = take;
+                next.shotboardActiveTakeAudio = true;
+                next.sourceTrackOriginal = track;
+                clearTransientWaveformState(next);
+                return next;
+            });
+        }
+        const hasAuthoritativeTimelineAudio = Boolean(multi?.pluriPublishEnabled)
+            && byTimeline
+            && typeof byTimeline === "object"
+            && Object.keys(byTimeline).length > 0;
+        if (hasAuthoritativeTimelineAudio) return [];
         const all = Array.isArray(multi?.audioSegmentsAll)
             ? multi.audioSegmentsAll
             : Array.isArray(multi?.allAudioSegments)
@@ -7710,7 +8299,8 @@ function renderShotboardV3(node) {
         return sourceMatches.map((seg) => {
             const localStart = Number(seg?.localStart);
             const next = cloneForMultiTimeline(seg, {});
-            next.track = 0;
+            const track = multiAudioTrackForTake(seg, take);
+            next.track = track;
             next.start = Number.isFinite(localStart)
                 ? Math.max(0, Math.round(localStart))
                 : (Boolean(seg?.multiGenerationClip) || /^T\d+/i.test(String(seg?.timelineId || ""))
@@ -7719,7 +8309,8 @@ function renderShotboardV3(node) {
             next.timelineId = timelineId;
             next.multiTakeIndex = take;
             next.shotboardActiveTakeAudio = true;
-            next.sourceTrackOriginal = asTrack(seg?.sourceTrackOriginal ?? seg?.track ?? sourceTrackForTake);
+            next.sourceTrackOriginal = track;
+            clearTransientWaveformState(next);
             return next;
         });
     };
@@ -7727,13 +8318,40 @@ function renderShotboardV3(node) {
         const sourceAll = Array.isArray(multi?.audioSegmentsAll)
             || Array.isArray(multi?.allAudioSegments)
             || Array.isArray(multi?.audioSegmentsAllSource)
-            || Array.isArray(multi?.sourceAudioSegmentsAll);
+            || Array.isArray(multi?.sourceAudioSegmentsAll)
+            || (multi?.audioByTimeline && typeof multi.audioByTimeline === "object");
         if (!sourceAll) return false;
         timeline.audioSegments = multiAudioSegmentsForTake(multi, takeIndex);
-        timeline.audioTrackCount = 1;
-        timeline.audioBusMode = "shotboard_only_first";
-        timeline.onlyFirstTrack = true;
+        applyAudioTrackCountForSegments(timeline.audioSegments);
         return true;
+    };
+    const multiAudioDurationSecondsForTake = (multi, takeIndex) => {
+        const fps = getFps();
+        const items = multiAudioSegmentsForTake(multi, takeIndex);
+        const endFrame = endOfSegments(items.filter((seg) => segmentHasAudioMedia(seg) && !seg.placeholder));
+        return endFrame > 0 ? Number((endFrame / fps).toFixed(3)) : 0;
+    };
+    const multiDurationSecondsForTake = (multi, takeIndex, visual = {}) => {
+        const take = Math.max(1, Math.round(Number(takeIndex) || 1));
+        const timelineId = multiTimelineId(take);
+        const durationByTimeline = multi?.durationByTimeline && typeof multi.durationByTimeline === "object" ? multi.durationByTimeline : {};
+        const timelineDurations = multi?.timelineDurations && typeof multi.timelineDurations === "object" ? multi.timelineDurations : {};
+        const candidates = [
+            durationByTimeline[timelineId],
+            durationByTimeline[`T${take}`],
+            timelineDurations[timelineId],
+            timelineDurations[`T${take}`],
+            multiAudioDurationSecondsForTake(multi, take),
+            visual?.duration_seconds,
+            visual?.durationSeconds,
+            visual?.duration,
+            multi?.chunkSeconds,
+        ];
+        for (const value of candidates) {
+            const parsed = positiveNumberOrNull(value);
+            if (parsed !== null) return parsed;
+        }
+        return multiTargetDurationSeconds();
     };
     const switchMultiTimeline = (takeIndex) => {
         const take = Math.max(1, Math.round(Number(takeIndex) || 1));
@@ -7741,18 +8359,27 @@ function renderShotboardV3(node) {
         const multi = timeline.multiGeneration && typeof timeline.multiGeneration === "object"
             ? cloneForMultiTimeline(timeline.multiGeneration, {})
             : {};
-        const currentId = String(multi.activeTimelineId || multiTimelineId(multi.activeTake || 1));
-        const visualTimelines = multi.visualTimelines && typeof multi.visualTimelines === "object"
-            ? cloneForMultiTimeline(multi.visualTimelines, {})
-            : {};
+        const currentTake = activeTakeFromMulti(multi);
+        const currentId = multiTimelineId(currentTake);
+        const visualTimelines = normalizeVisualTimelineMap(multi.visualTimelines);
         visualTimelines[currentId] = snapshotCurrentVisualTimeline(currentId);
         const selected = visualTimelines[nextId] || defaultVisualTimeline(nextId);
         visualTimelines[nextId] = selected;
+        const selectedPrompt = String(selected.global_prompt ?? selected.prompt ?? "");
+        if (promptArea) promptArea.value = selectedPrompt;
+        if (promptWidget) {
+            promptWidget.value = selectedPrompt;
+            try { promptWidget.callback?.(selectedPrompt); } catch {}
+        }
+        node._iamccsCineShotboardV3LastPromptText = selectedPrompt;
         timeline.segments = cloneForMultiTimeline(selected.segments || [], []);
         timeline.rows = cloneForMultiTimeline(selected.rows || [], []);
-        const selectedDuration = Math.max(0, Number(selected.duration_seconds || 0)) || multiTargetDurationSeconds();
-        if (durationWidget && selectedDuration > 0) durationWidget.value = Number(selectedDuration.toFixed(3));
         if (fpsWidget && Number(selected.frame_rate) > 0) fpsWidget.value = Number(selected.frame_rate);
+        const selectedDuration = multiDurationSecondsForTake(multi, take, selected);
+        if (selectedDuration > 0) {
+            setDurationSecondsDirect(Number(selectedDuration.toFixed(3)), `multi_switch_${nextId}`);
+            fitTimelineContentToFrames(getTotalFrames());
+        }
         timeline.generationStrategy = "multigeneration_manual_take";
         const nextMultiGeneration = {
             ...multi,
@@ -7768,6 +8395,29 @@ function renderShotboardV3(node) {
             updatedAt: new Date().toISOString(),
         };
         applyMultiAudioForTake(nextMultiGeneration, take);
+        if (selectedDuration > 0) {
+            fitTimelineContentToFrames(getTotalFrames());
+            visualTimelines[nextId] = snapshotCurrentVisualTimeline(nextId);
+            nextMultiGeneration.visualTimelines = visualTimelines;
+        }
+        try {
+            const summary = (timeline.segments || []).map((seg) => ({
+                start: Math.round(Number(seg?.start || 0)),
+                length: Math.round(Number(seg?.length || 0)),
+                ref: seg?.ref,
+                imageFile: seg?.imageFile || seg?.image_file || "",
+            }));
+            console.info("[IAMCCS V3 MULTI SWITCH]", {
+                nodeId: node?.id,
+                from: currentId,
+                to: nextId,
+                duration_seconds: getDuration(),
+                fps: getFps(),
+                segments: summary,
+                audio_segments: Array.isArray(timeline.audioSegments) ? timeline.audioSegments.length : 0,
+                global_prompt_chars: selectedPrompt.length,
+            });
+        } catch {}
         timeline.multiGeneration = nextMultiGeneration;
         setBridgeTake(take);
         writeTimeline({ force: true });
@@ -7775,18 +8425,94 @@ function renderShotboardV3(node) {
         draw();
         emitMultiTimelineReady(take, "switch");
     };
+    const duplicateActiveTimelineToNext = () => {
+        const multi = timeline.multiGeneration && typeof timeline.multiGeneration === "object"
+            ? cloneForMultiTimeline(timeline.multiGeneration, {})
+            : {};
+        const sourceTake = activeTakeFromMulti(multi);
+        const targetTake = Math.max(1, sourceTake + 1);
+        const sourceId = multiTimelineId(sourceTake);
+        const targetId = multiTimelineId(targetTake);
+        const visualTimelines = normalizeVisualTimelineMap(multi.visualTimelines);
+        visualTimelines[sourceId] = snapshotCurrentVisualTimeline(sourceId);
+        const stamp = Date.now().toString(36);
+        const source = cloneForMultiTimeline(visualTimelines[sourceId], defaultVisualTimeline(sourceId));
+        const remapList = (items, prefix) => (Array.isArray(items) ? items : []).map((item, index) => {
+            const next = cloneForMultiTimeline(item, {});
+            next.id = `${prefix}_${targetId.toLowerCase()}_${stamp}_${index + 1}`;
+            next.timelineId = targetId;
+            next.timeline_id = targetId;
+            next.multiTakeIndex = targetTake;
+            return next;
+        });
+        const duplicated = {
+            ...source,
+            schema: "iamccs.multigeneration.visual_timeline",
+            schema_version: 1,
+            timeline_id: targetId,
+            duplicated_from: sourceId,
+            duplicated_at: new Date().toISOString(),
+            saved_at: new Date().toISOString(),
+            duration_seconds: Number(source.duration_seconds || getDuration()),
+            frame_rate: Number(source.frame_rate || getFps()),
+            image_paths: cloneForMultiTimeline(source.image_paths || [], []),
+            segments: remapList(source.segments, "seg"),
+            rows: remapList(source.rows, "row"),
+            global_prompt: String(source.global_prompt ?? source.prompt ?? ""),
+            prompt: String(source.global_prompt ?? source.prompt ?? ""),
+            guide_strength: Number(source.guide_strength ?? defaultForceWidget?.value ?? 0.3),
+        };
+        visualTimelines[targetId] = duplicated;
+        timeline.multiGeneration = {
+            ...multi,
+            enabled: true,
+            activeTake: sourceTake,
+            activeTimelineId: sourceId,
+            timelineIds: Array.from(new Set([
+                ...(Array.isArray(multi.timelineIds) ? multi.timelineIds : []),
+                ...Object.keys(visualTimelines),
+                sourceId,
+                targetId,
+            ])).sort(),
+            visualTimelines,
+            updatedAt: new Date().toISOString(),
+            lastDuplicatedTimeline: { from: sourceId, to: targetId, at: new Date().toISOString() },
+        };
+        writeTimeline({ force: true });
+        console.info("[IAMCCS V3 MULTI DUPLICATE]", {
+            nodeId: node?.id,
+            from: sourceId,
+            to: targetId,
+            segments: duplicated.segments.length,
+            rows: duplicated.rows.length,
+            images: duplicated.image_paths.length,
+            duration_seconds: duplicated.duration_seconds,
+            global_prompt_chars: duplicated.global_prompt.length,
+        });
+        showTimelineNotice(`Duplicated ${sourceId} to ${targetId}.`, "info");
+        switchMultiTimeline(targetTake);
+    };
     if (!root._iamccsV3BridgeTimelineListener) {
         root._iamccsV3BridgeTimelineListener = true;
         window.addEventListener("iamccs:multigeneration-active-take", (event) => {
             const detail = event?.detail || {};
             if (detail.source === "shotboard") return;
-            const take = Math.max(1, Math.round(Number(detail.activeTake || String(detail.timelineId || "").replace(/\D/g, "") || 1)));
+            const take = Math.max(1, Math.round(Number(String(detail.timelineId || "").replace(/\D/g, "") || detail.activeTake || 1)));
             const multi = timeline.multiGeneration && typeof timeline.multiGeneration === "object" ? timeline.multiGeneration : {};
-            const currentTake = Math.max(1, Math.round(Number(multi.activeTake || multiTimelineTakeFromId(multi.activeTimelineId) || 1)));
+            const currentTake = activeTakeFromMulti(multi);
             if (take === currentTake) {
                 const updated = applyMultiAudioForTake(multi, take);
                 if (updated) {
-                    timeline.multiGeneration = { ...multi, activeTake: take, activeTimelineId: multiTimelineId(take), updatedAt: new Date().toISOString() };
+                    const visualTimelines = normalizeVisualTimelineMap(multi.visualTimelines);
+                    const timelineId = multiTimelineId(take);
+                    const selected = visualTimelines[timelineId] || {};
+                    const selectedDuration = multiDurationSecondsForTake(multi, take, selected);
+                    if (selectedDuration > 0) {
+                        setDurationSecondsDirect(Number(selectedDuration.toFixed(3)), `multi_audio_refresh_${timelineId}`);
+                        fitTimelineContentToFrames(getTotalFrames());
+                        visualTimelines[timelineId] = snapshotCurrentVisualTimeline(timelineId);
+                    }
+                    timeline.multiGeneration = { ...multi, visualTimelines, activeTake: take, activeTimelineId: timelineId, updatedAt: new Date().toISOString() };
                     writeTimeline({ force: true });
                     draw();
                     emitMultiTimelineReady(take, "same-take-audio-refresh");
@@ -7807,13 +8533,17 @@ function renderShotboardV3(node) {
             0
         );
         const maxTakes = Math.max(2, Math.min(12, Math.round(Number(maxWidget?.value || fixedWidget?.value || known || 5))));
-        const activeTake = Math.max(1, Math.min(maxTakes, Math.round(Number(multi.activeTake || multiTimelineTakeFromId(multi.activeTimelineId) || 1))));
+        const activeTake = Math.max(1, Math.min(maxTakes, activeTakeFromMulti(multi)));
         const wrap = document.createElement("div");
         wrap.title = "Switch real Shotboard visual timelines for staged multigeneration.";
         wrap.style.cssText = `display:flex;align-items:center;gap:4px;height:28px;padding:0 5px;border:1px solid ${purple.border};border-radius:5px;background:${purple.button};`;
         const label = document.createElement("span");
         label.textContent = "MULTI";
         label.style.cssText = `color:#fff1ba;font-size:9px;font-weight:950;`;
+        const globalChip = document.createElement("span");
+        globalChip.textContent = `GLOBAL T${String(activeTake).padStart(2, "0")}`;
+        globalChip.title = "The textarea below is the global prompt for the selected multigeneration timeline.";
+        globalChip.style.cssText = `height:18px;padding:0 5px;display:flex;align-items:center;border:1px solid ${purple.borderSoft};border-radius:4px;background:#211b12;color:#ffe7a8;font-size:8px;font-weight:950;letter-spacing:.02em;`;
         const select = document.createElement("select");
         select.style.cssText = `height:22px;min-width:112px;border:1px solid ${purple.border};border-radius:4px;background:${purple.valueBg};color:${purple.valueText};font-size:10px;font-weight:900;`;
         for (let i = 1; i <= maxTakes; i += 1) {
@@ -7829,7 +8559,17 @@ function renderShotboardV3(node) {
             event.stopPropagation();
             switchMultiTimeline(Number(select.value));
         };
-        wrap.append(label, select);
+        const duplicateNext = document.createElement("button");
+        duplicateNext.type = "button";
+        duplicateNext.textContent = "Copy -> Next";
+        duplicateNext.title = "Duplicate the current visual timeline, including images, prompts, boxes, rows, duration, FPS and force, into the next T timeline.";
+        duplicateNext.style.cssText = `height:22px;padding:0 7px;border:1px solid #d8a94f;border-radius:4px;background:#d6ad5b;color:#17130d;font-size:9px;font-weight:950;cursor:pointer;`;
+        duplicateNext.onclick = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            duplicateActiveTimelineToNext();
+        };
+        wrap.append(label, globalChip, select, duplicateNext);
         if (String(multi.durationWarning || "").trim()) {
             const warn = document.createElement("span");
             warn.textContent = "DURATION";
@@ -7892,21 +8632,21 @@ function renderShotboardV3(node) {
         const btn = document.createElement("button");
         btn.type = "button";
         btn.textContent = label;
-        btn.title = label === "-" ? "Compress timeline visually" : "Expand timeline visually";
-        btn.style.cssText = `width:24px;height:22px;border:1px solid ${purple.border};border-radius:4px;background:${purple.valueBg};color:${purple.valueText};font-size:14px;font-weight:900;cursor:pointer;`;
+        const isFit = label === "Fit";
+        btn.title = isFit ? "Fit entire board duration into the visible timeline" : (label === "-" ? "Zoom timeline out" : "Zoom timeline in");
+        btn.style.cssText = `${isFit ? "width:34px" : "width:24px"};height:22px;border:1px solid ${purple.border};border-radius:4px;background:${isFit ? purple.play : purple.valueBg};color:${isFit ? "#17130D" : purple.valueText};font-size:${isFit ? "10px" : "14px"};font-weight:900;cursor:pointer;`;
         btn.onclick = (event) => {
             event.preventDefault();
             event.stopPropagation();
-            const current = Number.isFinite(Number(timelineMeterSeconds)) ? Number(timelineMeterSeconds) : Math.max(0.5, getDuration());
-            timelineMeterSeconds = clampTimelineMeterSeconds(current + delta);
-            node.properties = node.properties || {};
-            node.properties.iamccs_v3_timeline_meter_seconds = timelineMeterSeconds;
-            node.properties.iamccs_v3_timeline_meter_user_set = true;
-            timelineNotice = label === "-" ? "Timeline meter compressed" : "Timeline meter expanded";
-            timelineNoticeUntil = Date.now() + 900;
+            if (isFit) {
+                setTimelineFitMode("button");
+                timelineViewport.scrollLeft = 0;
+            } else {
+                setTimelineManualZoom(label === "-" ? (1 / 1.22) : 1.22);
+                showTimelineNotice(label === "-" ? "Timeline zoom out" : "Timeline zoom in", "info");
+            }
             draw();
             requestAnimationFrame(() => {
-                timelineMeterSeconds = clampTimelineMeterSeconds(timelineMeterSeconds);
                 draw();
                 try { node.setDirtyCanvas?.(true, true); } catch {}
                 try { app.graph?.setDirtyCanvas?.(true, true); } catch {}
@@ -7916,10 +8656,12 @@ function renderShotboardV3(node) {
     };
     const timelineMeterReadout = document.createElement("span");
     timelineMeterReadout.style.cssText = `min-width:50px;text-align:center;color:${purple.muted};font-size:9px;font-weight:900;`;
-    timelineMeterWrap.append(timelineMeterButton("-", -0.5), timelineMeterReadout, timelineMeterButton("+", 0.5));
+    timelineMeterWrap.append(timelineMeterButton("-", -1), timelineMeterReadout, timelineMeterButton("+", 1), timelineMeterButton("Fit", 0));
     const multiTimelineControl = makeMultiTimelineControl();
     const addImageBtn = makeBtn("Add Image", "blue");
+    const addVideoBtn = isShotboardV4 ? makeBtn("Add Video", "amber") : null;
     const addTextBtn = makeBtn("Add Text", "violet");
+    const addIcLoraBtn = isShotboardV4 ? makeBtn("Add IC-LoRA", "teal") : null;
     const addAudioBtn = makeBtn("Add Audio", "olive");
     const addTrackBtn = makeBtn("Add Audio Track", "sand");
     const collapseBtn = makeBtn(collapsed ? "Show Boxes" : "Collapse Boxes", "slate");
@@ -7927,9 +8669,14 @@ function renderShotboardV3(node) {
     const importBoardBtn = makeBtn("Import Board", "violet");
     const saveBtn = makeBtn("Save Board", "green");
     const savePackageBtn = makeBtn("Save Package", "gold");
+    const saveMultiPackageBtn = makeBtn("Save Multi Pkg", "gold");
     const clearBtn = makeBtn("Clear Board", "danger");
-    topActions.append(logBtn, globalOnlyBtn, multiTimelineControl, promptSizeWrap, timelineMeterWrap, addImageBtn, addTextBtn, addAudioBtn, addTrackBtn, collapseBtn, openEditorBtn, importBoardBtn, saveBtn, savePackageBtn, clearBtn);
-    head.append(title, topActions);
+    topActions.append(logBtn, globalOnlyBtn, multiTimelineControl, promptSizeWrap, timelineMeterWrap, addImageBtn);
+    if (addVideoBtn) topActions.append(addVideoBtn);
+    topActions.append(addTextBtn);
+    if (addIcLoraBtn) topActions.append(addIcLoraBtn);
+    topActions.append(addAudioBtn, addTrackBtn, collapseBtn, openEditorBtn, importBoardBtn, saveBtn, savePackageBtn, saveMultiPackageBtn, clearBtn);
+    head.append(topActions);
     root.addEventListener("iamccs:cine-fullscreen", (event) => {
         openEditorBtn.textContent = event.detail?.open ? "Close Editor" : "Open Editor";
     });
@@ -8042,16 +8789,26 @@ function renderShotboardV3(node) {
     fileInput.accept = "image/*";
     fileInput.multiple = true;
     fileInput.style.display = "none";
+    const videoInput = document.createElement("input");
+    videoInput.type = "file";
+    videoInput.accept = "video/*";
+    videoInput.multiple = true;
+    videoInput.style.display = "none";
     const audioInput = document.createElement("input");
     audioInput.type = "file";
     audioInput.accept = "audio/*";
     audioInput.multiple = true;
     audioInput.style.display = "none";
+    const motionInput = document.createElement("input");
+    motionInput.type = "file";
+    motionInput.accept = "video/*";
+    motionInput.multiple = true;
+    motionInput.style.display = "none";
     const boardInput = document.createElement("input");
     boardInput.type = "file";
     boardInput.accept = "application/json,.json";
     boardInput.style.display = "none";
-    root.append(head, promptWrap, settings, timelineNotice, fileInput, audioInput, boardInput);
+    root.append(head, promptWrap, settings, timelineNotice, fileInput, videoInput, audioInput, motionInput, boardInput);
 
     const timelineViewport = document.createElement("div");
     timelineViewport.style.cssText = [
@@ -8070,29 +8827,35 @@ function renderShotboardV3(node) {
         "box-sizing:border-box",
     ].join(";");
     const frameRuler = document.createElement("div");
-    frameRuler.style.cssText = `height:28px;position:relative;border:1px solid ${purple.border};border-bottom:0;background:linear-gradient(180deg,#18323A 0%,#13272F 60%,#101D23 100%);border-radius:6px 6px 0 0;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.10);cursor:ew-resize;user-select:none;`;
+    frameRuler.style.cssText = `height:28px;position:relative;border:1px solid ${purple.border};border-bottom:0;background:${isShotboardV4 ? "linear-gradient(92deg,rgba(40,91,61,.24) 0 1px,transparent 1px 36px),linear-gradient(28deg,transparent 0 58%,rgba(209,112,42,.16) 59%,transparent 62%),linear-gradient(180deg,#454A4C 0%,#353A3C 60%,#272D2F 100%)" : "linear-gradient(180deg,#18323A 0%,#13272F 60%,#101D23 100%)"};border-radius:6px 6px 0 0;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.10);cursor:ew-resize;user-select:none;touch-action:none;`;
     const ruler = document.createElement("div");
-    ruler.style.cssText = `height:36px;position:relative;border:1px solid ${purple.border};border-bottom:0;background:linear-gradient(180deg,#3D3A36 0%,#2D2C2A 58%,#242423 100%);overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.10);cursor:ew-resize;user-select:none;`;
+    ruler.style.cssText = `height:36px;position:relative;border:1px solid ${purple.border};border-bottom:0;background:${isShotboardV4 ? "linear-gradient(104deg,rgba(31,77,53,.18) 0 1px,transparent 1px 44px),linear-gradient(31deg,transparent 0 64%,rgba(199,94,31,.14) 65%,transparent 68%),linear-gradient(180deg,#4A4D4B 0%,#393D3C 58%,#2A2D2C 100%)" : "linear-gradient(180deg,#3D3A36 0%,#2D2C2A 58%,#242423 100%)"};overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.10);cursor:ew-resize;user-select:none;touch-action:none;`;
     const timelineBox = document.createElement("div");
-    timelineBox.title = "Double click in the image timeline to import a reference at that frame.";
-    timelineBox.style.cssText = `position:relative;height:344px;border:1px solid ${purple.border};background:#242220;overflow:hidden;border-radius:0 0 6px 6px;margin-bottom:6px;box-shadow:inset 0 0 0 1px rgba(216,155,69,.08);`;
+    timelineBox.title = isShotboardV4 ? "Double click the main visual lane to add media; scrub the header or playbar to preview video." : "Double click in the image timeline to import a reference at that frame.";
+    timelineBox.style.cssText = `position:relative;height:344px;border:1px solid ${purple.border};background:${isShotboardV4 ? "linear-gradient(126deg,rgba(43,92,61,.13) 0 1px,transparent 1px 48px),linear-gradient(26deg,transparent 0 68%,rgba(205,98,31,.12) 69%,transparent 72%),linear-gradient(180deg,#303435,#25292A)" : "#242220"};overflow:hidden;border-radius:0 0 6px 6px;margin-bottom:6px;box-shadow:${isShotboardV4 ? "inset 0 0 0 1px rgba(47,114,78,.11),inset 0 1px 0 rgba(255,255,255,.07)" : "inset 0 0 0 1px rgba(216,155,69,.08)"};touch-action:none;`;
     const imageTrack = document.createElement("div");
     // imageTrack fills full width; endEdge marker overlays the last 4px so there is no dark gap at the right — By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
-    imageTrack.style.cssText = `position:absolute;left:0;right:0;top:0;height:254px;border-bottom:1px solid ${purple.borderSoft};background:linear-gradient(180deg,rgba(85,184,178,.14),rgba(36,34,32,.16));`;
+    imageTrack.style.cssText = `position:absolute;left:0;right:0;top:0;height:254px;border-bottom:1px solid ${purple.borderSoft};background:${isShotboardV4 ? "linear-gradient(112deg,rgba(35,86,58,.16) 0 1px,transparent 1px 42px),linear-gradient(25deg,transparent 0 58%,rgba(205,101,33,.12) 59%,transparent 61%),linear-gradient(180deg,rgba(68,72,72,.58),rgba(36,40,40,.30))" : "linear-gradient(180deg,rgba(85,184,178,.14),rgba(36,34,32,.16))"};`;
     const actionTrack = document.createElement("div");
     actionTrack.style.cssText = "display:none;";
+    const icLoraTrack = document.createElement("div");
+    icLoraTrack.style.cssText = "display:none;";
     const audioTracks = document.createElement("div");
     // audioTracks also fills full width matching imageTrack — By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     audioTracks.style.cssText = "position:absolute;left:0;right:0;top:254px;bottom:0;";
-    timelineBox.append(imageTrack, audioTracks);
+    timelineBox.append(imageTrack, icLoraTrack, audioTracks);
     // Timeline start/end edge markers — visible boundaries showing where the timeline begins and ends
     // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     const timelineStartEdge = document.createElement("div");
     timelineStartEdge.title = "Timeline start (frame 0)";
-    timelineStartEdge.style.cssText = "position:absolute;left:0;top:0;bottom:0;width:4px;background:linear-gradient(180deg,#40DCCE,rgba(64,220,206,.45));pointer-events:none;z-index:25;border-radius:2px 0 0 2px;box-shadow:2px 0 10px rgba(64,220,206,.5),0 0 0 1px rgba(64,220,206,.22);";
+    timelineStartEdge.style.cssText = isShotboardV4
+        ? "position:absolute;left:0;top:0;bottom:0;width:4px;background:linear-gradient(180deg,#4F9A61,rgba(47,114,78,.48));pointer-events:none;z-index:25;border-radius:2px 0 0 2px;box-shadow:2px 0 10px rgba(47,114,78,.48),0 0 0 1px rgba(47,114,78,.24);"
+        : "position:absolute;left:0;top:0;bottom:0;width:4px;background:linear-gradient(180deg,#40DCCE,rgba(64,220,206,.45));pointer-events:none;z-index:25;border-radius:2px 0 0 2px;box-shadow:2px 0 10px rgba(64,220,206,.5),0 0 0 1px rgba(64,220,206,.22);";
     const timelineEndEdge = document.createElement("div");
     timelineEndEdge.title = "Timeline end";
-    timelineEndEdge.style.cssText = "position:absolute;right:0;top:0;bottom:0;width:4px;background:linear-gradient(180deg,#E09040,rgba(224,144,64,.45));pointer-events:none;z-index:25;border-radius:0 2px 2px 0;box-shadow:-2px 0 10px rgba(224,144,64,.5),0 0 0 1px rgba(224,144,64,.22);";
+    timelineEndEdge.style.cssText = isShotboardV4
+        ? "position:absolute;right:0;top:0;bottom:0;width:4px;background:linear-gradient(180deg,#D98332,rgba(201,107,45,.48));pointer-events:none;z-index:25;border-radius:0 2px 2px 0;box-shadow:-2px 0 10px rgba(201,107,45,.48),0 0 0 1px rgba(201,107,45,.24);"
+        : "position:absolute;right:0;top:0;bottom:0;width:4px;background:linear-gradient(180deg,#E09040,rgba(224,144,64,.45));pointer-events:none;z-index:25;border-radius:0 2px 2px 0;box-shadow:-2px 0 10px rgba(224,144,64,.5),0 0 0 1px rgba(224,144,64,.22);";
     timelineBox.append(timelineStartEdge, timelineEndEdge);
     const playbar = document.createElement("div");
     playbar.style.cssText = `display:flex;align-items:center;gap:9px;margin-bottom:8px;padding:8px 9px;border:1px solid ${purple.border};background:linear-gradient(180deg,#3B3834 0%,#2B2926 100%);border-radius:7px;box-shadow:inset 0 1px 0 rgba(255,255,255,.10), inset 0 -10px 18px rgba(0,0,0,.18);`;
@@ -8171,16 +8934,42 @@ function renderShotboardV3(node) {
     let audioContext = null;
     let activeAudioNodes = [];
     let audioBufferCache = new Map();
+    const shotboardAudioOwnerId = `shotboard-v3:${node?.id ?? "node"}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    const shotboardAudioGuard = () => {
+        const key = "__IAMCCS_SHOTBOARD_AUDIO_PLAYBACK_GUARD__";
+        if (!window[key] || typeof window[key] !== "object") window[key] = { owners: new Map() };
+        if (!(window[key].owners instanceof Map)) window[key].owners = new Map();
+        return window[key];
+    };
+    const registerShotboardAudioOwner = () => {
+        shotboardAudioGuard().owners.set(shotboardAudioOwnerId, {
+            stop: () => stopPlayback("external_shotboard_play"),
+        });
+    };
+    const unregisterShotboardAudioOwner = () => {
+        try { shotboardAudioGuard().owners.delete(shotboardAudioOwnerId); } catch {}
+    };
+    const stopOtherShotboardAudioOwners = () => {
+        const owners = Array.from(shotboardAudioGuard().owners.entries());
+        for (const [ownerId, owner] of owners) {
+            if (ownerId === shotboardAudioOwnerId) continue;
+            try { owner?.stop?.(); } catch (err) { console.warn("[IAMCCS Cine Shotboard V3] could not stop sibling audio preview", err); }
+        }
+    };
     let waveformLoading = new Set();
     let playbackStartFrame = 0;
     let playbackStartTimestamp = 0;
     let dragState = null;
     let previewSegments = null;
+    let previewMotionSegments = null;
     let previewAudioSegments = null;
+    let pendingMotionInsertFrame = null;
     let pendingAudioInsertFrame = null;
     let pendingAudioTrack = 0;
+    let playheadScrubState = null;
     let drawRaf = 0;
     let transitionAppliedStamp = 0;
+    protectControlDrag(scrub);
     playbar.append(scrubStyle, playBtn, loopBtn, timeReadout, audioPlaybarControls, scrub);
     timelineCanvas.append(frameRuler, ruler, timelineBox);
     timelineViewport.appendChild(timelineCanvas);
@@ -8375,40 +9164,116 @@ function renderShotboardV3(node) {
         loopBtn.style.color = isLooping ? "#FFF2B8" : purple.text;
     }
 
-    function setPlayFrameFromMeterEvent(event, meterElement) {
+    function setPlayFrame(frame, options = {}) {
+        const next = Math.max(0, Math.min(getTotalFrames(), Math.round(Number(frame || 0))));
+        playFrame = next;
+        if (isPlaying) {
+            playbackStartFrame = playFrame;
+            playbackStartTimestamp = performance.now();
+            if (options.audio !== false) scheduleAudioFromFrame(playFrame);
+        }
+        if (options.draw === "schedule") scheduleDraw();
+        else draw();
+    }
+
+    function setPlayFrameFromMeterEvent(event, meterElement, options = {}) {
         if (!meterElement) return;
         event?.preventDefault?.();
         event?.stopPropagation?.();
         const rect = meterElement.getBoundingClientRect();
         const ratio = Math.max(0, Math.min(1, (Number(event.clientX || 0) - rect.left) / Math.max(1, rect.width)));
-        playFrame = Math.max(0, Math.min(getTotalFrames(), Math.round(ratio * getTotalFrames())));
-        if (isPlaying) {
-            playbackStartFrame = playFrame;
-            playbackStartTimestamp = performance.now();
-            scheduleAudioFromFrame(playFrame);
-        }
-        draw();
+        setPlayFrame(ratio * getTotalFrames(), { draw: options.draw || "schedule", audio: options.audio });
     }
 
     function bindMeterScrub(meterElement) {
         if (!meterElement || meterElement._iamccsMeterScrubBound) return;
         meterElement._iamccsMeterScrubBound = true;
         meterElement.addEventListener("pointerdown", (event) => {
-            setPlayFrameFromMeterEvent(event, meterElement);
-            const move = (moveEvent) => setPlayFrameFromMeterEvent(moveEvent, meterElement);
-            const finish = () => {
+            if (event.button != null && event.button !== 0) return;
+            playheadScrubState = {
+                pointerId: event.pointerId,
+                meterElement,
+                wasPlaying: Boolean(isPlaying),
+            };
+            try { meterElement.setPointerCapture?.(event.pointerId); } catch {}
+            setPlayFrameFromMeterEvent(event, meterElement, { draw: "schedule" });
+            const move = (moveEvent) => {
+                if (playheadScrubState?.pointerId !== moveEvent.pointerId && moveEvent.pointerId != null) return;
+                if (typeof moveEvent.buttons === "number" && moveEvent.buttons === 0) {
+                    finish(moveEvent);
+                    return;
+                }
+                setPlayFrameFromMeterEvent(moveEvent, meterElement, { draw: "schedule" });
+            };
+            const finish = (finishEvent) => {
+                finishEvent?.preventDefault?.();
+                finishEvent?.stopPropagation?.();
                 window.removeEventListener("pointermove", move, true);
                 window.removeEventListener("pointerup", finish, true);
                 window.removeEventListener("pointercancel", finish, true);
+                try {
+                    if (meterElement.hasPointerCapture?.(event.pointerId)) meterElement.releasePointerCapture(event.pointerId);
+                } catch {}
+                playheadScrubState = null;
+                draw();
             };
             window.addEventListener("pointermove", move, { passive: false, capture: true });
             window.addEventListener("pointerup", finish, { passive: false, capture: true });
             window.addEventListener("pointercancel", finish, { passive: false, capture: true });
+            meterElement.addEventListener("lostpointercapture", finish, { passive: false, capture: true, once: true });
         }, { passive: false, capture: true });
+    }
+
+    function bindTimelineSurfaceScrub(surfaceElement) {
+        if (!surfaceElement || surfaceElement._iamccsSurfaceScrubBound) return;
+        surfaceElement._iamccsSurfaceScrubBound = true;
+        const surfaceAllowed = (event) => {
+            if (event.button != null && event.button !== 0) return false;
+            if (event.target?.closest?.("button,input,select,textarea,[data-iamccs-audio-remove-button='1']")) return false;
+            if (event.target?.closest?.(".iamccs-v4-ic-lora-clip")) return false;
+            const block = event.target?.closest?.("[data-iamccs-timeline-block='1']");
+            if (block) return false;
+            return surfaceElement.contains(event.target);
+        };
+        surfaceElement.addEventListener("pointerdown", (event) => {
+            if (!surfaceAllowed(event)) return;
+            playheadScrubState = {
+                pointerId: event.pointerId,
+                meterElement: surfaceElement,
+                wasPlaying: Boolean(isPlaying),
+            };
+            try { surfaceElement.setPointerCapture?.(event.pointerId); } catch {}
+            setPlayFrameFromMeterEvent(event, surfaceElement, { draw: "schedule" });
+            const move = (moveEvent) => {
+                if (playheadScrubState?.pointerId !== moveEvent.pointerId && moveEvent.pointerId != null) return;
+                if (typeof moveEvent.buttons === "number" && moveEvent.buttons === 0) {
+                    finish(moveEvent);
+                    return;
+                }
+                setPlayFrameFromMeterEvent(moveEvent, surfaceElement, { draw: "schedule" });
+            };
+            const finish = (finishEvent) => {
+                finishEvent?.preventDefault?.();
+                finishEvent?.stopPropagation?.();
+                window.removeEventListener("pointermove", move, true);
+                window.removeEventListener("pointerup", finish, true);
+                window.removeEventListener("pointercancel", finish, true);
+                try {
+                    if (surfaceElement.hasPointerCapture?.(event.pointerId)) surfaceElement.releasePointerCapture(event.pointerId);
+                } catch {}
+                playheadScrubState = null;
+                draw();
+            };
+            window.addEventListener("pointermove", move, { passive: false, capture: true });
+            window.addEventListener("pointerup", finish, { passive: false, capture: true });
+            window.addEventListener("pointercancel", finish, { passive: false, capture: true });
+            surfaceElement.addEventListener("lostpointercapture", finish, { passive: false, capture: true, once: true });
+        }, { passive: false });
     }
 
     bindMeterScrub(frameRuler);
     bindMeterScrub(ruler);
+    bindTimelineSurfaceScrub(timelineBox);
 
     function audioPeakValue(raw) {
         if (raw && typeof raw === "object") {
@@ -8451,17 +9316,65 @@ function renderShotboardV3(node) {
         return peaks;
     }
 
+    const waveformCache = () => {
+        if (!window.IAMCCS_AUDIO_WAVEFORM_CACHE) window.IAMCCS_AUDIO_WAVEFORM_CACHE = new Map();
+        return window.IAMCCS_AUDIO_WAVEFORM_CACHE;
+    };
+    const audioSourceKeyForSegment = (seg) => {
+        if (!seg) return "";
+        const file = String(seg.audioFile || "").trim();
+        if (file) return `file:${seg.audioUploadType || seg.uploadType || seg.storageType || "input"}:${file}`;
+        const b64 = String(seg.audioB64 || "").trim();
+        if (b64) return `b64:${seg.id || "audio"}:${b64.length}:${b64.slice(0, 96)}`;
+        return `id:${seg.id || ""}`;
+    };
+    const rememberWaveformForSegment = (seg) => {
+        const peaks = Array.isArray(seg?.waveformPeaks) ? seg.waveformPeaks : [];
+        if (!seg || peaks.length <= 8) return null;
+        const item = {
+            waveformPeaks: JSON.parse(JSON.stringify(peaks)),
+            audioDurationFrames: Math.max(1, Math.round(Number(seg.audioDurationFrames || seg.length || 1))),
+            waveformReal: Boolean(seg.waveformReal !== false),
+            updatedAt: Date.now(),
+        };
+        waveformCache().set(audioSourceKeyForSegment(seg), item);
+        return item;
+    };
+    const hydrateWaveformFromCache = (seg) => {
+        if (!seg || !audioSegmentHasMedia(seg)) return false;
+        const cached = waveformCache().get(audioSourceKeyForSegment(seg));
+        if (!cached || !Array.isArray(cached.waveformPeaks) || cached.waveformPeaks.length <= 8) return false;
+        seg.waveformPeaks = JSON.parse(JSON.stringify(cached.waveformPeaks));
+        seg.audioDurationFrames = Math.max(1, Math.round(Number(seg.audioDurationFrames || cached.audioDurationFrames || seg.length || 1)));
+        seg.waveformReal = cached.waveformReal !== false;
+        seg._iamccsWaveformDecodedKey = audioSourceKeyForSegment(seg);
+        return true;
+    };
+
     function ensureSegmentWaveform(seg) {
         if (!seg || !audioSegmentHasMedia(seg) || waveformLoading.has(seg.id)) return;
-        const sourceKey = String(seg.audioFile || `${seg.id || "audio"}:${String(seg.audioB64 || "").slice(0, 64)}`);
+        const sourceKey = audioSourceKeyForSegment(seg);
         const hasDecodedPeaks = Array.isArray(seg.waveformPeaks)
             && seg.waveformPeaks.length > 8
             && seg.waveformPeaks.some((item) => item && typeof item === "object" && Number.isFinite(Number(item.min)) && Number.isFinite(Number(item.max)));
-        if (seg._iamccsWaveformDecodedKey === sourceKey && seg.waveformReal === true && hasDecodedPeaks) return;
-        if (seg._iamccsWaveformFailedKey === sourceKey) return;
+        if (hasDecodedPeaks) {
+            rememberWaveformForSegment(seg);
+            if (seg._iamccsWaveformDecodedKey === sourceKey && seg.waveformReal === true) return;
+            seg._iamccsWaveformDecodedKey = sourceKey;
+            seg.waveformReal = true;
+            return;
+        }
+        if (hydrateWaveformFromCache(seg)) return;
+        const failedAt = Number(seg._iamccsWaveformFailedAt || 0);
+        const canRetryFailedWaveform = !failedAt || (Date.now() - failedAt) > 1600;
+        if (seg._iamccsWaveformFailedKey === sourceKey && !canRetryFailedWaveform) return;
+        if (seg._iamccsWaveformFailedKey === sourceKey && canRetryFailedWaveform) {
+            delete seg._iamccsWaveformFailedKey;
+            delete seg._iamccsWaveformFailedAt;
+        }
         // Never trust serialized/fallback peaks as the visual truth. Decode the actual
         // current media source so the waveform remains useful while trimming.
-        seg.waveformReal = false;
+        if (!hasDecodedPeaks) seg.waveformReal = false;
         waveformLoading.add(seg.id);
         audioBufferForSegment(seg)
             .then((buffer) => {
@@ -8470,15 +9383,20 @@ function renderShotboardV3(node) {
                 seg.waveformPeaks = peaksFromBuffer(buffer, Math.max(900, Math.min(2200, Math.round(Number(buffer.duration || 0) * 70))));
                 seg.waveformReal = true;
                 seg._iamccsWaveformDecodedKey = sourceKey;
+                rememberWaveformForSegment(seg);
                 delete seg._iamccsWaveformFailedKey;
+                delete seg._iamccsWaveformFailedAt;
                 waveformLoading.delete(seg.id);
                 draw();
             })
             .catch((err) => {
                 waveformLoading.delete(seg.id);
-                seg.waveformPeaks = [];
-                seg.waveformReal = false;
+                if (!hasDecodedPeaks) {
+                    seg.waveformPeaks = [];
+                    seg.waveformReal = false;
+                }
                 seg._iamccsWaveformFailedKey = sourceKey;
+                seg._iamccsWaveformFailedAt = Date.now();
                 console.warn("[IAMCCS Cine Shotboard V3] waveform decode failed", seg?.audioFile || seg?.fileName || seg?.id, err);
             });
     }
@@ -8586,6 +9504,7 @@ function renderShotboardV3(node) {
     }
 
     function stopAudioNodes() {
+        scheduleAudioFromFrame._token = Symbol("audio_stop");
         activeAudioNodes.forEach((node) => {
             try { node.stop(); } catch {}
             try { node.disconnect(); } catch {}
@@ -8595,7 +9514,7 @@ function renderShotboardV3(node) {
 
     async function audioBufferForSegment(seg) {
         if (!seg || (!seg.audioFile && !seg.audioB64)) return null;
-        const key = seg.audioFile || `${seg.id || "audio"}:${String(seg.audioB64 || "").slice(0, 64)}`;
+        const key = audioSourceKeyForSegment(seg);
         if (audioBufferCache.has(key)) return audioBufferCache.get(key);
         const AudioContextClass = window.AudioContext || window.webkitAudioContext;
         if (!AudioContextClass) return null;
@@ -8636,6 +9555,7 @@ function renderShotboardV3(node) {
         if (!arrayBuffer) return null;
         const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
         audioBufferCache.set(key, decoded);
+        audioBufferCache.set(audioSourceKeyForSegment(seg), decoded);
         return decoded;
     }
 
@@ -8684,16 +9604,19 @@ function renderShotboardV3(node) {
         }
     }
 
-    function stopPlayback() {
+    function stopPlayback(reason = "manual") {
         isPlaying = false;
         if (playTimer) clearInterval(playTimer);
         playTimer = null;
         stopAudioNodes();
+        unregisterShotboardAudioOwner();
         updatePlayUI();
     }
 
     function startPlayback() {
         if (isPlaying) return;
+        stopOtherShotboardAudioOwners();
+        registerShotboardAudioOwner();
         isPlaying = true;
         if (playFrame >= getTotalFrames()) playFrame = 0;
         playbackStartFrame = playFrame;
@@ -8721,6 +9644,7 @@ function renderShotboardV3(node) {
 
     const cloneSegments = (items) => JSON.parse(JSON.stringify(items || []));
     const activeVisualSegments = () => previewSegments || timeline.segments || [];
+    const activeMotionSegments = () => previewMotionSegments || timeline.motionSegments || [];
     const activeAudioSegments = () => previewAudioSegments || timeline.audioSegments || [];
     const visibleAudioSegments = () => {
         const items = activeAudioSegments();
@@ -8823,8 +9747,8 @@ function renderShotboardV3(node) {
             });
     }
 
-    function timelineDragMetrics(isAudio = false) {
-        const target = isAudio ? audioTracks : imageTrack;
+    function timelineDragMetrics(trackType = "visual") {
+        const target = trackType === "audio" ? audioTracks : trackType === "motion" ? icLoraTrack : imageTrack;
         const rect = target?.getBoundingClientRect?.() || timelineBox.getBoundingClientRect();
         const widthPx = Math.max(1, Number(rect.width || timelineBox.getBoundingClientRect().width || 1));
         const leftPx = Number(rect.left || timelineBox.getBoundingClientRect().left || 0);
@@ -8897,6 +9821,8 @@ function renderShotboardV3(node) {
         const index = items.findIndex((item) => item.id === targetId);
         if (index < 0) return items;
         const target = items[index];
+        const targetOldStart = Math.max(0, Math.round(Number(target.start || 0)));
+        const targetOldTrim = Math.max(0, Math.round(Number(target.trimStart || target.trim_start || 0)));
         const minLength = 1;
         if (edge === "right") {
             const oldEnd = Number(target.start || 0) + Number(target.length || 1);
@@ -8928,8 +9854,15 @@ function renderShotboardV3(node) {
                 target.start = Math.round(nextStart);
                 target.length = Math.max(minLength, oldLength - (nextStart - oldStart));
             }
+            if (String(target.type || "") === "video") {
+                const videoDuration = Math.max(1, Math.round(Number(target.videoDurationFrames || target.video_duration_frames || target.length || 1)));
+                const trimDelta = Math.round(Number(target.start || 0) - targetOldStart);
+                target.trimStart = Math.max(0, Math.min(videoDuration - 1, targetOldTrim + trimDelta));
+                target.trim_start = target.trimStart;
+                target.length = Math.max(1, Math.min(Math.round(Number(target.length || 1)), videoDuration - target.trimStart));
+            }
         }
-        return normalizeTimelineDragPreviewItems(items, durationFrames);
+        return normalizeTimelineDragPreviewItems(items.map((item) => String(item.type || "") === "video" ? clampSegment(item) : item), durationFrames);
     }
 
     function audioDragPreview(initItems, targetId, dragDelta, edge, durationFrames) {
@@ -8963,9 +9896,44 @@ function renderShotboardV3(node) {
         return items;
     }
 
-    function startTimelineDrag(event, seg, isAudio = false, edge = "center") {
+    function motionDragPreview(initItems, targetId, dragDelta, edge, durationFrames) {
+        const items = cloneSegments(initItems).sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
+        const target = items.find((item) => item.id === targetId);
+        if (!target) return items;
+        const total = Math.max(1, Math.round(Number(durationFrames || getTotalFrames())));
+        const oldStart = Math.max(0, Math.round(Number(target.start || 0)));
+        const oldLength = Math.max(1, Math.round(Number(target.length || 1)));
+        const oldEnd = oldStart + oldLength;
+        const videoDuration = Math.max(1, Math.round(Number(target.videoDurationFrames || target.video_duration_frames || oldLength)));
+        const oldTrim = Math.max(0, Math.round(Number(target.trimStart || target.trim_start || 0)));
+        if (edge === "center") {
+            target.start = Math.max(0, Math.min(Math.round(oldStart + dragDelta), Math.max(0, total - oldLength)));
+            return items.map(clampMotionSegment);
+        }
+        if (edge === "right") {
+            const newEnd = Math.max(oldStart + 1, Math.min(total, oldEnd + dragDelta));
+            target.length = Math.max(1, Math.min(newEnd - oldStart, Math.max(1, videoDuration - oldTrim)));
+            return items.map(clampMotionSegment);
+        }
+        if (edge === "left") {
+            const newStart = Math.max(0, Math.min(oldStart + dragDelta, oldEnd - 1));
+            const trimDelta = newStart - oldStart;
+            const newTrim = Math.max(0, Math.min(videoDuration - 1, oldTrim + trimDelta));
+            target.start = newStart;
+            target.trimStart = newTrim;
+            target.trim_start = newTrim;
+            target.length = Math.max(1, Math.min(oldEnd - newStart, videoDuration - newTrim));
+            return items.map(clampMotionSegment);
+        }
+        return items.map(clampMotionSegment);
+    }
+
+    function startTimelineDrag(event, seg, track = false, edge = "center") {
         event.preventDefault();
         event.stopPropagation();
+        const trackType = track === "motion" ? "motion" : track ? "audio" : "visual";
+        const isAudio = trackType === "audio";
+        const isMotion = trackType === "motion";
         selectedId = seg.id;
         stopPlayback();
         const startX = event.clientX;
@@ -8973,10 +9941,12 @@ function renderShotboardV3(node) {
         dragState = {
             kind: edge,
             isAudio,
+            isMotion,
+            trackType,
             targetId: seg.id,
             startX,
             originalStart,
-            initial: cloneSegments(isAudio ? timeline.audioSegments : timeline.segments),
+            initial: cloneSegments(isAudio ? timeline.audioSegments : isMotion ? timeline.motionSegments : timeline.segments),
         };
         event.currentTarget?.setPointerCapture?.(event.pointerId);
         const captureTarget = event.currentTarget;
@@ -8990,18 +9960,43 @@ function renderShotboardV3(node) {
                 finishDrag();
                 return;
             }
-            const { widthPx, leftPx } = timelineDragMetrics(isAudio);
+            const { widthPx, leftPx } = timelineDragMetrics(trackType);
             const deltaFrames = Math.round(((move.clientX - startX) / widthPx) * getTotalFrames());
+            const pointerFrame = Math.max(0, Math.min(getTotalFrames(), Math.round(((move.clientX - leftPx) / Math.max(1, widthPx)) * getTotalFrames())));
             let next;
             if (isAudio) {
                 next = audioDragPreview(dragState.initial, dragState.targetId, deltaFrames, edge, getTotalFrames());
+            } else if (isMotion) {
+                next = motionDragPreview(dragState.initial, dragState.targetId, deltaFrames, edge, getTotalFrames());
             } else if (edge === "center") {
-                const pointerFrame = Math.round(((move.clientX - leftPx) / Math.max(1, widthPx)) * getTotalFrames());
                 next = applyCenterDragPhysics(dragState.initial, dragState.targetId, dragState.originalStart + deltaFrames, pointerFrame, getTotalFrames());
             } else {
                 next = edgeDragPreview(dragState.initial, dragState.targetId, deltaFrames, edge, getTotalFrames());
             }
+            if (!isAudio && Array.isArray(next)) {
+                const target = next.find((item) => item.id === dragState.targetId);
+                if (isTimelineVideoSegment(target) || (isMotion && segmentHasMotionMedia(target))) {
+                    const fps = Math.max(1, Number(getFps() || 24));
+                    const clipStart = Math.max(0, Math.round(Number(target.start || 0)));
+                    const clipLength = Math.max(1, Math.round(Number(target.length || 1)));
+                    const trimStart = Math.max(0, Math.round(Number(target.trimStart || target.trim_start || 0)));
+                    const localFrame = edge === "left"
+                        ? 0
+                        : edge === "right"
+                            ? Math.max(0, clipLength - 1)
+                            : Math.max(0, Math.min(clipLength - 1, pointerFrame - clipStart));
+                    const sourceFrame = trimStart + localFrame;
+                    dragState.videoScrubFrame = sourceFrame;
+                    dragState.videoScrubLocalFrame = localFrame;
+                    dragState.videoScrubSeconds = sourceFrame / fps;
+                } else {
+                    delete dragState.videoScrubFrame;
+                    delete dragState.videoScrubLocalFrame;
+                    delete dragState.videoScrubSeconds;
+                }
+            }
             if (isAudio) previewAudioSegments = next;
+            else if (isMotion) previewMotionSegments = next;
             else previewSegments = next;
             scheduleDraw();
         };
@@ -9019,14 +10014,24 @@ function renderShotboardV3(node) {
                 if (captureTarget?.hasPointerCapture?.(pointerId)) captureTarget.releasePointerCapture(pointerId);
             } catch (_) {}
             if (dragState) {
+                const stickyScrubId = String(dragState.targetId || "");
+                const stickyScrubSeconds = Number(dragState.videoScrubSeconds);
                 if (isAudio && previewAudioSegments) timeline.audioSegments = previewAudioSegments;
-                if (!isAudio && previewSegments) timeline.segments = normalizeTimelineDragPreviewItems(previewSegments, getTotalFrames());
+                if (isMotion && previewMotionSegments) timeline.motionSegments = previewMotionSegments.map(clampMotionSegment);
+                if (!isAudio && !isMotion && previewSegments) timeline.segments = normalizeTimelineDragPreviewItems(previewSegments, getTotalFrames());
+                if (stickyScrubId && Number.isFinite(stickyScrubSeconds)) {
+                    videoStickyScrubPreview.set(stickyScrubId, {
+                        seconds: Math.max(0, stickyScrubSeconds),
+                        until: Date.now() + 4500,
+                    });
+                }
             }
-            if (!isAudio) {
+            if (!isAudio && !isMotion) {
                 const moved = (timeline.segments || []).find((item) => item.id === seg.id);
                 if (moved && isActionBridgeRelaySegment(moved)) syncActionBridgeSourceFromRelay(moved);
             }
             previewSegments = null;
+            previewMotionSegments = null;
             previewAudioSegments = null;
             dragState = null;
             writeTimeline();
@@ -9278,6 +10283,14 @@ function renderShotboardV3(node) {
         fileInput.click();
     }
 
+    function openAppendVideoPicker(targetId = null, frame = null) {
+        if (!isShotboardV4) return;
+        pendingVideoTargetId = targetId;
+        pendingVideoInsertFrame = frame == null ? null : Math.max(0, Math.round(Number(frame || 0)));
+        try { videoInput.value = ""; } catch {}
+        videoInput.click();
+    }
+
     function textRelaySegment(start, length, label = "text_relay_slot") {
         return {
             id: newId("txt"),
@@ -9483,7 +10496,7 @@ function renderShotboardV3(node) {
         menu.className = "iamccs-v3-add-menu";
         const fallbackRect = root.getBoundingClientRect();
         const menuW = 180;
-        const menuH = 122;
+        const menuH = isShotboardV4 ? 156 : 122;
         const viewportW = Math.max(1, Number(window.innerWidth || document.documentElement?.clientWidth || fallbackRect.right || 1));
         const viewportH = Math.max(1, Number(window.innerHeight || document.documentElement?.clientHeight || fallbackRect.bottom || 1));
         const pointerX = Number.isFinite(Number(event?.clientX)) ? Number(event.clientX) : fallbackRect.left + 24;
@@ -9531,6 +10544,16 @@ function renderShotboardV3(node) {
             if (seg) splitImageSlotAfterSegment(seg);
             else openAppendImagePicker(targetId);
         });
+        if (isShotboardV4) {
+            addChoice("Video Clip", "Import an editorial video clip into the main visual lane", () => {
+                const frame = seg
+                    ? Number(seg.start || 0) + Number(seg.length || 0)
+                    : Number.isFinite(Number(event?._iamccsTimelineFrame))
+                        ? Number(event._iamccsTimelineFrame)
+                        : endOfSegments(activeVisualSegments());
+                openAppendVideoPicker(null, Math.max(0, Math.round(frame)));
+            });
+        }
         addChoice("Audio", "Import audio at this timeline position", () => {
             const frame = seg ? Number(seg.start || 0) + Number(seg.length || 0) : endOfSegments(activeVisualSegments());
             pendingAudioInsertFrame = Math.max(0, Math.round(frame));
@@ -9558,7 +10581,7 @@ function renderShotboardV3(node) {
         const left = cursor >= total ? Math.max(0, 100 - normalWidth) : (start / Math.max(1, total)) * 100;
         const block = document.createElement("button");
         block.type = "button";
-        block.title = "Add text, image or audio to the next empty slot";
+        block.title = isShotboardV4 ? "Add text, image, video or audio to the next empty slot" : "Add text, image or audio to the next empty slot";
         block.style.cssText = [
             "position:absolute",
             `left:${left}%`,
@@ -9595,15 +10618,407 @@ function renderShotboardV3(node) {
     }
 
     function computeTimelineCanvasWidth(segments = activeVisualSegments()) {
-        const viewportWidth = Math.max(1, Number(timelineViewport?.clientWidth || 0) || (SHOTBOARD_V3_RIGID_WIDTH - 32));
-        timelineMeterSeconds = clampTimelineMeterSeconds(timelineMeterSeconds);
+        const viewportWidth = timelineViewportWidth();
         const duration = Math.max(0.5, getDuration());
-        const halfSecondSteps = Math.round((timelineMeterSeconds - duration) * 2);
-        const visualScale = Math.max(0.2, Math.min(8, Math.pow(1.18, halfSecondSteps)));
-        const meterWidth = viewportWidth * visualScale;
-        const minUsableWidth = Math.min(viewportWidth, 360);
-        return Math.max(minUsableWidth, Math.min(12000, Math.ceil(meterWidth)));
+        timelineMeterSeconds = duration;
+        if (timelineViewMode !== "manual") return Math.max(360, Math.ceil(viewportWidth));
+        const fitPps = viewportWidth / duration;
+        timelinePixelsPerSecond = Math.max(fitPps, Math.min(900, Number(timelinePixelsPerSecond || fitPps)));
+        const meterWidth = duration * timelinePixelsPerSecond;
+        return Math.max(Math.ceil(viewportWidth), Math.min(12000, Math.ceil(meterWidth)));
     }
+
+    const isTimelineVideoSegment = (seg) => String(seg?.type || "") === "video" && !seg?.placeholder;
+    const videoPathForSegment = (seg) => String(seg?.videoFile || seg?.video_file || seg?.imageFile || seg?.image_file || seg?.path || "").trim();
+    const videoUrlForSegment = (seg) => {
+        const path = videoPathForSegment(seg);
+        if (!path) return "";
+        return videoPreviewSources.get(path) || previewUrlForPath(path);
+    };
+    const videoMediaKeyForSegment = (seg) => {
+        const path = videoPathForSegment(seg);
+        const url = videoUrlForSegment(seg);
+        return path && url ? `${path}|${url}` : "";
+    };
+    const videoDisplayName = (seg) => {
+        const raw = String(seg?.fileName || seg?.name || videoPathForSegment(seg) || "video").trim();
+        return raw.split(/[\\/]/).pop() || raw || "video";
+    };
+    const videoTargetSeconds = (seg) => {
+        const fps = getFps();
+        const dragSeconds = Number(dragState?.targetId === seg?.id ? dragState.videoScrubSeconds : NaN);
+        if (Number.isFinite(dragSeconds)) return Math.max(0, dragSeconds);
+        const sticky = videoStickyScrubPreview.get(String(seg?.id || ""));
+        if (sticky && Date.now() < Number(sticky.until || 0) && Number.isFinite(Number(sticky.seconds))) {
+            return Math.max(0, Number(sticky.seconds));
+        }
+        if (sticky) videoStickyScrubPreview.delete(String(seg?.id || ""));
+        const start = Math.max(0, Math.round(Number(seg.start || 0)));
+        const length = Math.max(1, Math.round(Number(seg.length || 1)));
+        const trimStart = Math.max(0, Math.round(Number(seg.trimStart || seg.trim_start || 0)));
+        const active = playFrame >= start && playFrame < start + length;
+        const localFrame = active ? Math.max(0, Math.round(Number(playFrame || 0) - start)) : 0;
+        const sourceFrame = trimStart + localFrame;
+        return Math.max(0, sourceFrame / Math.max(1, fps));
+    };
+    const assignVideoThumbnailsToSegments = (mediaKey, thumbs) => {
+        const items = [
+            ...(Array.isArray(timeline.segments) ? timeline.segments : []),
+            ...(Array.isArray(timeline.motionSegments) ? timeline.motionSegments : []),
+            ...(Array.isArray(previewSegments) ? previewSegments : []),
+            ...(Array.isArray(previewMotionSegments) ? previewMotionSegments : []),
+        ];
+        for (const item of items) {
+            if (videoMediaKeyForSegment(item) === mediaKey) {
+                item._iamccsVideoThumbnails = thumbs;
+                item._iamccsVideoThumbsPending = false;
+            }
+        }
+    };
+    const videoThumbnailsForSegment = (seg) => {
+        const mediaKey = videoMediaKeyForSegment(seg);
+        if (!mediaKey) return [];
+        if (videoThumbnailCache.has(mediaKey)) {
+            const cached = videoThumbnailCache.get(mediaKey);
+            return Array.isArray(cached) ? cached : [];
+        }
+        if (Array.isArray(seg?._iamccsVideoThumbnails) && seg._iamccsVideoThumbnails.length) return seg._iamccsVideoThumbnails;
+        return [];
+    };
+    const nearestVideoThumbnailForSegment = (seg, targetSeconds) => {
+        const thumbs = videoThumbnailsForSegment(seg);
+        if (!thumbs.length) return null;
+        let best = thumbs[0];
+        let bestDiff = Infinity;
+        const target = Number(targetSeconds || 0);
+        for (const thumb of thumbs) {
+            const diff = Math.abs(Number(thumb?.time || 0) - target);
+            if (diff < bestDiff) {
+                best = thumb;
+                bestDiff = diff;
+            }
+        }
+        return best?.img || null;
+    };
+    const seekVideoPreviewTo = (video, targetSeconds) => {
+        if (!video) return;
+        const target = Math.max(0, Number(targetSeconds || 0));
+        video._iamccsWantedTime = target;
+        if (video.readyState < 1) {
+            video._iamccsPendingSeek = target;
+            return;
+        }
+        const diff = Math.abs(Number(video.currentTime || 0) - target);
+        if (diff <= 0.025) {
+            video._iamccsPendingSeek = null;
+            video._iamccsFilmstripPaint?.();
+            return;
+        }
+        if (video.seeking) {
+            video._iamccsPendingSeek = target;
+            return;
+        }
+        try {
+            if (typeof video.fastSeek === "function") video.fastSeek(target);
+            else video.currentTime = target;
+        } catch {
+            try { video.currentTime = target; } catch {}
+        }
+    };
+    const ensureVideoThumbnails = (seg, video = null) => {
+        if (!seg || (!isTimelineVideoSegment(seg) && !segmentHasMotionMedia(seg))) return;
+        const mediaKey = videoMediaKeyForSegment(seg);
+        const url = videoUrlForSegment(seg);
+        if (!mediaKey || !url) return;
+        if (videoThumbnailCache.has(mediaKey)) {
+            const cached = videoThumbnailCache.get(mediaKey);
+            seg._iamccsVideoThumbnails = Array.isArray(cached) ? cached : [];
+            return;
+        }
+        if (videoThumbnailPromiseCache.has(mediaKey)) {
+            seg._iamccsVideoThumbsPending = true;
+            videoThumbnailPromiseCache.get(mediaKey).then((thumbs) => {
+                if (Array.isArray(thumbs)) {
+                    seg._iamccsVideoThumbnails = thumbs;
+                    seg._iamccsVideoThumbsPending = false;
+                    scheduleDraw();
+                }
+            }).catch(() => {
+                seg._iamccsVideoThumbsPending = false;
+            });
+            return;
+        }
+
+        seg._iamccsVideoThumbsPending = true;
+        const promise = (async () => {
+            const bgVideo = document.createElement("video");
+            bgVideo.crossOrigin = "anonymous";
+            bgVideo.muted = true;
+            bgVideo.playsInline = true;
+            bgVideo.preload = "auto";
+            bgVideo.src = url;
+            const thumbs = [];
+            try {
+                await new Promise((resolve) => {
+                    let done = false;
+                    const finish = () => {
+                        if (done) return;
+                        done = true;
+                        resolve();
+                    };
+                    bgVideo.onloadeddata = finish;
+                    bgVideo.onloadedmetadata = finish;
+                    bgVideo.onerror = finish;
+                    setTimeout(finish, 5000);
+                    if (bgVideo.readyState >= 2) finish();
+                });
+                const duration = Number(bgVideo.duration || 0);
+                if (!Number.isFinite(duration) || duration <= 0 || !bgVideo.videoWidth || !bgVideo.videoHeight) return thumbs;
+                const frameCount = Math.max(6, Math.min(24, Math.ceil(duration * 1.15)));
+                const maxH = 128;
+                const scale = Math.min(1, maxH / Math.max(1, Number(bgVideo.videoHeight || maxH)));
+                const canvas = document.createElement("canvas");
+                canvas.width = Math.max(1, Math.round(Number(bgVideo.videoWidth || 1) * scale));
+                canvas.height = Math.max(1, Math.round(Number(bgVideo.videoHeight || 1) * scale));
+                const ctx = canvas.getContext("2d");
+                if (!ctx) return thumbs;
+                for (let i = 0; i < frameCount; i += 1) {
+                    const ratio = frameCount <= 1 ? 0 : i / Math.max(1, frameCount - 1);
+                    const time = Math.min(Math.max(0, duration - 0.001), Math.max(0, ratio * duration));
+                    bgVideo.currentTime = time;
+                    await new Promise((resolve) => {
+                        let done = false;
+                        const finish = () => {
+                            if (done) return;
+                            done = true;
+                            resolve();
+                        };
+                        bgVideo.onseeked = finish;
+                        setTimeout(finish, 1200);
+                    });
+                    try {
+                        ctx.drawImage(bgVideo, 0, 0, canvas.width, canvas.height);
+                        const img = new Image();
+                        const src = canvas.toDataURL("image/jpeg", 0.62);
+                        await new Promise((resolve) => {
+                            img.onload = resolve;
+                            img.onerror = resolve;
+                            img.src = src;
+                        });
+                        thumbs.push({ time, img });
+                        videoThumbnailCache.set(mediaKey, thumbs.slice());
+                        assignVideoThumbnailsToSegments(mediaKey, thumbs.slice());
+                        video?._iamccsFilmstripPaint?.();
+                    } catch {}
+                }
+                return thumbs;
+            } finally {
+                try {
+                    bgVideo.pause();
+                    bgVideo.onloadeddata = null;
+                    bgVideo.onloadedmetadata = null;
+                    bgVideo.onerror = null;
+                    bgVideo.onseeked = null;
+                    bgVideo.removeAttribute("src");
+                    bgVideo.load();
+                } catch {}
+            }
+        })();
+        videoThumbnailPromiseCache.set(mediaKey, promise);
+        promise.then((thumbs) => {
+            const cleanThumbs = Array.isArray(thumbs) ? thumbs : [];
+            videoThumbnailCache.set(mediaKey, cleanThumbs);
+            assignVideoThumbnailsToSegments(mediaKey, cleanThumbs);
+        }).catch(() => {
+            assignVideoThumbnailsToSegments(mediaKey, []);
+        }).finally(() => {
+            videoThumbnailPromiseCache.delete(mediaKey);
+            scheduleDraw();
+        });
+    };
+    const videoElementForSegment = (seg) => {
+        const path = videoPathForSegment(seg);
+        const url = videoUrlForSegment(seg);
+        if (!path || !url) return null;
+        const cacheKey = `${String(seg?.id || "clip")}|${path}|${url}`;
+        let video = videoElementCache.get(cacheKey);
+        if (!video) {
+            video = document.createElement("video");
+            video.preload = "auto";
+            video.muted = true;
+            video.loop = false;
+            video.playsInline = true;
+            video.controls = false;
+            video.disablePictureInPicture = true;
+            video.crossOrigin = "anonymous";
+            video.src = url;
+            video.dataset.iamccsVideoPreviewKey = cacheKey;
+            video.style.cssText = "position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;";
+            const settlePendingSeek = () => {
+                video._iamccsFilmstripPaint?.();
+                const pending = Number(video._iamccsPendingSeek);
+                video._iamccsPendingSeek = null;
+                if (Number.isFinite(pending) && Math.abs(Number(video.currentTime || 0) - pending) > 0.025) {
+                    requestAnimationFrame(() => seekVideoPreviewTo(video, pending));
+                }
+            };
+            video.addEventListener("loadedmetadata", settlePendingSeek, { passive: true });
+            video.addEventListener("loadeddata", settlePendingSeek, { passive: true });
+            video.addEventListener("seeked", settlePendingSeek, { passive: true });
+            video.addEventListener("timeupdate", () => video._iamccsFilmstripPaint?.(), { passive: true });
+            videoElementCache.set(cacheKey, video);
+        }
+        return video;
+    };
+    const syncVideoPreviewElement = (video, seg) => {
+        if (!video || !seg) return;
+        const target = videoTargetSeconds(seg);
+        video.muted = true;
+        video.playsInline = true;
+        ensureVideoThumbnails(seg, video);
+        if (video.readyState >= 1) seekVideoPreviewTo(video, target);
+        else video._iamccsPendingSeek = target;
+        if (isPlaying && playFrame >= Number(seg.start || 0) && playFrame < Number(seg.start || 0) + Number(seg.length || 1)) {
+            try { video.playbackRate = Math.max(0.05, Number(getFps() || 24) / Math.max(1, Number(seg.sourceFps || seg.source_fps || getFps() || 24))); } catch {}
+            video.play?.().catch?.(() => {});
+        } else {
+            try { video.pause(); } catch {}
+        }
+    };
+    const videoFilmstripCanvasForSegment = (seg) => {
+        const path = videoPathForSegment(seg);
+        const url = videoUrlForSegment(seg);
+        const cacheKey = `${String(seg?.id || "clip")}|${path}|${url}|filmstrip`;
+        let canvas = videoFilmstripCanvasCache.get(cacheKey);
+        if (!canvas) {
+            canvas = document.createElement("canvas");
+            canvas.dataset.iamccsVideoFilmstripKey = cacheKey;
+            canvas.style.cssText = [
+                "position:absolute",
+                "left:0",
+                "top:0",
+                "width:100%",
+                "height:100%",
+                "display:block",
+                "z-index:1",
+                "background:#061526",
+                "pointer-events:none",
+            ].join(";");
+            videoFilmstripCanvasCache.set(cacheKey, canvas);
+        }
+        return canvas;
+    };
+    const videoAspectForFilmstrip = (seg, video) => {
+        const fromSeg = Number(seg?.sourceWidth || seg?.source_width || 0) / Math.max(1, Number(seg?.sourceHeight || seg?.source_height || 0));
+        if (Number.isFinite(fromSeg) && fromSeg > 0.1) return fromSeg;
+        const fromVideo = Number(video?.videoWidth || 0) / Math.max(1, Number(video?.videoHeight || 0));
+        return Number.isFinite(fromVideo) && fromVideo > 0.1 ? fromVideo : 16 / 9;
+    };
+    const drawVideoFilmstripBands = (ctx, cssW, cssH, tileW, bandW) => {
+        const topShade = ctx.createLinearGradient(0, 0, 0, cssH);
+        topShade.addColorStop(0, "rgba(0,0,0,.32)");
+        topShade.addColorStop(0.22, "rgba(0,0,0,0)");
+        topShade.addColorStop(0.78, "rgba(0,0,0,0)");
+        topShade.addColorStop(1, "rgba(0,0,0,.36)");
+        ctx.fillStyle = topShade;
+        ctx.fillRect(0, 0, cssW, cssH);
+        for (let x = 0; x <= cssW + tileW; x += tileW) {
+            const bx = Math.round(x - bandW / 2);
+            ctx.fillStyle = "rgba(0,0,0,.92)";
+            ctx.fillRect(bx, 0, bandW, cssH);
+            ctx.fillStyle = "rgba(128,174,191,.16)";
+            ctx.fillRect(bx + Math.max(1, bandW - 2), 0, 1, cssH);
+            ctx.fillStyle = "rgba(255,159,74,.12)";
+            ctx.fillRect(bx, 0, 1, cssH);
+            const holeW = Math.max(2, Math.round(bandW * 0.42));
+            const holeH = Math.max(3, Math.round(cssH * 0.055));
+            const holeX = bx + Math.max(1, Math.round((bandW - holeW) / 2));
+            ctx.fillStyle = "rgba(170,202,214,.18)";
+            for (let y = 8; y < cssH - holeH - 4; y += Math.max(12, Math.round(cssH * 0.18))) {
+                ctx.fillRect(holeX, y, holeW, holeH);
+            }
+        }
+        ctx.fillStyle = "rgba(0,0,0,.72)";
+        ctx.fillRect(0, 0, cssW, 2);
+        ctx.fillRect(0, Math.max(0, cssH - 2), cssW, 2);
+    };
+    const paintVideoFilmstripCanvas = (canvas, video, seg) => {
+        if (!canvas) return;
+        const parentRect = canvas.parentElement?.getBoundingClientRect?.();
+        const rect = canvas.getBoundingClientRect?.();
+        const cssW = Math.max(1, Math.round(Number(rect?.width || parentRect?.width || 1)));
+        const cssH = Math.max(1, Math.round(Number(rect?.height || parentRect?.height || 1)));
+        const dpr = Math.max(1, Math.min(2, Number(window.devicePixelRatio || 1)));
+        const backingW = Math.max(1, Math.round(cssW * dpr));
+        const backingH = Math.max(1, Math.round(cssH * dpr));
+        if (canvas.width !== backingW || canvas.height !== backingH) {
+            canvas.width = backingW;
+            canvas.height = backingH;
+        }
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        const bg = ctx.createLinearGradient(0, 0, 0, cssH);
+        bg.addColorStop(0, "#0B2945");
+        bg.addColorStop(0.55, "#061A2E");
+        bg.addColorStop(1, "#030C17");
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, cssW, cssH);
+        const aspect = videoAspectForFilmstrip(seg, video);
+        const tileW = Math.max(28, Math.round(cssH * aspect));
+        const bandW = Math.max(5, Math.min(12, Math.round(cssH * 0.07)));
+        const targetSeconds = videoTargetSeconds(seg);
+        const liveReady = Boolean(video && video.readyState >= 2 && Number(video.videoWidth || 0) > 0 && Number(video.videoHeight || 0) > 0);
+        const liveClose = liveReady && !video.seeking && Math.abs(Number(video.currentTime || 0) - targetSeconds) <= 0.20;
+        const fallbackThumb = nearestVideoThumbnailForSegment(seg, targetSeconds);
+        const drawSource = liveClose ? video : fallbackThumb || (liveReady ? video : null);
+        if (drawSource) {
+            for (let x = 0; x < cssW + tileW; x += tileW) {
+                try {
+                    ctx.drawImage(drawSource, Math.round(x), 0, tileW, cssH);
+                } catch {}
+            }
+        } else {
+            ctx.fillStyle = "rgba(118,184,232,.12)";
+            for (let x = 0; x < cssW + tileW; x += tileW) ctx.fillRect(Math.round(x), 0, Math.max(1, tileW - bandW), cssH);
+            ctx.fillStyle = "rgba(215,240,255,.72)";
+            ctx.font = "900 10px monospace";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "middle";
+            ctx.fillText("LOADING VIDEO", cssW / 2, cssH / 2);
+        }
+        drawVideoFilmstripBands(ctx, cssW, cssH, tileW, bandW);
+        if (dragState?.targetId === seg?.id && Number.isFinite(Number(dragState.videoScrubLocalFrame))) {
+            const local = Math.max(0, Number(dragState.videoScrubLocalFrame || 0));
+            const length = Math.max(1, Number(seg?.length || 1));
+            const markerX = Math.max(0, Math.min(cssW, (local / length) * cssW));
+            ctx.fillStyle = "rgba(255,165,78,.96)";
+            ctx.fillRect(Math.round(markerX) - 1, 0, 2, cssH);
+            ctx.fillStyle = "rgba(255,165,78,.24)";
+            ctx.fillRect(Math.max(0, Math.round(markerX) - 5), 0, 10, cssH);
+        }
+    };
+    const scheduleVideoFilmstripPaint = (canvas, video, seg) => {
+        if (!canvas) return;
+        const paint = () => paintVideoFilmstripCanvas(canvas, video, seg);
+        requestAnimationFrame(paint);
+        if (!video) return;
+        ensureVideoThumbnails(seg, video);
+        video._iamccsFilmstripPaint = paint;
+        if (!video._iamccsFilmstripHooksAttached) {
+            video._iamccsFilmstripHooksAttached = true;
+            ["loadedmetadata", "loadeddata", "seeked", "timeupdate"].forEach((name) => {
+                video.addEventListener(name, () => video._iamccsFilmstripPaint?.(), { passive: true });
+            });
+        }
+        if (typeof video.requestVideoFrameCallback === "function" && !video._iamccsFilmstripFramePending) {
+            video._iamccsFilmstripFramePending = true;
+            video.requestVideoFrameCallback(() => {
+                video._iamccsFilmstripFramePending = false;
+                video._iamccsFilmstripPaint?.();
+            });
+        }
+    };
 
     function makeBlock(seg, isAudio = false) {
         const total = getTotalFrames();
@@ -9625,7 +11040,12 @@ function renderShotboardV3(node) {
         const topRightSafe = isAudio ? innerRight : 42;
         const selected = selectedId === seg.id;
         const showDragStripes = Boolean(dragState && !isAudio && dragState.targetId === seg.id && dragState.kind !== "center");
-        const color = isAudio ? purple.audio : (String(seg.type) === "text" ? purple.textBlock : purple.image2);
+        const isVideoBlock = isTimelineVideoSegment(seg);
+        const color = isAudio
+            ? purple.audio
+            : isVideoBlock
+                ? "linear-gradient(180deg,#14365B,#0A223D 58%,#07182C)"
+                : (String(seg.type) === "text" ? purple.textBlock : purple.image2);
         block.style.cssText = [
             "position:absolute",
             `left:${left}%`,
@@ -9634,12 +11054,12 @@ function renderShotboardV3(node) {
             `top:${top}px`,
             `height:${height}px`,
             `background:${color}`,
-            (selected ? "border:2px solid #F9C859" : `border:1px solid ${purple.borderSoft}`),
+            (selected ? "border:2px solid #F9C859" : `border:1px solid ${isVideoBlock ? "#3F739A" : purple.borderSoft}`),
             "border-radius:4px",
             "box-sizing:border-box",
             "overflow:visible",
             "cursor:grab",
-            (selected ? "box-shadow:0 0 0 2px rgba(249,200,89,.35),0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,190,120,.08)" : "box-shadow:0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,190,120,.08)"),
+            (selected ? "box-shadow:0 0 0 2px rgba(249,200,89,.35),0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(145,203,255,.13)" : (isVideoBlock ? "box-shadow:0 6px 16px rgba(0,0,0,.42),inset 0 1px 0 rgba(145,203,255,.14)" : "box-shadow:0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,190,120,.08)")),
             "user-select:none",
             `z-index:${isAudio ? 14 : (selected || (dragState && dragState.targetId === seg.id) ? 18 : 4)}`,
         ].join(";");
@@ -9651,7 +11071,7 @@ function renderShotboardV3(node) {
             const addAfter = document.createElement("button");
             addAfter.type = "button";
             addAfter.textContent = "+";
-            addAfter.title = "Add text, image or audio after this slot";
+            addAfter.title = isShotboardV4 ? "Add text, image, video or audio after this slot" : "Add text, image or audio after this slot";
             addAfter.style.cssText = `position:absolute;right:14px;top:${truthRailHeight + 8}px;width:24px;height:24px;border:1px solid ${purple.border};border-radius:999px;background:${purple.valueBg};color:${purple.valueText};font-size:17px;font-weight:900;line-height:1;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,.45);z-index:9;`;
             addAfter.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
             addAfter.onclick = (event) => {
@@ -9662,6 +11082,79 @@ function renderShotboardV3(node) {
             block.appendChild(addAfter);
         };
         if (!isAudio && String(seg.type || "image") !== "text") {
+            if (isTimelineVideoSegment(seg)) {
+                const videoShell = document.createElement("div");
+                videoShell.style.cssText = [
+                    "position:absolute",
+                    `left:${innerLeft}px`,
+                    `right:${innerRight}px`,
+                    `top:${truthRailHeight}px`,
+                    `height:${imageHeight}px`,
+                    "overflow:hidden",
+                    "background:linear-gradient(180deg,#071D34,#04111F)",
+                    "border:1px solid rgba(83,145,190,.58)",
+                    "box-sizing:border-box",
+                    "box-shadow:inset 0 0 0 1px rgba(145,203,255,.08)",
+                    "z-index:2",
+                ].join(";");
+                const video = videoElementForSegment(seg);
+                if (video) {
+                    const filmstrip = videoFilmstripCanvasForSegment(seg);
+                    videoShell.appendChild(filmstrip);
+                    videoShell.appendChild(video);
+                    scheduleVideoFilmstripPaint(filmstrip, video, seg);
+                    syncVideoPreviewElement(video, seg);
+                } else {
+                    const missing = document.createElement("div");
+                    missing.textContent = "Video source missing";
+                    missing.style.cssText = "position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#F4D49E;font:10px/1 monospace;font-weight:900;background:rgba(0,0,0,.35);";
+                    videoShell.appendChild(missing);
+                }
+                const videoBadge = document.createElement("div");
+                videoBadge.textContent = "VIDEO";
+                videoBadge.style.cssText = "position:absolute;left:6px;top:5px;padding:2px 6px;border-radius:999px;background:rgba(5,22,40,.76);border:1px solid rgba(118,184,232,.72);color:#D7F0FF;font:8px/1 monospace;font-weight:950;z-index:5;pointer-events:none;";
+                const videoName = document.createElement("div");
+                videoName.textContent = videoDisplayName(seg);
+                videoName.title = videoPathForSegment(seg);
+                videoName.style.cssText = "position:absolute;left:58px;right:7px;top:5px;color:#DCEFFF;font:9px/1.1 monospace;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px #000;z-index:5;pointer-events:none;";
+                const trimInfo = document.createElement("div");
+                const fps = getFps();
+                const trimSeconds = Math.max(0, Number(seg.trimStart || seg.trim_start || 0) / fps);
+                trimInfo.textContent = `trim ${trimSeconds.toFixed(2)}s`;
+                trimInfo.style.cssText = "position:absolute;left:6px;right:6px;bottom:5px;height:15px;display:flex;align-items:center;justify-content:center;border-radius:999px;background:rgba(3,15,28,.66);border:1px solid rgba(118,184,232,.32);color:#A9D9FF;font:8px/1 monospace;font-weight:900;z-index:5;pointer-events:none;";
+                videoShell.append(videoBadge, videoName, trimInfo);
+                block.appendChild(videoShell);
+                const replaceVideo = document.createElement("button");
+                replaceVideo.type = "button";
+                replaceVideo.textContent = "+";
+                replaceVideo.title = "Replace this video, keeping duration, trim, prompt and timing";
+                replaceVideo.style.cssText = [
+                    "position:absolute",
+                    "left:calc(50% + 12px)",
+                    `top:${truthRailHeight + 54}px`,
+                    "transform:translate(-50%,-50%)",
+                    "width:28px",
+                    "height:28px",
+                    `border:1px solid ${purple.border}`,
+                    "border-radius:999px",
+                    `background:${purple.valueBg}`,
+                    `color:${purple.valueText}`,
+                    "font-size:18px",
+                    "font-weight:900",
+                    "line-height:1",
+                    "cursor:pointer",
+                    "box-shadow:0 3px 10px rgba(0,0,0,.38)",
+                    "opacity:.82",
+                    "z-index:8",
+                ].join(";");
+                replaceVideo.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
+                replaceVideo.onclick = (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    openAppendVideoPicker(seg.id);
+                };
+                block.appendChild(replaceVideo);
+            } else {
             const path = segmentReferencePath(seg);
             if (path) {
                 let previewUrl = previewUrlForPath(path);
@@ -9726,6 +11219,7 @@ function renderShotboardV3(node) {
                 };
                 block.appendChild(plus);
             }
+            }
         }
         if (!isAudio) appendAddAfterButton();
         if (isAudio) {
@@ -9781,7 +11275,12 @@ function renderShotboardV3(node) {
                 return protectControlDrag(b);
             };
             rail.append(
-                railBtn("E", "Open frame editor for this reference", () => {
+                railBtn(isTimelineVideoSegment(seg) ? "V" : "E", isTimelineVideoSegment(seg) ? "Replace or relink this editorial video" : "Open frame editor for this reference", () => {
+                    if (isTimelineVideoSegment(seg)) {
+                        selectedId = seg.id;
+                        openAppendVideoPicker(seg.id);
+                        return;
+                    }
                     selectedId = seg.id;
                     const currentPath = segmentReferencePath(seg);
                     const currentRef = referenceIndexForPath(currentPath) || Math.max(1, Number(seg.ref || 1));
@@ -9977,12 +11476,273 @@ function renderShotboardV3(node) {
                 event.preventDefault();
                 event.stopPropagation();
                 if (String(seg.type || "image") === "text") openTimelineAddMenu(event, seg, null);
+                else if (isTimelineVideoSegment(seg)) openAppendVideoPicker(seg.id);
                 else if (seg.placeholder || Number(seg.ref || 0) < 1) openAppendImagePicker(seg.id);
                 else splitImageSlotAfterSegment(seg);
             };
         }
         block.onclick = () => { selectedId = seg.id; draw(); };
         return block;
+    }
+
+    function motionDisplayName(seg) {
+        const raw = String(seg?.name || seg?.fileName || seg?.videoFile || seg?.video_file || "IC-LoRA reference").trim();
+        return raw.split(/[\\/]/).pop() || raw || "IC-LoRA reference";
+    }
+
+    function makeIcLoraBlock(seg) {
+        const total = getTotalFrames();
+        const left = (Number(seg.start || 0) / total) * 100;
+        const width = Math.max(1, (Number(seg.length || 1) / total) * 100);
+        const selected = selectedId === seg.id;
+        const strength = Math.max(0, Math.min(2, Number(seg.videoStrength ?? seg.video_strength ?? 1) || 0));
+        const attention = Math.max(0, Math.min(2, Number(seg.videoAttentionStrength ?? seg.video_attention_strength ?? 1) || 0));
+        const role = String(seg.icLoraRole || seg.ic_lora_role || "motion_reference");
+        const loraHint = String(seg.icLoraName || seg.ic_lora_name || seg.lora || "IC-LoRA").replace(/\.safetensors$/i, "");
+        const block = document.createElement("div");
+        block.className = "iamccs-v4-ic-lora-clip";
+        block.style.cssText = [
+            "position:absolute",
+            `left:${left}%`,
+            `width:${width}%`,
+            "min-width:96px",
+            "top:9px",
+            "height:98px",
+            "box-sizing:border-box",
+            (selected ? "border:2px solid #F8D26A" : "border:1px solid rgba(129,211,204,.66)"),
+            "border-radius:7px",
+            "background:linear-gradient(135deg,rgba(15,40,43,.96),rgba(43,37,53,.94) 54%,rgba(79,56,32,.92))",
+            (selected ? "box-shadow:0 0 0 2px rgba(248,210,106,.28),0 8px 18px rgba(0,0,0,.42),inset 0 1px 0 rgba(255,255,255,.16)" : "box-shadow:0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,255,255,.12)"),
+            "overflow:hidden",
+            "cursor:grab",
+            "user-select:none",
+            `z-index:${selected || (dragState && dragState.targetId === seg.id) ? 22 : 10}`,
+        ].join(";");
+
+        const bgGrid = document.createElement("div");
+        bgGrid.style.cssText = [
+            "position:absolute",
+            "inset:0",
+            "background:repeating-linear-gradient(90deg,rgba(255,255,255,.08) 0,rgba(255,255,255,.08) 1px,transparent 1px,transparent 18px),linear-gradient(180deg,rgba(255,255,255,.08),rgba(0,0,0,.18))",
+            "pointer-events:none",
+            "opacity:.76",
+            "z-index:0",
+        ].join(";");
+        block.appendChild(bgGrid);
+
+        const video = videoElementForSegment(seg);
+        if (video) {
+            const previewShell = document.createElement("div");
+            previewShell.style.cssText = [
+                "position:absolute",
+                "left:34px",
+                "right:0",
+                "top:0",
+                "bottom:0",
+                "overflow:hidden",
+                "background:linear-gradient(180deg,#071D34,#04111F)",
+                "z-index:1",
+                "pointer-events:none",
+            ].join(";");
+            const filmstrip = videoFilmstripCanvasForSegment(seg);
+            previewShell.appendChild(filmstrip);
+            previewShell.appendChild(video);
+            const tint = document.createElement("div");
+            tint.style.cssText = [
+                "position:absolute",
+                "inset:0",
+                "background:linear-gradient(90deg,rgba(8,24,26,.58),rgba(13,31,45,.18) 44%,rgba(56,36,19,.42)),linear-gradient(180deg,rgba(0,0,0,.18),rgba(0,0,0,.44))",
+                "box-shadow:inset 0 0 0 1px rgba(129,211,204,.16),inset 0 0 24px rgba(0,0,0,.38)",
+                "z-index:2",
+                "pointer-events:none",
+            ].join(";");
+            previewShell.appendChild(tint);
+            block.appendChild(previewShell);
+            scheduleVideoFilmstripPaint(filmstrip, video, seg);
+            syncVideoPreviewElement(video, seg);
+        }
+
+        const leftRail = document.createElement("div");
+        leftRail.style.cssText = "position:absolute;left:0;top:0;bottom:0;width:34px;background:linear-gradient(180deg,rgba(7,18,20,.94),rgba(7,11,14,.96));border-right:1px solid rgba(129,211,204,.45);display:grid;grid-template-rows:1fr 1fr 1fr;z-index:4;";
+        const railCell = (text, titleText) => {
+            const cell = document.createElement("div");
+            cell.textContent = text;
+            cell.title = titleText;
+            cell.style.cssText = "display:flex;align-items:center;justify-content:center;border-bottom:1px solid rgba(255,255,255,.12);color:#C9FFF8;font:9px/1 monospace;font-weight:950;text-transform:uppercase;";
+            return cell;
+        };
+        leftRail.append(
+            railCell("IC", "IC-LoRA conditioning lane"),
+            railCell("V", "Video reference / control source"),
+            railCell("CTL", "Temporal control clip")
+        );
+        block.appendChild(leftRail);
+
+        const header = document.createElement("div");
+        header.style.cssText = "position:absolute;left:43px;right:36px;top:7px;height:20px;display:flex;align-items:center;gap:5px;min-width:0;z-index:5;";
+        const pill = (text, color, bg = "rgba(0,0,0,.34)") => {
+            const p = document.createElement("span");
+            p.textContent = text;
+            p.style.cssText = `display:inline-flex;align-items:center;justify-content:center;max-width:110px;height:17px;padding:0 6px;border-radius:999px;border:1px solid ${color};background:${bg};color:#FFF9E8;font:8px/1 monospace;font-weight:950;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;`;
+            return p;
+        };
+        header.append(
+            pill(loraHint || "IC-LoRA", "rgba(129,211,204,.78)", "rgba(35,94,96,.36)"),
+            pill(role.replace(/_/g, " "), "rgba(244,204,120,.72)", "rgba(93,63,27,.36)")
+        );
+        block.appendChild(header);
+
+        const filename = document.createElement("div");
+        filename.textContent = motionDisplayName(seg);
+        filename.title = String(seg.videoFile || seg.video_file || "");
+        filename.style.cssText = "position:absolute;left:43px;right:12px;top:31px;height:17px;color:#F9F2DF;font:10px/1.1 monospace;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px #000;z-index:5;";
+        block.appendChild(filename);
+
+        const frameLabelText = `${frameLabel(seg.start)} -> ${frameLabel(Number(seg.start || 0) + Number(seg.length || 0))}`;
+        const range = document.createElement("div");
+        range.textContent = frameLabelText;
+        range.style.cssText = "position:absolute;left:43px;right:12px;top:50px;color:#C8DCD8;font:9px/1 monospace;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;z-index:5;";
+        block.appendChild(range);
+
+        const meters = document.createElement("div");
+        meters.style.cssText = "position:absolute;left:43px;right:12px;bottom:8px;height:27px;display:grid;grid-template-columns:1fr 1fr;gap:7px;z-index:5;";
+        const meter = (label, value, color) => {
+            const wrap = document.createElement("div");
+            wrap.style.cssText = "display:grid;grid-template-rows:10px 9px;gap:3px;min-width:0;";
+            const txt = document.createElement("div");
+            txt.textContent = `${label} ${value.toFixed(2)}`;
+            txt.style.cssText = "color:#F6E3BC;font:8px/1 monospace;font-weight:950;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+            const shell = document.createElement("div");
+            shell.style.cssText = "height:9px;border:1px solid rgba(255,255,255,.18);border-radius:999px;background:rgba(0,0,0,.42);overflow:hidden;";
+            const fill = document.createElement("div");
+            fill.style.cssText = `width:${Math.max(0, Math.min(100, (value / 2) * 100))}%;height:100%;background:${color};box-shadow:0 0 8px rgba(255,230,170,.25);`;
+            shell.appendChild(fill);
+            wrap.append(txt, shell);
+            return wrap;
+        };
+        meters.append(
+            meter("STR", strength, "linear-gradient(90deg,#5EC8BF,#F4D49E)"),
+            meter("ATT", attention, "linear-gradient(90deg,#A88CFF,#F0C247)")
+        );
+        block.appendChild(meters);
+
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.textContent = "X";
+        remove.title = "Remove this IC-LoRA reference clip";
+        remove.style.cssText = `position:absolute;right:7px;top:7px;width:22px;height:22px;border:1px solid ${purple.danger};border-radius:999px;background:#6B302A;color:#FFF2E4;font:9px/1 monospace;font-weight:950;cursor:pointer;z-index:12;`;
+        remove.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
+        remove.onclick = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            timeline.motionSegments = (timeline.motionSegments || []).filter((item) => item.id !== seg.id);
+            selectedId = timeline.segments[0]?.id || null;
+            writeTimeline({ force: true });
+            draw();
+        };
+        block.appendChild(remove);
+
+        const edgeHandle = (edge) => {
+            const h = document.createElement("div");
+            h.title = edge === "left" ? "Trim IC-LoRA reference start" : "Trim IC-LoRA reference end";
+            h.style.cssText = [
+                "position:absolute",
+                edge === "left" ? "left:0" : "right:0",
+                "top:0",
+                "bottom:0",
+                "width:12px",
+                "cursor:ew-resize",
+                "z-index:11",
+                edge === "left"
+                    ? "background:linear-gradient(90deg,rgba(129,211,204,.72),rgba(129,211,204,.08))"
+                    : "background:linear-gradient(90deg,rgba(244,204,120,.08),rgba(244,204,120,.72))",
+            ].join(";");
+            h.onpointerdown = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                startTimelineDrag(event, seg, "motion", edge);
+            };
+            return h;
+        };
+        block.append(edgeHandle("left"), edgeHandle("right"));
+
+        block.onpointerdown = (event) => {
+            if (event.target?.closest?.("button,input,select,textarea")) return;
+            const rect = block.getBoundingClientRect();
+            const edgePx = 13;
+            if (event.clientX <= rect.left + edgePx) return startTimelineDrag(event, seg, "motion", "left");
+            if (event.clientX >= rect.right - edgePx) return startTimelineDrag(event, seg, "motion", "right");
+            startTimelineDrag(event, seg, "motion", "center");
+        };
+        block.onclick = () => { selectedId = seg.id; draw(); };
+        return block;
+    }
+
+    function makeIcLoraEmptyLane() {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.innerHTML = `<span>+</span><b>IC-LoRA Video Reference</b><em>3DREAL / motion brush / camera source</em>`;
+        button.title = "Import a video reference for IC-LoRA motion guidance";
+        button.style.cssText = [
+            "position:sticky",
+            "left:12px",
+            "top:22px",
+            "width:292px",
+            "height:70px",
+            "box-sizing:border-box",
+            "border:1px dashed rgba(129,211,204,.70)",
+            "border-radius:8px",
+            "background:linear-gradient(135deg,rgba(18,52,55,.80),rgba(44,38,56,.76))",
+            "color:#F9F2DF",
+            "display:grid",
+            "grid-template-columns:42px 1fr",
+            "grid-template-rows:1fr 1fr",
+            "gap:2px 8px",
+            "align-items:center",
+            "padding:8px 12px",
+            "cursor:pointer",
+            "z-index:14",
+            "box-shadow:0 5px 14px rgba(0,0,0,.34), inset 0 1px 0 rgba(255,255,255,.12)",
+            "text-align:left",
+        ].join(";");
+        button.querySelector("span").style.cssText = "grid-row:1 / span 2;display:flex;align-items:center;justify-content:center;width:34px;height:34px;border-radius:999px;background:#D9FFF8;color:#111;font:24px/1 monospace;font-weight:950;";
+        button.querySelector("b").style.cssText = "display:block;font:11px/1 monospace;font-weight:950;text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+        button.querySelector("em").style.cssText = "display:block;color:#C8DCD8;font:9px/1.1 monospace;font-style:normal;font-weight:850;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+        button.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
+        button.onclick = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            try { motionInput.value = ""; } catch {}
+            motionInput.click();
+        };
+        return protectControlDrag(button);
+    }
+
+    function drawIcLoraTrack(segments) {
+        if (!isShotboardV4) return;
+        icLoraTrack.innerHTML = "";
+        const label = document.createElement("div");
+        label.textContent = timeline.motionTrackEnabled === false ? "IC-LoRA lane disabled" : "IC-LoRA / Motion Reference";
+        label.style.cssText = "position:sticky;left:8px;top:6px;width:max-content;max-width:260px;padding:3px 8px;border-radius:999px;border:1px solid rgba(129,211,204,.52);background:rgba(7,18,20,.72);color:#D9FFF8;font:8px/1 monospace;font-weight:950;text-transform:uppercase;z-index:13;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;";
+        icLoraTrack.appendChild(label);
+        if (timeline.motionTrackEnabled === false) {
+            const disabled = makeIcLoraEmptyLane();
+            disabled.querySelector("b").textContent = "Enable IC-LoRA Lane";
+            disabled.onclick = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                timeline.motionTrackEnabled = true;
+                timeline.useCustomMotion = true;
+                timeline.use_custom_motion = true;
+                writeTimeline({ force: true });
+                draw();
+            };
+            icLoraTrack.appendChild(disabled);
+            return;
+        }
+        const motionSegments = (segments || []).filter((seg) => seg && !seg.placeholder);
+        motionSegments.forEach((seg) => icLoraTrack.appendChild(makeIcLoraBlock(seg)));
+        if (!motionSegments.length) icLoraTrack.appendChild(makeIcLoraEmptyLane());
     }
 
     function appendVisualEdgeHandle(seg, edge, tone = "right") {
@@ -9992,6 +11752,11 @@ function renderShotboardV3(node) {
             ? Math.max(0, Math.round(Number(seg.start || 0)))
             : Math.max(0, Math.round(Number(seg.start || 0) + Number(seg.length || 1)));
         const pct = Math.max(0, Math.min(100, (frame / total) * 100));
+        const handleLeft = frame <= 0
+            ? "0px"
+            : frame >= total
+                ? "calc(100% - 9px)"
+                : `calc(${pct}% - 4.5px)`;
         const handle = document.createElement("div");
         handle.className = `iamccs-v3-solid-edge-handle iamccs-v3-solid-edge-${edge}`;
         handle.title = edge === "left"
@@ -10000,7 +11765,7 @@ function renderShotboardV3(node) {
         const warm = tone === "left";
         handle.style.cssText = [
             "position:absolute",
-            `left:calc(${pct}% - 9px)`,
+            `left:${handleLeft}`,
             "top:8px",
             "bottom:8px",
             "width:9px",
@@ -10037,7 +11802,7 @@ function renderShotboardV3(node) {
 
     // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     // Bug #2/#3 fix: include placeholder image segments so new "+" slots get resize handles.
-    // Bug #4 fix: skip left handle at timeline start (frame 0) and right handle at timeline end (totalFrames).
+    // Edge handles are intentionally clamped inside the track, including first-frame and final-frame boundaries.
     function drawVisualEdgeHandles(segments) {
         const total = getTotalFrames();
         const sorted = (segments || [])
@@ -10288,6 +12053,11 @@ function renderShotboardV3(node) {
                         const nextLength = Math.max(1, Math.round(Number(value || 1)));
                         timeline.segments = edgeDragPreview(timeline.segments, target.id, nextLength - Number(target.length || 1), "right", getTotalFrames());
                     }
+                    else if (key === "trimStart") {
+                        target.trimStart = Math.max(0, Math.round(Number(value || 0)));
+                        target.trim_start = target.trimStart;
+                        clampSegment(target);
+                    }
                     else if (key === "ref") setSegmentReference(target, value);
                     else if (key === "guideStrength") {
                         const nextStrength = Math.max(0, Math.min(1, Number(value || 0)));
@@ -10360,6 +12130,12 @@ function renderShotboardV3(node) {
                     timeline.segments = edgeDragPreview(timeline.segments, target.id, nextLength - Number(target.length || 1), "right", getTotalFrames());
                     shouldRedraw = true;
                 }
+                else if (key === "trimStart") {
+                    target.trimStart = Math.max(0, Math.round(Number(input.value || 0)));
+                    target.trim_start = target.trimStart;
+                    clampSegment(target);
+                    shouldRedraw = true;
+                }
                 else if (key === "ref") {
                     setSegmentReference(target, input.value);
                     shouldRedraw = true;
@@ -10406,7 +12182,7 @@ function renderShotboardV3(node) {
                     }
                     if (type === "textarea") syncSegmentTextPeers(target.id, key, input.value, input);
                 }
-                writeTimeline(key === "prompt" || key === "start" || key === "length" || key === "ref" || key === "guideStrength" || key === "imageLockStrength" ? { force: true } : {});
+                writeTimeline(key === "prompt" || key === "start" || key === "length" || key === "trimStart" || key === "ref" || key === "guideStrength" || key === "imageLockStrength" ? { force: true } : {});
                 if (key === "prompt") logPromptPersistence(target, "inspector_prompt_input");
                 if (shouldRedraw) draw();
             };
@@ -10859,6 +12635,7 @@ function renderShotboardV3(node) {
             };
             controls.append(
                 emptyButton("Add Image", "Create the first image box", () => addImageBtn?.click()),
+                ...(isShotboardV4 && addVideoBtn ? [emptyButton("Add Video", "Create the first editorial video clip", () => addVideoBtn?.click())] : []),
                 emptyButton("Add Text", "Create a text bridge box", () => addTextBtn?.click()),
                 emptyButton("Add Audio", "Import audio into the board", () => addAudioBtn?.click())
             );
@@ -10975,7 +12752,7 @@ function renderShotboardV3(node) {
             numericRow.append(
                 makeField(seg, "Frame", "start", "number"),
                 makeField(seg, "Len", "length", "number"),
-                makeField(seg, "Ref", "ref", "number"),
+                isTimelineVideoSegment(seg) ? makeField(seg, "Trim", "trimStart", "number") : makeField(seg, "Ref", "ref", "number"),
                 makeField(seg, "Guide Strength", "guideStrength", "number"),
                 makeSegmentSummary(seg, index, timeline.segments.length)
             );
@@ -11006,6 +12783,186 @@ function renderShotboardV3(node) {
             card.append(badge, leftPane, rightPane, relayWrap, actions);
             boxList.appendChild(card);
         });
+
+        if (isShotboardV4) {
+            const motionCardsToShow = (timeline.motionSegments || [])
+                .filter((seg) => segmentHasMotionMedia(seg) && !seg.placeholder)
+                .slice()
+                .sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
+            if (motionCardsToShow.length) {
+                const motionHeader = document.createElement("div");
+                motionHeader.style.cssText = [
+                    "display:flex",
+                    "align-items:center",
+                    "justify-content:space-between",
+                    "gap:10px",
+                    "margin:10px 0 6px 0",
+                    "padding:7px 9px",
+                    "border:1px solid rgba(129,211,204,.42)",
+                    "border-radius:6px",
+                    "background:linear-gradient(90deg,rgba(18,52,55,.48),rgba(44,38,56,.34))",
+                    "box-sizing:border-box",
+                ].join(";");
+                const leftTitle = document.createElement("div");
+                leftTitle.textContent = "IC-LoRA Reference Layer";
+                leftTitle.style.cssText = "color:#D9FFF8;font:10px/1 monospace;font-weight:950;text-transform:uppercase;";
+                const state = document.createElement("button");
+                state.type = "button";
+                state.textContent = timeline.motionTrackEnabled === false ? "Lane OFF" : "Lane ON";
+                state.title = "Enable or disable IC-LoRA motion guidance export";
+                state.style.cssText = `height:24px;border:1px solid ${timeline.motionTrackEnabled === false ? purple.borderSoft : "rgba(129,211,204,.66)"};border-radius:5px;background:${timeline.motionTrackEnabled === false ? purple.button : "linear-gradient(180deg,#285F61,#1F4447)"};color:${timeline.motionTrackEnabled === false ? purple.muted : "#D9FFF8"};font:9px/1 monospace;font-weight:950;cursor:pointer;`;
+                state.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
+                state.onclick = (event) => {
+                    event.preventDefault();
+                    timeline.motionTrackEnabled = timeline.motionTrackEnabled === false;
+                    timeline.useCustomMotion = timeline.motionTrackEnabled !== false && motionCardsToShow.length > 0;
+                    timeline.use_custom_motion = timeline.useCustomMotion;
+                    writeTimeline({ force: true });
+                    draw();
+                };
+                motionHeader.append(leftTitle, protectControlDrag(state));
+                boxList.appendChild(motionHeader);
+            }
+            const motionNumber = (seg, labelText, key, step = "1", min = "0", max = null) => {
+                const wrap = document.createElement("label");
+                wrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:9px;font-weight:900;text-align:center;min-width:0;`;
+                const span = document.createElement("span");
+                span.textContent = labelText;
+                const ctrl = numberStepperControl(seg[key] ?? 0, step, min, max, (value) => {
+                    const raw = Number(value);
+                    if (key === "start") seg.start = Math.max(0, Math.round(raw || 0));
+                    else if (key === "length") seg.length = Math.max(1, Math.round(raw || 1));
+                    else if (key === "trimStart") {
+                        seg.trimStart = Math.max(0, Math.round(raw || 0));
+                        seg.trim_start = seg.trimStart;
+                    }
+                    else if (key === "videoStrength") {
+                        seg.videoStrength = Math.max(0, Math.min(2, raw || 0));
+                        seg.video_strength = seg.videoStrength;
+                    }
+                    else if (key === "videoAttentionStrength") {
+                        seg.videoAttentionStrength = Math.max(0, Math.min(2, raw || 0));
+                        seg.video_attention_strength = seg.videoAttentionStrength;
+                    }
+                    clampMotionSegment(seg);
+                    writeTimeline({ force: true });
+                    draw();
+                }, { liveInput: key === "videoStrength" || key === "videoAttentionStrength" });
+                ctrl.style.gridTemplateColumns = "22px minmax(44px,1fr) 22px";
+                ctrl.style.gap = "5px";
+                ctrl.querySelectorAll("button").forEach((button) => {
+                    button.style.width = "22px";
+                    button.style.minWidth = "22px";
+                });
+                styleValueControls(ctrl);
+                wrap.append(span, ctrl);
+                return wrap;
+            };
+            motionCardsToShow.forEach((seg, index) => {
+                const card = document.createElement("div");
+                card.style.cssText = [
+                    "display:grid",
+                    "grid-template-columns:34px minmax(160px,1fr) minmax(220px,1.1fr) 78px 78px 78px 90px 100px 58px 34px",
+                    "gap:8px",
+                    "align-items:end",
+                    "margin:0 0 6px 0",
+                    "padding:8px 9px",
+                    (selectedId === seg.id ? "border:2px solid #F8D26A" : "border:1px solid rgba(129,211,204,.42)"),
+                    "border-radius:6px",
+                    `background:${selectedId === seg.id ? "linear-gradient(180deg,rgba(25,61,63,.94),rgba(47,41,60,.90))" : "linear-gradient(180deg,rgba(20,42,45,.86),rgba(42,36,54,.78))"}`,
+                    (selectedId === seg.id ? "box-shadow:0 0 0 2px rgba(248,210,106,.22),inset 0 1px 0 rgba(255,255,255,.10)" : "box-shadow:inset 0 1px 0 rgba(255,255,255,.07)"),
+                    "box-sizing:border-box",
+                    "min-width:0",
+                ].join(";");
+                const badge = document.createElement("button");
+                badge.type = "button";
+                badge.textContent = "IC";
+                badge.title = "Select this IC-LoRA reference";
+                badge.style.cssText = "align-self:center;justify-self:center;width:28px;height:28px;border:1px solid rgba(129,211,204,.74);border-radius:999px;background:rgba(7,18,20,.84);color:#D9FFF8;font:9px/1 monospace;font-weight:950;cursor:pointer;";
+                badge.onclick = () => { selectedId = seg.id; draw(); };
+
+                const meta = document.createElement("label");
+                meta.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:9px;font-weight:900;min-width:0;`;
+                const metaLabel = document.createElement("span");
+                metaLabel.textContent = `Reference ${index + 1}`;
+                const name = document.createElement("input");
+                name.value = String(seg.label || motionDisplayName(seg));
+                name.style.cssText = inputBase() + `height:28px;background:${purple.valueBg};border-color:rgba(129,211,204,.50);color:${purple.valueText};font-weight:850;text-align:center;`;
+                name.onpointerdown = (event) => event.stopPropagation();
+                name.oninput = () => {
+                    seg.label = name.value;
+                    writeTimeline();
+                };
+                protectControlDrag(name);
+                meta.append(metaLabel, name);
+
+                const roleWrap = document.createElement("label");
+                roleWrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:9px;font-weight:900;text-align:center;min-width:0;`;
+                const roleLabel = document.createElement("span");
+                roleLabel.textContent = "Control role";
+                const role = makeChoiceSelect(String(seg.icLoraRole || seg.ic_lora_role || "motion_reference"), [
+                    { value: "motion_reference", label: "Motion reference" },
+                    { value: "3dreal_reference", label: "3DREAL render" },
+                    { value: "camera_reference", label: "Camera guide" },
+                    { value: "motion_brush", label: "Motion brush" },
+                ], (value) => {
+                    seg.icLoraRole = value;
+                    seg.ic_lora_role = value;
+                    seg.icLoraName = value === "3dreal_reference" ? "3DREAL" : seg.icLoraName || "IC-LoRA";
+                    writeTimeline({ force: true });
+                    draw();
+                });
+                role.style.height = "28px";
+                styleValueControls(role);
+                roleWrap.append(roleLabel, role);
+
+                const overrideWrap = document.createElement("label");
+                overrideWrap.style.cssText = `display:flex;flex-direction:column;align-items:center;justify-content:end;gap:5px;color:${purple.muted};font-size:9px;font-weight:900;text-align:center;`;
+                const overrideText = document.createElement("span");
+                overrideText.textContent = "Audio";
+                const override = document.createElement("input");
+                override.type = "checkbox";
+                override.checked = Boolean(seg.audioOverride || seg.overrideAudio || timeline.overrideAudio || timeline.override_audio);
+                override.title = "Use audio from this IC-LoRA reference video as override audio";
+                override.style.cssText = `width:18px;height:18px;accent-color:${purple.accent};cursor:pointer;`;
+                override.onchange = () => {
+                    seg.audioOverride = override.checked;
+                    seg.overrideAudio = override.checked;
+                    timeline.overrideAudio = override.checked;
+                    timeline.override_audio = override.checked;
+                    writeTimeline({ force: true });
+                    draw();
+                };
+                overrideWrap.append(overrideText, protectControlDrag(override));
+
+                const remove = document.createElement("button");
+                remove.type = "button";
+                remove.textContent = "X";
+                remove.title = "Delete this IC-LoRA reference";
+                remove.style.cssText = `align-self:center;width:30px;height:28px;border:1px solid ${purple.danger};border-radius:4px;background:#6B302A;color:#FFF2E4;font:10px/1 monospace;font-weight:950;cursor:pointer;`;
+                remove.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
+                remove.onclick = (event) => {
+                    event.preventDefault();
+                    timeline.motionSegments = (timeline.motionSegments || []).filter((item) => item.id !== seg.id);
+                    selectedId = timeline.segments[0]?.id || null;
+                    writeTimeline({ force: true });
+                    draw();
+                };
+                card.append(
+                    protectControlDrag(badge),
+                    meta,
+                    roleWrap,
+                    motionNumber(seg, "Start", "start"),
+                    motionNumber(seg, "Len", "length"),
+                    motionNumber(seg, "Trim", "trimStart"),
+                    motionNumber(seg, "Strength", "videoStrength", "0.05", "0", "2"),
+                    motionNumber(seg, "Attention", "videoAttentionStrength", "0.05", "0", "2"),
+                    overrideWrap,
+                    protectControlDrag(remove)
+                );
+                boxList.appendChild(card);
+            });
+        }
 
         const audioAnchorSegmentId = (audio) => {
             if (!audio) return "";
@@ -11247,22 +13204,24 @@ function renderShotboardV3(node) {
         drawRuler();
         updatePlayUI();
         drawAudioPlaybarControls();
-        timelineMeterSeconds = clampTimelineMeterSeconds(timelineMeterSeconds);
         promptSizeReadout.textContent = `${Math.round(promptTextScale * 100)}%`;
-        const timelineZoomSteps = Math.round((timelineMeterSeconds - Math.max(0.5, getDuration())) * 2);
-        timelineMeterReadout.textContent = `${Math.round(Math.max(0.2, Math.min(8, Math.pow(1.18, timelineZoomSteps))) * 100)}%`;
         promptArea.style.fontSize = promptFontSize(12);
         timelineViewport.style.display = "block";
         playbar.style.display = "flex";
         imageTrack.innerHTML = "";
         actionTrack.innerHTML = "";
+        icLoraTrack.innerHTML = "";
         audioTracks.innerHTML = "";
         const visualSegments = activeVisualSegments();
+        const motionSegmentsForDraw = activeMotionSegments();
         const audioSegmentsForDraw = visibleAudioSegments();
         const trackHasRealAudio = (trackIndex) => audioSegmentsForDraw.some((seg) =>
             Number(seg?.track || 0) === Number(trackIndex || 0) && audioSegmentHasMedia(seg) && !seg.placeholder
         );
         const canvasWidth = computeTimelineCanvasWidth(visualSegments);
+        const viewportWidth = timelineViewportWidth();
+        const actualZoom = Math.max(1, canvasWidth / Math.max(1, viewportWidth));
+        timelineMeterReadout.textContent = timelineViewMode === "fit" ? "FIT" : `${Math.round(actualZoom * 100)}%`;
         const previousScrollLeft = Number(timelineViewport.scrollLeft || 0);
         timelineCanvas.style.width = `${canvasWidth}px`;
         frameRuler.style.width = "100%";
@@ -11273,10 +13232,17 @@ function renderShotboardV3(node) {
         // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
         timelineExtraH = Math.max(0, Math.min(600, Math.round(Number(node.properties?.iamccs_v3_timeline_extra_height || 0))));
         const _atCount = Math.max(1, Number(timeline.audioTrackCount || 1));
-        timelineBox.style.height = `${264 + _atCount * 90 + timelineExtraH}px`;
+        const mainTrackHeight = 254 + timelineExtraH;
+        const icTrackHeight = isShotboardV4 ? 116 : 0;
+        const audioTrackTop = mainTrackHeight + icTrackHeight;
+        timelineBox.style.height = `${audioTrackTop + _atCount * 90 + 10}px`;
         audioTracks.style.height = `${_atCount * 90}px`;
-        imageTrack.style.height = `${254 + timelineExtraH}px`;
-        audioTracks.style.top = `${254 + timelineExtraH}px`;
+        imageTrack.style.height = `${mainTrackHeight}px`;
+        icLoraTrack.style.display = isShotboardV4 ? "block" : "none";
+        icLoraTrack.style.cssText = isShotboardV4
+            ? `position:absolute;left:0;right:0;top:${mainTrackHeight}px;height:${icTrackHeight}px;border-bottom:1px solid ${purple.borderSoft};background:linear-gradient(108deg,rgba(36,85,57,.16) 0 1px,transparent 1px 40px),linear-gradient(27deg,transparent 0 62%,rgba(201,107,45,.13) 63%,transparent 66%),linear-gradient(180deg,rgba(65,69,68,.42),rgba(39,43,42,.30) 52%,rgba(49,47,41,.26));box-shadow:inset 0 1px 0 rgba(255,255,255,.06),inset 0 -1px 0 rgba(0,0,0,.22);overflow:hidden;`
+            : "display:none;";
+        audioTracks.style.top = `${audioTrackTop}px`;
         for (let i = 0; i < Math.max(1, Number(timeline.audioTrackCount || 1)); i += 1) {
             const lane = document.createElement("div");
             lane.style.cssText = `position:absolute;left:0;right:0;top:${i * 90}px;height:90px;border-bottom:1px solid ${purple.borderSoft};background:${i % 2 ? "rgba(255,255,255,.025)" : "transparent"};`;
@@ -11327,6 +13293,7 @@ function renderShotboardV3(node) {
         visualSegments.forEach((seg) => imageTrack.appendChild(makeBlock(seg, false)));
         if (!visualSegments.length) imageTrack.appendChild(makeImagePlaceholderBlock());
         drawVisualEdgeHandles(visualSegments);
+        drawIcLoraTrack(motionSegmentsForDraw);
         audioSegmentsForDraw.forEach((seg) => audioTracks.appendChild(makeBlock(seg, true)));
         timelineBox.querySelectorAll(".iamccs-v3-playhead").forEach((item) => item.remove());
         const playhead = document.createElement("div");
@@ -11435,7 +13402,12 @@ function renderShotboardV3(node) {
         ensureDurationForFrames(requiredEnd);
         uploaded.forEach((_, i) => {
             const imageFile = uploaded[i];
-            const room = Math.max(1, getTotalFrames() - Math.min(cursor, getTotalFrames() - 1));
+            const totalFrames = getTotalFrames();
+            const room = totalFrames - cursor;
+            if (room <= 1) {
+                showTimelineNotice("No timeline room for more images. Increase Duration before adding more slots.", "warn");
+                return;
+            }
             const length = Math.min(defaultLen(), room);
             timeline.segments.push({
                 id: newId("seg"),
@@ -11465,11 +13437,112 @@ function renderShotboardV3(node) {
             cursor += length;
         });
         uploaded.forEach((path) => refPreviewBusters.set(String(path), String(Date.now())));
-        if (endOfSegments(timeline.segments) > getTotalFrames() || timeline.segments.some((seg) => Number(seg.length || 0) <= 1)) {
-            spreadVisualSegmentsAcrossDuration();
-        }
         selectedId = timeline.segments[timeline.segments.length - 1]?.id || selectedId;
         writeTimeline();
+        draw();
+    }
+
+    async function uploadEditorialVideos(files, targetFrameStart = null, targetId = null) {
+        if (!isShotboardV4) return;
+        const videoFiles = Array.from(files || []).filter((file) => String(file.type || "").startsWith("video/") || /\.(mp4|mov|mkv|webm|avi)$/i.test(String(file.name || "")));
+        if (!videoFiles.length) return;
+        if (isSingleEmptyDefaultVisualSegment()) timeline.segments = [];
+        let cursor = targetFrameStart == null
+            ? endOfSegments(timeline.segments)
+            : Math.max(0, Math.round(Number(targetFrameStart || 0)));
+        let replaceTarget = targetId ? (timeline.segments || []).find((seg) => String(seg.id || "") === String(targetId)) : null;
+        for (const [index, file] of videoFiles.entries()) {
+            try {
+                const body = new FormData();
+                body.append("image", file);
+                body.append("type", "input");
+                body.append("overwrite", "false");
+                const resp = await api.fetchApi("/upload/image", { method: "POST", body });
+                if (!resp || resp.status !== 200) throw new Error(`upload failed: ${resp?.status || "no response"}`);
+                const data = await resp.json();
+                const filename = data?.name || file.name;
+                const subfolder = data?.subfolder || "";
+                const videoFile = subfolder ? `${subfolder}/${filename}` : filename;
+                try { videoPreviewSources.set(videoFile, URL.createObjectURL(file)); } catch {}
+                const info = await decodeVideoInfo(file);
+                const sourceFrames = Math.max(1, info.durationFrames);
+                if (replaceTarget && index === 0) {
+                    replaceTarget.type = "video";
+                    replaceTarget.placeholder = false;
+                    replaceTarget.videoFile = videoFile;
+                    replaceTarget.video_file = videoFile;
+                    replaceTarget.imageFile = videoFile;
+                    replaceTarget.image_file = videoFile;
+                    replaceTarget.path = videoFile;
+                    replaceTarget.fileName = file.name;
+                    replaceTarget.name = file.name;
+                    replaceTarget.mime = file.type;
+                    replaceTarget.size = file.size;
+                    replaceTarget.sourceWidth = info.width;
+                    replaceTarget.sourceHeight = info.height;
+                    replaceTarget.videoDurationFrames = sourceFrames;
+                    replaceTarget.video_duration_frames = sourceFrames;
+                    replaceTarget.trimStart = 0;
+                    replaceTarget.trim_start = 0;
+                    replaceTarget.ref = 0;
+                    replaceTarget.use_video = true;
+                    replaceTarget.use_guide = true;
+                    replaceTarget.label = String(replaceTarget.label || file.name.replace(/\.[^.]+$/, "") || "video_clip");
+                    clampSegment(replaceTarget);
+                    selectedId = replaceTarget.id;
+                    cursor = endOfSegments(timeline.segments);
+                    continue;
+                }
+                const wantedLength = Math.min(sourceFrames, defaultLen() * 2);
+                ensureDurationForFrames(cursor + wantedLength);
+                const start = Math.min(cursor, Math.max(0, getTotalFrames() - 1));
+                const length = Math.max(1, Math.min(sourceFrames, getTotalFrames() - start));
+                const seg = clampSegment({
+                    id: newId("vid"),
+                    type: "video",
+                    start,
+                    length,
+                    trimStart: 0,
+                    trim_start: 0,
+                    videoDurationFrames: sourceFrames,
+                    video_duration_frames: sourceFrames,
+                    imageFile: videoFile,
+                    image_file: videoFile,
+                    videoFile,
+                    video_file: videoFile,
+                    path: videoFile,
+                    fileName: file.name,
+                    name: file.name,
+                    mime: file.type,
+                    size: file.size,
+                    sourceWidth: info.width,
+                    sourceHeight: info.height,
+                    sourceFps: getFps(),
+                    source_fps: getFps(),
+                    ref: 0,
+                    label: file.name.replace(/\.[^.]+$/, "") || `video_${index + 1}`,
+                    prompt: "",
+                    note: "",
+                    camera: "cinematic motion",
+                    transition: "continuous_motion",
+                    guideStrength: Number(defaultForceWidget?.value || 0.25),
+                    imageLockStrength: Number(defaultForceWidget?.value || 0.25),
+                    defaultForceSource: Number(defaultForceWidget?.value || 0.25),
+                    forceCustom: false,
+                    use_video: true,
+                    use_guide: true,
+                    use_prompt: false,
+                });
+                timeline.segments.push(seg);
+                selectedId = seg.id;
+                cursor = Number(seg.start || 0) + Number(seg.length || 1);
+            } catch (err) {
+                console.error("[IAMCCS Cine Shotboard V4] editorial video upload failed", err);
+                showTimelineNotice(`Video upload failed: ${err?.message || err}`, "error");
+            }
+        }
+        timeline.segments = (timeline.segments || []).sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
+        writeTimeline({ force: true });
         draw();
     }
 
@@ -11478,9 +13551,20 @@ function renderShotboardV3(node) {
         addUploadedImagesToTimeline(uploaded);
         fileInput.value = "";
     };
+    videoInput.onchange = async (event) => {
+        await uploadEditorialVideos(event.target.files || [], pendingVideoInsertFrame, pendingVideoTargetId);
+        pendingVideoInsertFrame = null;
+        pendingVideoTargetId = null;
+        videoInput.value = "";
+    };
     addImageBtn.onclick = () => {
         openAppendImagePicker();
     };
+    if (addVideoBtn) {
+        addVideoBtn.onclick = () => {
+            openAppendVideoPicker(null, null);
+        };
+    }
     openEditorBtn.onclick = () => {
         toggleFullscreenEditor(root, node);
     };
@@ -11621,12 +13705,111 @@ function renderShotboardV3(node) {
         draw();
     }
 
+    async function decodeVideoInfo(file) {
+        const fallbackFrames = Math.min(defaultLen() * 2, getTotalFrames());
+        try {
+            const url = URL.createObjectURL(file);
+            const info = await new Promise((resolve) => {
+                const video = document.createElement("video");
+                const done = (value) => {
+                    try { URL.revokeObjectURL(url); } catch {}
+                    resolve(value);
+                };
+                video.preload = "metadata";
+                video.onloadedmetadata = () => {
+                    const durationFrames = Math.max(1, Math.ceil(Number(video.duration || 0) * getFps()));
+                    done({
+                        durationFrames: Number.isFinite(durationFrames) ? durationFrames : fallbackFrames,
+                        width: Math.max(0, Math.round(Number(video.videoWidth || 0))),
+                        height: Math.max(0, Math.round(Number(video.videoHeight || 0))),
+                    });
+                };
+                video.onerror = () => done({ durationFrames: fallbackFrames, width: 0, height: 0 });
+                video.src = url;
+            });
+            return info || { durationFrames: fallbackFrames, width: 0, height: 0 };
+        } catch {
+            return { durationFrames: fallbackFrames, width: 0, height: 0 };
+        }
+    }
+
+    async function uploadMotionGuideVideos(files, targetFrameStart = null) {
+        if (!isShotboardV4) return;
+        const videoFiles = Array.from(files || []).filter((file) => String(file.type || "").startsWith("video/") || /\.(mp4|mov|mkv|webm|avi)$/i.test(String(file.name || "")));
+        if (!videoFiles.length) return;
+        let cursor = targetFrameStart == null
+            ? endOfSegments((timeline.motionSegments || []).filter((item) => segmentHasMotionMedia(item) && !item.placeholder))
+            : Math.max(0, Math.round(Number(targetFrameStart || 0)));
+        for (const file of videoFiles) {
+            try {
+                const body = new FormData();
+                body.append("image", file);
+                const resp = await api.fetchApi("/upload/image", { method: "POST", body });
+                if (!resp || resp.status !== 200) throw new Error(`upload failed: ${resp?.status || "no response"}`);
+                const data = await resp.json();
+                const filename = data?.name || file.name;
+                const subfolder = data?.subfolder || "";
+                const videoFile = subfolder ? `${subfolder}/${filename}` : filename;
+                const info = await decodeVideoInfo(file);
+                const room = Math.max(1, getTotalFrames() - Math.min(cursor, Math.max(0, getTotalFrames() - 1)));
+                const length = Math.min(Math.max(1, info.durationFrames), Math.max(defaultLen(), room));
+                ensureDurationForFrames(cursor + length);
+                const seg = clampMotionSegment({
+                    id: newId("mot"),
+                    type: "motion_video",
+                    start: Math.min(cursor, Math.max(0, getTotalFrames() - 1)),
+                    length: Math.min(length, Math.max(1, getTotalFrames() - Math.min(cursor, Math.max(0, getTotalFrames() - 1)))),
+                    trimStart: 0,
+                    videoDurationFrames: Math.max(1, info.durationFrames),
+                    videoFile,
+                    fileName: file.name,
+                    name: file.name,
+                    mime: file.type,
+                    size: file.size,
+                    sourceWidth: info.width,
+                    sourceHeight: info.height,
+                    controlMode: "ic_lora_video",
+                    icLoraRole: /3d|real|render/i.test(file.name) ? "3dreal_reference" : "motion_reference",
+                    icLoraName: /3d|real|render/i.test(file.name) ? "3DREAL" : "IC-LoRA",
+                    videoStrength: 1,
+                    videoAttentionStrength: 1,
+                    audioOverride: false,
+                    label: file.name.replace(/\.[^.]+$/, "") || "ic_lora_reference",
+                });
+                timeline.motionSegments = (timeline.motionSegments || []).concat(seg).sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
+                timeline.motionClips = timeline.motionSegments;
+                timeline.motionTrackEnabled = true;
+                timeline.useCustomMotion = true;
+                timeline.use_custom_motion = true;
+                selectedId = seg.id;
+                cursor += Math.max(1, Number(seg.length || length));
+            } catch (err) {
+                console.error("[IAMCCS Cine Shotboard V4] IC-LoRA video upload failed", err);
+                showTimelineNotice(`IC-LoRA video upload failed: ${err?.message || err}`, "error");
+            }
+        }
+        writeTimeline({ force: true });
+        draw();
+    }
+
     audioInput.onchange = async (event) => {
         await uploadAudioFiles(event.target.files || [], pendingAudioInsertFrame, pendingAudioTrack);
         pendingAudioInsertFrame = null;
         pendingAudioTrack = 0;
         audioInput.value = "";
     };
+    motionInput.onchange = async (event) => {
+        await uploadMotionGuideVideos(event.target.files || [], pendingMotionInsertFrame);
+        pendingMotionInsertFrame = null;
+        motionInput.value = "";
+    };
+    if (addIcLoraBtn) {
+        addIcLoraBtn.onclick = () => {
+            pendingMotionInsertFrame = null;
+            try { motionInput.value = ""; } catch {}
+            motionInput.click();
+        };
+    }
     addAudioBtn.onclick = () => {
         pendingAudioInsertFrame = null;
         pendingAudioTrack = 0;
@@ -11637,22 +13820,27 @@ function renderShotboardV3(node) {
         const rect = timelineBox.getBoundingClientRect();
         const frame = Math.round(((event.clientX - rect.left) / Math.max(1, rect.width)) * getTotalFrames());
         const y = event.clientY - rect.top;
-        if (y >= 254) {
+        const mainTrackHeight = 254 + timelineExtraH;
+        const icTrackHeight = isShotboardV4 ? 116 : 0;
+        const audioTrackTop = mainTrackHeight + icTrackHeight;
+        if (isShotboardV4 && y >= mainTrackHeight && y < audioTrackTop) {
+            pendingMotionInsertFrame = frame;
+            try { motionInput.value = ""; } catch {}
+            motionInput.click();
+        } else if (y >= audioTrackTop) {
             pendingAudioInsertFrame = frame;
-            pendingAudioTrack = Math.max(0, Math.min(Math.max(1, Number(timeline.audioTrackCount || 1)) - 1, Math.floor((y - 254) / 90)));
+            pendingAudioTrack = Math.max(0, Math.min(Math.max(1, Number(timeline.audioTrackCount || 1)) - 1, Math.floor((y - audioTrackTop) / 90)));
             audioInput.click();
         } else {
-            openAppendImagePicker();
+            if (isShotboardV4) {
+                event._iamccsTimelineFrame = frame;
+                openTimelineAddMenu(event, null, null);
+            }
+            else openAppendImagePicker();
         }
     };
     scrub.oninput = () => {
-        playFrame = Math.round(Number(scrub.value || 0));
-        if (isPlaying) {
-            playbackStartFrame = playFrame;
-            playbackStartTimestamp = performance.now();
-            scheduleAudioFromFrame(playFrame);
-        }
-        draw();
+        setPlayFrame(Number(scrub.value || 0), { draw: "schedule" });
     };
     playBtn.onclick = () => {
         if (isPlaying) stopPlayback();
@@ -11677,11 +13865,23 @@ function renderShotboardV3(node) {
         return sorted.map((item, index) => {
             const next = sorted[index + 1];
             const start = item.frame;
-            const end = next ? next.frame : getTotalFrames();
             const row = item.row;
+            const explicitLength = Number(row.length ?? row.length_frames ?? row.duration_frames);
+            const explicitDurationSeconds = Number(row.duration_seconds ?? row.duration ?? row.durationSeconds);
+            const explicitEnd = Number(row.end_frame ?? row.endFrame);
+            const end = Number.isFinite(explicitLength) && explicitLength > 0
+                ? start + Math.max(1, Math.round(explicitLength))
+                : Number.isFinite(explicitDurationSeconds) && explicitDurationSeconds > 0
+                    ? start + Math.max(1, Math.round(explicitDurationSeconds * fps))
+                    : Number.isFinite(explicitEnd) && explicitEnd > start
+                        ? Math.round(explicitEnd)
+                        : next ? next.frame : getTotalFrames();
             const prompt = String(row.relay_prompt ?? row.local_prompt ?? row.prompt ?? "").trim();
-            const isText = String(row.type || "").toLowerCase() === "text" || Number(row.ref ?? row.image_ref ?? row.reference_index ?? 1) <= 0;
-            const rowTruthPath = isText ? "" : String(row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path || "").trim();
+            const rowType = String(row.type || "").toLowerCase();
+            const isVideo = rowType === "video" || Boolean(row.videoFile || row.video_file);
+            const isText = !isVideo && (rowType === "text" || Number(row.ref ?? row.image_ref ?? row.reference_index ?? 1) <= 0);
+            const rowVideoPath = isVideo ? String(row.videoFile || row.video_file || row.path || "").trim() : "";
+            const rowTruthPath = isText || isVideo ? "" : String(row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path || "").trim();
             const rowTruthName = isText ? "" : (String(row.imageTruthName || row.imageName || row.name || row.filename || "").trim() || rowTruthPath.split(/[\\/]/).pop() || "");
             const defaultForceValue = Math.max(0, Math.min(1, Number(defaultForceWidget?.value ?? 0.25)));
             const rowForceValue = Math.max(0, Math.min(1, Number(row.motion_force ?? row.force ?? row.strength ?? defaultForceValue)));
@@ -11693,12 +13893,17 @@ function renderShotboardV3(node) {
                     : Number.isFinite(Number(row.force ?? row.strength)) && Math.abs(rowForceValue - defaultForceValue) > 0.0005;
             return {
                 id: newId(isText ? "text" : "seg"),
-                type: isText ? "text" : "image",
+                type: isVideo ? "video" : isText ? "text" : "image",
                 start,
                 length: Math.max(1, end - start),
-                ref: Math.max(1, Math.round(Number(row.ref ?? row.image_ref ?? row.reference_index ?? index + 1) || index + 1)),
-                imageFile: rowTruthPath,
-                path: rowTruthPath,
+                ref: isVideo ? 0 : Math.max(1, Math.round(Number(row.ref ?? row.image_ref ?? row.reference_index ?? index + 1) || index + 1)),
+                videoFile: rowVideoPath,
+                video_file: rowVideoPath,
+                videoDurationFrames: isVideo ? Math.max(1, Math.round(Number(row.videoDurationFrames || row.video_duration_frames || end - start || 1))) : undefined,
+                trimStart: isVideo ? Math.max(0, Math.round(Number(row.trimStart || row.trim_start || 0))) : undefined,
+                imageFile: isVideo ? rowVideoPath : rowTruthPath,
+                image_file: isVideo ? rowVideoPath : rowTruthPath,
+                path: isVideo ? rowVideoPath : rowTruthPath,
                 imageTruthPath: rowTruthPath,
                 imageTruthName: rowTruthName,
                 imageName: rowTruthName,
@@ -11899,12 +14104,25 @@ function renderShotboardV3(node) {
                 : Array.isArray(audioData.audioSegments)
                     ? audioData.audioSegments
                     : [];
+            const importedMotionSegments = isShotboardV4
+                ? (Array.isArray(baseTimeline.motionSegments) ? baseTimeline.motionSegments : Array.isArray(baseTimeline.motionClips) ? baseTimeline.motionClips : [])
+                    .map((seg) => clampMotionSegment({ ...seg, id: seg.id || newId("mot") }))
+                : [];
             timeline = {
                 ...baseTimeline,
                 schema: "iamccs.cine.filmmaker_timeline",
                 schema_version: Number(baseTimeline.schema_version || 1),
                 segments: baseTimeline.segments.map((seg) => normalizeV3RelayOnlySegment({ ...seg, id: seg.id || newId(seg.type === "text" ? "text" : "seg") })),
                 rows: Array.isArray(baseTimeline.rows) ? cloneJsonData(baseTimeline.rows) : [],
+                motionSegments: importedMotionSegments,
+                motionClips: importedMotionSegments,
+                motionTrackEnabled: isShotboardV4 ? baseTimeline.motionTrackEnabled !== false : false,
+                useCustomMotion: Boolean(baseTimeline.useCustomMotion ?? baseTimeline.use_custom_motion ?? (Array.isArray(baseTimeline.motionSegments) && baseTimeline.motionSegments.length)),
+                use_custom_motion: Boolean(baseTimeline.use_custom_motion ?? baseTimeline.useCustomMotion ?? (Array.isArray(baseTimeline.motionSegments) && baseTimeline.motionSegments.length)),
+                overrideAudio: Boolean(baseTimeline.overrideAudio ?? baseTimeline.override_audio ?? false),
+                override_audio: Boolean(baseTimeline.override_audio ?? baseTimeline.overrideAudio ?? false),
+                inpaintAudio: Boolean(baseTimeline.inpaintAudio ?? baseTimeline.inpaint_audio ?? false),
+                inpaint_audio: Boolean(baseTimeline.inpaint_audio ?? baseTimeline.inpaintAudio ?? false),
                 audioSegments: importedAudioSegments.map((seg) => ({ ...seg, id: seg.id || newId("aud") })),
                 audioTrackCount: Math.max(1, Number(baseTimeline.audioTrackCount || audioData.audioTrackCount || importedAudioSegments.length || 2)),
                 audioSyncMode: String(baseTimeline.audioSyncMode || audioData.audioSyncMode || "timeline_audio"),
@@ -11928,6 +14146,9 @@ function renderShotboardV3(node) {
                     schema: "iamccs.cine.filmmaker_timeline",
                     schema_version: 1,
                     segments: converted,
+                    motionSegments: [],
+                    motionClips: [],
+                    motionTrackEnabled: isShotboardV4,
                     audioSegments: [],
                     audioTrackCount: 1,
                     audioSyncMode: "timeline_audio",
@@ -11976,7 +14197,8 @@ function renderShotboardV3(node) {
         const file = files.find((item) => /\.json$/i.test(item.name || ""));
         const audioFiles = files.filter((item) => String(item.type || "").startsWith("audio/"));
         const imageFiles = files.filter((item) => String(item.type || "").startsWith("image/"));
-        if (!file && !audioFiles.length && !imageFiles.length) return;
+        const videoFiles = files.filter((item) => String(item.type || "").startsWith("video/") || /\.(mp4|mov|mkv|webm|avi)$/i.test(String(item.name || "")));
+        if (!file && !audioFiles.length && !imageFiles.length && !(isShotboardV4 && videoFiles.length)) return;
         event.preventDefault();
         event.stopPropagation();
         if (file) {
@@ -11989,6 +14211,19 @@ function renderShotboardV3(node) {
         }
         if (imageFiles.length) {
             addUploadedImagesToTimeline(await uploadShotboardImages(imageFiles));
+            return;
+        }
+        if (isShotboardV4 && videoFiles.length) {
+            const rect = timelineBox.getBoundingClientRect();
+            const y = Number(event.clientY || 0) - Number(rect.top || 0);
+            const mainTrackHeight = 254 + timelineExtraH;
+            const icTrackHeight = 116;
+            const frame = Math.max(0, Math.round(((Number(event.clientX || 0) - Number(rect.left || 0)) / Math.max(1, Number(rect.width || 1))) * getTotalFrames()));
+            if (rect.width && y >= mainTrackHeight && y < mainTrackHeight + icTrackHeight) {
+                await uploadMotionGuideVideos(videoFiles, frame);
+            } else {
+                await uploadEditorialVideos(videoFiles, rect.width ? frame : null, null);
+            }
             return;
         }
         if (audioFiles.length) {
@@ -12080,18 +14315,59 @@ function renderShotboardV3(node) {
             savePackageBtn.disabled = false;
         }
     };
+    saveMultiPackageBtn.onclick = async () => {
+        try {
+            saveMultiPackageBtn.disabled = true;
+            writeTimeline({ force: true });
+            const timelineText = getWidget(node, "timeline_data")?.value || "";
+            const exportedTimeline = boardTimelineForExport(timelineText);
+            const timelinePayload = exportedTimeline.payload;
+            const promptText = exportedTimeline.text || timelineText || JSON.stringify(timeline || {});
+            console.log("[IAMCCS V3 BOARD SAVE]", {
+                kind: "multi_package",
+                nodeId: node?.id,
+                containsCoastline: /\bcoastline\b/i.test(promptText),
+                firstPrompt: String(timelinePayload?.segments?.[0]?.prompt || timelinePayload?.rows?.[0]?.relay_prompt || "").replace(/\s+/g, " ").slice(0, 220),
+                settings: v3SettingsSnapshot(),
+            });
+            const board = {
+                metadata: { schema: "iamccs.cine.filmmaker_board", schema_version: 1, saved_at: new Date().toISOString(), node_type: nodeClassName(node) },
+                global_prompt: promptArea.value,
+                timeline_data: exportedTimeline.text,
+                timeline: timelinePayload,
+                image_paths: refPaths(),
+                settings: v3SettingsSnapshot(),
+            };
+            Object.assign(board, board.settings);
+            const packageBoard = buildMultiTimelinePackageBoard(board, timelinePayload);
+            const packageName = await askShotboardPackageName(`cine_filmmaker_v3_multi_${timestampForPackageName()}`);
+            if (!packageName) {
+                showTimelineNotice("Save Multi Pkg cancelled.", "warn");
+                return;
+            }
+            await saveShotboardPackageFolder(packageBoard, "cine_filmmaker_v3_multi", (message) => {
+                showTimelineNotice(message, message && /failed/i.test(message) ? "error" : "warn");
+            }, packageName);
+        } catch (err) {
+            console.error("[IAMCCS Cine Shotboard V3] multi package save failed", err);
+            showTimelineNotice(`Save Multi Pkg failed: ${err?.message || err}`, "error");
+        } finally {
+            saveMultiPackageBtn.disabled = false;
+        }
+    };
     clearBtn.onclick = () => {
         stopPlayback();
         promptArea.value = "";
         setWidgetValue(node, "global_prompt", "");
-        timeline = { schema: "iamccs.cine.filmmaker_timeline", schema_version: 2, segments: [], audioSegments: [], audioTrackCount: 1, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
+        timeline = { schema: "iamccs.cine.filmmaker_timeline", schema_version: 2, segments: [], motionSegments: [], motionClips: [], motionTrackEnabled: isShotboardV4, useCustomMotion: false, use_custom_motion: false, overrideAudio: false, override_audio: false, inpaintAudio: false, inpaint_audio: false, audioSegments: [], audioTrackCount: 1, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
         selectedId = null;
         clearOwnReferencePaths(node);
         writeTimeline();
         draw();
     };
 
-    const widget = node.addDOMWidget("Cine Shotboard V3", "iamccs_cine_shotboard_v3", root, { serialize: false });
+    const shotboardWidgetLabel = isShotboardV4Class(nodeClassName(node)) ? "Cine Shotboard V4" : "Cine Shotboard V3";
+    const widget = node.addDOMWidget(shotboardWidgetLabel, "iamccs_cine_shotboard_v3", root, { serialize: false });
     node._iamccsCineShotboardV3Widget = widget;
     const v3RigidWidth = SHOTBOARD_V3_RIGID_WIDTH;
     widget.computeSize = (width) => {
@@ -13353,7 +15629,7 @@ function renderForNode(node) {
                 const shots = Array.isArray(data.segments) ? data.segments.filter((seg) => String(seg?.type || "image") !== "audio").length : 0;
                 const audio = Array.isArray(data.audioSegments) ? data.audioSegments.length : 0;
                 return [
-                    "Shotboard V3 mini view",
+                    isShotboardV4Class(klass) ? "Shotboard V4 mini view" : "Shotboard V3 mini view",
                     `${duration.toFixed(2)}s / ${Math.round(duration * fps)} frames`,
                     `${shots} visual slots / ${audio} audio clips`,
                     "Zoom in or open editor for full controls",

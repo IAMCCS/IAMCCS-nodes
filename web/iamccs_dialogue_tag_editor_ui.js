@@ -1874,7 +1874,7 @@ function injectVisibleWidgets(node, data, status, injectBtn, foot) {
   status?.classList.add("iamccs-inject-status");
   foot?.classList.add("iamccs-inject-status");
   status.textContent = "Inject UI in progress...";
-  downstream(node, (candidate) => nodeType(candidate) === "IAMCCS_CineShotboardPlannerV3").forEach((shotboard) => {
+  downstream(node, (candidate) => ["IAMCCS_CineShotboardPlannerV3", "IAMCCS_CineShotboardPlannerV4"].includes(nodeType(candidate))).forEach((shotboard) => {
     const gp = widget(shotboard, "global_prompt");
     const td = widget(shotboard, "timeline_data");
     if (gp) { gp.value = data.global_prompt || ""; try { gp.callback?.(gp.value); } catch {} }

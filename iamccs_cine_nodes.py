@@ -57,6 +57,87 @@ def _cine_debug(message: str) -> None:
         print(message)
 
 
+def _conditioning_set_values_safe(conditioning: Any, values: Dict[str, Any]) -> Any:
+    try:
+        import node_helpers
+
+        return node_helpers.conditioning_set_values(conditioning, values)
+    except Exception:
+        pass
+    updated = []
+    for item in conditioning or []:
+        if isinstance(item, (list, tuple)) and len(item) > 1 and isinstance(item[1], dict):
+            clone = list(item)
+            clone[1] = dict(clone[1])
+            clone[1].update(values)
+            updated.append(tuple(clone) if isinstance(item, tuple) else clone)
+        else:
+            updated.append(item)
+    return updated
+
+
+def _set_guide_crop_metadata(
+    positive: Any,
+    negative: Any,
+    initial_latent_length: int,
+    latent_image: Any,
+) -> Tuple[Any, Any, int]:
+    current_length = 0
+    try:
+        current_length = int(latent_image.shape[2])
+    except Exception:
+        current_length = int(initial_latent_length or 0)
+    exact_crop_frames = max(0, int(current_length) - max(0, int(initial_latent_length or 0)))
+    values = {"nghtdrp_guide_crop_latent_frames": int(exact_crop_frames)}
+    return (
+        _conditioning_set_values_safe(positive, values),
+        _conditioning_set_values_safe(negative, values),
+        int(exact_crop_frames),
+    )
+
+
+def _conditioning_get_any_value(conditioning: Any, key: str, default: Any = None) -> Any:
+    for item in conditioning or []:
+        if isinstance(item, (list, tuple)) and len(item) > 1 and isinstance(item[1], dict):
+            value = item[1].get(key, None)
+            if value is not None:
+                return value
+    return default
+
+
+def _guide_crop_count_from_conditioning(conditioning: Any, latent_image: Any = None) -> int:
+    value = _conditioning_get_any_value(conditioning, "nghtdrp_guide_crop_latent_frames", None)
+    if value is not None:
+        try:
+            return max(0, int(value))
+        except Exception:
+            return 0
+    keyframe_idxs = _conditioning_get_any_value(conditioning, "keyframe_idxs", None)
+    if keyframe_idxs is None:
+        return 0
+    try:
+        if latent_image is not None:
+            latent_shape = latent_image.shape
+            tokens_per_frame = int(latent_shape[-2]) * int(latent_shape[-1])
+            if tokens_per_frame > 0:
+                return max(0, int(keyframe_idxs.shape[2]) // tokens_per_frame)
+        return max(0, int(torch.unique(keyframe_idxs[:, 0, :, 0]).shape[0]))
+    except Exception:
+        return 0
+
+
+def _get_latent_noise_mask(latent: Dict[str, Any], latent_image: Any) -> Any:
+    noise_mask = latent.get("noise_mask", None) if isinstance(latent, dict) else None
+    if noise_mask is not None:
+        return noise_mask.clone()
+    batch, _, latent_frames, _, _ = latent_image.shape
+    return torch.ones(
+        (batch, 1, latent_frames, 1, 1),
+        dtype=torch.float32,
+        device=latent_image.device,
+    )
+
+
 def _load_original_promptrelay_module():
     """Load ComfyUI-PromptRelay's own nodes.py under a synthetic package name.
 
@@ -792,6 +873,8 @@ class IAMCCS_CineLTXSequencer:
             noise_mask = torch.ones((batch, 1, latent_frames, 1, 1), dtype=torch.float32, device=latent_image.device)
 
         _, _, latent_length, latent_height, latent_width = latent_image.shape
+        initial_latent_length = int(latent_length)
+        initial_latent_length = int(latent_length)
         batch_size = int(multi_input.shape[0]) if multi_input is not None and torch.is_tensor(multi_input) else 0
         time_scale_factor = int(scale_factors[0]) if scale_factors else 8
         latent_pixel_frames = max(1, (int(latent_length) - 1) * max(1, time_scale_factor) + 1)
@@ -878,9 +961,16 @@ class IAMCCS_CineLTXSequencer:
                 f"requested_frame={requested_frame} applied_frame={int(f_idx)} strength={strength:.3f}"
             )
 
+        positive, negative, guide_crop_frames = _set_guide_crop_metadata(
+            positive,
+            negative,
+            initial_latent_length,
+            latent_image,
+        )
+
         _cine_debug(
             "[IAMCCS CineDebug:CineLTXSequencer] summary "
-            f"applied={len(applied)} skipped={len(skipped)}"
+            f"applied={len(applied)} skipped={len(skipped)} guide_crop_frames={guide_crop_frames}"
         )
 
         report = _json_report({
@@ -894,6 +984,7 @@ class IAMCCS_CineLTXSequencer:
             "references_loaded": batch_size,
             "latent_pixel_frames": int(latent_pixel_frames),
             "guide_attention_entries": False,
+            "guide_crop_frames": int(guide_crop_frames),
             "guide_strength_semantics": "clean_noise_mask_without_attention_attenuation",
             "compatibility_mode": "v3_clean_conditioning_guide",
             "applied_keyframes": applied,
@@ -2356,6 +2447,129 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
         return True
 
     @classmethod
+    def _normalise_visual_segments_contract(cls, segments: Any, ltx_frames: int) -> Tuple[Any, Dict[str, Any]]:
+        """Keep the visual segment contract closed through the LTX rounded duration."""
+        if not isinstance(segments, list) or not segments:
+            return segments, {"changed": False, "reason": "no_segments"}
+        target = max(1, _safe_int(ltx_frames, 0))
+        if target <= 1:
+            return segments, {"changed": False, "reason": "invalid_target"}
+        cloned: List[Any] = []
+        candidates: List[Tuple[int, int, int]] = []
+        for idx, seg in enumerate(segments):
+            if not isinstance(seg, dict):
+                cloned.append(seg)
+                continue
+            item = dict(seg)
+            cloned.append(item)
+            seg_type = str(item.get("type", "image") or "image").strip().lower()
+            if seg_type == "audio" or cls._as_bool(item.get("placeholder", False), False):
+                continue
+            start = max(0, _safe_int(item.get("start", item.get("frame", 0)), 0))
+            length = max(1, _safe_int(item.get("length", item.get("len", 1)), 1))
+            candidates.append((idx, start, start + length))
+        if not candidates:
+            return cloned, {"changed": False, "reason": "no_visual_segments"}
+        last_idx, last_start, last_end = sorted(candidates, key=lambda value: (value[1], value[0]))[-1]
+        if last_end >= target:
+            return cloned, {
+                "changed": False,
+                "target_frames": int(target),
+                "visual_end_frames": int(last_end),
+            }
+        last = cloned[last_idx]
+        if isinstance(last, dict):
+            last["length"] = int(max(1, target - last_start))
+            last["end"] = int(target)
+        return cloned, {
+            "changed": True,
+            "target_frames": int(target),
+            "visual_end_before": int(last_end),
+            "visual_end_after": int(target),
+            "extended_frames": int(target - last_end),
+            "last_segment_index": int(last_idx),
+        }
+
+    @classmethod
+    def _segments_from_rows(
+        cls,
+        rows: List[Dict[str, Any]],
+        duration_seconds: float,
+        fps: int,
+        ltx_round_mode: str,
+    ) -> Tuple[str, str, int, List[int]]:
+        """Compile V3 Relay lengths from explicit slot lengths, LTX Director-style.
+
+        The legacy planner derives a row's end from the next row's start. V3 rows
+        also carry the editor's explicit ``length`` so a slot remains the exact
+        duration chosen in the Shotboard, including when a later slot is edited.
+        """
+        target_frames = max(1, int(round(float(duration_seconds) * max(1, int(fps)))))
+        max_frames = int(cls._round_frames(target_frames, str(ltx_round_mode or "up_8n_plus_1")))
+        ordered = sorted(
+            [row for row in (rows or []) if isinstance(row, dict)],
+            key=lambda item: (
+                _safe_int(item.get("frame", item.get("start", 0)), 0)
+                if item.get("frame", item.get("start", None)) is not None
+                else int(round(_safe_float(item.get("second", 0.0), 0.0) * max(1, int(fps)))),
+                _safe_int(item.get("ref", 0), 0),
+            ),
+        )
+        visual_segments: List[Dict[str, Any]] = []
+        for index, row in enumerate(ordered):
+            start = max(
+                0,
+                _safe_int(
+                    row.get("frame", row.get("start", 0)),
+                    int(round(_safe_float(row.get("second", 0.0), 0.0) * max(1, int(fps)))),
+                ),
+            )
+            if start >= max_frames:
+                continue
+            explicit_length = _safe_int(
+                row.get("length", row.get("length_frames", row.get("duration_frames", 0))),
+                0,
+            )
+            if explicit_length <= 0:
+                next_start = max_frames
+                for next_row in ordered[index + 1:]:
+                    candidate = _safe_int(
+                        next_row.get("frame", next_row.get("start", 0)),
+                        int(round(_safe_float(next_row.get("second", 0.0), 0.0) * max(1, int(fps)))),
+                    )
+                    if candidate > start:
+                        next_start = candidate
+                        break
+                explicit_length = max(1, next_start - start)
+            prompt = str(row.get("relay_prompt", row.get("local_prompt", row.get("prompt", ""))) or "")
+            if not cls._as_bool(row.get("use_prompt", bool(prompt)), bool(prompt)):
+                prompt = ""
+            visual_segments.append({
+                "type": "image",
+                "start": int(start),
+                "length": int(max(1, explicit_length)),
+                "prompt": prompt,
+                "use_prompt": bool(prompt),
+                "label": str(row.get("label", f"slot_{index + 1}") or f"slot_{index + 1}"),
+                "relay_manual_off": bool(row.get("relay_manual_off", row.get("promptrelay_manual_off", False))),
+            })
+        compiled = cls._compile_flfreal_timeline(
+            timeline_data=json.dumps({"segments": visual_segments, "frame_rate": int(fps)}, ensure_ascii=False),
+            duration_seconds=float(duration_seconds),
+            frame_rate=int(fps),
+            ltx_round_mode=str(ltx_round_mode or "up_8n_plus_1"),
+        )
+        if not isinstance(compiled, dict):
+            return "", "", int(max_frames), []
+        lengths = [int(value) for value in compiled.get("lengths", [])]
+        return (
+            str(compiled.get("local_prompts", "") or ""),
+            str(compiled.get("segment_lengths", "") or ""),
+            int(compiled.get("max_frames", max_frames) or max_frames),
+            lengths,
+        )
+
+    @classmethod
     def _parse_rows(cls, timeline_data: str, duration_seconds: float, default_force: float) -> List[Dict[str, Any]]:
         text = str(timeline_data or "").strip()
         if not text:
@@ -2370,7 +2584,9 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
         fps = max(1, _safe_int(data.get("frame_rate", data.get("fps", 24)), 24))
         rows: List[Dict[str, Any]] = []
         image_order = 0
-        for idx, seg in enumerate(sorted(data.get("segments", []), key=lambda item: _safe_int(item.get("start", 0), 0))):
+        raw_segments = [item for item in data.get("segments", []) if isinstance(item, dict)]
+        raw_segments.sort(key=lambda item: _safe_int(item.get("start", item.get("frame", 0)), 0))
+        for idx, seg in enumerate(raw_segments):
             if not isinstance(seg, dict):
                 continue
             if cls._as_bool(seg.get("placeholder", False), False):
@@ -2389,6 +2605,16 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
             _max_frames = int(cls._round_frames(_target_frames, _ltx_mode))
             if start_frame >= _max_frames:
                 continue
+            raw_length = _safe_int(seg.get("length", seg.get("length_frames", seg.get("duration_frames", 0))), 0)
+            if raw_length <= 0:
+                next_start = _max_frames
+                for next_seg in raw_segments[idx + 1:]:
+                    candidate = _safe_int(next_seg.get("start", next_seg.get("frame", 0)), 0)
+                    if candidate > start_frame:
+                        next_start = candidate
+                        break
+                raw_length = max(1, next_start - start_frame)
+            segment_length = max(1, min(raw_length, _max_frames - start_frame))
             is_text = seg_type == "text"
             if not is_text:
                 image_order += 1
@@ -2401,6 +2627,11 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
             rows.append({
                 "second": max(0.0, second),
                 "frame": int(start_frame),
+                "length": int(segment_length),
+                "length_frames": int(segment_length),
+                "duration_frames": int(segment_length),
+                "end_frame": int(start_frame + segment_length),
+                "duration_seconds": float(segment_length / max(1, fps)),
                 "ref": ref,
                 "force": 0.0 if is_text else float(strength),
                 "motion_force": 0.0 if is_text else float(strength),
@@ -2471,7 +2702,7 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
         visual_segments.sort(key=lambda item: _safe_int(item.get("start", item.get("frame", 0)), 0))
         prompts: List[str] = []
         lengths: List[int] = []
-        missing_prompt_labels: List[str] = []
+        empty_local_prompt_labels: List[str] = []
         action_bridge_count = 0
         pending_gap = 0
         cursor = 0
@@ -2479,8 +2710,6 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
         def append_segment(prompt: str, length: int) -> None:
             prompt = str(prompt or "").strip()
             length = max(1, int(round(length)))
-            if not prompt:
-                return
             prompts.append(prompt)
             lengths.append(length)
 
@@ -2514,29 +2743,36 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                 hold_len = max(0, total_len - bridge_len)
                 if hold_len > 0 and prompt and use_prompt:
                     append_segment(prompt, hold_len)
-                elif hold_len > 0 and not prompt:
-                    append_segment("same continuous shot; keep the current guide alive while preparing the next physical camera action", hold_len)
+                elif hold_len > 0:
+                    append_segment("", hold_len)
+                    empty_local_prompt_labels.append(str(seg.get("label", seg.get("name", f"segment_{index + 1}")) or f"segment_{index + 1}"))
                 append_segment(bridge_prompt, bridge_len)
                 action_bridge_count += 1
-            elif prompt and use_prompt:
-                append_segment(prompt, total_len)
-            elif use_prompt:
-                missing_prompt_labels.append(str(seg.get("label", seg.get("name", f"segment_{index + 1}")) or f"segment_{index + 1}"))
-            elif lengths:
-                lengths[-1] += total_len
             else:
-                pending_gap += total_len
+                # Keep one prompt/length pair for every visual slot. An empty
+                # local prompt remains empty here: the separate global_prompt
+                # input belongs to the Relay and must not be copied into this
+                # slot's local prompt field.
+                if prompt and use_prompt:
+                    append_segment(prompt, total_len)
+                else:
+                    append_segment("", total_len)
+                    empty_local_prompt_labels.append(str(seg.get("label", seg.get("name", f"segment_{index + 1}")) or f"segment_{index + 1}"))
 
         clamped_cursor = min(cursor, duration_frames)
         if lengths and clamped_cursor < duration_frames:
             lengths[-1] += duration_frames - clamped_cursor
         report = {
             "available": True,
-            "mode": "flfreal_visual_timeline_1to1",
+            "mode": "flfreal_visual_timeline_slot_duration_v3",
             "visual_segments": len(visual_segments),
             "relay_segments": len(prompts),
             "action_bridges": int(action_bridge_count),
-            "missing_prompt_labels": missing_prompt_labels,
+            "missing_prompt_labels": [],
+            "empty_local_prompt_labels": empty_local_prompt_labels,
+            "empty_local_prompt_segments": len(empty_local_prompt_labels),
+            "slot_duration_contract": "one_prompt_length_per_visual_slot",
+            "prompt_contract": "global_prompt_is_separate_relay_context",
             "max_frames": int(max_frames),
             "duration_frames": int(duration_frames),
         }
@@ -2552,6 +2788,21 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
         upstream_cine_linx = cine_linx
         upstream_resources = self._input_linx_resources(upstream_cine_linx)
         upstream_mode = str(upstream_cine_linx.get("mode", "") if isinstance(upstream_cine_linx, dict) else "")
+        take_router_timeline = upstream_resources.get("cine_take_router_timeline_data") if upstream_resources else None
+        take_router_package = upstream_resources.get("cine_take_router_package") if upstream_resources else None
+        if isinstance(take_router_timeline, str) and take_router_timeline.strip():
+            timeline_data = take_router_timeline
+            routed_data = _safe_json_loads(take_router_timeline, {})
+            if isinstance(routed_data, dict):
+                global_prompt = str(routed_data.get("global_prompt", routed_data.get("prompt", global_prompt)) or "")
+                duration_seconds = _safe_float(routed_data.get("duration_seconds", duration_seconds), duration_seconds)
+                frame_rate = _safe_float(routed_data.get("frame_rate", frame_rate), frame_rate)
+            if isinstance(take_router_package, dict):
+                print(
+                    "[IAMCCS ShotboardPlannerV3] TAKE_ROUTER_INPUT "
+                    f"timeline={take_router_package.get('timeline_id', take_router_package.get('take_id', ''))} "
+                    f"take={take_router_package.get('take_index', '')} audio={take_router_package.get('audio_lane', '')}"
+                )
         widget_duration_seconds = _safe_float(duration_seconds, 20.0)
         widget_frame_rate = _safe_int(frame_rate, 24)
 
@@ -2643,6 +2894,64 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                 if upstream_global_prompt:
                     global_prompt = upstream_global_prompt
                 print(f"[IAMCCS ShotboardPlannerV3] UPSTREAM_DIALOGUE_TIMELINE segments={len(parsed_upstream_dialogue_timeline.get('segments', []))} global_prompt={bool(str(global_prompt).strip())}")
+        timeline_prompt_data = _safe_json_loads(str(timeline_data or "{}"), {})
+        if isinstance(timeline_prompt_data, dict):
+            multi_prompt = timeline_prompt_data.get("multiGeneration") if isinstance(timeline_prompt_data.get("multiGeneration"), dict) else {}
+            active_timeline_id = str(multi_prompt.get("activeTimelineId") or "").strip()
+            visual_timelines = multi_prompt.get("visualTimelines") if isinstance(multi_prompt.get("visualTimelines"), dict) else {}
+            active_visual = visual_timelines.get(active_timeline_id) if active_timeline_id else None
+            if isinstance(active_visual, dict):
+                upstream_take_package = {}
+                if upstream_resources:
+                    upstream_take_package = upstream_resources.get("cine_multigeneration_take_package") if isinstance(upstream_resources.get("cine_multigeneration_take_package"), dict) else {}
+                    if not upstream_take_package:
+                        upstream_take_package = _safe_json_loads(str(upstream_resources.get("cine_multigeneration_take_package_json", "{}") or "{}"), {})
+                package_timeline_id = str(upstream_take_package.get("timeline_id", upstream_take_package.get("take_id", "")) or "").strip() if isinstance(upstream_take_package, dict) else ""
+                if active_timeline_id and upstream_resources and (upstream_resources.get("cine_multigeneration_index") or upstream_resources.get("cine_multigeneration_index_json")) and not package_timeline_id:
+                    raise ValueError(
+                        "IAMCCS ShotboardPlannerV3 hard-fail: multigeneration bridge did not provide a TakePackage. "
+                        "Refusing to infer active timeline."
+                    )
+                if active_timeline_id and package_timeline_id and package_timeline_id != active_timeline_id:
+                    raise ValueError(
+                        "IAMCCS ShotboardPlannerV3 hard-fail: active Shotboard timeline and bridge TakePackage disagree. "
+                        f"Shotboard={active_timeline_id}, TakePackage={package_timeline_id}."
+                    )
+                active_segments = active_visual.get("segments") if isinstance(active_visual.get("segments"), list) else []
+                active_rows = active_visual.get("rows") if isinstance(active_visual.get("rows"), list) else []
+                if active_timeline_id and not active_segments and not active_rows:
+                    raise ValueError(
+                        "IAMCCS ShotboardPlannerV3 hard-fail: active multigeneration visual timeline "
+                        f"{active_timeline_id} has no visual segments/rows. Refusing to reuse a previous timeline."
+                    )
+                if active_segments:
+                    timeline_prompt_data["segments"] = copy.deepcopy(active_segments)
+                if active_rows:
+                    timeline_prompt_data["rows"] = copy.deepcopy(active_rows)
+                visual_duration = _positive_float_or_none(
+                    active_visual.get("duration_seconds", active_visual.get("durationSeconds", active_visual.get("duration")))
+                )
+                if visual_duration is not None:
+                    timeline_prompt_data["duration_seconds"] = float(visual_duration)
+                    duration_seconds = float(visual_duration)
+                    duration_truth_source = f"multi_visual_{active_timeline_id}"
+                visual_fps = _positive_int_or_none(active_visual.get("frame_rate", active_visual.get("fps")))
+                if visual_fps is not None:
+                    timeline_prompt_data["frame_rate"] = int(visual_fps)
+                    frame_rate = int(visual_fps)
+                    frame_rate_truth_source = f"multi_visual_{active_timeline_id}"
+                if "global_prompt" in active_visual or "prompt" in active_visual:
+                    timeline_global_prompt = str(active_visual.get("global_prompt", active_visual.get("prompt", "")) or "")
+                    global_prompt = timeline_global_prompt
+                    timeline_prompt_data["global_prompt"] = timeline_global_prompt
+                    timeline_prompt_data["prompt"] = timeline_global_prompt
+                timeline_data = json.dumps(timeline_prompt_data, ensure_ascii=False)
+                if _safe_bool(timeline_prompt_data.get("verbose_log", timeline_prompt_data.get("verboseLog", True)), True):
+                    print(
+                        "[IAMCCS ShotboardPlannerV3] MULTI_VISUAL_TIMELINE_APPLIED "
+                        f"timeline={active_timeline_id or 'T01'} segments={len(active_segments)} rows={len(active_rows)} "
+                        f"global_chars={len(str(global_prompt or ''))} duration={timeline_prompt_data.get('duration_seconds')}"
+                    )
         multi_input = self._multi_input_from_cine_linx(upstream_cine_linx)
         (cine_linx,) = super().execute(
             global_prompt,
@@ -2742,15 +3051,31 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
         global_prompt_only = bool(_safe_bool(data.get("global_prompt_only", data.get("use_global_prompt_only", False)), False)) if isinstance(data, dict) else False
         verbose_log = bool(_safe_bool(data.get("verbose_log", data.get("verboseLog", True)), True)) if isinstance(data, dict) else True
         fps = max(1, _safe_int(frame_rate, 24))
+        target_frames_for_contract = int(round(float(_safe_float(duration_seconds, widget_duration_seconds)) * fps))
+        rounded_frames_for_contract = _round_ltx_frames(target_frames_for_contract, str(ltx_round_mode or "up_8n_plus_1"))
+        visual_segments, visual_contract_report = self._normalise_visual_segments_contract(
+            visual_segments,
+            int(rounded_frames_for_contract),
+        )
+        if isinstance(data, dict) and isinstance(visual_segments, list):
+            data["segments"] = visual_segments
+            timeline_data = json.dumps(data, ensure_ascii=False)
         if verbose_log:
-            target_frames = int(round(float(_safe_float(duration_seconds, widget_duration_seconds)) * fps))
-            rounded_frames = _round_ltx_frames(target_frames, str(ltx_round_mode or "up_8n_plus_1"))
             print(
                 "[IAMCCS ShotboardPlannerV3] "
                 f"DURATION_TRUTH source={duration_truth_source} duration_passed={float(_safe_float(duration_seconds, widget_duration_seconds)):.3f}s "
-                f"fps_source={frame_rate_truth_source} fps_passed={int(fps)} target_frames={int(target_frames)} rounded_max_frames={int(rounded_frames)} "
+                f"fps_source={frame_rate_truth_source} fps_passed={int(fps)} target_frames={int(target_frames_for_contract)} rounded_max_frames={int(rounded_frames_for_contract)} "
                 f"widget_duration={float(widget_duration_seconds):.3f}s timeline_duration={timeline_duration_seconds} upstream_duration={upstream_duration_seconds}"
             )
+            if isinstance(visual_contract_report, dict) and visual_contract_report.get("changed"):
+                print(
+                    "[IAMCCS ShotboardPlannerV3] VISUAL_SEGMENT_CONTRACT_FIX "
+                    f"target_frames={visual_contract_report.get('target_frames')} "
+                    f"visual_end_before={visual_contract_report.get('visual_end_before')} "
+                    f"visual_end_after={visual_contract_report.get('visual_end_after')} "
+                    f"extended_frames={visual_contract_report.get('extended_frames')} "
+                    f"last_segment_index={visual_contract_report.get('last_segment_index')}"
+                )
         promptrelay_requested = False
         if isinstance(data, dict):
             promptrelay_requested = self._as_bool(data.get("promptrelay_enabled", data.get("enable_promptrelay", False)), False)
@@ -2758,6 +3083,19 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                 promptrelay_requested = False
             if not global_prompt_only and not promptrelay_requested and flfreal_mode == "flfreal_parity" and director_local_prompts.strip() and director_segment_lengths.strip():
                 promptrelay_requested = True
+            if not global_prompt_only and not promptrelay_requested:
+                visual_slot_count = sum(
+                    1
+                    for seg in (visual_segments if isinstance(visual_segments, list) else [])
+                    if isinstance(seg, dict)
+                    and not self._as_bool(seg.get("placeholder", False), False)
+                    and str(seg.get("type", "image") or "image").strip().lower() != "audio"
+                )
+                if visual_slot_count > 1:
+                    # Multiple visual slots need the compiled relay even when
+                    # local prompt fields are empty: the global prompt is only
+                    # a text fallback and must not merge slot durations.
+                    promptrelay_requested = True
             if not global_prompt_only and not promptrelay_requested:
                 for seg in visual_segments if isinstance(visual_segments, list) else []:
                     if not isinstance(seg, dict) or str(seg.get("type", "image") or "image").strip().lower() == "audio":
@@ -2778,6 +3116,14 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
             resources = cine_linx.setdefault("resources", {})
             outputs = cine_linx.setdefault("outputs", {})
             payload = resources.get("cine_payload") if isinstance(resources.get("cine_payload"), dict) else {}
+            # Keep the full Shotboard timeline contract in CineLinX. Downstream
+            # multigeneration routers must be able to route T01/T02/... from the
+            # same truth the Shotboard just compiled, not from stale widget state
+            # or from a single active audio lane.
+            resources["cine_board_timeline_data"] = str(timeline_data or "")
+            resources["cine_dialogue_shotboard_timeline_json"] = str(timeline_data or "")
+            outputs["timeline_data"] = str(timeline_data or "")
+            payload["timeline_data"] = str(timeline_data or "")
             payload["backend_mode"] = "cine_ltx23_filmmaker_timeline"
             payload["filmmaker_schema"] = "iamccs.cine.filmmaker_timeline"
             payload["flfreal_mode"] = flfreal_mode
@@ -2807,6 +3153,10 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                 outputs["segment_lengths"] = ""
             resources["cine_payload"] = payload
             resources["cine_verbose_log"] = bool(verbose_log)
+            resources.setdefault("shotboard_tail_trim_frames", 1)
+            resources.setdefault("cine_tail_trim_frames", resources.get("shotboard_tail_trim_frames", 1))
+            outputs.setdefault("shotboard_tail_trim_frames", resources.get("shotboard_tail_trim_frames", 1))
+            payload.setdefault("shotboard_tail_trim_frames", resources.get("shotboard_tail_trim_frames", 1))
             if not isinstance(audio_timeline_payload, dict):
                 audio_timeline_payload = {}
             audio_timeline_payload["audioSegments"] = audio_segments if isinstance(audio_segments, list) else []
@@ -3718,6 +4068,7 @@ class IAMCCS_CineFLFProductor:
             noise_mask = torch.ones((batch, 1, latent_frames, 1, 1), dtype=torch.float32, device=latent_image.device)
 
         _, _, latent_length, latent_height, latent_width = latent_image.shape
+        initial_latent_length = int(latent_length)
         time_scale_factor = int(scale_factors[0]) if scale_factors else 8
         latent_pixel_frames = max(1, (int(latent_length) - 1) * max(1, time_scale_factor) + 1)
         max_frame = max(0, int(latent_pixel_frames) - 1 - max(0, int(tail_safety_frames)))
@@ -3773,10 +4124,18 @@ class IAMCCS_CineFLFProductor:
                 "strength": float(strength),
             })
 
+        positive, negative, guide_crop_frames = _set_guide_crop_metadata(
+            positive,
+            negative,
+            initial_latent_length,
+            latent_image,
+        )
+
         return positive, negative, {"samples": latent_image, "noise_mask": noise_mask}, {
             "applied_guides": applied,
             "skipped_guides": skipped,
             "latent_pixel_frames": int(latent_pixel_frames),
+            "guide_crop_frames": int(guide_crop_frames),
         }
 
     @classmethod
@@ -4354,9 +4713,54 @@ class IAMCCS_CineFilmmakerBackend:
         image_resize_method = _iamccs_cine_resize_method(resources.get("cine_image_resize_method", payload.get("image_resize_method", "crop")))
         image_multiple_of = _safe_int(resources.get("cine_image_multiple_of", payload.get("image_multiple_of", 32)), 32)
         img_compression = _safe_int(resources.get("cine_img_compression", payload.get("img_compression", 0)), 0)
-        max_frames = _safe_int(resources.get("cine_max_frames", outputs.get("max_frames", payload.get("max_frames", 0))), 0)
+
+        # In multigeneration, TakeRouter materializes the selected T/A timeline
+        # in cine_take_router_timeline_data. Its visual segments are authoritative
+        # for guides, local Relay prompts and slot lengths. Older resources can
+        # still contain the planner's previously active timeline, so resolve the
+        # routed visual contract before deriving any downstream generation values.
+        routed_timeline_source = "planner_cine_linx"
+        routed_max_frames = 0
+        routed_timeline_raw = resources.get("cine_take_router_timeline_data", "")
+        routed_timeline = (
+            dict(routed_timeline_raw)
+            if isinstance(routed_timeline_raw, dict)
+            else _safe_json_loads(routed_timeline_raw, {})
+        )
+        if isinstance(routed_timeline, dict) and isinstance(routed_timeline.get("segments"), list) and routed_timeline.get("segments"):
+            routed_timeline_source = "take_router_routed_timeline"
+            routed_segments = [
+                dict(seg)
+                for seg in routed_timeline.get("segments", [])
+                if isinstance(seg, dict)
+            ]
+            visual_segments_json = json.dumps(routed_segments, ensure_ascii=False)
+            routed_duration = _safe_float(routed_timeline.get("duration_seconds", routed_timeline.get("durationSeconds", routed_timeline.get("duration"))), 0.0)
+            if routed_duration > 0:
+                duration_seconds = float(routed_duration)
+            routed_fps = _safe_int(routed_timeline.get("frame_rate", routed_timeline.get("frameRate", routed_timeline.get("fps"))), 0)
+            if routed_fps > 0:
+                frame_rate = int(routed_fps)
+            routed_global_prompt = str(routed_timeline.get("global_prompt", routed_timeline.get("prompt", "")) or "")
+            if routed_global_prompt:
+                global_prompt = routed_global_prompt
+            routed_compile = IAMCCS_CineShotboardPlannerV3._compile_flfreal_timeline(
+                timeline_data=json.dumps({"segments": routed_segments, "frame_rate": int(frame_rate)}, ensure_ascii=False),
+                duration_seconds=float(duration_seconds),
+                frame_rate=int(frame_rate),
+                ltx_round_mode=str(payload.get("ltx_round_mode", "up_8n_plus_1") or "up_8n_plus_1"),
+            )
+            if isinstance(routed_compile, dict):
+                local_prompts = str(routed_compile.get("local_prompts", "") or "")
+                segment_lengths = str(routed_compile.get("segment_lengths", "") or "")
+                if routed_compile.get("max_frames"):
+                    routed_max_frames = int(routed_compile.get("max_frames"))
+
+        max_frames = int(routed_max_frames or _safe_int(resources.get("cine_max_frames", outputs.get("max_frames", payload.get("max_frames", 0))), 0))
         if max_frames <= 0:
             max_frames = _round_ltx_frames(int(round(duration_seconds * max(1, frame_rate))), str(payload.get("ltx_round_mode", "up_8n_plus_1")))
+        else:
+            max_frames = _round_ltx_frames(max_frames, str(payload.get("ltx_round_mode", "up_8n_plus_1")))
         audio_end_frames = self._timeline_end_frames(audio_timeline_json, "audioSegments")
         visual_end_frames = self._timeline_end_frames(visual_segments_json, "segments")
         timeline_end_frames = max(
@@ -4364,6 +4768,17 @@ class IAMCCS_CineFilmmakerBackend:
             visual_end_frames,
         )
         duration_target_frames = int(round(float(duration_seconds) * max(1, int(frame_rate))))
+        if (
+            str(payload.get("filmmaker_schema", "") if isinstance(payload, dict) else "") == "iamccs.cine.filmmaker_timeline"
+            and int(visual_end_frames) > 0
+            and int(duration_target_frames) > 0
+            and int(visual_end_frames) < int(duration_target_frames)
+        ):
+            raise ValueError(
+                "IAMCCS FilmmakerBackend hard-fail: visual timeline ends before the logical duration. "
+                f"visual_end_frames={int(visual_end_frames)} target_frames={int(duration_target_frames)} max_frames={int(max_frames)}. "
+                "The Shotboard visual segment contract must cover the requested duration before sampling."
+            )
         duration_clamp_applied = False
         if timeline_end_frames > 0:
             rounded_timeline_frames = _round_ltx_frames(timeline_end_frames, str(payload.get("ltx_round_mode", "up_8n_plus_1")))
@@ -4515,6 +4930,10 @@ class IAMCCS_CineFilmmakerBackend:
         )
         if not guide_data.get("images"):
             guide_data = IAMCCS_CineInfoV2._guide_data_from_plan(guide_plan_json, multi_output)
+        # Store raw (non-rounded) duration so downstream IAMCCS_LTXVideoDurationCrop
+        # can trim the corrupted LTX 8n+1 padding frames after VAE decode.
+        guide_data["duration_frames"] = int(round(float(duration_seconds) * max(1, int(frame_rate))))
+        guide_data["ltxv_length"] = int(max_frames)
         if verbose_log:
             visual_segments_for_log = _safe_json_loads(visual_segments_json, [])
             if isinstance(visual_segments_for_log, dict):
@@ -4532,6 +4951,7 @@ class IAMCCS_CineFilmmakerBackend:
             print(
                 "[IAMCCS FilmmakerBackend] "
                 f"GUIDE_VALUES_USED source={guide_data_source} count={len(guide_data.get('images', []))} "
+                f"timeline_source={routed_timeline_source} "
                 f"frames={guide_data.get('insert_frames', [])} "
                 f"strengths={guide_data.get('strengths', [])} "
                 f"refs={guide_data.get('reference_indices', [])} "
@@ -4571,7 +4991,14 @@ class IAMCCS_CineFilmmakerBackend:
                 print(f"[IAMCCS FilmmakerBackend] segment log truncated: {len(visual_segments_for_log) - 80} more segments.")
         has_timeline_audio = self._has_custom_audio(audio_timeline_json)
         custom_audio_requested = bool(_safe_bool(payload.get("use_custom_audio", resources.get("cine_use_custom_audio", use_custom_audio)), False) or has_timeline_audio)
-        audio_out = self._build_combined_audio(audio_timeline_json, int(max_frames), float(frame_rate))
+        # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+        # audio_out is built for raw duration (duration_frames) so it matches the user-chosen duration
+        # exactly after IAMCCS_LTXVideoDurationCrop trims the video. No audio trimming needed.
+        # audio_for_latent is built for max_frames (8n+1 padded) so the audio VAE produces the
+        # correct latent size required by the LTX sampler.
+        raw_duration_frames = int(round(float(duration_seconds) * max(1, int(frame_rate))))
+        audio_out = self._build_combined_audio(audio_timeline_json, raw_duration_frames, float(frame_rate))
+        audio_for_latent = self._build_combined_audio(audio_timeline_json, int(max_frames), float(frame_rate))
         audio_peak = 0.0
         audio_samples = 0
         try:
@@ -4585,7 +5012,7 @@ class IAMCCS_CineFilmmakerBackend:
             "[IAMCCS FilmmakerBackend] "
             f"Audio requested={bool(custom_audio_requested)} timeline_audio={bool(has_timeline_audio)} "
             f"segments={len(_safe_json_loads(audio_timeline_json, [])) if isinstance(_safe_json_loads(audio_timeline_json, []), list) else len(_safe_json_loads(audio_timeline_json, {}).get('audioSegments', [])) if isinstance(_safe_json_loads(audio_timeline_json, {}), dict) else 0} "
-            f"samples={audio_samples} peak={audio_peak:.6f}"
+            f"samples={audio_samples} peak={audio_peak:.6f} raw_duration_frames={raw_duration_frames}"
         )
         strict_audio = bool(_safe_bool(goya_audio_strict, False) and custom_audio_requested and has_timeline_audio)
         if custom_audio_requested and has_timeline_audio and audio_peak <= 0.000001:
@@ -4593,7 +5020,7 @@ class IAMCCS_CineFilmmakerBackend:
             if strict_audio:
                 raise RuntimeError(message)
             print(f"[IAMCCS FilmmakerBackend] WARNING: {message}")
-        audio_latent = self._encode_audio_latent(audio_vae, audio_out, strict=strict_audio) if custom_audio_requested and has_timeline_audio else {}
+        audio_latent = self._encode_audio_latent(audio_vae, audio_for_latent, strict=strict_audio) if custom_audio_requested and has_timeline_audio else {}
         if not audio_latent:
             audio_latent = self._empty_audio_latent(audio_vae, int(max_frames), float(frame_rate))
         else:
@@ -4621,6 +5048,7 @@ class IAMCCS_CineFilmmakerBackend:
             "height": int(height),
             "guide_data_count": len(guide_data.get("images", [])),
             "guide_data_source": guide_data_source,
+            "visual_timeline_source": routed_timeline_source,
             "image_loading": {
                 "mode": "ltx_director_style_internal_load_resize_compress",
                 "resize_method": image_resize_method,
@@ -4882,15 +5310,7 @@ class IAMCCS_CineFilmmakerGuide1to1:
 
         latent_image = latent["samples"].clone()
 
-        if "noise_mask" in latent:
-            noise_mask = latent["noise_mask"].clone()
-        else:
-            batch, _, latent_frames, _, _ = latent_image.shape
-            noise_mask = torch.ones(
-                (batch, 1, latent_frames, 1, 1),
-                dtype=torch.float32,
-                device=latent_image.device,
-            )
+        noise_mask = _get_latent_noise_mask(latent, latent_image)
 
         if scale_by != 1.0:
             batch, channels, frames, height, width = latent_image.shape
@@ -4931,14 +5351,37 @@ class IAMCCS_CineFilmmakerGuide1to1:
                 ).permute(0, 2, 1, 3, 4)
 
         _, _, latent_length, latent_height, latent_width = latent_image.shape
-
+        initial_latent_length = int(latent_length)
         images = guide_data.get("images", []) if isinstance(guide_data, dict) else []
         insert_frames = guide_data.get("insert_frames", []) if isinstance(guide_data, dict) else []
         strengths = guide_data.get("strengths", []) if isinstance(guide_data, dict) else []
-
+        applied = []
+        skipped = []
         for idx, img_tensor in enumerate(images):
             frame = insert_frames[idx] if idx < len(insert_frames) else 0
-            strength = strengths[idx] if idx < len(strengths) else 1.0
+            strength = float(strengths[idx] if idx < len(strengths) else 1.0)
+            if strength <= 0.0:
+                skipped.append({"index": idx, "frame": int(_safe_int(frame, 0)), "reason": "strength <= 0"})
+                continue
+
+            try:
+                if torch.is_tensor(img_tensor) and img_tensor.ndim == 4:
+                    _, img_h, img_w, _ = img_tensor.shape
+                    target_pix_w = int(latent_width * 32)
+                    target_pix_h = int(latent_height * 32)
+                    if target_pix_w != int(img_w) or target_pix_h != int(img_h):
+                        img_nchw = img_tensor.permute(0, 3, 1, 2)
+                        img_resized = comfy.utils.common_upscale(
+                            img_nchw,
+                            target_pix_w,
+                            target_pix_h,
+                            str(upscale_method),
+                            "disabled",
+                        )
+                        img_tensor = img_resized.permute(0, 2, 3, 1)
+            except Exception as exc:
+                skipped.append({"index": idx, "frame": int(_safe_int(frame, 0)), "reason": f"resize failed: {exc}"})
+                continue
 
             image_1, encoded = LTXVAddGuide.encode(vae, latent_width, latent_height, img_tensor, scale_factors)
             frame_idx, latent_idx = LTXVAddGuide.get_latent_index(
@@ -4949,21 +5392,114 @@ class IAMCCS_CineFilmmakerGuide1to1:
                 scale_factors,
             )
 
-            assert latent_idx + encoded.shape[2] <= latent_length, (
-                f"Guide image {idx + 1}: conditioning frames exceed the length of the latent sequence."
-            )
+            if latent_idx >= latent_length:
+                skipped.append({
+                    "index": idx,
+                    "frame": int(_safe_int(frame, 0)),
+                    "latent_idx": int(latent_idx),
+                    "reason": "latent index outside sequence",
+                })
+                continue
+
+            max_guide_frames = max(0, int(latent_length) - int(latent_idx))
+            if encoded.shape[2] > max_guide_frames:
+                encoded = encoded[:, :, :max_guide_frames]
+            if encoded.shape[2] <= 0:
+                skipped.append({
+                    "index": idx,
+                    "frame": int(_safe_int(frame, 0)),
+                    "latent_idx": int(latent_idx),
+                    "reason": "empty encoded guide",
+                })
+                continue
 
             positive, negative, latent_image, noise_mask = LTXVAddGuide.append_keyframe(
                 positive,
                 negative,
-                frame_idx,
+                int(frame_idx),
                 latent_image,
                 noise_mask,
                 encoded,
-                strength,
+                float(strength),
                 scale_factors,
             )
+            applied.append({
+                "index": idx,
+                "frame": int(frame_idx),
+                "latent_idx": int(latent_idx),
+                "latent_frames": int(encoded.shape[2]),
+                "strength": float(strength),
+            })
 
+        positive, negative, _guide_crop_frames = _set_guide_crop_metadata(
+            positive,
+            negative,
+            initial_latent_length,
+            latent_image,
+        )
+        print(
+            "[IAMCCS CineFilmmakerGuide1to1] "
+            f"DIRECTOR_APPEND_GUIDES applied={len(applied)} skipped={len(skipped)} "
+            f"initial_latent={int(initial_latent_length)} current_latent={int(latent_image.shape[2])} "
+            f"guide_crop_frames={int(_guide_crop_frames)} frames={[item['frame'] for item in applied]}"
+        )
+
+        return positive, negative, {"samples": latent_image, "noise_mask": noise_mask}
+
+
+class IAMCCS_CineFilmmakerCropGuides1to1:
+    """Crop appended LTX Director guide latents using the WhatDreamsCost contract."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "positive": ("CONDITIONING",),
+                "negative": ("CONDITIONING",),
+                "latent": ("LATENT",),
+            },
+        }
+
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "LATENT")
+    RETURN_NAMES = ("positive", "negative", "latent")
+    FUNCTION = "execute"
+    CATEGORY = "IAMCCS/Cine/02 Single Generation"
+
+    @classmethod
+    def execute(cls, positive, negative, latent):
+        latent_image = latent["samples"].clone()
+        noise_mask = _get_latent_noise_mask(latent, latent_image)
+
+        crop_frames = _guide_crop_count_from_conditioning(positive, latent_image)
+        if crop_frames <= 0:
+            clear_values = {
+                "keyframe_idxs": None,
+                "guide_attention_entries": None,
+                "nghtdrp_guide_crop_latent_frames": None,
+            }
+            return (
+                _conditioning_set_values_safe(positive, clear_values),
+                _conditioning_set_values_safe(negative, clear_values),
+                {"samples": latent_image, "noise_mask": noise_mask},
+            )
+
+        crop_frames = min(int(crop_frames), max(0, int(latent_image.shape[2]) - 1))
+        before = int(latent_image.shape[2])
+        if crop_frames > 0:
+            latent_image = latent_image[:, :, :-crop_frames]
+            noise_mask = noise_mask[:, :, :-crop_frames]
+
+        clear_values = {
+            "keyframe_idxs": None,
+            "guide_attention_entries": None,
+            "nghtdrp_guide_crop_latent_frames": None,
+        }
+        positive = _conditioning_set_values_safe(positive, clear_values)
+        negative = _conditioning_set_values_safe(negative, clear_values)
+        print(
+            "[IAMCCS CineFilmmakerCropGuides1to1] "
+            f"DIRECTOR_CROP_GUIDES before={before} crop_frames={int(crop_frames)} after={int(latent_image.shape[2])}"
+        )
         return positive, negative, {"samples": latent_image, "noise_mask": noise_mask}
 
 

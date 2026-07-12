@@ -3,6 +3,9 @@ import { app } from "../../scripts/app.js";
 console.info("[IAMCCS MultiTimelineBridge UI] stable module loaded", { ts: new Date().toISOString() });
 
 const STYLE_ID = "iamccs-multitimeline-bridge-stable-style";
+const BRIDGE_FIXED_SIZE = [660, 470];
+const BRIDGE_CHROME_HEIGHT = 126;
+const BRIDGE_WIDGET_HEIGHT = BRIDGE_FIXED_SIZE[1] - BRIDGE_CHROME_HEIGHT;
 
 function nodeType(node) {
     return String(node?.type || node?.comfyClass || node?.constructor?.type || "");
@@ -31,7 +34,7 @@ function hideWidget(item) {
     if (!item) return;
     item.hidden = true;
     item.type = "hidden";
-    item.computeSize = () => [0, -4];
+    item.computeSize = () => [0, 0];
     item.draw = () => {};
     item.options = { ...(item.options || {}), hidden: true };
     if (item.inputEl) {
@@ -75,6 +78,36 @@ function maxTakes(node) {
 
 function activeTake(node) {
     return Math.max(1, Math.min(maxTakes(node), Math.round(num(widget(node, "active_take")?.value, 1))));
+}
+
+function selectedTakesCsv(node) {
+    const raw = String(node?.properties?.iamccs_selected_takes_csv || "").trim();
+    if (raw) return raw;
+    const countMode = String(widget(node, "take_count_mode")?.value || "auto_from_audio");
+    const desired = countMode === "fixed_take_count"
+        ? Math.max(1, Math.round(num(widget(node, "fixed_take_count")?.value, 3)))
+        : maxTakes(node);
+    return Array.from({ length: Math.min(maxTakes(node), desired) }, (_, index) => String(index + 1)).join(",");
+}
+
+function selectedTakeList(node) {
+    const max = maxTakes(node);
+    const unique = [];
+    String(selectedTakesCsv(node) || "")
+        .split(/[,;\s]+/)
+        .map((value) => Math.round(Number(value)))
+        .filter((value) => value >= 1 && value <= max)
+        .forEach((value) => {
+            if (!unique.includes(value)) unique.push(value);
+        });
+    return unique.length ? unique : [activeTake(node)];
+}
+
+function setSelectedTakesCsv(node, value) {
+    node.properties = node.properties || {};
+    node.properties.iamccs_selected_takes_csv = String(value || "").trim();
+    try { node.setDirtyCanvas?.(true, true); } catch {}
+    try { app.graph?.setDirtyCanvas?.(true, true); } catch {}
 }
 
 function setTake(node, take) {
@@ -150,26 +183,32 @@ async function waitForQueueIdle(statusEl = null, label = "", timeoutMs = 1000 * 
     return false;
 }
 
-async function queueSingleBackendSequence(node, count, statusEl = null) {
-    const max = Math.max(1, Math.min(maxTakes(node), Math.round(Number(count) || 1)));
+async function queueSingleBackendSequence(node, count, statusEl = null, takeList = null) {
+    const sequence = Array.isArray(takeList) && takeList.length
+        ? takeList.map((take) => Math.max(1, Math.min(maxTakes(node), Math.round(Number(take) || 1))))
+        : Array.from({ length: Math.max(1, Math.min(maxTakes(node), Math.round(Number(count) || 1))) }, (_, index) => index + 1);
     setWidget(node, "take_source_mode", "auto_detect_multi_lanes");
     setWidget(node, "take_track_layout", "collapse_to_lane_1");
-    for (let take = 1; take <= max; take += 1) {
+    for (let index = 0; index < sequence.length; index += 1) {
+        const take = sequence[index];
         setTake(node, take);
         const takeLabel = `T${String(take).padStart(2, "0")} / A${take}`;
-        if (statusEl) statusEl.textContent = `Preparing ${takeLabel} on the single backend (${take}/${max})...`;
+        if (statusEl) statusEl.textContent = `Preparing ${takeLabel} on the single backend (${index + 1}/${sequence.length})...`;
         try { app.graph?.setDirtyCanvas?.(true, true); } catch {}
         const ready = await waitForShotboardTakeReady(take);
         if (statusEl) {
             const segs = ready?.detail?.audioSegments ?? "?";
             statusEl.textContent = `${ready.ok ? "Ready" : "Timed wait"} ${takeLabel}: ${segs} audio segment(s). Queueing...`;
         }
+        if (!ready.ok) {
+            throw new Error(`${takeLabel} was not confirmed by Shotboard before queue. Open/select the Shotboard timeline first, then press Prepare or Queue again.`);
+        }
         await sleep(260);
         await queuePromptOnce();
         await waitForQueueIdle(statusEl, `${takeLabel}`);
         await sleep(350);
     }
-    if (statusEl) statusEl.textContent = `Completed sequential queue: ${Array.from({ length: max }, (_, i) => `T${String(i + 1).padStart(2, "0")}/A${i + 1}`).join(" -> ")}.`;
+    if (statusEl) statusEl.textContent = `Completed sequential queue: ${sequence.map((take) => `T${String(take).padStart(2, "0")}/A${take}`).join(" -> ")}.`;
 }
 
 function ensureStyle() {
@@ -180,21 +219,27 @@ function ensureStyle() {
         .iamccs-mtb {
             box-sizing: border-box;
             width: 100%;
-            padding: 10px;
+            height: ${BRIDGE_WIDGET_HEIGHT}px;
+            max-height: ${BRIDGE_WIDGET_HEIGHT}px;
+            padding: 8px;
             border: 1px solid rgba(244, 212, 158, .28);
-            border-radius: 8px;
+            border-radius: 4px;
             background: linear-gradient(180deg, #141b1d, #080d0f);
             color: #e8f7f3;
             font: 11px Inter, Arial, sans-serif;
             pointer-events: auto;
             overflow: hidden;
+            display: grid;
+            grid-template-rows: 34px 112px 50px 34px 1fr;
+            gap: 7px;
         }
         .iamccs-mtb-head {
             display: flex;
             align-items: flex-start;
             justify-content: space-between;
             gap: 10px;
-            margin-bottom: 9px;
+            min-height: 0;
+            overflow: hidden;
         }
         .iamccs-mtb-title {
             color: #fff1ba;
@@ -210,8 +255,9 @@ function ensureStyle() {
         .iamccs-mtb-grid {
             display: grid;
             grid-template-columns: repeat(4, minmax(0, 1fr));
-            gap: 7px;
-            margin-bottom: 8px;
+            gap: 6px;
+            min-height: 0;
+            overflow: hidden;
         }
         .iamccs-mtb label {
             min-width: 0;
@@ -255,12 +301,13 @@ function ensureStyle() {
             display: grid;
             grid-template-columns: repeat(5, minmax(0, 1fr));
             gap: 6px;
-            margin-bottom: 8px;
+            min-height: 0;
+            overflow: hidden;
         }
         .iamccs-mtb-take {
             min-width: 0;
             min-height: 48px;
-            padding: 7px;
+            padding: 6px;
             border: 1px solid rgba(143,208,204,.26);
             border-radius: 6px;
             background: rgba(0,0,0,.24);
@@ -283,18 +330,41 @@ function ensureStyle() {
             gap: 6px;
             flex-wrap: wrap;
             justify-content: flex-end;
+            min-height: 0;
+            overflow: hidden;
         }
         .iamccs-mtb-ledger {
-            margin-top: 7px;
-            padding: 6px 7px;
+            padding: 5px 7px;
             border: 1px solid rgba(255,255,255,.08);
             border-radius: 5px;
             background: #05090a;
             color: #b8fff1;
             font: 10px Consolas, monospace;
+            min-height: 0;
+            overflow: hidden;
         }
     `;
     document.head.appendChild(style);
+}
+
+function installFixedBridgeNode(node) {
+    if (typeof node.setSize === "function") node.setSize([...BRIDGE_FIXED_SIZE]);
+    else node.size = [...BRIDGE_FIXED_SIZE];
+    node.resizable = false;
+    node.resizeable = false;
+    node.flags = { ...(node.flags || {}), resizable: false };
+    node.min_size = [...BRIDGE_FIXED_SIZE];
+    node.shape = 0;
+    if (!node._iamccsMtbOriginalOnResize) node._iamccsMtbOriginalOnResize = node.onResize;
+    node.onResize = function () {
+        try { this._iamccsMtbOriginalOnResize?.apply(this, arguments); } catch {}
+        this.size = [...BRIDGE_FIXED_SIZE];
+        this.resizable = false;
+        this.resizeable = false;
+        this.flags = { ...(this.flags || {}), resizable: false };
+        this.min_size = [...BRIDGE_FIXED_SIZE];
+    };
+    try { node.setDirtyCanvas?.(true, true); } catch {}
 }
 
 function select(options, value, onChange) {
@@ -322,11 +392,13 @@ function installBridgeUI(node, reason = "install") {
     node._iamccsStableMultiTimelineBridgeReady = true;
     ensureStyle();
     hideRawWidgets(node);
+    installFixedBridgeNode(node);
     const root = document.createElement("div");
     root.className = "iamccs-mtb";
 
     const render = () => {
         hideRawWidgets(node);
+        installFixedBridgeNode(node);
         const active = activeTake(node);
         const max = maxTakes(node);
         const chunkTemplate = String(widget(node, "chunk_template")?.value || "20s");
@@ -372,7 +444,23 @@ function installBridgeUI(node, reason = "install") {
         fixedInput.min = "1";
         fixedInput.max = "64";
         fixedInput.value = String(fixedCount);
-        fixedInput.onchange = () => setWidget(node, "fixed_take_count", Math.max(1, Math.round(Number(fixedInput.value || 1))));
+        fixedInput.onchange = () => {
+            const nextCount = Math.max(1, Math.round(Number(fixedInput.value || 1)));
+            setWidget(node, "fixed_take_count", nextCount);
+            if (!String(node?.properties?.iamccs_selected_takes_csv || "").trim()) {
+                setSelectedTakesCsv(node, Array.from({ length: Math.min(maxTakes(node), nextCount) }, (_, index) => String(index + 1)).join(","));
+            }
+            render();
+        };
+        const selectedInput = document.createElement("input");
+        selectedInput.type = "text";
+        selectedInput.value = selectedTakesCsv(node);
+        selectedInput.placeholder = "1,2";
+        selectedInput.title = "Queue only these takes. Examples: 1,2 or 1,3,5";
+        selectedInput.onchange = () => {
+            setSelectedTakesCsv(node, selectedInput.value || "1");
+            render();
+        };
         const layoutSelect = select([["collapse_to_lane_1", "Send active chunk as A1"], ["preserve_bus_tracks", "Preserve bus lane"]], widget(node, "take_track_layout")?.value || "collapse_to_lane_1", (value) => setWidget(node, "take_track_layout", value));
         grid.append(
             field("Chunk template", templateSelect),
@@ -382,6 +470,7 @@ function installBridgeUI(node, reason = "install") {
             field("Take source", sourceMode),
             field("Take count", countMode),
             field("Fixed takes", fixedInput),
+            field("Selected takes", selectedInput),
             field("Shotboard audio layout", layoutSelect),
         );
 
@@ -417,6 +506,7 @@ function installBridgeUI(node, reason = "install") {
             setWidget(node, "source_bus", "master_out");
             setWidget(node, "take_count_mode", "auto_from_audio");
             setWidget(node, "take_track_layout", "collapse_to_lane_1");
+            setSelectedTakesCsv(node, "");
             setTake(node, 1);
             render();
         };
@@ -428,7 +518,7 @@ function installBridgeUI(node, reason = "install") {
 
         const ledger = document.createElement("div");
         ledger.className = "iamccs-mtb-ledger";
-        ledger.textContent = `Active T${String(active).padStart(2, "0")} / A${active} | ${chunkTemplate === "custom" ? customSeconds + "s" : chunkTemplate} | Contract: T1=A1, T2=A2, T3=A3. One backend only: queue sequence changes active take between queued prompts.`;
+        ledger.textContent = `Active T${String(active).padStart(2, "0")} / A${active} | selected queue ${selectedTakeList(node).map((take) => `T${String(take).padStart(2, "0")}/A${take}`).join(" -> ")} | Contract: T1=A1, T2=A2, T3=A3.`;
         queueSeq.onclick = async () => {
             queueSeq.disabled = true;
             queueSeq.classList.add("is-primary");
@@ -437,7 +527,9 @@ function installBridgeUI(node, reason = "install") {
                 const desired = countMode === "fixed_take_count"
                     ? Math.max(1, Math.round(num(widget(node, "fixed_take_count")?.value, 3)))
                     : maxTakes(node);
-                await queueSingleBackendSequence(node, desired, ledger);
+                const selected = selectedTakeList(node);
+                setSelectedTakesCsv(node, selected.join(","));
+                await queueSingleBackendSequence(node, desired, ledger, selected);
             } catch (err) {
                 ledger.textContent = `Queue sequence failed: ${err?.message || err}`;
                 console.warn("[IAMCCS MultiTimelineBridge UI] single-backend queue failed", err);
@@ -451,8 +543,8 @@ function installBridgeUI(node, reason = "install") {
 
     render();
     const uiWidget = node.addDOMWidget("IAMCCS MultiTimeline Bridge UI", "iamccs_multitimeline_bridge_ui", root, { serialize: false });
-    uiWidget.computeSize = (width) => [width, 330];
-    node.size = [Math.max(Number(node.size?.[0] || 0), 620), Math.max(Number(node.size?.[1] || 0), 430)];
+    uiWidget.computeSize = () => [BRIDGE_FIXED_SIZE[0] - 24, BRIDGE_WIDGET_HEIGHT];
+    installFixedBridgeNode(node);
     console.info("[IAMCCS MultiTimelineBridge UI] installed", { nodeId: node?.id, reason });
 }
 

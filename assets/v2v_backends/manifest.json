@@ -1,0 +1,18 @@
+﻿{
+    "router":  "IAMCCS_CineInfoV2VBackendRouter",
+    "created":  "2026-07-05T23:24:19",
+    "templates":  {
+                      "ltx_simple":  "ltx_simple_router.json",
+                      "wananimate_bg_locked":  "wananimate_bg_locked_router.json",
+                      "scail2_multi_person_identity":  "scail2_multi_person_identity_router.json",
+                      "flux_klein_pose_transfer":  "pose_transfer_canvas_router.json",
+                      "scail2_single_person":  "scail2_single_person_router.json"
+                  },
+    "adapters":  [
+                     "IAMCCS_V2VBusToLTX",
+                     "IAMCCS_V2VBusToScail",
+                     "IAMCCS_V2VBusToWanAnimate",
+                     "IAMCCS_V2VBusToPoseTransfer"
+                 ],
+    "note":  "IAMCCS V2V router backend workflow templates. BackendRouter stays compact and adapters open backend-specific outputs."
+}

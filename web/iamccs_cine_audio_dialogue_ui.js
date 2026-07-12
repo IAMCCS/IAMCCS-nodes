@@ -896,8 +896,7 @@ function ensureAudioBoardArrangerStyles() {
             width: 100%;
             height: auto;
             min-height: 0;
-            max-height: none;
-            padding: 10px 10px 18px;
+            padding: 10px 10px 8px;
             overflow: hidden;
             contain: layout paint style;
             content-visibility: visible;
@@ -981,6 +980,55 @@ function ensureAudioBoardArrangerStyles() {
             padding: 0 9px;
             font-size: 11px;
         }
+        .iamccs-audio-board-tools input {
+            width: 100%;
+            min-height: 39px;
+            padding: 0 10px;
+            border: 1px solid rgba(222,236,128,.48);
+            border-radius: 5px;
+            background: linear-gradient(180deg, rgba(34,43,27,.98), rgba(16,22,14,.98));
+            color: #f6ffe4;
+            font-size: 11px;
+            font-weight: 850;
+            outline: none;
+        }
+        .iamccs-audio-board-tools input:focus {
+            border-color: rgba(244,212,158,.82);
+            box-shadow: 0 0 0 2px rgba(244,212,158,.18);
+        }
+        .iamccs-audio-save-popover {
+            position: fixed;
+            z-index: 2147483620;
+            width: 254px;
+            padding: 10px;
+            border: 1px solid rgba(244,212,158,.72);
+            border-radius: 7px;
+            background: linear-gradient(180deg, rgba(22,29,28,.98), rgba(8,13,14,.98));
+            box-shadow: 0 12px 28px rgba(0,0,0,.45), 0 0 0 1px rgba(255,255,255,.06) inset;
+            color: #f6ffe4;
+        }
+        .iamccs-audio-save-popover strong {
+            display: block;
+            margin-bottom: 7px;
+            color: #ffe4a2;
+            font-size: 11px;
+            font-weight: 900;
+        }
+        .iamccs-audio-save-popover input {
+            width: 100%;
+            min-height: 34px;
+            margin-bottom: 8px;
+        }
+        .iamccs-audio-save-popover .actions {
+            display: flex;
+            gap: 7px;
+            justify-content: flex-end;
+        }
+        .iamccs-audio-save-popover button {
+            min-height: 28px;
+            width: auto;
+            padding: 0 11px;
+        }
         .iamccs-audio-board-title { color: #f4f8f9; font-size: 13px; font-weight: 900; }
         .iamccs-audio-board-sub { color: #8fa5ac; font-size: 10px; font-weight: 750; }
         .iamccs-audio-board button {
@@ -996,6 +1044,38 @@ function ensureAudioBoardArrangerStyles() {
             white-space: nowrap;
         }
         .iamccs-audio-board button:hover { border-color: rgba(244, 212, 158, .65); }
+        .iamccs-audio-board button.is-file {
+            background: linear-gradient(180deg, #2f5660, #18373f);
+            border-color: rgba(124,210,224,.48);
+        }
+        .iamccs-audio-board button.is-save-audioboard {
+            background: linear-gradient(180deg, #4d5f30, #303c1d);
+            border-color: rgba(222,236,128,.50);
+        }
+        .iamccs-audio-board button.is-build {
+            background: linear-gradient(180deg, #315a45, #1d3b2e);
+            border-color: rgba(116,220,156,.48);
+        }
+        .iamccs-audio-board button.is-mode {
+            background: linear-gradient(180deg, #554d73, #312b49);
+            border-color: rgba(190,174,255,.48);
+        }
+        .iamccs-audio-board button.is-edit {
+            background: linear-gradient(180deg, #5e4b2f, #372819);
+            border-color: rgba(244,199,122,.52);
+        }
+        .iamccs-audio-board button.is-view {
+            background: linear-gradient(180deg, #294f6a, #193247);
+            border-color: rgba(123,190,240,.45);
+        }
+        .iamccs-audio-board button.is-publish {
+            background: linear-gradient(180deg, #265b4c, #18382f);
+            border-color: rgba(104,241,191,.54);
+        }
+        .iamccs-audio-board button.is-lane {
+            background: linear-gradient(180deg, #59426c, #332541);
+            border-color: rgba(217,172,255,.48);
+        }
         .iamccs-audio-board button:active,
         .iamccs-audio-board button[data-iamccs-audio-pressed="true"] {
             color: #120D08;
@@ -1262,7 +1342,27 @@ function ensureAudioBoardArrangerStyles() {
                 linear-gradient(90deg, rgba(205,151,76,.32), transparent 45%),
                 linear-gradient(180deg, rgba(68,48,26,.98), rgba(11,13,14,.99));
             border-right-color: rgba(255,218,151,.82);
-            box-shadow: inset -10px 0 18px rgba(0,0,0,.22), inset 0 0 0 1px rgba(255,218,151,.30);
+            outline: 2px solid rgba(255,233,171,.92);
+            outline-offset: -2px;
+            box-shadow: inset -10px 0 18px rgba(0,0,0,.22), inset 0 0 0 2px rgba(255,218,151,.46), 0 0 12px rgba(255,205,112,.30);
+        }
+        .iamccs-audio-board-track-label.is-selected::before {
+            content: "";
+            position: absolute;
+            left: 0;
+            top: 0;
+            bottom: 0;
+            width: 6px;
+            background: #fff0bd;
+            box-shadow: 0 0 10px rgba(255,220,135,.90), 2px 0 0 rgba(255,184,82,.72);
+            pointer-events: none;
+        }
+        .iamccs-audio-board-track-label.is-multi-selected {
+            background:
+                linear-gradient(90deg, rgba(121,84,210,.38), transparent 47%),
+                linear-gradient(180deg, rgba(40,32,70,.98), rgba(10,13,17,.99));
+            border-right-color: rgba(213,188,255,.90);
+            box-shadow: inset -10px 0 18px rgba(0,0,0,.22), inset 0 0 0 1px rgba(213,188,255,.34), 0 0 0 1px rgba(119,95,230,.22);
         }
         .iamccs-audio-board-track:has(.iamccs-audio-board-track-label.is-selected),
         .iamccs-audio-board-track.is-selected {
@@ -1274,6 +1374,19 @@ function ensureAudioBoardArrangerStyles() {
             border-bottom: 2px solid rgba(244,212,158,.55);
             outline: 1px solid rgba(244,212,158,.28);
             outline-offset: -1px;
+            box-shadow: inset 0 0 0 2px rgba(255,226,168,.32), inset 0 0 28px rgba(244,184,92,.10);
+        }
+        .iamccs-audio-board-track.is-selected::after {
+            content: "";
+            position: absolute;
+            left: 246px;
+            right: 0;
+            top: 0;
+            bottom: 0;
+            pointer-events: none;
+            border-top: 2px solid rgba(255,226,168,.60);
+            border-bottom: 2px solid rgba(255,226,168,.42);
+            box-shadow: inset 0 0 0 1px rgba(255,226,168,.16);
         }
         .iamccs-audio-board-track-label.is-muted {
             filter: saturate(.82) brightness(.86);
@@ -1492,7 +1605,7 @@ function ensureAudioBoardArrangerStyles() {
             height: calc(var(--iamccs-track-height, 72px) - 28px);
             min-width: 18px;
             border: 1px solid rgba(143, 208, 204, .56);
-            border-radius: 6px;
+            border-radius: 0;
             overflow: hidden;
             background: linear-gradient(180deg, rgba(40,82,116,.98), rgba(24,54,81,.98));
             box-shadow: inset 0 1px 0 rgba(255,255,255,.10), 0 4px 10px rgba(0,0,0,.22);
@@ -1539,20 +1652,25 @@ function ensureAudioBoardArrangerStyles() {
         }
         .iamccs-clip-source-marker {
             position: absolute;
-            top: 0;
-            bottom: 0;
+            top: 4px;
+            bottom: auto;
             z-index: 28;
             display: none;
-            min-width: 72px;
-            padding: 4px 6px;
+            max-width: 116px;
+            min-width: 0;
+            height: 17px;
+            padding: 3px 6px 2px;
             color: #111712;
             background: linear-gradient(180deg, rgba(255,226,168,.98), rgba(211,151,70,.92));
-            border-left: 1px solid rgba(255,255,255,.75);
-            border-right: 1px solid rgba(0,0,0,.35);
+            border: 1px solid rgba(255,255,255,.58);
+            border-radius: 0;
             font: 900 8px/1.1 ui-monospace, SFMono-Regular, Consolas, monospace;
             pointer-events: none;
             text-shadow: none;
-            box-shadow: 0 0 12px rgba(244,212,158,.38);
+            box-shadow: 0 2px 8px rgba(0,0,0,.36), 0 0 8px rgba(244,212,158,.26);
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
         }
         .iamccs-audio-clip svg,
         .iamccs-audio-clip canvas {
@@ -1569,25 +1687,33 @@ function ensureAudioBoardArrangerStyles() {
             top: 0;
             bottom: 0;
             z-index: 30;
-            width: 24px;
-            background: linear-gradient(90deg, rgba(244,212,158,.34), rgba(244,212,158,.08));
+            width: 20px;
+            background: linear-gradient(90deg, rgba(255,226,168,.38), rgba(244,212,158,.10));
             cursor: ew-resize;
             touch-action: none;
             pointer-events: auto;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,.20), 0 0 8px rgba(244,212,158,.12);
         }
-        .iamccs-clip-handle.left { left: 0; border-right: 1px solid rgba(244,212,158,.50); }
-        .iamccs-clip-handle.right { right: 0; border-left: 1px solid rgba(244,212,158,.50); }
+        .iamccs-clip-handle.left { left: 0; border-right: 2px solid rgba(255,226,168,.82); }
+        .iamccs-clip-handle.right { right: 0; border-left: 2px solid rgba(255,226,168,.82); }
         .iamccs-clip-handle::after {
             content: "";
             position: absolute;
             top: 8px;
             bottom: 8px;
-            width: 2px;
-            background: rgba(255,226,168,.82);
-            box-shadow: 5px 0 0 rgba(255,226,168,.35);
+            width: 3px;
+            background: rgba(255,239,196,.98);
+            box-shadow: 5px 0 0 rgba(255,226,168,.56), -5px 0 0 rgba(255,226,168,.32), 0 0 8px rgba(255,226,168,.55);
         }
-        .iamccs-clip-handle.left::after { left: 6px; }
-        .iamccs-clip-handle.right::after { right: 11px; }
+        .iamccs-clip-handle.left::after { left: 8px; }
+        .iamccs-clip-handle.right::after { right: 8px; }
+        .iamccs-audio-clip:hover .iamccs-clip-handle,
+        .iamccs-audio-clip.is-selected .iamccs-clip-handle,
+        .iamccs-audio-clip.is-trimming .iamccs-clip-handle {
+            background: linear-gradient(90deg, rgba(255,226,168,.62), rgba(255,226,168,.18));
+            border-color: #fff0c7;
+            box-shadow: inset 0 0 0 1px rgba(255,255,255,.38), 0 0 12px rgba(255,220,135,.34);
+        }
         .iamccs-playhead {
             position: absolute;
             top: 0;
@@ -2085,9 +2211,10 @@ function ensureAudioBoardArrangerStyles() {
 }
 
 const IAMCCS_AUDIO_BOARD_FIXED_WIDTH = 1880;
-const IAMCCS_AUDIO_BOARD_FIXED_HEIGHT = 1650;
+const IAMCCS_AUDIO_BOARD_FIXED_HEIGHT = 2060;
 const IAMCCS_AUDIO_BOARD_MIN_HEIGHT = 560;
 const IAMCCS_AUDIO_BOARD_VISIBLE_TRACKS = 3;
+const IAMCCS_AUDIO_BOARD_NODE_CHROME = 104;
 // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
 const TRACK_COLORS = ["#315f8f", "#2f7f71", "#7a5a34", "#6b4c80", "#8a4b45", "#556b36", "#3c6478", "#7a6738"];
 const normalizeTrackColor = (color, index = 0) => /^#[0-9a-f]{6}$/i.test(String(color || "")) ? String(color) : TRACK_COLORS[index % TRACK_COLORS.length];
@@ -2142,18 +2269,15 @@ function iamccsAudioBoardFixedSizeFromValue(rawValue) {
 
 function iamccsAudioBoardFixedSizeFromDom(root, rawValue) {
     const base = iamccsAudioBoardFixedSizeFromValue(rawValue);
-    const measuredHeight = Math.max(0, Math.ceil(Number(root?.scrollHeight || root?.offsetHeight || 0)));
+    // Measure the full root element (height:auto means scrollHeight = actual content, no phantom fill).
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // node.size[1] = root.scrollHeight + litegraph chrome
+    // (title 30 + 3 output slots × 20 + margins ≈ 104 = IAMCCS_AUDIO_BOARD_NODE_CHROME)
+    const measuredHeight = Math.max(0, Math.ceil(Number(root?.scrollHeight || 0)));
     if (!measuredHeight) return base;
-    // LiteGraph places the DOM widget starting at y≈34px (title 30 + margin 4) from the node top.
-    // node.size[1] must be >= measuredHeight + 34 + bottom_buffer so the element stays inside the border.
-    // Using +50 gives ~16px clearance between element bottom and node border.
-    // However the Arranger node has 3 output slots (cine_linx, audio_timeline_json, report) each adding
-    // ~20px (LiteGraph.NODE_SLOT_HEIGHT), pushing the widget start down by ~60px.
-    // Effective y-start ≈ 30 (title) + 60 (3 output slots) + 4 (margin) ≈ 94px.
-    // Therefore offset must be >= 94px to contain the element. Using +110 for 16px bottom clearance.
     return [
         base[0],
-        Math.max(IAMCCS_AUDIO_BOARD_MIN_HEIGHT, Math.min(IAMCCS_AUDIO_BOARD_FIXED_HEIGHT, measuredHeight + 110)),
+        Math.max(IAMCCS_AUDIO_BOARD_MIN_HEIGHT, Math.min(IAMCCS_AUDIO_BOARD_FIXED_HEIGHT, measuredHeight + IAMCCS_AUDIO_BOARD_NODE_CHROME + 12)),
     ];
 }
 
@@ -2246,10 +2370,11 @@ function renderAudioBoardArranger(node) {
         node.resizeable = false;
         node.flags = { ...(node.flags || {}), resizable: false };
         node.min_size = fixed.slice();
+        node.max_size = fixed.slice();
         if (domWidget) {
             domWidget.computeSize = () => existingRoot?._iamccsAudioFullscreenState
                 ? [IAMCCS_AUDIO_BOARD_FIXED_WIDTH, 24]
-                : [fixed[0], Math.max(24, fixed[1] - 70)];
+                : [fixed[0], Math.max(24, fixed[1] - IAMCCS_AUDIO_BOARD_NODE_CHROME)];
         }
         if (Number(node.size?.[0] || 0) !== fixed[0] || Number(node.size?.[1] || 0) !== fixed[1]) {
             if (typeof node.setSize === "function") node.setSize(fixed.slice());
@@ -2354,6 +2479,7 @@ function renderAudioBoardArranger(node) {
     contextMenuEl.style.display = "none";
     document.body.appendChild(contextMenuEl);
     let selectedId = "";
+    let selectedTrackSet = new Set();
     let audioContext = null;
     let shotboardSyncTimer = 0;
     let liveStateWriteTimer = 0;
@@ -2516,7 +2642,7 @@ function renderAudioBoardArranger(node) {
             duration_seconds: DEFAULT_SECONDS,
             frame_rate: Number(fpsWidget?.value || 24),
             status: { edits: [] },
-            view: { timeZoom: 1, trackHeight: 188, tool: "cursor", visibleSeconds: VIEWPORT_SECONDS },
+            view: { timeZoom: 1, trackHeight: 188, tool: "cursor", visibleSeconds: VIEWPORT_SECONDS, snapToSeconds: true },
             showEventMonitor: false,
             showClipValues: false,
             showMultiGeneration: false,
@@ -2686,7 +2812,7 @@ function renderAudioBoardArranger(node) {
         if (!setWidgetValue(node, "arranger_data", nextValue)) return false;
         state = parseState();
         if (!segments().some((seg) => String(seg?.id || "") === String(selectedId || ""))) {
-            selectedId = segments()[0]?.id || "";
+            selectedId = "";
         }
         if (typeof node._iamccsAudioBoardLastRuntimeReason !== "string") {
             node._iamccsAudioBoardLastRuntimeReason = "";
@@ -2799,6 +2925,33 @@ function renderAudioBoardArranger(node) {
         state.selectedMixer.track = Math.max(0, Math.min(Math.max(0, Number(state.audioTrackCount || 1) - 1), Number(state.selectedMixer.track || 0)));
         return state.selectedMixer;
     };
+    const normalizeSelectedTrackSet = () => {
+        const count = Math.max(1, Number(state.audioTrackCount || 1));
+        selectedTrackSet = new Set(
+            Array.from(selectedTrackSet || [])
+                .map((track) => Math.round(Number(track || 0)))
+                .filter((track) => track >= 0 && track < count)
+        );
+        return selectedTrackSet;
+    };
+    const selectAudioTrack = (track, event = null) => {
+        const count = Math.max(1, Number(state.audioTrackCount || 1));
+        const index = Math.max(0, Math.min(count - 1, Math.round(Number(track || 0))));
+        normalizeSelectedTrackSet();
+        if (event && (event.shiftKey || event.ctrlKey || event.metaKey)) {
+            if (selectedTrackSet.has(index) && selectedTrackSet.size > 1) selectedTrackSet.delete(index);
+            else selectedTrackSet.add(index);
+        } else {
+            selectedTrackSet = new Set([index]);
+        }
+        state.selectedMixer = { type: "track", track: index };
+        selectedId = "";
+        transport.helper = selectedTrackSet.size > 1
+            ? `Selected lanes ${Array.from(selectedTrackSet).sort((a, b) => a - b).map((lane) => `A${lane + 1}`).join(", ")}.`
+            : `Selected A${index + 1} device chain.`;
+        return index;
+    };
+    const selectedTrackIndexes = () => Array.from(normalizeSelectedTrackSet()).sort((a, b) => a - b);
     const effectParamSpecs = (type) => ({
         eq: [
             ["low", "LOW", -24, 24, .5, 0, "dB"],
@@ -3050,7 +3203,7 @@ function renderAudioBoardArranger(node) {
                     const targetId = Number(target?.id || 0);
                     const type = String(target?.comfyClass || target?.type || "");
                     if (!target || !targetId) continue;
-                    if (type === "IAMCCS_CineShotboardPlannerV3") {
+                    if (type === "IAMCCS_CineShotboardPlannerV3" || type === "IAMCCS_CineShotboardPlannerV4") {
                         if (!foundIds.has(targetId)) {
                             foundIds.add(targetId);
                             found.push(target);
@@ -3140,6 +3293,7 @@ function renderAudioBoardArranger(node) {
         state.view.trackHeight = Math.max(184, Math.min(240, Number(state.view.trackHeight || 188)));
         state.view.tool = String(state.view.tool || "cursor");
         if (!["cursor", "move", "trim", "cut"].includes(state.view.tool)) state.view.tool = "cursor";
+        state.view.snapToSeconds = state.view.snapToSeconds !== false;
         state.view.visibleSeconds = VIEWPORT_SECONDS;
         return state.view;
     };
@@ -3158,6 +3312,14 @@ function renderAudioBoardArranger(node) {
     const contentWidth = () => LABEL_W + Math.max(visibleTimelineWidth(), Math.ceil(meterEndFrames() * pxPerFrame())) + 8;
     const frameToX = (frame) => LABEL_W + Math.round(Math.max(0, Number(frame || 0)) * pxPerFrame());
     const xToFrame = (x) => Math.max(0, Math.round((Number(x || 0) - LABEL_W) / pxPerFrame()));
+    const snapFrameToSecond = (frame) => {
+        const rounded = Math.max(0, Math.round(Number(frame || 0)));
+        if (view().snapToSeconds === false) return rounded;
+        const secondFrames = Math.max(1, secondsToFrames(1));
+        const nearest = Math.max(0, Math.round(rounded / secondFrames) * secondFrames);
+        const tolerance = Math.max(2, Math.round(secondFrames * .22));
+        return Math.abs(nearest - rounded) <= tolerance ? nearest : rounded;
+    };
     const loopRange = () => {
         const start = Math.max(0, Math.min(totalFrames(), Math.round(Number(state.loopInFrame || 0))));
         const end = Math.max(0, Math.min(totalFrames(), Math.round(Number(state.loopOutFrame || 0))));
@@ -3186,7 +3348,7 @@ function renderAudioBoardArranger(node) {
             state.loopOutFrame = Math.min(totalFrames(), state.loopInFrame + secondsToFrames(4));
         }
         state.loopEnabled = !state.loopEnabled;
-        if (loopRange()) state.loopPublishEnabled = true;
+        state.loopPublishEnabled = state.loopEnabled && Boolean(loopRange());
         addEdit(`Loop ${state.loopEnabled ? "enabled" : "disabled"} ${loopRange() ? `${fmtTime(state.loopInFrame)}-${fmtTime(state.loopOutFrame)}` : ""}.`);
         writeState("loop_toggle", false);
         draw();
@@ -3265,7 +3427,16 @@ function renderAudioBoardArranger(node) {
         return source.map((seg) => {
             const localStart = Number(seg?.localStart);
             const next = JSON.parse(JSON.stringify(seg || {}));
-            next.track = 0;
+            const track = Math.max(0, Math.round(Number(
+                next.shotboardTrack
+                ?? next.track_index
+                ?? next.trackIndex
+                ?? next.sourceTrackOriginal
+                ?? next.track
+                ?? next.sourceTrack
+                ?? (take - 1)
+            ) || 0));
+            next.track = track;
             next.start = Number.isFinite(localStart)
                 ? Math.max(0, Math.round(localStart))
                 : (Boolean(seg?.multiGenerationClip) || /^T\d+/i.test(String(seg?.timelineId || ""))
@@ -3274,9 +3445,95 @@ function renderAudioBoardArranger(node) {
             next.timelineId = timelineId;
             next.multiTakeIndex = take;
             next.shotboardActiveTakeAudio = true;
-            next.sourceTrackOriginal = Math.max(0, Math.round(Number(seg?.track || 0)));
+            next.sourceTrackOriginal = track;
+            next.shotboardTrack = track;
             return next;
         });
+    };
+    const flattenMultiTimelineAudio = (multi) => {
+        const out = [];
+        const seen = new Set();
+        const push = (seg) => {
+            if (!seg || typeof seg !== "object") return;
+            const key = [
+                seg.id || "",
+                seg.timelineId || "",
+                seg.multiTakeIndex || "",
+                seg.audioFile || seg.fileName || "",
+                seg.start || 0,
+                seg.length || 0,
+                seg.track || 0,
+            ].join("|");
+            if (seen.has(key)) return;
+            seen.add(key);
+            out.push(seg);
+        };
+        if (multi && typeof multi === "object") {
+            if (multi.audioByTimeline && typeof multi.audioByTimeline === "object") {
+                Object.values(multi.audioByTimeline).forEach((items) => {
+                    (Array.isArray(items) ? items : []).forEach(push);
+                });
+            }
+            (Array.isArray(multi.audioSegmentsAll) ? multi.audioSegmentsAll : []).forEach(push);
+            (Array.isArray(multi.allAudioSegments) ? multi.allAudioSegments : []).forEach(push);
+        }
+        return out;
+    };
+    const audioByTimelineFromSegments = (allAudioSegments) => {
+        const out = {};
+        const source = Array.isArray(allAudioSegments) ? allAudioSegments : [];
+        source.forEach((seg) => {
+            const take = Math.max(1, Math.round(Number(seg?.multiTakeIndex || String(seg?.timelineId || "").replace(/\D/g, "") || 1)));
+            const timelineId = normalizeMultiTimelineId(seg?.timelineId, take);
+            if (!out[timelineId]) out[timelineId] = [];
+            const localStart = Number(seg?.localStart);
+            const next = JSON.parse(JSON.stringify(seg || {}));
+            const track = Math.max(0, Math.round(Number(
+                next.shotboardTrack
+                ?? next.track_index
+                ?? next.trackIndex
+                ?? next.sourceTrackOriginal
+                ?? next.track
+                ?? next.sourceTrack
+                ?? (take - 1)
+            ) || 0));
+            next.timelineId = timelineId;
+            next.multiTakeIndex = take;
+            next.track = track;
+            next.sourceTrackOriginal = Math.max(0, Math.round(Number(next.sourceTrackOriginal ?? track) || 0));
+            next.shotboardTrack = track;
+            next.start = Number.isFinite(localStart) ? Math.max(0, Math.round(localStart)) : Math.max(0, Math.round(Number(next.start || 0)));
+            next.shotboardActiveTakeAudio = true;
+            out[timelineId].push(next);
+        });
+        return out;
+    };
+    const isDerivedPluriPublishSegment = (seg) => {
+        const id = String(seg?.id || "");
+        return Boolean(seg?.shotboardPluriPublish) || /_pluri_t\d+/i.test(id);
+    };
+    const oneAudioSegmentPerTimeline = (items) => {
+        const groups = new Map();
+        for (const seg of Array.isArray(items) ? items : []) {
+            if (!seg || typeof seg !== "object") continue;
+            const take = Math.max(1, Math.round(Number(seg?.multiTakeIndex || String(seg?.timelineId || "").replace(/\D/g, "") || 1)));
+            const timelineId = normalizeMultiTimelineId(seg?.timelineId, take);
+            const bucket = groups.get(timelineId) || [];
+            bucket.push(seg);
+            groups.set(timelineId, bucket);
+        }
+        const score = (seg) => {
+            let value = 0;
+            if (Boolean(seg?.physicalChunk) || seg?.audioPublishSchema === "iamccs.audio.publish.v2") value += 100;
+            if (!isDerivedPluriPublishSegment(seg)) value += 50;
+            if (String(seg?.audioFile || "").trim()) value += 20;
+            if (Number(seg?.track) === Math.max(0, Math.round(Number(seg?.multiTakeIndex || String(seg?.timelineId || "").replace(/\D/g, "") || 1) - 1))) value += 5;
+            return value;
+        };
+        return Array.from(groups.entries())
+            .sort(([a], [b]) => String(a).localeCompare(String(b)))
+            .map(([, group]) => group.slice().sort((a, b) => score(b) - score(a))[0])
+            .filter(Boolean);
     };
     const activePublishRange = () => {
         const total = Math.max(1, totalFrames());
@@ -3360,7 +3617,7 @@ function renderAudioBoardArranger(node) {
                     }
                 }
             }
-            const allAudioSegments = JSON.parse(JSON.stringify(segments()));
+            const allAudioSegments = segments().map((seg) => cloneAudioSegmentForPublish(seg));
             let effectivePublishRange = publishRange;
             let publishSourceAudioSegments = effectivePublishRange.enabled ? cropAudioSegmentsToPublishRange(allAudioSegments, effectivePublishRange) : allAudioSegments;
             if (effectivePublishRange.enabled && !publishSourceAudioSegments.length && allAudioSegments.length) {
@@ -3368,8 +3625,15 @@ function renderAudioBoardArranger(node) {
                 effectivePublishRange = { enabled: false };
                 publishSourceAudioSegments = allAudioSegments;
             }
-            const pluriPublishEnabled = Boolean(state.multiGeneration?.pluriPublishEnabled);
-            const shotboardOnlyFirst = pluriPublishEnabled || state.audioBusMode === "only_first" || state.onlyFirstTrack;
+            const hasPhysicalMultiPublishSegments = publishSourceAudioSegments.some((seg) => {
+                const timelineId = String(seg?.timelineId || "").trim();
+                const take = Math.max(0, Math.round(Number(seg?.multiTakeIndex || timelineId.replace(/\D/g, "") || 0)));
+                return Boolean(seg?.physicalChunk || seg?.audioPublishSchema === "iamccs.audio.publish.v2")
+                    && (take > 0 || /^T\d+/i.test(timelineId));
+            });
+            const pluriPublishEnabled = Boolean(state.multiGeneration?.pluriPublishEnabled)
+                || (isManualPublishReason(reason) && Boolean(state.multiGeneration?.enabled) && hasPhysicalMultiPublishSegments);
+            const shotboardOnlyFirst = !pluriPublishEnabled && (state.audioBusMode === "only_first" || state.onlyFirstTrack);
             const firstAvailableTrack = Math.min(...publishSourceAudioSegments.map((seg) => Math.max(0, Number(seg.track || 0))).filter((value) => Number.isFinite(value)));
             const onlyFirstTrackIndex = Number.isFinite(firstAvailableTrack) ? firstAvailableTrack : 0;
             let nextShotboardAudioSegments = shotboardOnlyFirst
@@ -3390,42 +3654,131 @@ function renderAudioBoardArranger(node) {
             const arrangerMulti = state.multiGeneration && typeof state.multiGeneration === "object" ? state.multiGeneration : {};
             const boardMulti = data.multiGeneration && typeof data.multiGeneration === "object" ? data.multiGeneration : {};
             if (pluriPublishEnabled && publishSourceAudioSegments.length) {
-                const pluriSegments = publishSourceAudioSegments.map((seg) => {
+                if (!state.multiGeneration) state.multiGeneration = {};
+                if (!state.multiGeneration.pluriPublishEnabled) {
+                    state.multiGeneration.pluriPublishEnabled = true;
+                    state.multiGeneration.pluriPublishAutoEnabled = true;
+                    state.multiGeneration.pluriPublishAutoEnabledAt = new Date().toISOString();
+                    if (isManualPublishReason(reason)) {
+                        addEdit("MULTI publish auto-enabled PLURI-PUBLISH because physical T-lane chunks are present.");
+                    }
+                }
+                const isMultiPublishClip = (seg) => Boolean(seg?.multiGenerationClip)
+                    || /^T\d+/i.test(String(seg?.timelineId || ""))
+                    || Math.max(0, Math.round(Number(seg?.multiTakeIndex || 0))) > 0;
+                const multiCandidates = [
+                    ...publishSourceAudioSegments,
+                    ...flattenMultiTimelineAudio(arrangerMulti),
+                    ...flattenMultiTimelineAudio(boardMulti),
+                ];
+                const multiPublishSource = multiCandidates.filter(isMultiPublishClip);
+                const currentPhysicalSource = publishSourceAudioSegments.filter((seg) =>
+                    isMultiPublishClip(seg)
+                    && Boolean(seg?.physicalChunk || seg?.audioPublishSchema === "iamccs.audio.publish.v2")
+                    && !isDerivedPluriPublishSegment(seg)
+                );
+                const physicalMultiSource = multiPublishSource.filter((seg) =>
+                    Boolean(seg?.physicalChunk || seg?.audioPublishSchema === "iamccs.audio.publish.v2")
+                    && !isDerivedPluriPublishSegment(seg)
+                );
+                const pluriPublishSource = currentPhysicalSource.length
+                    ? currentPhysicalSource
+                    : (physicalMultiSource.length ? physicalMultiSource : (multiPublishSource.length ? multiPublishSource : publishSourceAudioSegments));
+                const canonicalPluriSource = oneAudioSegmentPerTimeline(pluriPublishSource);
+                const pluriSegments = canonicalPluriSource.map((seg) => {
                     const sourceTrack = Math.max(0, Math.round(Number(seg.track || 0)));
-                    const take = sourceTrack + 1;
+                    const explicitTake = Math.max(0, Math.round(Number(seg.multiTakeIndex || String(seg.timelineId || "").replace(/\D/g, "") || 0)));
+                    const take = explicitTake || sourceTrack + 1;
+                    const physical = Boolean(seg.physicalChunk || seg.audioPublishSchema === "iamccs.audio.publish.v2");
+                    const clean = physical ? stripHeavyAudioPublishFields(seg) : seg;
+                    const sourceTrackOriginal = Math.max(0, Math.round(Number(
+                        seg.sourceTrackOriginal
+                        ?? seg.shotboardTrack
+                        ?? seg.track_index
+                        ?? seg.trackIndex
+                        ?? seg.track
+                        ?? seg.sourceTrack
+                        ?? (take - 1)
+                    ) || 0));
                     return {
-                        ...seg,
+                        ...clean,
                         id: `${String(seg.id || "aud")}_pluri_t${take}`,
                         timelineId: `T${String(take).padStart(2, "0")}`,
                         multiTakeIndex: take,
                         multiGenerationClip: true,
+                        physicalChunk: physical,
+                        audioPublishSchema: physical ? "iamccs.audio.publish.v2" : String(seg.audioPublishSchema || ""),
                         shotboardPluriPublish: true,
-                        sourceTrackOriginal: sourceTrack,
-                        sourceGlobalStart: Math.max(0, Number(seg.start || 0)),
+                        sourceTrackOriginal,
+                        shotboardTrack: sourceTrackOriginal,
+                        sourceGlobalStart: Math.max(0, Number(seg.sourceGlobalStart ?? seg.globalStart ?? seg.start ?? 0)),
+                        sourceGlobalEnd: Math.max(0, Number(seg.sourceGlobalEnd ?? seg.globalEnd ?? (Number(seg.sourceGlobalStart ?? seg.globalStart ?? seg.start ?? 0) + Number(seg.length || 1)))),
                         localStart: 0,
                         start: 0,
-                        track: 0,
+                        trimStart: physical ? 0 : Math.max(0, Math.round(Number(seg.trimStart || 0))),
+                        length: Math.max(1, Math.round(Number(seg.length || seg.audioDurationFrames || 1))),
+                        audioDurationFrames: physical
+                            ? Math.max(1, Math.round(Number(seg.length || seg.audioDurationFrames || 1)))
+                            : Math.max(1, Math.round(Number(seg.audioDurationFrames || seg.length || 1))),
+                        track: sourceTrackOriginal,
                     };
                 });
                 const timelineIds = Array.from(new Set(pluriSegments.map((seg) => seg.timelineId))).sort();
                 const activeTake = Math.max(1, Number(boardMulti.activeTake || arrangerMulti.activeTake || 1));
                 const activeTimelineId = `T${String(activeTake).padStart(2, "0")}`;
+                const audioByTimeline = audioByTimelineFromSegments(pluriSegments);
+                Object.values(audioByTimeline).forEach((items) => {
+                    (Array.isArray(items) ? items : []).forEach((seg) => {
+                        if (seg.audioPublishSchema !== "iamccs.audio.publish.v2") return;
+                        const length = Math.max(1, Math.round(Number(seg.length || 1)));
+                        const duration = Math.max(1, Math.round(Number(seg.audioDurationFrames || length)));
+                        if (duration !== length) {
+                            console.warn("[IAMCCS AudioBoard] V2 chunk duration corrected", { id: seg.id, length, audioDurationFrames: duration });
+                            seg.audioDurationFrames = length;
+                        }
+                        seg.trimStart = 0;
+                        seg.start = Math.max(0, Math.round(Number(seg.start || 0)));
+                    });
+                });
+                console.info("[IAMCCS AudioBoard] PLURI_PUBLISH_AUDIO_MAP", {
+                    activeTimelineId,
+                    usedSplitClips: multiPublishSource.length > 0,
+                    timelines: Object.fromEntries(Object.entries(audioByTimeline).map(([key, items]) => [key, (items || []).map((seg) => ({
+                        id: seg.id,
+                        name: seg.name || seg.fileName || seg.audioFile,
+                        start: seg.start,
+                        length: seg.length,
+                        trimStart: seg.trimStart,
+                        sourceTrackOriginal: seg.sourceTrackOriginal,
+                    }))])),
+                });
                 data.multiGeneration = {
                     ...boardMulti,
                     ...arrangerMulti,
                     enabled: true,
+                    audio_publish_schema: pluriSegments.some((seg) => seg.audioPublishSchema === "iamccs.audio.publish.v2") ? "iamccs.audio.publish.v2" : "iamccs.audio.publish.v1",
+                    publishV2: pluriSegments.some((seg) => seg.audioPublishSchema === "iamccs.audio.publish.v2"),
+                    physicalChunks: pluriSegments.some((seg) => seg.physicalChunk),
                     pluriPublishEnabled: true,
                     audioSegmentsAll: pluriSegments,
-                    audioSegmentsAllSource: allAudioSegments,
+                    audioSegmentsAllSource: pluriSegments.some((seg) => seg.physicalChunk) ? [] : allAudioSegments.map((seg) => stripHeavyAudioPublishFields(seg)),
+                    audioByTimeline,
                     timelineIds,
                     activeTake,
                     activeTimelineId,
                     publishRange: effectivePublishRange.enabled ? JSON.parse(JSON.stringify(effectivePublishRange)) : { enabled: false },
                     shotboardDurationPolicy: "pluri_publish_audio_lanes_to_timelines",
-                    truth: "AudioBoard pluri-publish maps A1->T1, A2->T2, A3->T3... and publishes only the active timeline lane to Shotboard audio.",
+                    truth: "AudioBoard pluri-publish maps A1->T1, A2->T2, A3->T3... audioByTimeline is the persistent truth; Shotboard audioSegments is only the active timeline view. When split clips exist, source full-length clips are excluded from pluri-publish.",
                 };
-                nextShotboardAudioSegments = shotboardAudioForActiveTake(pluriSegments, activeTake, activeTimelineId);
-                data.trackSettings = [allTrackSettings[Math.max(0, Number(nextShotboardAudioSegments[0]?.sourceTrackOriginal || 0))] || allTrackSettings[0] || {}];
+                nextShotboardAudioSegments = audioByTimeline[activeTimelineId] || shotboardAudioForActiveTake(pluriSegments, activeTake, activeTimelineId);
+                data.audioTrackCount = Math.max(
+                    1,
+                    Number(state.audioTrackCount || 1),
+                    ...nextShotboardAudioSegments.map((seg) => Math.max(0, Math.round(Number(seg?.track || 0))) + 1)
+                );
+                data.trackSettings = allTrackSettings;
+                data.audioBusMode = "timeline_audio";
+                data.onlyFirstTrack = false;
             } else if (arrangerMulti.enabled) {
                 const clonedMulti = JSON.parse(JSON.stringify(arrangerMulti));
                 if (clonedMulti.sourceSegment && typeof clonedMulti.sourceSegment === "object") {
@@ -3467,12 +3820,34 @@ function renderAudioBoardArranger(node) {
             } else if (Object.keys(boardMulti).length) {
                 data.multiGeneration = boardMulti;
             }
+            if (!publishSourceAudioSegments.length) {
+                nextShotboardAudioSegments = [];
+                if (data.multiGeneration && typeof data.multiGeneration === "object") {
+                    data.multiGeneration = {
+                        ...data.multiGeneration,
+                        audio_publish_schema: "",
+                        publishV2: false,
+                        physicalChunks: false,
+                        audioSegmentsAll: [],
+                        audioSegmentsAllSource: [],
+                        audioByTimeline: {},
+                        publishRange: { enabled: false },
+                        audioClearedAt: new Date().toISOString(),
+                    };
+                }
+            }
             data.audioSegments = nextShotboardAudioSegments;
 
             // Only publish tracks that have at least one clip — strip empty tracks.
             // Build the compacted index: active track indices in ascending order.
             const activeTrackIndices = [...new Set(data.audioSegments.map((seg) => Number(seg.track || 0)))].sort((a, b) => a - b);
-            const activeTrackIndexSet = new Set(activeTrackIndices);
+            if (pluriPublishEnabled) {
+                data.audioTrackCount = Math.max(
+                    1,
+                    Number(data.audioTrackCount || 1),
+                    ...activeTrackIndices.map((idx) => Math.max(0, Math.round(Number(idx || 0))) + 1)
+                );
+            } else {
             // Remap segment .track values to a dense 0-based index so downstream
             // consumers see contiguous track numbers (0, 1, 2 …) with no gaps.
             const remapTrack = (oldTrack) => {
@@ -3485,6 +3860,7 @@ function renderAudioBoardArranger(node) {
             if (!shotboardOnlyFirst && activeTrackIndices.length > 0 && activeTrackIndices.length < Number(state.audioTrackCount || 4)) {
                 data.audioTrackCount = activeTrackIndices.length;
                 data.trackSettings = compactedTrackSettings;
+            }
             }
 
             data.use_custom_audio = data.audioSegments.some((seg) => hasMedia(seg) && !seg.mute);
@@ -3702,6 +4078,9 @@ function renderAudioBoardArranger(node) {
             draw();
             return;
         }
+        const publishPlayhead = Math.max(0, Math.round(Number(transport.playhead || 0)));
+        stopPlayback(false);
+        setPlayhead(publishPlayhead, false);
         // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
         const cleanup = stripDialogueInjectPlaceholders(segments(), { force: false });
         if (cleanup.removed > 0) {
@@ -3711,6 +4090,8 @@ function renderAudioBoardArranger(node) {
         }
         syncToShotboard("manual_publish");
         addEdit(`Published ${segments().length} audio clip${segments().length === 1 ? "" : "s"} to connected Shotboard V3.`);
+        transport.playing = false;
+        transport.pendingLoopRestart = false;
         draw();
     };
     const pullFromShotboard = () => {
@@ -3742,28 +4123,221 @@ function renderAudioBoardArranger(node) {
     let saveAudioBoardInFlight = false;
     const defaultAudioBoardPackageName = () => `audioboard_${new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19)}`;
     const cleanAudioBoardPackageName = (value) => String(value || "").trim().replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, "_").slice(0, 120);
-    const saveAudioBoardPackage = async (options = {}) => {
+    const chooseAudioBoardPackageFolder = async () => {
+        const response = await api.fetchApi("/api/iamccs/audio/choose_package_folder", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                initial_dir: state.audioBoardPackageDirectory || state.audioBoardPackageFolder || "",
+            }),
+        });
+        let result = {};
+        try { result = await response.json(); }
+        catch { result = { error: `folder picker failed: ${response.status}` }; }
+        if (result?.cancelled) return "";
+        if (!response.ok || !result?.ok || !result?.folder) throw new Error(result?.error || `folder picker failed: ${response.status}`);
+        return String(result.folder || "");
+    };
+    const projectNameForSave = () => cleanAudioBoardPackageName(state.audioBoardPackageName || state.projectName || state.boardName || "");
+    const chooseFolderForSave = async () => {
+        try {
+            const targetRoot = await chooseAudioBoardPackageFolder();
+            if (!targetRoot) {
+                transport.helper = "Save cancelled.";
+                draw();
+                return "";
+            }
+            state.audioBoardPackageDirectory = targetRoot;
+            return targetRoot;
+        } catch (err) {
+            console.warn("[IAMCCS AudioBoardArranger] folder picker failed", err);
+            transport.helper = `Folder picker failed: ${err?.message || err}`;
+            draw();
+            return "";
+        }
+    };
+    const closeAudioSavePopover = () => {
+        try { root._iamccsAudioSavePopover?.remove?.(); } catch {}
+        root._iamccsAudioSavePopover = null;
+    };
+    const openAudioSavePopover = (button, title, onConfirm) => {
+        closeAudioSavePopover();
+        const pop = document.createElement("div");
+        pop.className = "iamccs-audio-save-popover";
+        const label = document.createElement("strong");
+        label.textContent = title;
+        const input = document.createElement("input");
+        input.type = "text";
+        input.placeholder = "Nome progetto";
+        input.value = projectNameForSave() || defaultAudioBoardPackageName();
+        const actions = document.createElement("div");
+        actions.className = "actions";
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.textContent = "Cancel";
+        const ok = document.createElement("button");
+        ok.type = "button";
+        ok.textContent = "OK";
+        ok.className = "is-save-audioboard";
+        actions.append(cancel, ok);
+        pop.append(label, input, actions);
+        document.body.appendChild(pop);
+        const rect = button?.getBoundingClientRect?.() || { left: 20, top: 20, bottom: 52, right: 274 };
+        const left = Math.max(8, Math.min(window.innerWidth - 270, Number(rect.left || 20)));
+        const top = Math.max(8, Math.min(window.innerHeight - 126, Number(rect.bottom || rect.top || 20) + 8));
+        pop.style.left = `${left}px`;
+        pop.style.top = `${top}px`;
+        const outside = (event) => {
+            if (pop.contains(event.target) || button?.contains?.(event.target)) return;
+            closeAudioSavePopover();
+            window.removeEventListener("pointerdown", outside, true);
+        };
+        const confirm = () => {
+            const clean = cleanAudioBoardPackageName(input.value);
+            if (!clean) {
+                input.focus();
+                input.style.borderColor = "#ff8f8f";
+                return;
+            }
+            state.audioBoardPackageName = clean;
+            state.projectName = clean;
+            writeState("project_name", false, { quiet: true });
+            closeAudioSavePopover();
+            window.removeEventListener("pointerdown", outside, true);
+            onConfirm(clean);
+        };
+        cancel.onclick = () => {
+            closeAudioSavePopover();
+            window.removeEventListener("pointerdown", outside, true);
+        };
+        ok.onclick = confirm;
+        input.onkeydown = (event) => {
+            if (event.key === "Enter") confirm();
+            if (event.key === "Escape") cancel.click();
+        };
+        setTimeout(() => window.addEventListener("pointerdown", outside, true), 0);
+        requestAnimationFrame(() => {
+            input.focus();
+            input.select();
+        });
+        root._iamccsAudioSavePopover = pop;
+    };
+    const stripAudioBoardEmbeddedPayloads = (item) => {
+        if (Array.isArray(item)) {
+            item.forEach(stripAudioBoardEmbeddedPayloads);
+            return;
+        }
+        if (!item || typeof item !== "object") return;
+        if (item.packageAudioExcerpt && typeof item.packageAudioExcerpt === "object") {
+            delete item.packageAudioExcerpt.dataUrl;
+        }
+        if (item.masterExcerpt && typeof item.masterExcerpt === "object") {
+            delete item.masterExcerpt.dataUrl;
+        }
+        Object.values(item).forEach(stripAudioBoardEmbeddedPayloads);
+    };
+    const buildAudioBoardMetadataBoardForSave = () => {
+        const board = JSON.parse(JSON.stringify(state));
+        stripAudioBoardEmbeddedPayloads(board);
+        board.metadata = {
+            ...(board.metadata || {}),
+            schema: "iamccs.audio_board.metadata",
+            schema_version: 1,
+            save_mode: "metadata_only",
+            audio_policy: "references_existing_audio",
+            saved_at: new Date().toISOString(),
+        };
+        board.package = {
+            ...(board.package || {}),
+            kind: "audio_board_metadata",
+            includes_audio_files: false,
+            audio_policy: "references_existing_audio",
+            saved_at: board.metadata.saved_at,
+        };
+        return board;
+    };
+    const saveAudioBoardMetadata = async (options = {}) => {
         if (saveAudioBoardInFlight) {
-            transport.helper = "Save AudioBoard already running...";
+            transport.helper = "Save already running...";
             draw();
             return;
         }
-        saveAudioBoardInFlight = true;
-        const requestedLabel = cleanAudioBoardPackageName(options.packageName || state.audioBoardPackageName || "");
-        const label = requestedLabel || defaultAudioBoardPackageName();
-        state.audioBoardPackageName = label;
-        try {
-            console.info("[IAMCCS AudioBoardArranger] Save AudioBoard clicked", { label, nodeId: node.id || null });
-            addEdit(`Saving AudioBoard package: ${label}`);
-            transport.helper = `Saving AudioBoard package: ${label}`;
+        const label = cleanAudioBoardPackageName(options.packageName || state.audioBoardPackageName || state.projectName || state.boardName || "");
+        if (!label) {
+            transport.helper = "Nome progetto mancante.";
             draw();
-            writeState("save_audioboard_prepare", false, { quiet: true });
+            return;
+        }
+        const targetRoot = await chooseFolderForSave();
+        if (!targetRoot) return;
+        saveAudioBoardInFlight = true;
+        state.audioBoardPackageName = label;
+        state.projectName = label;
+        try {
+            console.info("[IAMCCS AudioBoardArranger] Save AudioBoard metadata clicked", { label, targetRoot, nodeId: node.id || null });
+            addEdit(`Saving AudioBoard JSON: ${label}`);
+            transport.helper = `Saving AudioBoard JSON in ${targetRoot}`;
+            draw();
+            writeState("save_audioboard_json_prepare", false, { quiet: true });
+            const response = await api.fetchApi("/api/iamccs/audio/save_audioboard_json", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    board_name: label,
+                    target_root: targetRoot,
+                    board: buildAudioBoardMetadataBoardForSave(),
+                    workflow_node_id: node.id || null,
+                }),
+            });
+            let result = {};
+            try { result = await response.json(); }
+            catch { result = { error: `save failed: ${response.status}` }; }
+            if (!response.ok || !result?.ok) throw new Error(result?.error || `save failed: ${response.status}`);
+            addEdit(`Saved AudioBoard JSON: ${result.board_name || label}`);
+            transport.helper = `Saved AudioBoard JSON: ${result.file}`;
+            console.info("[IAMCCS AudioBoardArranger] Save AudioBoard metadata complete", result);
+            writeState("save_audioboard_json_done", false, { quiet: true });
+        } catch (err) {
+            console.warn("[IAMCCS AudioBoardArranger] save audioboard metadata failed", err);
+            addEdit(`Save AudioBoard failed: ${err?.message || err}`);
+            transport.helper = `Save AudioBoard failed: ${err?.message || err}`;
+        } finally {
+            saveAudioBoardInFlight = false;
+            draw();
+        }
+    };
+    const saveAudioBoardPackage = async (options = {}) => {
+        if (saveAudioBoardInFlight) {
+            transport.helper = "Save already running...";
+            draw();
+            return;
+        }
+        const label = cleanAudioBoardPackageName(options.packageName || state.audioBoardPackageName || state.projectName || state.boardName || "");
+        if (!label) {
+            transport.helper = "Nome progetto mancante.";
+            draw();
+            return;
+        }
+        const targetRoot = String(options.targetRoot || "").trim() || await chooseFolderForSave();
+        if (!targetRoot) return;
+        saveAudioBoardInFlight = true;
+        state.audioBoardPackageName = label;
+        state.projectName = label;
+        state.audioBoardPackageDirectory = targetRoot;
+        try {
+            console.info("[IAMCCS AudioBoardArranger] Save Package clicked", { label, targetRoot, nodeId: node.id || null });
+            addEdit(`Saving full AudioBoard package: ${label}`);
+            transport.helper = `Saving full AudioBoard package in ${targetRoot}`;
+            draw();
+            writeState("save_audioboard_package_prepare", false, { quiet: true });
+            const packageBoard = await buildAudioBoardPackageBoardForSave();
             const response = await api.fetchApi("/api/iamccs/audio/save_audioboard_package", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     package_name: label,
-                    board: JSON.parse(JSON.stringify(state)),
+                    target_root: targetRoot,
+                    board: packageBoard,
                     workflow_node_id: node.id || null,
                 }),
             });
@@ -3772,38 +4346,26 @@ function renderAudioBoardArranger(node) {
             catch { result = { error: `save failed: ${response.status}` }; }
             if (!response.ok || !result?.ok) throw new Error(result?.error || `save failed: ${response.status}`);
             state.audioBoardPackageName = result.package_name || label;
-            addEdit(`Saved AudioBoard package: ${result.package_name}`);
-            transport.helper = `Saved AudioBoard package: ${result.package_dir}`;
-            console.info("[IAMCCS AudioBoardArranger] Save AudioBoard complete", result);
-            writeState("save_audioboard_done", false, { quiet: true });
+            state.projectName = state.audioBoardPackageName;
+            addEdit(`Saved full AudioBoard package: ${result.package_name}`);
+            transport.helper = `Saved full AudioBoard package: ${result.package_dir}`;
+            console.info("[IAMCCS AudioBoardArranger] Save Package complete", result);
+            writeState("save_audioboard_package_done", false, { quiet: true });
         } catch (err) {
             console.warn("[IAMCCS AudioBoardArranger] save package failed", err);
-            addEdit(`Save AudioBoard failed: ${err?.message || err}`);
-            transport.helper = `Save AudioBoard failed: ${err?.message || err}`;
+            addEdit(`Save Package failed: ${err?.message || err}`);
+            transport.helper = `Save Package failed: ${err?.message || err}`;
         } finally {
             saveAudioBoardInFlight = false;
             draw();
         }
     };
-    const saveAudioBoardPackageAs = () => {
-        const proposed = state.audioBoardPackageName || defaultAudioBoardPackageName();
-        const chosen = window.prompt("Save AudioBoard package as", proposed);
-        if (chosen == null) {
-            transport.helper = "Save As cancelled.";
-            draw();
-            return;
-        }
-        const label = cleanAudioBoardPackageName(chosen);
-        if (!label) {
-            transport.helper = "Save As cancelled: empty package name.";
-            draw();
-            return;
-        }
-        saveAudioBoardPackage({ packageName: label });
-    };
-    const uploadAudioFile = async (file) => {
+    const uploadAudioFile = async (file, options = {}) => {
         const body = new FormData();
         body.append("image", file);
+        if (options.subfolder) body.append("subfolder", String(options.subfolder));
+        body.append("type", String(options.type || "input"));
+        body.append("overwrite", "false");
         const resp = await api.fetchApi("/upload/image", { method: "POST", body });
         if (!resp || resp.status !== 200) throw new Error(`upload failed: ${resp?.status || "no response"}`);
         const data = await resp.json();
@@ -3811,13 +4373,290 @@ function renderAudioBoardArranger(node) {
         const subfolder = data?.subfolder || "";
         return { path: subfolder ? `${subfolder}/${filename}` : filename, type: data?.type || "input" };
     };
-    const audioViewUrl = (seg) => {
+    const encodeWavPcm16 = (channels, sampleRate) => {
+        const safeChannels = (Array.isArray(channels) ? channels : []).filter((item) => item && item.length);
+        const channelCount = Math.max(1, Math.min(2, safeChannels.length || 1));
+        const samples = Math.max(1, safeChannels[0]?.length || 1);
+        const blockAlign = channelCount * 2;
+        const byteRate = sampleRate * blockAlign;
+        const dataSize = samples * blockAlign;
+        const buffer = new ArrayBuffer(44 + dataSize);
+        const view = new DataView(buffer);
+        const writeString = (offset, text) => {
+            for (let i = 0; i < text.length; i += 1) view.setUint8(offset + i, text.charCodeAt(i));
+        };
+        writeString(0, "RIFF");
+        view.setUint32(4, 36 + dataSize, true);
+        writeString(8, "WAVE");
+        writeString(12, "fmt ");
+        view.setUint32(16, 16, true);
+        view.setUint16(20, 1, true);
+        view.setUint16(22, channelCount, true);
+        view.setUint32(24, sampleRate, true);
+        view.setUint32(28, byteRate, true);
+        view.setUint16(32, blockAlign, true);
+        view.setUint16(34, 16, true);
+        writeString(36, "data");
+        view.setUint32(40, dataSize, true);
+        let offset = 44;
+        for (let i = 0; i < samples; i += 1) {
+            for (let ch = 0; ch < channelCount; ch += 1) {
+                const source = safeChannels[ch] || safeChannels[0] || new Float32Array(samples);
+                const value = Math.max(-1, Math.min(1, Number(source[i] || 0)));
+                view.setInt16(offset, value < 0 ? value * 0x8000 : value * 0x7fff, true);
+                offset += 2;
+            }
+        }
+        return new Blob([buffer], { type: "audio/wav" });
+    };
+    function blobToDataUrl(blob) {
+        return new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ""));
+            reader.onerror = () => reject(reader.error || new Error("Blob read failed"));
+            reader.readAsDataURL(blob);
+        });
+    }
+    async function buildAudioBoardPackageBoardForSave() {
+        const board = JSON.parse(JSON.stringify(state));
+        const hasMultiGeneration = Boolean(board.multiGeneration && typeof board.multiGeneration === "object" && (
+            board.multiGeneration.enabled
+            || board.multiGeneration.pluriPublishEnabled
+            || Array.isArray(board.multiGeneration.timelineIds)
+            || (board.multiGeneration.audioByTimeline && typeof board.multiGeneration.audioByTimeline === "object")
+        ));
+        board.package = {
+            ...(board.package || {}),
+            kind: "audio_board_package",
+            includes_audio_segments: true,
+            includes_segment_excerpts: true,
+            includes_multi_generation: hasMultiGeneration,
+            includes_master_excerpt: false,
+            saved_at: new Date().toISOString(),
+        };
+        board.metadata = {
+            ...(board.metadata || {}),
+            schema: "iamccs.audio_board.package",
+            schema_version: 1,
+            package_kind: board.package.kind,
+            includes_multi_generation: hasMultiGeneration,
+            saved_at: board.package.saved_at,
+        };
+        board.audioBoardPackageKind = board.package.kind;
+        const safeFps = Math.max(1, fps());
+        const clonedSegments = Array.isArray(board.audioSegments) ? board.audioSegments : [];
+        const clonedById = new Map(clonedSegments.map((seg) => [String(seg?.id || ""), seg]));
+        const sourceSegments = Array.isArray(state.audioSegments) ? state.audioSegments : [];
+        for (const [index, sourceSeg] of sourceSegments.entries()) {
+            const clonedSeg = clonedById.get(String(sourceSeg?.id || ""));
+            if (!clonedSeg || (!sourceSeg?.audioFile && !sourceSeg?.audioB64 && !sourceSeg?.path)) continue;
+            const trimStart = Math.max(0, Math.round(Number(sourceSeg.trimStart || 0)));
+            const lengthFrames = Math.max(1, Math.round(Number(sourceSeg.length || sourceSeg.audioDurationFrames || 1)));
+            try {
+                const buffer = await getBuffer(sourceSeg, false);
+                if (!buffer) throw new Error("source audio buffer unavailable");
+                const sampleRate = Math.max(1, Math.round(Number(buffer.sampleRate || 44100)));
+                const startSample = Math.max(0, Math.floor((trimStart / safeFps) * sampleRate));
+                const wantedSamples = Math.max(1, Math.floor((lengthFrames / safeFps) * sampleRate));
+                const endSample = Math.max(startSample + 1, Math.min(buffer.length, startSample + wantedSamples));
+                const channelCount = Math.max(1, Math.min(2, Number(buffer.numberOfChannels || 1)));
+                const channels = [];
+                for (let ch = 0; ch < channelCount; ch += 1) {
+                    channels.push(buffer.getChannelData(ch).slice(startSample, endSample));
+                }
+                const blob = encodeWavPcm16(channels, sampleRate);
+                const safeBase = String(sourceSeg.name || sourceSeg.fileName || sourceSeg.audioFile || sourceSeg.id || `audio_${index + 1}`)
+                    .replace(/\.[^.]+$/, "")
+                    .replace(/[^A-Za-z0-9_.-]+/g, "_")
+                    .slice(0, 48) || `audio_${index + 1}`;
+                const filename = `${String(index + 1).padStart(3, "0")}_${safeBase}_excerpt_${trimStart}_${trimStart + lengthFrames}.wav`;
+                clonedSeg.packageAudioExcerpt = {
+                    schema: "iamccs.audio.segment_excerpt",
+                    schema_version: 1,
+                    role: "segment_excerpt",
+                    segmentId: String(sourceSeg.id || ""),
+                    sourceAudioFile: String(sourceSeg.audioFile || sourceSeg.fileName || sourceSeg.path || ""),
+                    sourceName: String(sourceSeg.name || sourceSeg.fileName || sourceSeg.audioFile || ""),
+                    timelineId: String(sourceSeg.timelineId || ""),
+                    sourceSegmentId: String(sourceSeg.sourceSegmentId || ""),
+                    track: Math.max(0, Math.round(Number(sourceSeg.track || 0))),
+                    startFrame: Math.max(0, Math.round(Number(sourceSeg.start || 0))),
+                    trimStartFrame: trimStart,
+                    lengthFrames,
+                    fps: safeFps,
+                    durationSeconds: Number((lengthFrames / safeFps).toFixed(6)),
+                    sampleRate,
+                    channels: channelCount,
+                    fileName: filename,
+                    mime: "audio/wav",
+                    dataUrl: await blobToDataUrl(blob),
+                    createdAt: new Date().toISOString(),
+                };
+                clonedSeg.audioPackageMode = "excerpt";
+            } catch (err) {
+                clonedSeg.packageAudioExcerpt = {
+                    schema: "iamccs.audio.segment_excerpt",
+                    schema_version: 1,
+                    role: "segment_excerpt",
+                    segmentId: String(sourceSeg.id || ""),
+                    sourceAudioFile: String(sourceSeg.audioFile || sourceSeg.fileName || sourceSeg.path || ""),
+                    trimStartFrame: trimStart,
+                    lengthFrames,
+                    fps: safeFps,
+                    error: String(err?.message || err),
+                };
+                console.warn("[IAMCCS AudioBoardArranger] segment excerpt package render failed", sourceSeg?.id || index, err);
+            }
+        }
+        const multi = board.multiGeneration && typeof board.multiGeneration === "object" ? board.multiGeneration : {};
+        const source = multi.sourceSegment && typeof multi.sourceSegment === "object" ? multi.sourceSegment : null;
+        const sourceId = String(multi.sourceSegmentId || source?.id || "").trim();
+        if (!source || !sourceId) return board;
+        const chunks = (Array.isArray(board.audioSegments) ? board.audioSegments : [])
+            .filter((seg) => String(seg?.sourceSegmentId || "") === sourceId && (seg?.multiGenerationClip || /^T\d+/i.test(String(seg?.timelineId || ""))))
+            .sort((a, b) => Number(a.sourceGlobalStart ?? a.globalStart ?? a.start ?? 0) - Number(b.sourceGlobalStart ?? b.globalStart ?? b.start ?? 0));
+        const sourceTrim = Math.max(0, Math.round(Number(source.trimStart || 0)));
+        const sourceLength = Math.max(
+            1,
+            Math.round(Number(source.length || source.audioDurationFrames || 0))
+                || chunks.reduce((sum, seg) => sum + Math.max(1, Math.round(Number(seg.length || seg.audioDurationFrames || 1))), 0)
+                || secondsToFrames(Number(board.duration_seconds || 1))
+        );
+        try {
+            const buffer = await getBuffer(source, false);
+            if (!buffer) throw new Error("source audio buffer unavailable");
+            const sampleRate = Math.max(1, Math.round(Number(buffer.sampleRate || 44100)));
+            const startSample = Math.max(0, Math.floor((sourceTrim / safeFps) * sampleRate));
+            const wantedSamples = Math.max(1, Math.floor((sourceLength / safeFps) * sampleRate));
+            const endSample = Math.max(startSample + 1, Math.min(buffer.length, startSample + wantedSamples));
+            const channelCount = Math.max(1, Math.min(2, Number(buffer.numberOfChannels || 1)));
+            const channels = [];
+            for (let ch = 0; ch < channelCount; ch += 1) {
+                channels.push(buffer.getChannelData(ch).slice(startSample, endSample));
+            }
+            const blob = encodeWavPcm16(channels, sampleRate);
+            const safeBase = String(source.name || source.fileName || source.audioFile || "master_excerpt")
+                .replace(/\.[^.]+$/, "")
+                .replace(/[^A-Za-z0-9_.-]+/g, "_")
+                .slice(0, 48) || "master_excerpt";
+            const filename = `${safeBase}_master_excerpt_${sourceTrim}_${sourceTrim + sourceLength}.wav`;
+            const excerpt = {
+                schema: "iamccs.audio.master_excerpt",
+                schema_version: 1,
+                role: "master_excerpt",
+                sourceSegmentId: sourceId,
+                sourceAudioFile: String(source.audioFile || source.fileName || source.path || ""),
+                sourceName: String(source.name || source.fileName || source.audioFile || ""),
+                sourceTrack: Math.max(0, Math.round(Number(multi.sourceTrack ?? source.track ?? 0))),
+                startFrame: 0,
+                trimStartFrame: sourceTrim,
+                lengthFrames: sourceLength,
+                fps: safeFps,
+                durationSeconds: Number((sourceLength / safeFps).toFixed(6)),
+                sampleRate,
+                channels: channelCount,
+                fileName: filename,
+                mime: "audio/wav",
+                dataUrl: await blobToDataUrl(blob),
+                derivedChunks: chunks.map((seg) => ({
+                    id: String(seg.id || ""),
+                    timelineId: String(seg.timelineId || ""),
+                    takeIndex: Math.max(1, Math.round(Number(seg.multiTakeIndex || 1))),
+                    sourceGlobalStart: Math.max(0, Math.round(Number(seg.sourceGlobalStart ?? seg.globalStart ?? seg.start ?? 0))),
+                    sourceGlobalEnd: Math.max(0, Math.round(Number(seg.sourceGlobalEnd ?? seg.globalEnd ?? (Number(seg.start || 0) + Number(seg.length || 0))))),
+                    length: Math.max(1, Math.round(Number(seg.length || seg.audioDurationFrames || 1))),
+                    audioFile: String(seg.audioFile || ""),
+                })),
+                createdAt: new Date().toISOString(),
+            };
+            board.multiGeneration = { ...multi, masterExcerpt: excerpt };
+            board.masterExcerpt = excerpt;
+            board.package.includes_master_excerpt = true;
+            board.metadata.includes_master_excerpt = true;
+            transport.helper = `AudioBoard package includes master excerpt ${Math.round(sourceLength)}f (${excerpt.durationSeconds}s).`;
+        } catch (err) {
+            board.multiGeneration = {
+                ...multi,
+                masterExcerpt: {
+                    schema: "iamccs.audio.master_excerpt",
+                    schema_version: 1,
+                    role: "master_excerpt",
+                    sourceSegmentId: sourceId,
+                    sourceAudioFile: String(source.audioFile || source.fileName || source.path || ""),
+                    trimStartFrame: sourceTrim,
+                    lengthFrames: sourceLength,
+                    fps: safeFps,
+                    error: String(err?.message || err),
+                },
+            };
+            board.package.includes_master_excerpt = true;
+            board.metadata.includes_master_excerpt = true;
+            console.warn("[IAMCCS AudioBoardArranger] master excerpt package render failed", err);
+        }
+        return board;
+    }
+    const makeAudioChunkFile = async (sourceSeg, chunkStartFrames, chunkLengthFrames, timelineId) => {
+        const buffer = await getBuffer(sourceSeg, false);
+        if (!buffer) throw new Error("source audio buffer unavailable");
+        const safeFps = Math.max(1, fps());
+        const sampleRate = Math.max(1, Math.round(Number(buffer.sampleRate || 44100)));
+        const startSample = Math.max(0, Math.floor((Number(chunkStartFrames || 0) / safeFps) * sampleRate));
+        const wantedSamples = Math.max(1, Math.floor((Number(chunkLengthFrames || 1) / safeFps) * sampleRate));
+        const endSample = Math.max(startSample + 1, Math.min(buffer.length, startSample + wantedSamples));
+        const sampleCount = Math.max(1, endSample - startSample);
+        const channelCount = Math.max(1, Math.min(2, Number(buffer.numberOfChannels || 1)));
+        const channels = [];
+        for (let ch = 0; ch < channelCount; ch += 1) {
+            channels.push(buffer.getChannelData(ch).slice(startSample, endSample));
+        }
+        const blob = encodeWavPcm16(channels, sampleRate);
+        const safeBase = String(sourceSeg?.name || sourceSeg?.fileName || "audio").replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9_.-]+/g, "_").slice(0, 42) || "audio";
+        const fileName = `${safeBase}_${timelineId}_${Math.round(chunkStartFrames)}_${Math.round(chunkStartFrames + chunkLengthFrames)}.wav`;
+        const file = new File([blob], fileName, { type: "audio/wav" });
+        const uploaded = await uploadAudioFile(file, { subfolder: "IAMCCS_audio_chunks", type: "input" });
+        const pseudoBuffer = {
+            numberOfChannels: channelCount,
+            length: sampleCount,
+            duration: sampleCount / sampleRate,
+            getChannelData: (ch) => channels[Math.max(0, Math.min(channelCount - 1, ch))] || channels[0],
+        };
+        return {
+            uploaded,
+            file,
+            buffer: pseudoBuffer,
+            durationFrames: Math.max(1, Math.round((sampleCount / sampleRate) * safeFps)),
+            peaks: peaksFromBuffer(pseudoBuffer, Math.max(360, Math.min(1200, Math.round((sampleCount / sampleRate) * 70)))),
+            channelCount,
+            sampleRate,
+        };
+    };
+    const uniqueText = (items) => {
+        const seen = new Set();
+        const out = [];
+        for (const item of items || []) {
+            const text = String(item || "").trim();
+            if (!text || seen.has(text)) continue;
+            seen.add(text);
+            out.push(text);
+        }
+        return out;
+    };
+    const audioViewUrlCandidates = (seg) => {
         const file = String(seg.audioFile || "").trim();
-        if (!file) return "";
+        if (!file) return [];
         const parts = file.split(/[\\/]+/).filter(Boolean);
         const filename = parts.pop() || file;
         const subfolder = parts.join("/");
-        return `/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(seg.audioUploadType || "input")}&subfolder=${encodeURIComponent(subfolder)}`;
+        const types = uniqueText([seg.audioUploadType, seg.previewType, seg.fileType, "input", "output", "temp"]);
+        const urls = [];
+        for (const type of types) {
+            urls.push(`/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}&subfolder=${encodeURIComponent(subfolder)}`);
+            if (subfolder) urls.push(`/view?filename=${encodeURIComponent(filename)}&type=${encodeURIComponent(type)}&subfolder=`);
+        }
+        return uniqueText(urls);
+    };
+    const audioViewUrl = (seg) => {
+        return audioViewUrlCandidates(seg)[0] || "";
     };
     const audioSourceKey = (seg) => {
         if (!seg) return "";
@@ -3829,20 +4668,72 @@ function renderAudioBoardArranger(node) {
         if (b64) return `b64:${seg.id || "audio"}:${b64.length}:${b64.slice(0, 96)}`;
         return `id:${seg.id || ""}`;
     };
+    const waveformCache = () => {
+        if (!window.IAMCCS_AUDIO_WAVEFORM_CACHE) window.IAMCCS_AUDIO_WAVEFORM_CACHE = new Map();
+        return window.IAMCCS_AUDIO_WAVEFORM_CACHE;
+    };
+    const rememberWaveformForSegment = (seg) => {
+        if (!seg || !hasMedia(seg)) return null;
+        const peaks = Array.isArray(seg.waveformPeaks) ? seg.waveformPeaks : [];
+        if (peaks.length <= 8) return null;
+        const key = audioSourceKey(seg);
+        const item = {
+            waveformPeaks: JSON.parse(JSON.stringify(peaks)),
+            audioDurationFrames: Math.max(1, Math.round(Number(seg.audioDurationFrames || seg.length || 1))),
+            waveformReal: Boolean(seg.waveformReal !== false),
+            updatedAt: Date.now(),
+        };
+        waveformCache().set(key, item);
+        return item;
+    };
+    const cloneAudioSegmentForPublish = (seg) => {
+        const next = JSON.parse(JSON.stringify(seg || {}));
+        const cached = rememberWaveformForSegment(seg) || waveformCache().get(audioSourceKey(seg));
+        if (cached && (!Array.isArray(next.waveformPeaks) || next.waveformPeaks.length <= 8)) {
+            next.waveformPeaks = JSON.parse(JSON.stringify(cached.waveformPeaks || []));
+            next.audioDurationFrames = Math.max(1, Math.round(Number(next.audioDurationFrames || cached.audioDurationFrames || next.length || 1)));
+            next.waveformReal = cached.waveformReal !== false;
+            next._iamccsWaveformDecodedKey = audioSourceKey(seg);
+        }
+        return next;
+    };
+    const stripHeavyAudioPublishFields = (seg) => {
+        const next = JSON.parse(JSON.stringify(seg || {}));
+        delete next.waveformPeaks;
+        delete next.waveformCache;
+        delete next.decodedWaveform;
+        delete next.audioB64;
+        delete next._iamccsWaveformDecodedKey;
+        delete next._iamccsWaveformFailedKey;
+        delete next._iamccsWaveformFailedAt;
+        delete next._iamccsWaveformLoadError;
+        return next;
+    };
     const getBuffer = async (seg, resume = true) => {
         if (!seg) return null;
         const key = audioSourceKey(seg);
         if (audioBuffers.has(key)) return audioBuffers.get(key);
         const ctx = await ensureAudioContext(resume);
-        const url = audioUrls.get(seg.id) || audioViewUrl(seg);
-        if (!url) return null;
-        const resp = await fetch(url);
-        if (!resp.ok) throw new Error(`audio fetch failed ${resp.status}`);
-        const arrayBuffer = await resp.arrayBuffer();
-        const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
-        audioBuffers.set(key, decoded);
-        seg._iamccsWaveformDecodedKey = key;
-        return decoded;
+        const urls = uniqueText([audioUrls.get(seg.id), ...audioViewUrlCandidates(seg)]);
+        if (!urls.length) return null;
+        let lastError = null;
+        for (const url of urls) {
+            try {
+                const resp = await fetch(url);
+                if (!resp.ok) throw new Error(`audio fetch failed ${resp.status}`);
+                const arrayBuffer = await resp.arrayBuffer();
+                const decoded = await ctx.decodeAudioData(arrayBuffer.slice(0));
+                audioBuffers.set(key, decoded);
+                seg._iamccsWaveformDecodedKey = key;
+                seg._iamccsWaveformDecodedUrl = url;
+                delete seg._iamccsWaveformFailedKey;
+                delete seg._iamccsWaveformLoadError;
+                return decoded;
+            } catch (err) {
+                lastError = err;
+            }
+        }
+        throw lastError || new Error("audio fetch failed");
     };
     const peaksFromBuffer = (decoded, count = 1200) => {
         const channelCount = Math.max(1, decoded?.numberOfChannels || 1);
@@ -3879,10 +4770,13 @@ function renderAudioBoardArranger(node) {
         const hasDecodedPeaks = Array.isArray(seg?.waveformPeaks) && seg.waveformPeaks.length > 8;
         if (!seg || !hasMedia(seg) || waveformLoading.has(seg.id)) return;
         if (seg._iamccsWaveformDecodedKey === sourceKey && seg.waveformReal === true && hasDecodedPeaks) return;
+        if (seg._iamccsWaveformFailedKey === sourceKey && !hasDecodedPeaks) return;
         // Regenerable waveform caches may be compacted from workflow drafts. A stale
         // waveformReal flag must never prevent decoding the still-valid audio file.
         seg.waveformReal = false;
         delete seg.waveformPeaks;
+        delete seg._iamccsWaveformLoadError;
+        delete seg._iamccsWaveformFailedKey;
         waveformLoading.add(seg.id);
         getBuffer(seg, false)
             .then((buffer) => {
@@ -3891,13 +4785,17 @@ function renderAudioBoardArranger(node) {
                 seg.waveformPeaks = peaksFromBuffer(buffer, Math.max(900, Math.min(2200, Math.round(buffer.duration * 70))));
                 seg.waveformReal = true;
                 seg._iamccsWaveformDecodedKey = sourceKey;
+                rememberWaveformForSegment(seg);
                 waveformLoading.delete(seg.id);
                 writeState("waveform_decode", false, { quiet: true });
                 draw();
             })
             .catch((err) => {
                 waveformLoading.delete(seg.id);
+                seg._iamccsWaveformFailedKey = sourceKey;
+                seg._iamccsWaveformLoadError = String(err?.message || err || "waveform decode failed");
                 console.warn("[IAMCCS AudioBoardArranger] waveform decode failed", seg?.audioFile || seg?.fileName || seg?.id, err);
+                draw();
             });
     };
     const decodeAudioInfo = async (file) => {
@@ -3991,6 +4889,7 @@ function renderAudioBoardArranger(node) {
                 };
                 audioUrls.set(seg.id, URL.createObjectURL(file));
                 audioBuffers.set(audioSourceKey(seg), info.buffer);
+                rememberWaveformForSegment(seg);
                 segments().push(seg);
                 selectedId = seg.id;
                 if (!firstVisual) cursor += info.durationFrames;
@@ -4897,7 +5796,8 @@ function renderAudioBoardArranger(node) {
             ctx.fillStyle = "rgba(235,248,255,.76)";
             ctx.font = `900 ${Math.max(10, Math.round(12 * dpr))}px ui-monospace, Consolas, monospace`;
             ctx.textAlign = "center";
-            ctx.fillText(waveformLoading.has(seg.id) ? "decoding real waveform..." : "no waveform peaks", w * .5, h * .53);
+            const failed = String(seg?._iamccsWaveformLoadError || "").trim();
+            ctx.fillText(waveformLoading.has(seg.id) ? "decoding real waveform..." : (failed ? "waveform decode failed" : "no waveform peaks"), w * .5, h * .53);
             clip.appendChild(canvas);
             return;
         }
@@ -5006,6 +5906,7 @@ function renderAudioBoardArranger(node) {
             event.preventDefault();
             root.focus();
             selectedId = seg.id;
+            selectedTrackSet = new Set([Math.max(0, Number(seg.track || 0))]);
             state.selectedMixer = { type: "track", track: Math.max(0, Number(seg.track || 0)) };
             const rect = clip.getBoundingClientRect();
             const tool = view().tool;
@@ -5015,12 +5916,16 @@ function renderAudioBoardArranger(node) {
                 // necessary because LiteGraph applies a CSS transform scale to the widget.
                 const scaleX = Math.max(0.001, clip.offsetWidth / Math.max(1, rect.width));
                 const clickInClip = (event.clientX - rect.left) * scaleX; // CSS px from clip left
-                const frame = Math.max(
+                const rawFrame = Math.max(
                     Number(seg.start || 0),
                     Math.min(
                         Number(seg.start || 0) + Number(seg.length || 1),
                         Math.round(Number(seg.start || 0) + clickInClip / pxPerFrame())
                     )
+                );
+                const frame = Math.max(
+                    Number(seg.start || 0),
+                    Math.min(Number(seg.start || 0) + Number(seg.length || 1), snapFrameToSecond(rawFrame))
                 );
                 setPlayhead(frame, false);
                 splitSelectedAtPlayhead();
@@ -5048,14 +5953,17 @@ function renderAudioBoardArranger(node) {
                 const delta = Math.round((moveEvent.clientX - startX) / pxPerFrame());
                 const trackDelta = Math.round((moveEvent.clientY - startY) / Math.max(1, view().trackHeight));
                 if (mode === "trim_left") {
-                    const applied = Math.max(-trimStart, Math.min(length - 1, delta));
+                    const snappedStart = snapFrameToSecond(Math.max(0, start + delta));
+                    const applied = Math.max(-trimStart, Math.min(length - 1, snappedStart - start));
                     seg.start = Math.max(0, start + applied);
                     seg.trimStart = Math.max(0, trimStart + applied);
                     seg.length = Math.max(1, length - applied);
                 } else if (mode === "trim_right" || mode === "trim") {
-                    seg.length = Math.max(1, Math.min(Number(seg.audioDurationFrames || 999999) - Number(seg.trimStart || 0), length + delta));
+                    const maxLength = Number(seg.audioDurationFrames || 999999) - Number(seg.trimStart || 0);
+                    const snappedEnd = snapFrameToSecond(start + length + delta);
+                    seg.length = Math.max(1, Math.min(maxLength, snappedEnd - start));
                 } else {
-                    seg.start = Math.max(0, start + delta);
+                    seg.start = Math.max(0, snapFrameToSecond(start + delta));
                     seg.track = Math.max(0, Math.min(Math.max(1, Number(state.audioTrackCount || 4)) - 1, track + trackDelta));
                     clip.style.transform = `translateY(${trackDelta * Math.max(1, view().trackHeight)}px)`;
                 }
@@ -5118,6 +6026,7 @@ function renderAudioBoardArranger(node) {
             event.preventDefault();
             event.stopPropagation();
             selectedId = seg.id;
+            selectedTrackSet = new Set([Math.max(0, Number(seg.track || 0))]);
             state.selectedMixer = { type: "track", track: Math.max(0, Number(seg.track || 0)) };
             const frameAtClick = Number(seg.start || 0) + Math.round((event.clientX - clip.getBoundingClientRect().left) / Math.max(1, pxPerFrame()));
             setPlayhead(Math.max(Number(seg.start || 0), Math.min(Number(seg.start || 0) + Number(seg.length || 1), frameAtClick)), false);
@@ -5137,7 +6046,7 @@ function renderAudioBoardArranger(node) {
             draw();
         };
     };
-    const selectedClip = () => segments().find((seg) => seg.id === selectedId) || segments()[0] || null;
+    const selectedClip = () => selectedId ? (segments().find((seg) => String(seg.id || "") === String(selectedId || "")) || null) : null;
     const splitSelectedAtPlayhead = () => {
         const seg = selectedClip();
         if (!seg) return;
@@ -5225,8 +6134,13 @@ function renderAudioBoardArranger(node) {
             event.preventDefault();
             return;
         }
-        if (!selected) return;
         if (event.key === "Delete" || event.key === "Backspace") {
+            if (!selected && selectedTrackIndexes().length) {
+                deleteSelectedAudioLanes();
+                event.preventDefault();
+                return;
+            }
+            if (!selected) return;
             state.audioSegments = segments().filter((seg) => seg.id !== selected.id);
             selectedId = "";
             addEdit("Shortcut deleted selected clip.");
@@ -5295,9 +6209,33 @@ function renderAudioBoardArranger(node) {
         const selected = selectedClip();
         if (!selected) return;
         state.audioSegments = segments().filter((seg) => seg.id !== selected.id);
-        selectedId = segments()[0]?.id || "";
+        selectedId = "";
         addEdit("Deleted selected clip.");
         writeState("delete");
+        draw();
+    };
+    const deleteSelectedAudioLanes = () => {
+        const lanes = selectedTrackIndexes();
+        if (!lanes.length) return;
+        const laneSet = new Set(lanes);
+        const beforeTracks = Math.max(1, Number(state.audioTrackCount || 1));
+        const remapTrack = (track) => {
+            const oldTrack = Math.max(0, Math.round(Number(track || 0)));
+            let removedBefore = 0;
+            lanes.forEach((lane) => { if (lane < oldTrack) removedBefore += 1; });
+            return Math.max(0, oldTrack - removedBefore);
+        };
+        state.audioSegments = segments()
+            .filter((seg) => !laneSet.has(Math.max(0, Math.round(Number(seg.track || 0)))))
+            .map((seg) => ({ ...seg, track: remapTrack(seg.track) }));
+        state.trackSettings = (Array.isArray(state.trackSettings) ? state.trackSettings : [])
+            .filter((_, index) => !laneSet.has(index));
+        state.audioTrackCount = Math.max(1, beforeTracks - lanes.length);
+        selectedTrackSet = new Set([Math.min(Math.max(0, state.audioTrackCount - 1), lanes[0] || 0)]);
+        state.selectedMixer = { type: "track", track: selectedTrackIndexes()[0] || 0 };
+        selectedId = "";
+        addEdit(`Deleted lane${lanes.length === 1 ? "" : "s"} ${lanes.map((lane) => `A${lane + 1}`).join(", ")}.`);
+        writeState("delete_lanes");
         draw();
     };
     const moveSelectedClipToTrack = (track) => {
@@ -5348,17 +6286,21 @@ function renderAudioBoardArranger(node) {
     const openTrackContextMenu = (track, event) => {
         event.preventDefault();
         event.stopPropagation();
-        state.selectedMixer = { type: "track", track };
+        selectAudioTrack(track, event);
         const trackCount = Math.max(1, Number(state.audioTrackCount || 4));
         const actions = [
             {
                 label: `Select A${track + 1}`,
                 run: () => {
-                    state.selectedMixer = { type: "track", track };
-                    transport.helper = `Selected A${track + 1} device chain.`;
+                    selectAudioTrack(track);
                     writeState("select_track", false);
                     draw();
                 },
+            },
+            {
+                label: selectedTrackIndexes().length > 1 ? "Delete selected lanes" : `Delete A${track + 1}`,
+                run: () => deleteSelectedAudioLanes(),
+                klass: "danger",
             },
             { label: `Color A${track + 1}`, run: () => openTrackColorPicker(track, event) },
         ];
@@ -5407,7 +6349,7 @@ function renderAudioBoardArranger(node) {
         writeState("multi_clear");
         draw();
     };
-    const applyMultiGenerationSplit = (options = {}) => {
+    const applyMultiGenerationSplit = async (options = {}) => {
         const chunkSeconds = Math.max(1, Number(options.chunkSeconds || 20));
         const chunkFrames = Math.max(1, secondsToFrames(chunkSeconds));
         const sourceTrack = Math.max(0, Number(options.sourceTrack || 0));
@@ -5428,6 +6370,8 @@ function renderAudioBoardArranger(node) {
             draw();
             return;
         }
+        transport.helper = "MULTI split V2: rendering physical WAV chunks...";
+        draw();
         const sourceStart = Math.max(0, Math.round(Number(source.start || 0)));
         const sourceLength = Math.max(1, Math.round(Number(source.length || source.audioDurationFrames || 1)));
         const sourceTrim = Math.max(0, Math.round(Number(source.trimStart || 0)));
@@ -5435,6 +6379,10 @@ function renderAudioBoardArranger(node) {
         const takeCount = takeCountRaw === "auto"
             ? autoTakes
             : Math.max(1, Math.min(autoTakes, Math.round(Number(takeCountRaw) || autoTakes)));
+        state.audioTrackCount = Math.max(
+            Math.max(1, Number(state.audioTrackCount || 1)),
+            destinationStartTrack + takeCount
+        );
         const sourceId = String(source.id || "");
         const baseSegments = segments().filter((seg) => {
             if (Boolean(seg.multiGenerationClip) || String(seg.timelineId || "").startsWith("T")) return false;
@@ -5447,22 +6395,43 @@ function renderAudioBoardArranger(node) {
             const length = Math.max(1, Math.min(chunkFrames, sourceLength - offset));
             const takeIndex = index + 1;
             const timelineId = `T${String(takeIndex).padStart(2, "0")}`;
+            let chunkInfo;
+            try {
+                chunkInfo = await makeAudioChunkFile(source, sourceTrim + offset, length, timelineId);
+            } catch (err) {
+                addEdit(`MULTI split failed while creating ${timelineId} WAV chunk: ${err?.message || err}`);
+                transport.helper = `MULTI split failed at ${timelineId}.`;
+                draw();
+                return;
+            }
             const clone = {
                 ...JSON.parse(JSON.stringify(source)),
                 id: newId(`multi_${timelineId.toLowerCase()}`),
                 name: `${String(source.name || source.fileName || source.audioFile || "audio").slice(0, 42)} ${timelineId}`,
                 track: destinationStartTrack + index,
                 start: localizeStarts ? 0 : sourceStart + offset,
-                length,
-                trimStart: sourceTrim + offset,
-                audioDurationFrames: Math.max(sourceTrim + offset + length, Number(source.audioDurationFrames || sourceLength)),
+                length: chunkInfo.durationFrames,
+                trimStart: 0,
+                audioDurationFrames: chunkInfo.durationFrames,
+                audioFile: chunkInfo.uploaded.path,
+                audioUploadType: chunkInfo.uploaded.type,
+                fileName: chunkInfo.file.name,
+                mime: "audio/wav",
+                size: chunkInfo.file.size,
+                waveformPeaks: chunkInfo.peaks,
+                waveformReal: true,
+                _iamccsWaveformDecodedKey: `file:${chunkInfo.uploaded.type || "input"}:${chunkInfo.uploaded.path}`,
                 mute: false,
                 solo: false,
-                multiGenerationClip: true,
+            multiGenerationClip: true,
+            physicalChunk: true,
+            audioPublishSchema: "iamccs.audio.publish.v2",
                 multiTakeIndex: takeIndex,
                 timelineId,
                 sourceSegmentId: sourceId,
                 sourceTrack,
+                sourceTrackOriginal: destinationStartTrack + index,
+                shotboardTrack: destinationStartTrack + index,
                 sourceGlobalStart: sourceStart + offset,
                 sourceGlobalEnd: sourceStart + offset + length,
                 globalStart: sourceStart + offset,
@@ -5472,24 +6441,49 @@ function renderAudioBoardArranger(node) {
                 chunkFrames,
                 chunkSeconds,
             };
+            audioUrls.set(clone.id, URL.createObjectURL(chunkInfo.file));
+            audioBuffers.set(audioSourceKey(clone), chunkInfo.buffer);
+            rememberWaveformForSegment(clone);
             created.push(clone);
         }
         state.audioSegments = baseSegments.concat(created);
         state.audioTrackCount = Math.max(Number(state.audioTrackCount || 1), destinationStartTrack + created.length);
         state.audioBusMode = "only_first";
         state.onlyFirstTrack = true;
+        const audioByTimeline = {};
+        for (const seg of created) {
+            const timelineId = String(seg.timelineId || `T${String(seg.multiTakeIndex || 1).padStart(2, "0")}`);
+            const publishTrack = Math.max(0, Math.round(Number(seg.track ?? seg.sourceTrack ?? 0) || 0));
+            audioByTimeline[timelineId] = [stripHeavyAudioPublishFields({
+                ...seg,
+                track: publishTrack,
+                sourceTrackOriginal: publishTrack,
+                shotboardTrack: publishTrack,
+                start: Math.max(0, Math.round(Number(seg.start || 0))),
+                localStart: Math.max(0, Math.round(Number(seg.localStart ?? seg.start ?? 0))),
+                trimStart: 0,
+                length: Math.max(1, Math.round(Number(seg.length || seg.audioDurationFrames || 1))),
+                audioDurationFrames: Math.max(1, Math.round(Number(seg.audioDurationFrames || seg.length || 1))),
+            })];
+        }
         state.multiGeneration = {
             enabled: true,
+            audio_publish_schema: "iamccs.audio.publish.v2",
+            physicalChunks: true,
+            publishV2: true,
+            pluriPublishEnabled: true,
+            pluriPublishAutoEnabled: true,
             template: `${chunkSeconds}s`,
             chunkSeconds,
             chunkFrames,
             sourceTrack,
-            sourceSegment: JSON.parse(JSON.stringify(source)),
+            sourceSegment: stripHeavyAudioPublishFields(source),
             sourceSegmentId: sourceId,
             destinationStartTrack,
             splitStartMode,
             takeCount: created.length,
             timelineIds: created.map((seg) => seg.timelineId),
+            audioByTimeline,
             laneIndex: created.map((seg) => ({
                 timeline_id: seg.timelineId,
                 take_index: seg.multiTakeIndex,
@@ -5502,10 +6496,13 @@ function renderAudioBoardArranger(node) {
                 source_global_start: seg.sourceGlobalStart,
                 source_global_end: seg.sourceGlobalEnd,
                 length: seg.length,
+                audio_file: seg.audioFile,
+                physical_chunk: true,
             })),
             updatedAt: new Date().toISOString(),
         };
-        addEdit(`MULTI split created ${created.length} take lane(s): ${multiGenerationMapText()}.`);
+        addEdit(`MULTI split V2 created ${created.length} physical WAV chunk lane(s): ${multiGenerationMapText()}.`);
+        transport.helper = `MULTI split V2 ready: ${created.length} WAV chunk lane(s).`;
         writeState("multi_split");
         draw();
     };
@@ -5532,14 +6529,26 @@ function renderAudioBoardArranger(node) {
         title.className = "iamccs-audio-board-multi-title";
         title.innerHTML = `<span>MULTIGENERATION</span><small>audio chunk lanes</small>`;
         let chunkSeconds = Number(multi.chunkSeconds || 20);
-        let takeCount = "auto";
+        let takeCount = String(multi.takeCountRequested || "auto");
         let sourceTrack = Number(multi.sourceTrack || 0);
         let destinationStartTrack = Number(multi.destinationStartTrack || 0);
         let splitStartMode = String(multi.splitStartMode || "all_zero") === "global_source" ? "global_source" : "all_zero";
         let pluriPublishEnabled = Boolean(multi.pluriPublishEnabled);
+        const persistMultiDraft = (reason = "multi_draft") => {
+            state.multiGeneration = state.multiGeneration && typeof state.multiGeneration === "object" ? state.multiGeneration : {};
+            state.multiGeneration.enabled = true;
+            state.multiGeneration.template = `${Number(chunkSeconds || 20)}s`;
+            state.multiGeneration.chunkSeconds = Math.max(1, Number(chunkSeconds || 20));
+            state.multiGeneration.sourceTrack = Math.max(0, Number(sourceTrack || 0));
+            state.multiGeneration.destinationStartTrack = Math.max(0, Number(destinationStartTrack || 0));
+            state.multiGeneration.splitStartMode = String(splitStartMode || "all_zero") === "global_source" ? "global_source" : "all_zero";
+            state.multiGeneration.takeCountRequested = String(takeCount || "auto");
+            writeState(reason, false, { quiet: String(reason || "").endsWith("_input") });
+        };
         const chunk = makeMultiSelect("Template", [["10", "10 sec"], ["15", "15 sec"], ["20", "20 sec"], ["25", "25 sec"], ["custom", "custom"]], [10, 15, 20, 25].includes(chunkSeconds) ? String(chunkSeconds) : "custom", (value) => {
             if (value !== "custom") customInput.value = value;
             chunkSeconds = Math.max(1, Number(customInput.value || value || 20));
+            persistMultiDraft("multi_template");
         });
         const customLabel = document.createElement("label");
         customLabel.textContent = "Seconds";
@@ -5549,12 +6558,22 @@ function renderAudioBoardArranger(node) {
         customInput.max = "300";
         customInput.step = "0.25";
         customInput.value = String(chunkSeconds);
-        customInput.onchange = () => { chunkSeconds = Math.max(1, Number(customInput.value || 20)); };
+        customInput.oninput = () => {
+            chunkSeconds = Math.max(1, Number(customInput.value || 20));
+            chunk.select.value = [10, 15, 20, 25].includes(Number(chunkSeconds)) ? String(Number(chunkSeconds)) : "custom";
+            persistMultiDraft("multi_seconds_input");
+        };
+        customInput.onchange = () => {
+            chunkSeconds = Math.max(1, Number(customInput.value || 20));
+            customInput.value = String(chunkSeconds);
+            chunk.select.value = [10, 15, 20, 25].includes(Number(chunkSeconds)) ? String(Number(chunkSeconds)) : "custom";
+            persistMultiDraft("multi_seconds_change");
+        };
         customLabel.appendChild(customInput);
-        const takes = makeMultiSelect("Takes", [["auto", "auto"], ["2", "2 takes"], ["3", "3 takes"], ["4", "4 takes"], ["5", "5 takes"]], takeCount, (value) => { takeCount = value; });
-        const source = makeMultiSelect("Source", Array.from({ length: Math.max(1, Number(state.audioTrackCount || 1)) }, (_, i) => [String(i), `A${i + 1}`]), sourceTrack, (value) => { sourceTrack = Number(value || 0); });
-        const dest = makeMultiSelect("T1 lane", Array.from({ length: Math.max(1, Number(state.audioTrackCount || 1)) }, (_, i) => [String(i), `A${i + 1}`]), destinationStartTrack, (value) => { destinationStartTrack = Number(value || 0); });
-        const startMode = makeMultiSelect("T lanes start", [["all_zero", "all lanes from 0"], ["global_source", "sequential / source time"]], splitStartMode, (value) => { splitStartMode = String(value || "all_zero"); });
+        const takes = makeMultiSelect("Takes", [["auto", "auto"], ["2", "2 takes"], ["3", "3 takes"], ["4", "4 takes"], ["5", "5 takes"]], takeCount, (value) => { takeCount = value; persistMultiDraft("multi_takes"); });
+        const source = makeMultiSelect("Source", Array.from({ length: Math.max(1, Number(state.audioTrackCount || 1)) }, (_, i) => [String(i), `A${i + 1}`]), sourceTrack, (value) => { sourceTrack = Number(value || 0); persistMultiDraft("multi_source"); });
+        const dest = makeMultiSelect("T1 lane", Array.from({ length: Math.max(1, Number(state.audioTrackCount || 1)) }, (_, i) => [String(i), `A${i + 1}`]), destinationStartTrack, (value) => { destinationStartTrack = Number(value || 0); persistMultiDraft("multi_destination"); });
+        const startMode = makeMultiSelect("T lanes start", [["all_zero", "all lanes from 0"], ["global_source", "sequential / source time"]], splitStartMode, (value) => { splitStartMode = String(value || "all_zero"); persistMultiDraft("multi_start_mode"); });
         startMode.wrap.title = "Choose whether each generated T lane starts at frame 0, or keeps the source/sequential timing.";
         const pluri = document.createElement("button");
         pluri.type = "button";
@@ -5574,7 +6593,22 @@ function renderAudioBoardArranger(node) {
         split.type = "button";
         split.className = "is-primary";
         split.textContent = "Split To T Lanes";
-        split.onclick = () => applyMultiGenerationSplit({ chunkSeconds, sourceTrack, destinationStartTrack, takeCount, splitStartMode });
+        split.onclick = async () => {
+            split.disabled = true;
+            split.textContent = "Splitting WAV...";
+            try {
+                chunkSeconds = Math.max(1, Number(customInput.value || chunkSeconds || 20));
+                takeCount = String(takes.select.value || takeCount || "auto");
+                sourceTrack = Number(source.select.value || sourceTrack || 0);
+                destinationStartTrack = Number(dest.select.value || destinationStartTrack || 0);
+                splitStartMode = String(startMode.select.value || splitStartMode || "all_zero");
+                persistMultiDraft("multi_before_split");
+                await applyMultiGenerationSplit({ chunkSeconds, sourceTrack, destinationStartTrack, takeCount, splitStartMode });
+            } finally {
+                split.disabled = false;
+                split.textContent = "Split To T Lanes";
+            }
+        };
         const clear = document.createElement("button");
         clear.type = "button";
         clear.className = "danger";
@@ -6368,6 +7402,11 @@ function renderAudioBoardArranger(node) {
     };
     let refreshFixedAudioBoardSize = () => {};
     const draw = () => {
+        const previousTimeline = root.querySelector(".iamccs-audio-board-timeline");
+        const previousTimelineScroll = previousTimeline
+            ? { left: Number(previousTimeline.scrollLeft || 0), top: Number(previousTimeline.scrollTop || 0) }
+            : (root._iamccsAudioBoardTimelineScroll || null);
+        if (previousTimeline) root._iamccsAudioBoardTimelineScroll = previousTimelineScroll;
         closeContextMenu();
         root.classList.toggle("is-tool-cut", view().tool === "cut");
         root.classList.toggle("is-tool-trim", view().tool === "trim");
@@ -6393,45 +7432,63 @@ function renderAudioBoardArranger(node) {
         const clipActions = document.createElement("div");
         clipActions.className = "iamccs-clip-action-bar";
         clipActions.innerHTML = `<strong>CLIP EDIT</strong>`;
-        addButton(tools, root._iamccsAudioFullscreenState ? "Close Editor" : "Open Editor", () => toggleAudioFullscreen(), root._iamccsAudioFullscreenState ? "is-active" : "");
-        addButton(tools, "MULTI", () => { state.showMultiGeneration = !state.showMultiGeneration; addEdit(`Multigeneration panel ${state.showMultiGeneration ? "shown" : "hidden"}.`); writeState("toggle_multi", false); draw(); }, state.showMultiGeneration ? "is-active" : "");
-        const saveAudioBoardBtn = addButton(tools, "Save AudioBoard", (event) => { event?.preventDefault?.(); event?.stopPropagation?.(); saveAudioBoardPackage(); }, "is-save-audioboard");
-        saveAudioBoardBtn.dataset.iamccsAudioAction = "save_audioboard";
-        saveAudioBoardBtn.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); saveAudioBoardPackage(); };
-        saveAudioBoardBtn.onmousedown = (event) => { event.preventDefault(); event.stopPropagation(); };
-        const saveAsBtn = addButton(tools, "Save As", (event) => { event?.preventDefault?.(); event?.stopPropagation?.(); saveAudioBoardPackageAs(); }, "is-save-audioboard");
-        saveAsBtn.dataset.iamccsAudioAction = "save_audioboard_as";
-        saveAsBtn.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); saveAudioBoardPackageAs(); };
-        saveAsBtn.onmousedown = (event) => { event.preventDefault(); event.stopPropagation(); };
-        const importBoardBtn = addButton(tools, "Import AudioBoard", (event) => { event?.preventDefault?.(); event?.stopPropagation?.(); audioBoardInput.click(); });
+        addButton(tools, root._iamccsAudioFullscreenState ? "Close Editor" : "Open Editor", () => toggleAudioFullscreen(), `is-view${root._iamccsAudioFullscreenState ? " is-active" : ""}`);
+        addButton(tools, "MULTI", () => { state.showMultiGeneration = !state.showMultiGeneration; addEdit(`Multigeneration panel ${state.showMultiGeneration ? "shown" : "hidden"}.`); writeState("toggle_multi", false); draw(); }, `is-mode${state.showMultiGeneration ? " is-active" : ""}`);
+        const saveAudioBoardJsonBtn = addButton(tools, "Save AudioBoard", null, "is-save-audioboard");
+        saveAudioBoardJsonBtn.dataset.iamccsAudioAction = "save_audioboard_json";
+        saveAudioBoardJsonBtn.title = "Save only the AudioBoard JSON metadata. Audio clips remain linked to their current files.";
+        saveAudioBoardJsonBtn.onclick = (event) => {
+            event?.preventDefault?.();
+            event?.stopPropagation?.();
+            openAudioSavePopover(saveAudioBoardJsonBtn, "Save AudioBoard", (packageName) => saveAudioBoardMetadata({ packageName }));
+        };
+        const saveAudioBoardBtn = addButton(tools, "Save Package", null, "is-save-audioboard");
+        saveAudioBoardBtn.dataset.iamccsAudioAction = "save_audioboard_package";
+        saveAudioBoardBtn.title = "Choose a folder and save edited clips, split chunks, metadata, and master excerpt when available.";
+        saveAudioBoardBtn.onclick = (event) => {
+            event?.preventDefault?.();
+            event?.stopPropagation?.();
+            openAudioSavePopover(saveAudioBoardBtn, "Save Package", (packageName) => saveAudioBoardPackage({ packageName }));
+        };
+        const importBoardBtn = addButton(tools, "Import AudioBoard", (event) => { event?.preventDefault?.(); event?.stopPropagation?.(); audioBoardInput.click(); }, "is-file");
         importBoardBtn.dataset.iamccsAudioAction = "import_audioboard";
         importBoardBtn.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); audioBoardInput.click(); };
         importBoardBtn.onmousedown = (event) => { event.preventDefault(); event.stopPropagation(); };
-        addButton(tools, "Import Audio", () => fileInput.click());
-        addButton(tools, "Add Track", () => { state.audioTrackCount = Math.max(1, Number(state.audioTrackCount || 4)) + 1; addEdit("Added audio track."); writeState("add_track"); draw(); });
+        addButton(tools, "Import Audio", () => fileInput.click(), "is-file");
+        addButton(tools, "Add Track", () => { state.audioTrackCount = Math.max(1, Number(state.audioTrackCount || 4)) + 1; addEdit("Added audio track."); writeState("add_track"); draw(); }, "is-build");
         addButton(tools, "ONLY FIRST", () => {
             state.audioBusMode = state.audioBusMode === "only_first" ? "all_tracks" : "only_first";
             state.onlyFirstTrack = state.audioBusMode === "only_first";
             addEdit(state.onlyFirstTrack ? "Shotboard V3 sync uses only track A1." : "Shotboard V3 sync uses all tracks.");
             writeState("bus_mode");
             draw();
-        }, state.audioBusMode === "only_first" ? "is-active" : "");
+        }, `is-mode${state.audioBusMode === "only_first" ? " is-active" : ""}`);
         for (const tool of ["cursor", "move", "trim", "cut"]) {
             const helper = tool === "cut"
                 ? "Tool: cut. Click a clip to split at the clicked frame."
                 : tool === "trim"
                     ? "Tool: trim. Drag a clip edge to trim."
                     : "";
-            addButton(tools, tool.toUpperCase(), () => setTool(tool, helper), view().tool === tool ? "is-active" : "");
+            addButton(tools, tool.toUpperCase(), () => setTool(tool, helper), `is-mode${view().tool === tool ? " is-active" : ""}`);
         }
+        const snapEnabled = view().snapToSeconds !== false;
+        const snapButton = addButton(tools, `SNAP 1s ${snapEnabled ? "ON" : "OFF"}`, () => {
+            view().snapToSeconds = !view().snapToSeconds;
+            addEdit(`Whole-second snap ${view().snapToSeconds ? "enabled" : "disabled"}.`);
+            writeState("snap_seconds", false);
+            draw();
+        }, `is-mode${snapEnabled ? " is-active" : ""}`);
+        snapButton.title = "Magnetic snapping to whole-second marks while moving, trimming, or cutting clips.";
+        snapButton.setAttribute("aria-pressed", snapEnabled ? "true" : "false");
         addButton(tools, "Delete Selected", () => deleteSelectedClip(), "danger");
-        addButton(tools, "Zoom +", () => { view().timeZoom = Math.min(8, view().timeZoom * 1.25); addEdit("Zoomed timeline in."); writeState("zoom", false); draw(); });
-        addButton(tools, "Zoom -", () => { view().timeZoom = Math.max(.35, view().timeZoom / 1.25); addEdit("Zoomed timeline out."); writeState("zoom", false); draw(); });
-        addButton(tools, "Tall +", () => { view().trackHeight = Math.min(240, view().trackHeight + 10); addEdit("Increased track height."); writeState("track_height", false); draw(); });
-        addButton(tools, "Tall -", () => { view().trackHeight = Math.max(184, view().trackHeight - 10); addEdit("Reduced track height."); writeState("track_height", false); draw(); });
-        addButton(tools, "Event Monitor", () => { state.showEventMonitor = !state.showEventMonitor; addEdit(`Event monitor ${state.showEventMonitor ? "shown" : "hidden"}.`); writeState("event_monitor", false); draw(); }, state.showEventMonitor ? "is-active" : "");
-        addButton(tools, "AUTO PUBLISH", () => { state.shotboardAutoSyncEnabled = !state.shotboardAutoSyncEnabled; addEdit(`Shotboard auto publish ${state.shotboardAutoSyncEnabled ? "enabled" : "disabled"}.`); writeState("toggle_shotboard_auto_publish", false); draw(); }, state.shotboardAutoSyncEnabled ? "is-active" : "");
-        addButton(tools, "Publish", () => publishToShotboard());
+        addButton(tools, "Delete Lanes", () => deleteSelectedAudioLanes(), "danger is-lane");
+        addButton(tools, "Zoom +", () => { view().timeZoom = Math.min(8, view().timeZoom * 1.25); addEdit("Zoomed timeline in."); writeState("zoom", false); draw(); }, "is-view");
+        addButton(tools, "Zoom -", () => { view().timeZoom = Math.max(.35, view().timeZoom / 1.25); addEdit("Zoomed timeline out."); writeState("zoom", false); draw(); }, "is-view");
+        addButton(tools, "Tall +", () => { view().trackHeight = Math.min(240, view().trackHeight + 10); addEdit("Increased track height."); writeState("track_height", false); draw(); }, "is-view");
+        addButton(tools, "Tall -", () => { view().trackHeight = Math.max(184, view().trackHeight - 10); addEdit("Reduced track height."); writeState("track_height", false); draw(); }, "is-view");
+        addButton(tools, "Event Monitor", () => { state.showEventMonitor = !state.showEventMonitor; addEdit(`Event monitor ${state.showEventMonitor ? "shown" : "hidden"}.`); writeState("event_monitor", false); draw(); }, `is-view${state.showEventMonitor ? " is-active" : ""}`);
+        addButton(tools, "AUTO PUBLISH", () => { state.shotboardAutoSyncEnabled = !state.shotboardAutoSyncEnabled; addEdit(`Shotboard auto publish ${state.shotboardAutoSyncEnabled ? "enabled" : "disabled"}.`); writeState("toggle_shotboard_auto_publish", false); draw(); }, `is-publish${state.shotboardAutoSyncEnabled ? " is-active" : ""}`);
+        addButton(tools, "Publish", () => publishToShotboard(), "is-publish");
         addButton(tools, "Clear", () => { stopPlayback(false); state.audioSegments = []; selectedId = ""; addEdit("Cleared arranger clips."); writeState("clear"); draw(); }, "danger");
         addButton(clipActions, "Track Up", () => selected && setSelectedExternal("track", Math.max(0, Number(selected.track || 0) - 1)));
         addButton(clipActions, "Track Down", () => selected && setSelectedExternal("track", Math.min(Math.max(1, Number(state.audioTrackCount || 4)) - 1, Number(selected.track || 0) + 1)));
@@ -6616,7 +7673,7 @@ function renderAudioBoardArranger(node) {
         ruler.className = "iamccs-audio-board-ruler";
         ruler.style.width = `${editorContentWidth}px`;
         ruler.style.minWidth = `${editorContentWidth}px`;
-        const activeLoopRange = loopRange();
+        const activeLoopRange = (state.loopEnabled || state.loopPublishEnabled) ? loopRange() : null;
         const addLoopRange = (parent, klass) => {
             if (!activeLoopRange) return;
             const region = document.createElement("div");
@@ -6708,13 +7765,20 @@ function renderAudioBoardArranger(node) {
         timeline.appendChild(ruler);
         for (let track = 0; track < trackCount; track += 1) {
             const isTrackSelected = selectedMixer().type === "track" && selectedMixer().track === track;
+            const isTrackMultiSelected = selectedTrackIndexes().includes(track);
             const lane = document.createElement("div");
-            lane.className = `iamccs-audio-board-track${isTrackSelected ? " is-selected" : ""}`;
+            lane.className = `iamccs-audio-board-track${isTrackSelected || isTrackMultiSelected ? " is-selected" : ""}`;
             lane.style.width = `${editorContentWidth}px`;
             lane.style.minWidth = `${editorContentWidth}px`;
             addLoopRange(lane, "iamccs-loop-range");
             const trackSegs = segments().filter((seg) => Number(seg.track || 0) === track);
             lane.oncontextmenu = (event) => openTrackContextMenu(track, event);
+            lane.onclick = (event) => {
+                if (event.target?.closest?.(".iamccs-audio-clip,.iamccs-audio-board-track-label,.iamccs-loop-marker")) return;
+                selectAudioTrack(track, event);
+                writeState("select_track_lane", false, { quiet: true });
+                draw();
+            };
             const trackState = trackSettings(track);
             trackState.volume = Math.max(0, Math.min(2, finiteNumber(trackState.volume, 1)));
             trackState.pan = Math.max(-1, Math.min(1, finiteNumber(trackState.pan, 0)));
@@ -6724,17 +7788,17 @@ function renderAudioBoardArranger(node) {
             lane.style.setProperty("--iamccs-track-glow", trackColorWithAlpha(trackState.color, .22, track));
             const trackPeak = trackState.mute ? 0 : Math.min(1, trackSegs.reduce((sum, seg) => sum + peakFor(seg), 0));
             const trackLabel = document.createElement("div");
-            trackLabel.className = `iamccs-audio-board-track-label${selectedMixer().type === "track" && selectedMixer().track === track ? " is-selected" : ""}${trackState.mute ? " is-muted" : ""}${trackState.lock ? " is-locked" : ""}`;
+            trackLabel.className = `iamccs-audio-board-track-label${isTrackSelected ? " is-selected" : ""}${isTrackMultiSelected && !isTrackSelected ? " is-multi-selected" : ""}${trackState.mute ? " is-muted" : ""}${trackState.lock ? " is-locked" : ""}`;
             trackLabel.style.borderLeft = `4px solid ${trackState.color}`;
             trackLabel.style.setProperty("--iamccs-track-glow", trackColorWithAlpha(trackState.color, .22, track));
             trackLabel.oncontextmenu = (event) => openTrackContextMenu(track, event);
             trackLabel.onclick = (event) => {
                 event.stopPropagation();
-                const wasSelected = selectedMixer().type === "track" && selectedMixer().track === track;
-                state.selectedMixer = { type: "track", track };
-                transport.helper = `Selected A${track + 1} device chain.`;
+                const before = `${selectedMixer().type}:${selectedMixer().track}:${selectedTrackIndexes().join(",")}`;
+                selectAudioTrack(track, event);
                 writeState("select_track", false, { quiet: true });
-                if (!wasSelected) draw();
+                const after = `${selectedMixer().type}:${selectedMixer().track}:${selectedTrackIndexes().join(",")}`;
+                if (before !== after) draw();
             };
             const top = document.createElement("div");
             top.className = "iamccs-track-strip-top";
@@ -6861,7 +7925,18 @@ function renderAudioBoardArranger(node) {
 
         root.appendChild(dynamic);
         collectTransportDom();
-        requestAnimationFrame(() => refreshFixedAudioBoardSize());
+        requestAnimationFrame(() => {
+            const nextTimeline = root.querySelector(".iamccs-audio-board-timeline");
+            if (nextTimeline && previousTimelineScroll) {
+                nextTimeline.scrollLeft = Math.max(0, Number(previousTimelineScroll.left || 0));
+                nextTimeline.scrollTop = Math.max(0, Number(previousTimelineScroll.top || 0));
+                root._iamccsAudioBoardTimelineScroll = {
+                    left: Number(nextTimeline.scrollLeft || 0),
+                    top: Number(nextTimeline.scrollTop || 0),
+                };
+            }
+            refreshFixedAudioBoardSize();
+        });
     };
     let bootError = null;
     try {
@@ -6922,6 +7997,17 @@ function renderAudioBoardArranger(node) {
         }
     };
     refreshFixedAudioBoardSize = applyFixedAudioBoardSize;
+    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+    // ResizeObserver: auto-adjust node height whenever content changes (track added/removed, etc.)
+    if (window.ResizeObserver && !node._iamccsAudioBoardResizeObserver) {
+        let _roBounce = 0;
+        const ro = new ResizeObserver(() => {
+            clearTimeout(_roBounce);
+            _roBounce = setTimeout(() => refreshFixedAudioBoardSize(), 80);
+        });
+        ro.observe(root);
+        node._iamccsAudioBoardResizeObserver = ro;
+    }
     if (!node._iamccsAudioBoardResizeLocked) {
         const previousOnResize = node.onResize;
         node.onResize = function (size) {
@@ -6935,6 +8021,7 @@ function renderAudioBoardArranger(node) {
             this.resizeable = false;
             this.flags = { ...(this.flags || {}), resizable: false };
             this.min_size = fixed.slice();
+            this.max_size = fixed.slice();
             if (Number(this.size?.[0] || 0) !== fixed[0] || Number(this.size?.[1] || 0) !== fixed[1]) {
                 if (typeof this.setSize === "function") this.setSize(fixed.slice());
                 else this.size = fixed.slice();
@@ -6946,7 +8033,7 @@ function renderAudioBoardArranger(node) {
     if (domWidget) {
         domWidget.computeSize = () => root._iamccsAudioFullscreenState
             ? [AUDIO_BOARD_FIXED_WIDTH, 24]
-            : [node._iamccsAudioBoardFixedSize?.[0] || AUDIO_BOARD_FIXED_WIDTH, Math.max(24, Number(node._iamccsAudioBoardFixedSize?.[1] || AUDIO_BOARD_FIXED_HEIGHT) - 70)];
+            : [node._iamccsAudioBoardFixedSize?.[0] || AUDIO_BOARD_FIXED_WIDTH, Math.max(24, Number(node._iamccsAudioBoardFixedSize?.[1] || AUDIO_BOARD_FIXED_HEIGHT) - IAMCCS_AUDIO_BOARD_NODE_CHROME)];
     }
     requestAnimationFrame(() => applyFixedAudioBoardSize());
     if (!node._iamccsAudioBoardSizeGuard) {
@@ -6956,8 +8043,12 @@ function renderAudioBoardArranger(node) {
                 node._iamccsAudioBoardSizeGuard = 0;
                 return;
             }
-            applyFixedAudioBoardSize();
-        }, 2400);
+            const fixed = node._iamccsAudioBoardFixedSize || [AUDIO_BOARD_FIXED_WIDTH, AUDIO_BOARD_FIXED_HEIGHT];
+            const current = Array.isArray(node.size) ? node.size : [0, 0];
+            if (Math.abs(Number(current[0] || 0) - fixed[0]) > 1 || Math.abs(Number(current[1] || 0) - fixed[1]) > 1) {
+                applyFixedAudioBoardSize();
+            }
+        }, 8000);
     }
     node._iamccsAudioBoardReady = true;
     console.info("[IAMCCS AudioBoardArranger] render complete", {
@@ -7654,20 +8745,29 @@ function renderControlAudEfx(node) {
             root._iamccsControlRackScrollLeft = Number(grid.scrollLeft || 0);
         });
     };
+    const scheduleControlDraw = () => {
+        if (node._iamccsControlAudEfxDrawQueued) return;
+        node._iamccsControlAudEfxDrawQueued = true;
+        requestAnimationFrame(() => {
+            node._iamccsControlAudEfxDrawQueued = false;
+            draw();
+        });
+    };
     document.addEventListener("iamccs:audio_arranger_state_changed", (event) => {
         const arranger = upstreamArranger();
         if (!arranger) return;
         if (Number(event?.detail?.node_id || 0) !== Number(arranger.id || 0)) return;
-        draw();
+        scheduleControlDraw();
     });
     node._iamccsControlAudEfxPoll = window.setInterval(() => {
+        if (document.hidden) return;
         const arranger = upstreamArranger();
         const widget = arranger ? findWidget(arranger, "arranger_data") : null;
         const nextSnapshot = String(widget?.value || "");
         if (node._iamccsControlAudEfxLastSnapshot === nextSnapshot) return;
         node._iamccsControlAudEfxLastSnapshot = nextSnapshot;
-        draw();
-    }, 500);
+        scheduleControlDraw();
+    }, 1800);
     draw();
     const domWidget = node.addDOMWidget("ControlAudEfx", "iamccs_control_aud_efx", root, { serialize: false });
     domWidget.computeSize = (width) => [Math.max(1320, Number(width || 1320)), 560];
@@ -8127,7 +9227,8 @@ function renderAudioBoardMixer(node) {
                     ? "linear-gradient(180deg,#f2bd4b,#f2bd4b 18%,#46e17b)"
                     : "linear-gradient(180deg,#46e17b,#1faa58)");
         });
-        mixerMeterRaf = requestAnimationFrame(updateMixerLiveMeters);
+        mixerMeterRaf = 0;
+        if (playing) mixerMeterRaf = requestAnimationFrame(updateMixerLiveMeters);
     }
     const draw = () => {
         const source = readArranger();

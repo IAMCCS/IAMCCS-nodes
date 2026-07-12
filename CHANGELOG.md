@@ -1,5 +1,12 @@
 # IAMCCS Nodes - Changelog
 
+## 2026-07-12 - version 1.5.0 - Shotboard multigen pipeline, Shotboard Editor and AudioBoard
+
+- Added the integrated Shotboard multi-timeline generation pipeline and take/audio routing.
+- Added the Shotboard Video Editor workflow with video, audio and master-audio lanes.
+- Added AudioBoard editing, real waveform handling, master-audio support and package export.
+- Added timeline identity and audio-lane metadata alignment across generation and editing stages.
+
 ## 2026-06-19 - version 1.4.9 - Frame Designer V2 added
 
 ## 🆕 2026-06-04 - version 1.4.8 —Add audioboard arranger + utilities and new functions

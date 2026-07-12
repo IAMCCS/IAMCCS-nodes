@@ -9,6 +9,15 @@
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows + general nodes 4 ComfyUI
 
+## Version: 1.5.0 (Shotboard multigen pipeline, Shotboard Editor and AudioBoard)
+
+This release adds the integrated IAMCCS production path for multi-timeline video work:
+
+- Shotboard multigen pipeline for selecting and routing timeline/take audio pairs.
+- Shotboard Video Editor with video, audio and master-audio lanes, real media previews, editing tools and project manifests.
+- AudioBoard Arranger with clip editing, real waveform previews, master-audio support, package export and second-grid snapping.
+- Metadata and media contracts that keep timeline identity, audio-lane identity and generated take assets aligned.
+
 ## Version: 1.4.9 (Frame Designer V2 added)
 
 ## Version: 1.4.8 (Audioboard and other audio utilities)

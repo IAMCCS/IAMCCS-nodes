@@ -64,6 +64,69 @@ def _clean_text(value: Any) -> str:
     return str(value or "").strip()
 
 
+def _hash_text(value: Any, length: int = 16) -> str:
+    text = str(value or "")
+    return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:length]
+
+
+def _hash_json(value: Any, length: int = 16) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    except Exception:
+        text = str(value or "")
+    return _hash_text(text, length)
+
+
+def _compact_preview(value: Any, limit: int = 420) -> str:
+    text = " ".join(str(value or "").replace("\r", " ").replace("\n", " ").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)] + "..."
+
+
+def _tensor_image_debug_payload(image: Any, label: str = "") -> Dict[str, Any]:
+    payload: Dict[str, Any] = {"label": _clean_text(label), "valid": False}
+    if image is None or not hasattr(image, "detach"):
+        payload["reason"] = "missing tensor"
+        return payload
+    try:
+        tensor = image.detach().cpu().float().clamp(0, 1)
+        arr = tensor.numpy()
+        u8 = (arr * 255.0).round().astype(np.uint8)
+        payload.update({
+            "valid": True,
+            "shape": list(arr.shape),
+            "hash": hashlib.sha256(u8.tobytes()).hexdigest()[:16],
+            "mean": round(float(arr.mean()), 8),
+            "std": round(float(arr.std()), 8),
+            "min": round(float(arr.min()), 8),
+            "max": round(float(arr.max()), 8),
+        })
+    except Exception as exc:
+        payload["reason"] = str(exc)
+    return payload
+
+
+def _noise_debug_payload(noise: Any, label: str = "") -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "label": _clean_text(label),
+        "valid": noise is not None,
+        "type": type(noise).__name__ if noise is not None else "None",
+        "object_id": hex(id(noise)) if noise is not None else "",
+    }
+    for attr in ("seed", "noise_seed"):
+        if hasattr(noise, attr):
+            try:
+                payload[attr] = int(getattr(noise, attr))
+            except Exception:
+                payload[attr] = str(getattr(noise, attr))
+    if "seed" not in payload and "noise_seed" not in payload:
+        payload["seed_visible"] = False
+    else:
+        payload["seed_visible"] = True
+    return payload
+
+
 def _normalize_hex(value: Any) -> str:
     text = str(value or "").strip().upper()
     if not text:
@@ -951,6 +1014,63 @@ def _bboxes_for_design(design: Dict[str, Any], width: int, height: int) -> List[
             h = max(1, height - y)
         bbox_dicts.append({"x": int(x), "y": int(y), "width": int(w), "height": int(h)})
     return [bbox_dicts] if bbox_dicts else []
+
+
+def _prompt_debug_payload(
+    design: Dict[str, Any],
+    prompt_payload: Dict[str, Any],
+    prompt_json: str,
+    bboxes: List[List[Dict[str, int]]],
+    width: int,
+    height: int,
+    incoming_signature: str = "",
+    stored_signature: str = "",
+    use_incoming: bool = False,
+    prompt_override: Dict[str, Any] | None = None,
+) -> Dict[str, Any]:
+    scene = design.get("scene") if isinstance(design.get("scene"), dict) else {}
+    items = design.get("items") if isinstance(design.get("items"), list) else []
+    elements = []
+    comp = prompt_payload.get("compositional_deconstruction") if isinstance(prompt_payload, dict) else {}
+    if isinstance(comp, dict) and isinstance(comp.get("elements"), list):
+        elements = comp.get("elements") or []
+    bbox_frame = bboxes[0] if isinstance(bboxes, list) and bboxes and isinstance(bboxes[0], list) else []
+    item_descs = [
+        _clean_text(item.get("desc"))
+        for item in items
+        if isinstance(item, dict) and item.get("kind") not in {"image", "mask"}
+    ]
+    item_labels = [
+        _clean_text(item.get("label") or item.get("id"))
+        for item in items
+        if isinstance(item, dict) and item.get("kind") not in {"image", "mask"}
+    ]
+    return {
+        "debug_version": "prompt_seed_image_fingerprint_20260702",
+        "prompt_hash": _hash_text(prompt_json),
+        "prompt_chars": len(prompt_json),
+        "scene_hash": _hash_json(scene),
+        "items_hash": _hash_json(items),
+        "bbox_hash": _hash_json(bbox_frame),
+        "element_hash": _hash_json(elements),
+        "width": int(width),
+        "height": int(height),
+        "bbox_count": len(bbox_frame),
+        "element_count": len(elements),
+        "item_count": len(items),
+        "item_labels": item_labels[:24],
+        "item_desc_hashes": [_hash_text(text, 10) for text in item_descs[:24]],
+        "high_preview": _compact_preview(scene.get("high_level_description"), 360),
+        "background_preview": _compact_preview(scene.get("background"), 360),
+        "first_element_preview": _compact_preview(elements[0].get("desc") if elements and isinstance(elements[0], dict) else "", 360),
+        "json_override_enabled": bool(_normalize_json_override(design.get("json_override")).get("enabled")),
+        "prompt_override_active": prompt_override is not None,
+        "direct_prompt_enabled": bool(_normalize_direct_prompt(design.get("direct_prompt"), scene).get("enabled")),
+        "used_ideoboard_input": bool(use_incoming),
+        "incoming_signature": incoming_signature,
+        "stored_signature": stored_signature,
+        "input_signature_changed": bool(incoming_signature and incoming_signature != stored_signature),
+    }
 
 
 def _paint_mask_for_design(design: Dict[str, Any], width: int, height: int) -> Tuple[torch.Tensor, str]:
@@ -1891,7 +2011,8 @@ class IAMCCS_StoryboardFrameDesigner:
         design = _design_from_runtime_source(source_data, design_data) if use_incoming else _normalize_design(source_data)
         design, prompt_override = _design_with_json_override(design)
         design_data_json = json.dumps(design, ensure_ascii=False, indent=2)
-        prompt_json = json.dumps(prompt_override if prompt_override is not None else _to_ideogram_prompt(design), ensure_ascii=False, indent=2)
+        prompt_payload = prompt_override if prompt_override is not None else _to_ideogram_prompt(design)
+        prompt_json = json.dumps(prompt_payload, ensure_ascii=False, indent=2)
         gemma_json_request = _gemma_json_request_for_design(design, prompt_json)
         conditioning_text = _conditioning_text_for_design(design, prompt_json)
         conditioning = self._basic_encode(clip, conditioning_text)
@@ -2014,7 +2135,8 @@ class IAMCCS_StoryboardFrameDesignerV2(IAMCCS_StoryboardFrameDesigner):
         design["i2i"] = i2i
 
         design_data_json = json.dumps(design, ensure_ascii=False, indent=2)
-        prompt_json = json.dumps(prompt_override if prompt_override is not None else _to_ideogram_prompt(design), ensure_ascii=False, indent=2)
+        prompt_payload = prompt_override if prompt_override is not None else _to_ideogram_prompt(design)
+        prompt_json = json.dumps(prompt_payload, ensure_ascii=False, indent=2)
         gemma_json_request = _gemma_json_request_for_design(design, prompt_json)
         conditioning_text = _conditioning_text_for_design(design, prompt_json)
         conditioning = self._basic_encode(clip, conditioning_text)
@@ -2039,9 +2161,23 @@ class IAMCCS_StoryboardFrameDesignerV2(IAMCCS_StoryboardFrameDesigner):
             report += " | i2i requested but no valid image layer found"
         report += " | structured JSON conditioning active"
         report += " | use SplitSigmasDenoise.denoise or high/low sigmas start step"
+        prompt_debug = _prompt_debug_payload(
+            design=design,
+            prompt_payload=prompt_payload,
+            prompt_json=prompt_json,
+            bboxes=bboxes,
+            width=width,
+            height=height,
+            incoming_signature=incoming_signature,
+            stored_signature=stored_signature,
+            use_incoming=use_incoming,
+            prompt_override=prompt_override,
+        )
         debug_report = json.dumps({
+            "prompt_debug": prompt_debug,
             "used_ideoboard_input": bool(use_incoming),
             "incoming_signature": incoming_signature,
+            "stored_signature": stored_signature,
             "width": int(width),
             "height": int(height),
             "i2i_enabled": bool(i2i["enabled"]),
@@ -2136,9 +2272,11 @@ class IAMCCS_IdeoInfo:
         info_report = {
             "ideo_info": "passthrough",
             "positive_type": type(values.get("positive")).__name__,
+            "prompt_hash": _hash_text(values.get("prompt_json") or ""),
             "prompt_json_chars": len(str(values.get("prompt_json") or "")),
             "width": int(values.get("width") or 0),
             "height": int(values.get("height") or 0),
+            "bbox_hash": _hash_json(bboxes[0] if isinstance(bboxes, list) and bboxes and isinstance(bboxes[0], list) else []),
             "bboxes": bbox_count,
             "target_panel_width": int(values.get("target_panel_width") or 0),
             "target_panel_height": int(values.get("target_panel_height") or 0),
@@ -2338,14 +2476,36 @@ class IAMCCS_IdeogramJSONPreviewPass:
     def pass_json(self, prompt_json, width=1024, height=1024, bboxes=None, debug_report=""):
         text = str(prompt_json or "").strip()
         report = "Ideogram JSON pass-through"
+        bbox_frame = bboxes[0] if isinstance(bboxes, list) and bboxes and isinstance(bboxes[0], list) else []
+        debug_summary = {
+            "prompt_hash": _hash_text(text),
+            "prompt_chars": len(text),
+            "bbox_hash": _hash_json(bbox_frame),
+            "bbox_count": len(bbox_frame),
+            "width": int(width),
+            "height": int(height),
+        }
         try:
             parsed = json.loads(text) if text else {}
             if isinstance(parsed, dict):
                 style = parsed.get("style_description") if isinstance(parsed.get("style_description"), dict) else {}
                 comp = parsed.get("compositional_deconstruction") if isinstance(parsed.get("compositional_deconstruction"), dict) else {}
                 elements = comp.get("elements") if isinstance(comp.get("elements"), list) else []
+                debug_summary.update({
+                    "scene_hash": _hash_json({
+                        "high_level_description": parsed.get("high_level_description"),
+                        "style_description": style,
+                        "background": comp.get("background") if isinstance(comp, dict) else "",
+                    }),
+                    "element_hash": _hash_json(elements),
+                    "element_count": len(elements),
+                    "high_preview": _compact_preview(parsed.get("high_level_description"), 320),
+                    "first_element_preview": _compact_preview(elements[0].get("desc") if elements and isinstance(elements[0], dict) else "", 320),
+                })
                 report = (
                     "Ideogram JSON pass-through | "
+                    f"prompt_hash={debug_summary['prompt_hash']} "
+                    f"bbox_hash={debug_summary['bbox_hash']} "
                     f"high={bool(parsed.get('high_level_description'))} "
                     f"style_keys={','.join(style.keys()) or 'none'} "
                     f"elements={len(elements)}"
@@ -2359,12 +2519,165 @@ class IAMCCS_IdeogramJSONPreviewPass:
             report = f"{report} | debug_report=yes"
         preview = text if len(text) <= 12000 else text[:12000] + "\n... [truncated preview]"
         ui_text = [report, preview]
+        ui_text.append(json.dumps({"json_preview_debug": debug_summary}, ensure_ascii=False, indent=2))
         if debug_text:
             ui_text.append(debug_text if len(debug_text) <= 12000 else debug_text[:12000] + "\n... [truncated debug]")
         return {
             "ui": {"text": ui_text},
             "result": (text, bboxes or [], int(width), int(height), report),
         }
+
+
+class IAMCCS_IdeoNoiseDebug:
+    """Passthrough debug probe for ComfyUI NOISE objects.
+
+    Put it between RandomNoise and the sampler. It does not change the noise
+    object; it only reports the seed held by RandomNoise so storyboard clone
+    reports can separate prompt issues from seed/noise issues.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "noise": ("NOISE", {"forceInput": True}),
+            },
+            "optional": {
+                "label": (
+                    "STRING",
+                    {
+                        "default": "ideogram_noise",
+                        "tooltip": "Optional label printed in the debug report.",
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("NOISE", "STRING")
+    RETURN_NAMES = ("noise", "report")
+    FUNCTION = "inspect"
+    CATEGORY = "IAMCCS/Cine/Ideogram/Debug"
+    OUTPUT_NODE = True
+
+    def inspect(self, noise, label="ideogram_noise"):
+        payload = _noise_debug_payload(noise, label)
+        report = json.dumps({"ideo_noise_debug": payload}, ensure_ascii=False, indent=2)
+        return {"ui": {"text": [report]}, "result": (noise, report)}
+
+
+class IAMCCS_IdeoRandomNoiseNoCache:
+    """RandomNoise replacement for diagnosing real clone/caching problems.
+
+    Use this instead of core RandomNoise when a system appears to return the
+    exact same image across random seeds. In random_each_queue mode it creates a
+    fresh seed server-side and uses IS_CHANGED=nan so ComfyUI cannot reuse the
+    previous cached noise object.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "mode": (
+                    ["random_each_queue", "manual_seed"],
+                    {
+                        "default": "random_each_queue",
+                        "tooltip": "random_each_queue creates a fresh server-side seed every execution. manual_seed uses the seed field.",
+                    },
+                ),
+                "seed": (
+                    "INT",
+                    {
+                        "default": 0,
+                        "min": 0,
+                        "max": 0xFFFFFFFFFFFFFFFF,
+                        "step": 1,
+                        "control_after_generate": True,
+                    },
+                ),
+                "force_rerun": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "When enabled, IS_CHANGED returns NaN so this node re-executes every queue.",
+                    },
+                ),
+                "nonce": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "tooltip": "Optional manual text token. Change it to force a fresh run in manual_seed mode.",
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("NOISE", "INT", "STRING")
+    RETURN_NAMES = ("noise", "actual_seed", "report")
+    FUNCTION = "make_noise"
+    CATEGORY = "IAMCCS/Cine/Ideogram/Debug"
+
+    @classmethod
+    def IS_CHANGED(cls, mode="random_each_queue", seed=0, force_rerun=True, nonce="", **kwargs):
+        if bool(force_rerun) or str(mode or "") == "random_each_queue":
+            return float("nan")
+        return f"{mode}:{int(seed)}:{_clean_text(nonce)}"
+
+    def make_noise(self, mode="random_each_queue", seed=0, force_rerun=True, nonce=""):
+        if str(mode or "") == "random_each_queue":
+            actual_seed = int.from_bytes(os.urandom(8), "little", signed=False)
+        else:
+            actual_seed = int(seed) & 0xFFFFFFFFFFFFFFFF
+        from comfy_extras.nodes_custom_sampler import Noise_RandomNoise
+        noise = Noise_RandomNoise(actual_seed)
+        payload = {
+            "mode": str(mode or ""),
+            "actual_seed": int(actual_seed),
+            "input_seed": int(seed) & 0xFFFFFFFFFFFFFFFF,
+            "force_rerun": bool(force_rerun),
+            "nonce_hash": _hash_text(nonce, 10),
+            "noise_type": type(noise).__name__,
+            "debug_version": "no_cache_random_noise_20260702",
+        }
+        report = json.dumps({"ideo_random_noise_no_cache": payload}, ensure_ascii=False, indent=2)
+        return {"ui": {"text": [report]}, "result": (noise, int(actual_seed), report)}
+
+
+class IAMCCS_IdeoImageHashDebug:
+    """Passthrough debug probe for IMAGE tensors.
+
+    Put it after Ideogram, Z-Image, SeedVR, FlashVSR, or crop outputs. Matching
+    hashes across different queues mean the image tensor is truly identical;
+    different hashes mean the pipeline changed even if the scene feels similar.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE", {"forceInput": True}),
+            },
+            "optional": {
+                "label": (
+                    "STRING",
+                    {
+                        "default": "ideogram_image",
+                        "tooltip": "Optional label printed in the debug report.",
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("image", "report")
+    FUNCTION = "inspect"
+    CATEGORY = "IAMCCS/Cine/Ideogram/Debug"
+    OUTPUT_NODE = True
+
+    def inspect(self, image, label="ideogram_image"):
+        payload = _tensor_image_debug_payload(image, label)
+        report = json.dumps({"ideo_image_hash_debug": payload}, ensure_ascii=False, indent=2)
+        return {"ui": {"text": [report]}, "result": (image, report)}
 
 
 NODE_CLASS_MAPPINGS = {
@@ -2374,6 +2687,9 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_IdeoInpaintPrep": IAMCCS_IdeoInpaintPrep,
     "IAMCCS_IdeoMaskedPixels": IAMCCS_IdeoMaskedPixels,
     "IAMCCS_IdeogramJSONPreviewPass": IAMCCS_IdeogramJSONPreviewPass,
+    "IAMCCS_IdeoNoiseDebug": IAMCCS_IdeoNoiseDebug,
+    "IAMCCS_IdeoRandomNoiseNoCache": IAMCCS_IdeoRandomNoiseNoCache,
+    "IAMCCS_IdeoImageHashDebug": IAMCCS_IdeoImageHashDebug,
 }
 
 
@@ -2384,6 +2700,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_IdeoInpaintPrep": "IAMCCS Ideo Inpaint Prep",
     "IAMCCS_IdeoMaskedPixels": "IAMCCS Ideo Masked Pixels",
     "IAMCCS_IdeogramJSONPreviewPass": "IAMCCS Ideogram JSON Preview / Pass",
+    "IAMCCS_IdeoNoiseDebug": "IDEO Noise Debug",
+    "IAMCCS_IdeoRandomNoiseNoCache": "IDEO Random Noise No Cache",
+    "IAMCCS_IdeoImageHashDebug": "IDEO Image Hash Debug",
 }
 
 

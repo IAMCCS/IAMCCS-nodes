@@ -1728,6 +1728,16 @@ function iamccsNameLookup(nameMap, value) {
     return hit ? hit[1] : "";
 }
 
+function boardIsMultiTimelinePackage(board) {
+    const markers = [
+        board?.kind,
+        board?.package?.kind,
+        board?.metadata?.package_kind,
+        board?.metadata?.schema,
+    ].map((value) => String(value || "").toLowerCase());
+    return markers.some((value) => value.includes("multi") && (value.includes("package") || value.includes("timeline")));
+}
+
 function collectActivePackageImagePaths(board) {
     const referencePaths = splitReferencePaths(board?.image_paths);
     const seen = new Set();
@@ -1760,6 +1770,49 @@ function collectActivePackageImagePaths(board) {
             add(rowPath);
             if (!rowPath) addFromRef(row.ref);
         }
+    }
+    if (boardIsMultiTimelinePackage(board)) {
+        const addFromReferenceList = (ref, refs = referencePaths) => {
+            const index = Math.round(Number(ref || 0)) - 1;
+            if (index >= 0 && index < refs.length) add(refs[index]);
+        };
+        const addPayload = (data, refs = referencePaths) => {
+            if (!data || typeof data !== "object") return;
+            const segments = Array.isArray(data?.segments) ? data.segments : [];
+            for (const seg of segments) {
+                if (!seg || typeof seg !== "object") continue;
+                const type = String(seg.type || "image");
+                if (type === "text" || type === "audio" || seg.textPlaceholder || seg.placeholder) continue;
+                const segPath = seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path;
+                add(segPath);
+                if (!segPath) addFromReferenceList(seg.ref, refs);
+            }
+            const rows = Array.isArray(data?.rows) ? data.rows : [];
+            for (const row of rows) {
+                if (!row || typeof row !== "object") continue;
+                if (row.use_guide === false || Number(row.force ?? row.strength ?? row.guideStrength ?? 0) <= 0) continue;
+                const rowPath = row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path;
+                add(rowPath);
+                if (!rowPath) addFromReferenceList(row.ref, refs);
+            }
+        };
+        const addMulti = (multi) => {
+            const visualTimelines = multi?.visualTimelines && typeof multi.visualTimelines === "object" ? multi.visualTimelines : {};
+            for (const visual of Object.values(visualTimelines)) {
+                const localRefs = splitReferencePaths(visual?.image_paths);
+                addPayload(visual, localRefs.length ? localRefs : referencePaths);
+            }
+        };
+        if (Array.isArray(board?.timelines)) {
+            for (const item of board.timelines) {
+                const timelineData = item?.timeline && typeof item.timeline === "object" ? item.timeline : item;
+                const localRefs = splitReferencePaths(item?.image_paths || timelineData?.image_paths);
+                addPayload(timelineData, localRefs.length ? localRefs : referencePaths);
+            }
+        }
+        addMulti(board?.multiGeneration);
+        addMulti(board?.timeline?.multiGeneration);
+        for (const data of parsedTimelineSourcesForBoard(board)) addMulti(data?.multiGeneration);
     }
     return paths;
 }
@@ -1949,7 +2002,7 @@ function rewritePackagedSegments(segments, pathMap, refMap = {}, originalReferen
     }
 }
 
-function rewritePackagedRows(rows, refMap = {}, originalReferencePaths = []) {
+function rewritePackagedRows(rows, refMap = {}, originalReferencePaths = [], pathMap = {}, nameMap = {}) {
     if (!Array.isArray(rows)) return;
     for (const row of rows) {
         if (!row || typeof row !== "object") continue;
@@ -1957,7 +2010,70 @@ function rewritePackagedRows(rows, refMap = {}, originalReferencePaths = []) {
         const explicitSource = String(row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path || "").trim();
         const refSource = sourcePathForRef(row.ref, originalReferencePaths);
         const nextRef = refMap[explicitSource] || refMap[refSource];
+        const nextPath = iamccsPathLookup(pathMap, explicitSource) || iamccsPathLookup(pathMap, refSource);
         if (nextRef) row.ref = nextRef;
+        if (nextPath) {
+            row.imageFile = nextPath;
+            row.path = nextPath;
+            row.imageTruthPath = nextPath;
+            row.imageTruthPinned = true;
+            row.imageTruthSource = "package_import_remap";
+            const nextName = iamccsNameLookup(nameMap, explicitSource) || iamccsNameLookup(nameMap, refSource) || iamccsPathBasename(nextPath);
+            if (nextName) {
+                row.imageTruthName = nextName;
+                row.imageName = nextName;
+            }
+            delete row.image_file;
+            delete row.image_truth_path;
+        }
+    }
+}
+
+function rewritePackagedMultiGeneration(container, pathMap, refMap = {}, originalReferencePaths = []) {
+    if (!container || typeof container !== "object") return;
+    const rewriteVisualMap = (visualTimelines) => {
+        if (!visualTimelines || typeof visualTimelines !== "object") return;
+        for (const visual of Object.values(visualTimelines)) {
+            if (!visual || typeof visual !== "object") continue;
+            const visualRefs = splitReferencePaths(visual.image_paths);
+            const refs = visualRefs.length ? visualRefs : originalReferencePaths;
+            if (visualRefs.length) {
+                visual.image_paths = visualRefs
+                    .map((path) => iamccsPathLookup(pathMap, path) || pathMap[path] || "")
+                    .filter(Boolean);
+                visual.images = visual.image_paths.map((path, index) => ({
+                    ref: index + 1,
+                    path,
+                    name: iamccsPathBasename(path) || `ref_${index + 1}`,
+                }));
+            }
+            rewritePackagedSegments(visual.segments, pathMap, refMap, refs);
+            rewritePackagedRows(visual.rows, refMap, refs, pathMap);
+        }
+    };
+    if (container.multiGeneration && typeof container.multiGeneration === "object") {
+        rewriteVisualMap(container.multiGeneration.visualTimelines);
+    }
+    rewriteVisualMap(container.visualTimelines);
+    if (Array.isArray(container.timelines)) {
+        for (const item of container.timelines) {
+            if (!item || typeof item !== "object") continue;
+            const timelineData = item.timeline && typeof item.timeline === "object" ? item.timeline : item;
+            const itemRefs = splitReferencePaths(item.image_paths || timelineData.image_paths);
+            const refs = itemRefs.length ? itemRefs : originalReferencePaths;
+            if (itemRefs.length) {
+                item.image_paths = itemRefs
+                    .map((path) => iamccsPathLookup(pathMap, path) || pathMap[path] || "")
+                    .filter(Boolean);
+                item.images = item.image_paths.map((path, index) => ({
+                    ref: index + 1,
+                    path,
+                    name: iamccsPathBasename(path) || `ref_${index + 1}`,
+                }));
+            }
+            rewritePackagedSegments(timelineData.segments, pathMap, refMap, refs);
+            rewritePackagedRows(timelineData.rows, refMap, refs, pathMap);
+        }
     }
 }
 
@@ -1985,11 +2101,13 @@ function rewriteBoardForPackage(board, orderedPaths, pathMap, manifestImages) {
         error: entry.error || undefined,
     }));
     rewritePackagedSegments(packagedBoard.segments, pathMap, refMap, originalReferencePaths);
-    rewritePackagedRows(packagedBoard.rows, refMap, originalReferencePaths);
+    rewritePackagedRows(packagedBoard.rows, refMap, originalReferencePaths, pathMap);
+    rewritePackagedMultiGeneration(packagedBoard, pathMap, refMap, originalReferencePaths);
     if (packagedBoard.timeline && typeof packagedBoard.timeline === "object") {
         if (packagedPaths.length) packagedBoard.timeline.image_paths = packagedPaths;
         rewritePackagedSegments(packagedBoard.timeline.segments, pathMap, refMap, originalReferencePaths);
-        rewritePackagedRows(packagedBoard.timeline.rows, refMap, originalReferencePaths);
+        rewritePackagedRows(packagedBoard.timeline.rows, refMap, originalReferencePaths, pathMap);
+        rewritePackagedMultiGeneration(packagedBoard.timeline, pathMap, refMap, originalReferencePaths);
     }
     if (typeof packagedBoard.timeline_data === "string" && packagedBoard.timeline_data.trim()) {
         try {
@@ -1997,7 +2115,8 @@ function rewriteBoardForPackage(board, orderedPaths, pathMap, manifestImages) {
             if (parsed && typeof parsed === "object") {
                 if (packagedPaths.length) parsed.image_paths = packagedPaths;
                 rewritePackagedSegments(parsed.segments, pathMap, refMap, originalReferencePaths);
-                rewritePackagedRows(parsed.rows, refMap, originalReferencePaths);
+                rewritePackagedRows(parsed.rows, refMap, originalReferencePaths, pathMap);
+                rewritePackagedMultiGeneration(parsed, pathMap, refMap, originalReferencePaths);
                 packagedBoard.timeline_data = JSON.stringify(parsed, null, 2);
             }
         } catch {}
@@ -6842,6 +6961,32 @@ function renderShotboardV3(node) {
     }
 
     let timeline = readTimeline();
+    const multiAudioTrackForTake = (seg, takeIndex = 1) => {
+        const fallback = Math.max(0, Math.round(Number(takeIndex || 1) - 1));
+        const candidates = [
+            seg?.shotboardTrack,
+            seg?.track_index,
+            seg?.trackIndex,
+            seg?.sourceTrackOriginal,
+            seg?.track,
+            seg?.sourceTrack,
+        ];
+        for (const value of candidates) {
+            const parsed = Number(value);
+            if (Number.isFinite(parsed) && parsed >= 0) return Math.max(0, Math.round(parsed));
+        }
+        return fallback;
+    };
+    const applyAudioTrackCountForSegments = (items) => {
+        const list = Array.isArray(items) ? items : [];
+        const maxTrack = list.reduce((max, seg) => {
+            const track = Math.max(0, Math.round(Number(seg?.track || 0) || 0));
+            return Math.max(max, track);
+        }, 0);
+        timeline.audioTrackCount = Math.max(1, maxTrack + 1);
+        timeline.audioBusMode = "timeline_audio";
+        timeline.onlyFirstTrack = false;
+    };
     node._iamccsCineShotboardV3LastTimelineText = String(timelineWidget?.value || "");
     const refPreviewBusters = new Map();
     const refPaths = () => getConnectedReferencePaths(node);
@@ -7664,11 +7809,8 @@ function renderShotboardV3(node) {
 
     const head = document.createElement("div");
     head.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;";
-    const title = document.createElement("div");
-    title.textContent = "Cine Shotboard Planner V3";
-    title.style.cssText = `font-size:13px;font-weight:800;color:${purple.text};`;
     const topActions = document.createElement("div");
-    topActions.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;";
+    topActions.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;flex:1;";
     const v3ButtonColors = {
         normal: { bg: purple.button, hover: purple.buttonHover, border: purple.border, color: purple.text },
         teal: { bg: "linear-gradient(180deg,#267E8E,#12475A)", hover: "linear-gradient(180deg,#3197A8,#195B72)", border: "#8DE7FF", color: "#EAFBFF" },
@@ -7799,6 +7941,157 @@ function renderShotboardV3(node) {
         rows: [],
         guide_strength: Number(defaultForceWidget?.value || 0.3),
     });
+    const imagePathSourceForSegment = (seg, referencePaths = refPaths()) => {
+        const explicit = String(seg?.imageTruthPath || seg?.image_truth_path || seg?.imageFile || seg?.image_file || seg?.path || "").trim();
+        if (explicit) return explicit;
+        const index = Math.round(Number(seg?.ref || 0)) - 1;
+        return index >= 0 && index < referencePaths.length ? String(referencePaths[index] || "").trim() : "";
+    };
+    const collectVisualTimelineImagePaths = (visual, fallbackPaths = refPaths()) => {
+        const localRefs = splitReferencePaths(visual?.image_paths);
+        const refs = localRefs.length ? localRefs : fallbackPaths;
+        const seen = new Set();
+        const paths = [];
+        const add = (value) => {
+            const clean = String(value || "").trim();
+            if (!clean || seen.has(clean)) return;
+            seen.add(clean);
+            paths.push(clean);
+        };
+        const segments = Array.isArray(visual?.segments) ? visual.segments : [];
+        for (const seg of segments) {
+            if (!seg || typeof seg !== "object") continue;
+            const type = String(seg.type || "image");
+            if (type === "text" || type === "audio" || seg.textPlaceholder || seg.placeholder) continue;
+            add(imagePathSourceForSegment(seg, refs));
+        }
+        const rows = Array.isArray(visual?.rows) ? visual.rows : [];
+        for (const row of rows) {
+            if (!row || typeof row !== "object") continue;
+            if (row.use_guide === false || Number(row.force ?? row.strength ?? row.guideStrength ?? 0) <= 0) continue;
+            add(imagePathSourceForSegment(row, refs));
+        }
+        return paths;
+    };
+    const buildMultiTimelinePackageBoard = (board, timelinePayload = {}) => {
+        const base = cloneJsonData(board || {});
+        const parsedTimeline = cloneJsonData(timelinePayload || {});
+        const multi = timeline.multiGeneration && typeof timeline.multiGeneration === "object"
+            ? cloneForMultiTimeline(timeline.multiGeneration, {})
+            : (parsedTimeline.multiGeneration && typeof parsedTimeline.multiGeneration === "object" ? cloneForMultiTimeline(parsedTimeline.multiGeneration, {}) : {});
+        const activeTake = Math.max(1, Math.round(Number(multi.activeTake || multiTimelineTakeFromId(multi.activeTimelineId) || 1)));
+        const activeTimelineId = multiTimelineId(activeTake);
+        const visualTimelines = multi.visualTimelines && typeof multi.visualTimelines === "object"
+            ? cloneForMultiTimeline(multi.visualTimelines, {})
+            : {};
+        visualTimelines[activeTimelineId] = snapshotCurrentVisualTimeline(activeTimelineId);
+        const ids = Array.from(new Set([
+            ...(Array.isArray(multi.timelineIds) ? multi.timelineIds.map((id) => multiTimelineId(multiTimelineTakeFromId(id))) : []),
+            ...Object.keys(visualTimelines).map((id) => multiTimelineId(multiTimelineTakeFromId(id))),
+            activeTimelineId,
+        ])).sort((a, b) => multiTimelineTakeFromId(a) - multiTimelineTakeFromId(b));
+        const allPaths = [];
+        const allSeen = new Set();
+        const addAllPath = (value) => {
+            const clean = String(value || "").trim();
+            if (!clean || allSeen.has(clean)) return;
+            allSeen.add(clean);
+            allPaths.push(clean);
+        };
+        const timelinePackages = ids.map((timelineId) => {
+            const take = multiTimelineTakeFromId(timelineId);
+            const visual = {
+                ...defaultVisualTimeline(timelineId),
+                ...(visualTimelines[timelineId] && typeof visualTimelines[timelineId] === "object" ? cloneForMultiTimeline(visualTimelines[timelineId], {}) : {}),
+                timeline_id: timelineId,
+                saved_at: new Date().toISOString(),
+            };
+            const localPaths = collectVisualTimelineImagePaths(visual, refPaths());
+            for (const path of localPaths) addAllPath(path);
+            const images = localPaths.map((path, index) => ({
+                ref: index + 1,
+                path,
+                name: String(path).split(/[\\/]/).pop() || `ref_${index + 1}`,
+            }));
+            visual.image_paths = localPaths;
+            visual.images = images;
+            visualTimelines[timelineId] = visual;
+            return {
+                timeline_id: timelineId,
+                take,
+                metadata: {
+                    schema: "iamccs.cine.shotboard.timeline.package_entry",
+                    schema_version: 1,
+                    saved_at: visual.saved_at,
+                    image_count: localPaths.length,
+                },
+                timeline: visual,
+                image_paths: localPaths,
+                images,
+            };
+        });
+        const nextMultiGeneration = {
+            ...multi,
+            enabled: true,
+            activeTake,
+            activeTimelineId,
+            timelineIds: ids,
+            visualTimelines,
+            exportedAt: new Date().toISOString(),
+        };
+        const activeTimeline = visualTimelines[activeTimelineId] || parsedTimeline;
+        const nextTimelinePayload = {
+            ...parsedTimeline,
+            ...activeTimeline,
+            multiGeneration: nextMultiGeneration,
+            image_paths: allPaths,
+            timelines: timelinePackages,
+        };
+        base.kind = "iamccs_cine_shotboard_multi_package";
+        base.metadata = {
+            ...(base.metadata || {}),
+            schema: "iamccs.cine.filmmaker_multi_board",
+            schema_version: 1,
+            package_kind: "multi_timeline_package",
+            saved_at: new Date().toISOString(),
+            timeline_count: timelinePackages.length,
+            active_timeline_id: activeTimelineId,
+            active_take: activeTake,
+        };
+        base.timeline = nextTimelinePayload;
+        base.timeline_data = JSON.stringify(nextTimelinePayload, null, 2);
+        base.multiGeneration = nextMultiGeneration;
+        base.visualTimelines = visualTimelines;
+        base.timelines = timelinePackages;
+        base.timeline_count = timelinePackages.length;
+        base.activeTimelineId = activeTimelineId;
+        base.activeTake = activeTake;
+        base.image_paths = allPaths;
+        base.images = allPaths.map((path, index) => ({
+            ref: index + 1,
+            path,
+            name: String(path).split(/[\\/]/).pop() || `ref_${index + 1}`,
+        }));
+        base.package = {
+            ...(base.package || {}),
+            kind: "multi_timeline_package",
+            includes_multi_timelines: true,
+            includes_images: true,
+            timeline_count: timelinePackages.length,
+        };
+        console.log("[IAMCCS V3 MULTI PACKAGE EXPORT]", {
+            nodeId: node?.id,
+            activeTimelineId,
+            timelines: timelinePackages.map((item) => ({
+                timeline_id: item.timeline_id,
+                segments: item.timeline?.segments?.length || 0,
+                rows: item.timeline?.rows?.length || 0,
+                images: item.image_paths.length,
+            })),
+            totalImages: allPaths.length,
+        });
+        return base;
+    };
     const multiAudioSegmentsForTake = (multi, takeIndex) => {
         const take = Math.max(1, Math.round(Number(takeIndex) || 1));
         const timelineId = multiTimelineId(take);
@@ -7807,6 +8100,31 @@ function renderShotboardV3(node) {
             const normalizedTake = Math.max(1, Math.round(Number(raw.replace(/\D/g, "")) || Number(fallbackTake) || 1));
             return multiTimelineId(normalizedTake);
         };
+        const byTimeline = multi?.audioByTimeline && typeof multi.audioByTimeline === "object" ? multi.audioByTimeline : {};
+        const mapped = Array.isArray(byTimeline[timelineId])
+            ? byTimeline[timelineId]
+            : (Array.isArray(byTimeline[`T${take}`]) ? byTimeline[`T${take}`] : []);
+        if (mapped.length) {
+            return mapped.map((seg) => {
+                const localStart = Number(seg?.localStart);
+                const next = cloneForMultiTimeline(seg, {});
+                const track = multiAudioTrackForTake(seg, take);
+                next.track = track;
+                next.start = Number.isFinite(localStart)
+                    ? Math.max(0, Math.round(localStart))
+                    : Math.max(0, Math.round(Number(next.start || 0)));
+                next.timelineId = timelineId;
+                next.multiTakeIndex = take;
+                next.shotboardActiveTakeAudio = true;
+                next.sourceTrackOriginal = track;
+                return next;
+            });
+        }
+        const hasAuthoritativeTimelineAudio = Boolean(multi?.pluriPublishEnabled)
+            && byTimeline
+            && typeof byTimeline === "object"
+            && Object.keys(byTimeline).length > 0;
+        if (hasAuthoritativeTimelineAudio) return [];
         const all = Array.isArray(multi?.audioSegmentsAll)
             ? multi.audioSegmentsAll
             : Array.isArray(multi?.allAudioSegments)
@@ -7824,24 +8142,25 @@ function renderShotboardV3(node) {
         return matches.map((seg) => {
             const localStart = Number(seg?.localStart);
             const next = cloneForMultiTimeline(seg, {});
-            next.track = 0;
+            const track = multiAudioTrackForTake(seg, take);
+            next.track = track;
             next.start = Number.isFinite(localStart)
                 ? Math.max(0, Math.round(localStart))
                 : 0;
             next.timelineId = timelineId;
             next.multiTakeIndex = take;
             next.shotboardActiveTakeAudio = true;
-            next.sourceTrackOriginal = Math.max(0, Math.round(Number(seg?.track || seg?.sourceTrackOriginal || 0)));
+            next.sourceTrackOriginal = track;
             return next;
         });
     };
     const applyMultiAudioForTake = (multi, takeIndex) => {
-        const sourceAll = Array.isArray(multi?.audioSegmentsAll) || Array.isArray(multi?.allAudioSegments);
+        const sourceAll = Array.isArray(multi?.audioSegmentsAll)
+            || Array.isArray(multi?.allAudioSegments)
+            || (multi?.audioByTimeline && typeof multi.audioByTimeline === "object");
         if (!sourceAll) return false;
         timeline.audioSegments = multiAudioSegmentsForTake(multi, takeIndex);
-        timeline.audioTrackCount = 1;
-        timeline.audioBusMode = "shotboard_only_first";
-        timeline.onlyFirstTrack = true;
+        applyAudioTrackCountForSegments(timeline.audioSegments);
         return true;
     };
     const switchMultiTimeline = (takeIndex) => {
@@ -8039,9 +8358,10 @@ function renderShotboardV3(node) {
     const importBoardBtn = makeBtn("Import Board", "violet");
     const saveBtn = makeBtn("Save Board", "green");
     const savePackageBtn = makeBtn("Save Package", "gold");
+    const saveMultiPackageBtn = makeBtn("Save Multi Pkg", "gold");
     const clearBtn = makeBtn("Clear Board", "danger");
-    topActions.append(logBtn, globalOnlyBtn, multiTimelineControl, promptSizeWrap, timelineMeterWrap, addImageBtn, addTextBtn, addAudioBtn, addTrackBtn, collapseBtn, openEditorBtn, importBoardBtn, saveBtn, savePackageBtn, clearBtn);
-    head.append(title, topActions);
+    topActions.append(logBtn, globalOnlyBtn, multiTimelineControl, promptSizeWrap, timelineMeterWrap, addImageBtn, addTextBtn, addAudioBtn, addTrackBtn, collapseBtn, openEditorBtn, importBoardBtn, saveBtn, savePackageBtn, saveMultiPackageBtn, clearBtn);
+    head.append(topActions);
     root.addEventListener("iamccs:cine-fullscreen", (event) => {
         openEditorBtn.textContent = event.detail?.open ? "Close Editor" : "Open Editor";
     });
@@ -8285,6 +8605,28 @@ function renderShotboardV3(node) {
     let audioContext = null;
     let activeAudioNodes = [];
     let audioBufferCache = new Map();
+    const shotboardAudioOwnerId = `shotboard-pure:${node?.id ?? "node"}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+    const shotboardAudioGuard = () => {
+        const key = "__IAMCCS_SHOTBOARD_AUDIO_PLAYBACK_GUARD__";
+        if (!window[key] || typeof window[key] !== "object") window[key] = { owners: new Map() };
+        if (!(window[key].owners instanceof Map)) window[key].owners = new Map();
+        return window[key];
+    };
+    const registerShotboardAudioOwner = () => {
+        shotboardAudioGuard().owners.set(shotboardAudioOwnerId, {
+            stop: () => stopPlayback("external_shotboard_play"),
+        });
+    };
+    const unregisterShotboardAudioOwner = () => {
+        try { shotboardAudioGuard().owners.delete(shotboardAudioOwnerId); } catch {}
+    };
+    const stopOtherShotboardAudioOwners = () => {
+        const owners = Array.from(shotboardAudioGuard().owners.entries());
+        for (const [ownerId, owner] of owners) {
+            if (ownerId === shotboardAudioOwnerId) continue;
+            try { owner?.stop?.(); } catch (err) { console.warn("[IAMCCS Cine Shotboard V3] could not stop sibling audio preview", err); }
+        }
+    };
     let waveformLoading = new Set();
     let playbackStartFrame = 0;
     let playbackStartTimestamp = 0;
@@ -8700,6 +9042,7 @@ function renderShotboardV3(node) {
     }
 
     function stopAudioNodes() {
+        scheduleAudioFromFrame._token = Symbol("audio_stop");
         activeAudioNodes.forEach((node) => {
             try { node.stop(); } catch {}
             try { node.disconnect(); } catch {}
@@ -8798,16 +9141,19 @@ function renderShotboardV3(node) {
         }
     }
 
-    function stopPlayback() {
+    function stopPlayback(reason = "manual") {
         isPlaying = false;
         if (playTimer) clearInterval(playTimer);
         playTimer = null;
         stopAudioNodes();
+        unregisterShotboardAudioOwner();
         updatePlayUI();
     }
 
     function startPlayback() {
         if (isPlaying) return;
+        stopOtherShotboardAudioOwners();
+        registerShotboardAudioOwner();
         isPlaying = true;
         if (playFrame >= getTotalFrames()) playFrame = 0;
         playbackStartFrame = playFrame;
@@ -13202,6 +13548,46 @@ function renderShotboardV3(node) {
             showTimelineNotice(`Save Package failed: ${err?.message || err}`, "error");
         } finally {
             savePackageBtn.disabled = false;
+        }
+    };
+    saveMultiPackageBtn.onclick = async () => {
+        try {
+            saveMultiPackageBtn.disabled = true;
+            writeTimeline({ force: true });
+            const timelineText = getWidget(node, "timeline_data")?.value || "";
+            const exportedTimeline = boardTimelineForExport(timelineText);
+            const timelinePayload = exportedTimeline.payload;
+            const promptText = exportedTimeline.text || timelineText || JSON.stringify(timeline || {});
+            console.log("[IAMCCS V3 BOARD SAVE]", {
+                kind: "multi_package",
+                nodeId: node?.id,
+                containsCoastline: /\bcoastline\b/i.test(promptText),
+                firstPrompt: String(timelinePayload?.segments?.[0]?.prompt || timelinePayload?.rows?.[0]?.relay_prompt || "").replace(/\s+/g, " ").slice(0, 220),
+                settings: v3SettingsSnapshot(),
+            });
+            const board = {
+                metadata: { schema: "iamccs.cine.filmmaker_board", schema_version: 1, saved_at: new Date().toISOString(), node_type: nodeClassName(node) },
+                global_prompt: promptArea.value,
+                timeline_data: exportedTimeline.text,
+                timeline: timelinePayload,
+                image_paths: refPaths(),
+                settings: v3SettingsSnapshot(),
+            };
+            Object.assign(board, board.settings);
+            const packageBoard = buildMultiTimelinePackageBoard(board, timelinePayload);
+            const packageName = await askShotboardPackageName(`cine_filmmaker_v3_multi_${timestampForPackageName()}`);
+            if (!packageName) {
+                showTimelineNotice("Save Multi Pkg cancelled.", "warn");
+                return;
+            }
+            await saveShotboardPackageFolder(packageBoard, "cine_filmmaker_v3_multi", (message) => {
+                showTimelineNotice(message, message && /failed/i.test(message) ? "error" : "warn");
+            }, packageName);
+        } catch (err) {
+            console.error("[IAMCCS Cine Shotboard V3] multi package save failed", err);
+            showTimelineNotice(`Save Multi Pkg failed: ${err?.message || err}`, "error");
+        } finally {
+            saveMultiPackageBtn.disabled = false;
         }
     };
     clearBtn.onclick = () => {
