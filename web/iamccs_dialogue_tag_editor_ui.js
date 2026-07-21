@@ -12,6 +12,26 @@ const OVERLAP_PRESETS = [
   ["0.22", "Interrupt"],
   ["0.35", "Heavy overlap"],
 ];
+const ENGINE_PROFILES = [
+  ["tts_audio_suite_chatterbox", "Chatterbox"],
+  ["omnivoice", "OmniVoice"],
+  ["indextts2", "IndexTTS2"],
+  ["qwen3_tts", "Qwen3"],
+  ["plain", "Plain"],
+];
+const AUDIO_LANE_MODES = [
+  ["speaker_stems_timeline", "Stems + timeline"],
+  ["speaker_stems_zero_start", "Stems @ 0"],
+  ["single_master", "Single master"],
+];
+const OMNIVOICE_TAGS = ["laughter", "breath", "sigh", "uhm", "pause:0.3", "pause:0.8"];
+const VOICE_DESIGN_COLUMNS = [
+  ["gender", ["male", "female", "neutral"]],
+  ["age", ["young", "adult", "elderly"]],
+  ["pitch", ["low", "medium", "high"]],
+  ["style", ["calm", "tense", "warm", "whisper", "authoritative", "emotional"]],
+  ["accent", ["american", "british", "italian", "spanish", "french"]],
+];
 
 function typeOf(node) { return String(node?.comfyClass || node?.type || node?.constructor?.type || ""); }
 function isEditor(node) { return typeOf(node) === TYPE; }
@@ -35,13 +55,13 @@ function hideWidget(item) {
 }
 function defaultData() {
   return {
-    schema: "iamccs.dialogue_tag_editor",
-    schema_version: 2,
+    schema: "iamccs.dialogue_scene",
+    schema_version: 3,
     global_prompt: "cinematic field and reverse-field dialogue, hard cut coverage, one dominant speaking face per shot, visible mouth movement, natural audio-driven performance, silent listener reaction, stable identities, coherent eyelines",
-    settings: { engine_profile: "", output_mode: "speaker_stems_for_overlap", tts_generation_mode: "double_stem_ab", speaker_stems_zero_start: false, speaker_stem_srt_local_zero: true, inline_edit_mode: "metadata_only", emotion_routing: "clean_metadata", default_gap_seconds: 0.12, text_theme: "light_boxes", font_zoom: 1 },
+    settings: { editor_profile: "dialogue", engine_profile: "tts_audio_suite_chatterbox", output_mode: "speaker_stems_for_overlap", audio_lane_mode: "speaker_stems_timeline", tts_generation_mode: "double_stem_ab", speaker_stems_zero_start: false, speaker_stem_srt_local_zero: false, inline_edit_mode: "metadata_only", emotion_routing: "clean_metadata", default_gap_seconds: 0.12, text_theme: "light_boxes", font_zoom: 1 },
     speakers: [
-      { id: "A", name: "Man A", voice: "speaker_a_low_tense", reference_text: "Keep your voice low. We do not know who is listening.", language: "en" },
-      { id: "B", name: "Man B", voice: "speaker_b_controlled_whisper", reference_text: "Good. Now we finally have something worth protecting.", language: "en" },
+      { id: "A", name: "Man A", voice: "speaker_a_low_tense", reference_text: "Keep your voice low. We do not know who is listening.", language: "en", voice_design: { gender: "male", age: "adult", pitch: "low", style: "tense", accent: "", dialect: "", instruct: "male, adult, low pitch, tense" } },
+      { id: "B", name: "Man B", voice: "speaker_b_controlled_whisper", reference_text: "Good. Now we finally have something worth protecting.", language: "en", voice_design: { gender: "male", age: "adult", pitch: "medium", style: "controlled whisper", accent: "", dialect: "", instruct: "male, adult, medium pitch, controlled whisper" } },
     ],
     lines: [
       { id: "line_001", speaker: "A", text: "You said the signal was dead. Then why is that receiver still blinking?", emotion: "tense", style: "low", paralinguistic: "Breathing", overlap_after: 0.18, ref: 1, track: 0, local_prompt: "hard cut, Man A close-up, Man A speaks clearly, visible mouth movement, tense controlled delivery, Man B listens quietly" },
@@ -98,21 +118,63 @@ function templateLines(kind) {
 function parseData(node) {
   try {
     const parsed = JSON.parse(String(widget(node, "dialogue_data")?.value || ""));
-    if (parsed && typeof parsed === "object") return { ...defaultData(), ...parsed, settings: { ...defaultData().settings, ...(parsed.settings || {}) } };
+    if (parsed && typeof parsed === "object") return ensureDialogueDefaults({ ...defaultData(), ...parsed, settings: { ...defaultData().settings, ...(parsed.settings || {}) } });
   } catch {}
-  return defaultData();
+  return ensureDialogueDefaults(defaultData());
+}
+function voiceDesignText(speaker) {
+  const design = speaker?.voice_design || {};
+  const explicit = String(design.instruct || "").trim();
+  if (explicit) return explicit;
+  return ["gender", "age", "pitch", "style", "accent", "dialect"].map((key) => String(design[key] || "").trim()).filter(Boolean).join(", ");
+}
+function ensureDialogueDefaults(data) {
+  const base = defaultData();
+  data = data && typeof data === "object" ? data : base;
+  data.settings = { ...base.settings, ...(data.settings || {}) };
+  data.speakers = Array.isArray(data.speakers) && data.speakers.length ? data.speakers : base.speakers;
+  data.lines = Array.isArray(data.lines) && data.lines.length ? data.lines : base.lines;
+  data.settings.audio_lane_mode = audioLaneMode(data);
+  data.settings.output_mode = outputModeFromLane(data.settings.audio_lane_mode);
+  data.settings.tts_generation_mode = data.settings.audio_lane_mode === "single_master" ? "tts_master_unico" : "double_stem_ab";
+  data.settings.speaker_stems_zero_start = data.settings.audio_lane_mode === "speaker_stems_zero_start";
+  data.settings.speaker_stem_srt_local_zero = data.settings.audio_lane_mode === "speaker_stems_zero_start";
+  data.speakers = data.speakers.map((speaker, index) => {
+    const next = { ...speaker };
+    next.id = String(next.id || String.fromCharCode(65 + index));
+    next.name = String(next.name || next.id);
+    next.voice_design = { gender: "", age: "", pitch: "", style: "", accent: "", dialect: "", instruct: "", ...(next.voice_design || {}) };
+    next.voice_design.instruct = voiceDesignText(next);
+    return next;
+  });
+  data.lines = data.lines.map((line, index) => {
+    const speaker = String(line.speaker || (index % 2 ? "B" : "A")).toUpperCase();
+    return { tts_params: {}, pause_after: 0, ...line, speaker, spoken_text: line.spoken_text || line.text || "", track: Number(line.track ?? (speaker === "B" ? 1 : 0)) };
+  });
+  return data;
 }
 function modeFromData(data) {
-  const value = data?.settings?.tts_generation_mode || data?.settings?.output_mode || "speaker_stems_for_overlap";
-  return value === "tts_master_unico" || value === "flatten_for_single_track" ? "tts_master_unico" : "double_stem_ab";
+  return audioLaneMode(data) === "single_master" ? "tts_master_unico" : "double_stem_ab";
 }
+function audioLaneMode(data) {
+  const settings = data?.settings || {};
+  const value = String(settings.audio_lane_mode || settings.tts_generation_mode || settings.output_mode || "");
+  if (value === "single_master" || value === "tts_master_unico" || value === "flatten_for_single_track") return "single_master";
+  if (value === "speaker_stems_zero_start" || settings.speaker_stems_zero_start) return "speaker_stems_zero_start";
+  return "speaker_stems_timeline";
+}
+function outputModeFromLane(mode) { return mode === "single_master" ? "flatten_for_single_track" : "speaker_stems_for_overlap"; }
 function outputMode(mode) { return mode === "tts_master_unico" ? "flatten_for_single_track" : "speaker_stems_for_overlap"; }
 function writeData(node, data) {
-  data.schema = "iamccs.dialogue_tag_editor";
-  data.schema_version = 2;
+  data = ensureDialogueDefaults(data);
+  data.schema = "iamccs.dialogue_scene";
+  data.schema_version = 3;
   data.settings = data.settings || {};
+  data.settings.audio_lane_mode = audioLaneMode(data);
   data.settings.tts_generation_mode = modeFromData(data);
-  data.settings.output_mode = outputMode(data.settings.tts_generation_mode);
+  data.settings.output_mode = outputModeFromLane(data.settings.audio_lane_mode);
+  data.settings.speaker_stems_zero_start = data.settings.audio_lane_mode === "speaker_stems_zero_start";
+  data.settings.speaker_stem_srt_local_zero = data.settings.audio_lane_mode === "speaker_stems_zero_start";
   setWidget(node, "output_mode", data.settings.output_mode);
   setWidget(node, "inline_edit_mode", data.settings.inline_edit_mode || "metadata_only");
   setWidget(node, "dialogue_data", JSON.stringify(data, null, 2));
@@ -128,7 +190,10 @@ function linesToText(data) {
       if (value && !attrs.some((attr) => attr.split(":")[0] === value.split(":")[0])) attrs.push(value);
     });
     if (Number(line.overlap_after || 0) > 0) attrs.push("overlap:" + Number(line.overlap_after).toFixed(2));
+    if (Number(line.pause_after || 0) > 0) attrs.push("pause:" + Number(line.pause_after).toFixed(2));
     if (Number(line.duration || 0) > 0) attrs.push("duration:" + Number(line.duration).toFixed(2));
+    if (Number(line.tts_params?.speed || line.speed || 0) > 0) attrs.push("speed:" + Number(line.tts_params?.speed || line.speed).toFixed(2));
+    if (line.tts_params?.seed || line.seed) attrs.push("seed:" + String(line.tts_params?.seed || line.seed));
     if (Number(line.ref || 0) > 0) attrs.push("ref:" + line.ref);
     return "[" + attrs.join("|") + "] " + (line.text || "");
   }).join("\n");
@@ -773,7 +838,16 @@ function parseScript(text, data) {
         else if (key === "style") line.style = val || "none";
         else if (key === "para") line.paralinguistic = val || "none";
         else if (key === "overlap") line.overlap_after = Math.max(0, Number(val || 0));
+        else if (key === "pause") line.pause_after = Math.max(0, Number(val || 0));
         else if (key === "duration") line.duration = Math.max(0, Number(val || 0));
+        else if (key === "speed") {
+          line.tts_params ||= {};
+          line.tts_params.speed = Math.max(0.25, Number(val || 1));
+        }
+        else if (key === "seed") {
+          line.tts_params ||= {};
+          line.tts_params.seed = val || "";
+        }
         else if (key === "ref") line.ref = Math.max(1, Number(val || 1));
         else if (rest.length) {
           line.extra_tags.push(part);
@@ -786,6 +860,7 @@ function parseScript(text, data) {
       line.text = String(atSpeakerMatch[2] || "").trim();
     }
     line.track = line.speaker === "B" ? 1 : 0;
+    line.spoken_text = line.text;
     line.local_prompt ||= line.speaker === "B" ? "hard cut, Man B close-up, Man B speaks clearly, visible mouth movement, Man A listens quietly" : "hard cut, Man A close-up, Man A speaks clearly, visible mouth movement, Man B listens quietly";
     lines.push(line);
   });
@@ -1151,9 +1226,30 @@ function ensureStyle() {
   .iamccs-dte button{height:28px;padding:0 10px;font-weight:900;cursor:pointer;transition:transform .12s ease,box-shadow .18s ease,background .18s ease,color .18s ease}.iamccs-dte button:hover{border-color:#f1ce78;color:#fff6d8;background:#343426}.iamccs-dte .gold{background:#d6b66f;border-color:#f0d892;color:#21180b}.iamccs-dte .active,.iamccs-dte button[aria-pressed="true"]{outline:2px solid rgba(133,235,145,.72);background:linear-gradient(180deg,#b9e98e,#69aa61);border-color:#d8f5b7;color:#10210f;box-shadow:0 0 0 3px rgba(105,170,97,.20),0 0 16px rgba(105,220,117,.30);transform:translateY(1px)}.iamccs-dte button[aria-pressed="true"]::after{content:" ON";font-size:8px;font-weight:950;color:#173719}
   .iamccs-dte .iamccs-inject-btn{min-width:110px;box-shadow:0 0 0 0 rgba(214,182,111,0)}.iamccs-dte .iamccs-inject-btn.is-busy{transform:translateY(1px) scale(.985);box-shadow:0 0 0 2px rgba(214,182,111,.28),0 0 18px rgba(214,182,111,.22);filter:saturate(1.12)}.iamccs-dte .iamccs-inject-btn.is-done{background:#84b86b;border-color:#ccecad;color:#10200e;box-shadow:0 0 0 2px rgba(132,184,107,.24),0 0 16px rgba(132,184,107,.16)}
   .iamccs-dte select,.iamccs-dte input{height:30px;padding:4px 8px;width:100%;margin-bottom:10px}.iamccs-dte-speaker{padding:12px;margin-bottom:12px;background:#26251d;border:1px solid rgba(214,182,111,.34);border-radius:7px}
+  .iamccs-choice-row{display:flex;flex-wrap:wrap;gap:7px;margin:7px 0 12px}.iamccs-choice-row.compact{gap:5px;margin:4px 0 8px}.iamccs-dte button.iamccs-choice-chip{height:28px;min-width:0;max-width:100%;padding:0 9px;border-radius:999px;font-size:10px;white-space:normal;line-height:1.05}.iamccs-dte button.iamccs-choice-chip.is-active{background:#86bd8f;border-color:#c6edc8;color:#10210f;box-shadow:0 0 0 2px rgba(134,189,143,.18)}.iamccs-dte button.iamccs-choice-chip[aria-pressed="true"]::after{content:""}.iamccs-voice-builder{display:grid;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid rgba(214,182,111,.22)}.iamccs-voice-builder-row .iamccs-dte-label{margin-bottom:4px;padding:5px 7px}.iamccs-voice-preview{min-height:28px;padding:7px 9px;border:1px solid rgba(109,141,183,.42);border-radius:6px;background:#151b22;color:#dbeaff;font-size:10px;font-weight:850;line-height:1.35}.iamccs-validation-strip{display:flex;flex-wrap:wrap;gap:7px;margin:8px 0 12px}.iamccs-validation-strip span{display:inline-flex;align-items:center;min-height:24px;padding:0 8px;border-radius:999px;background:#18232a;border:1px solid rgba(109,141,183,.45);color:#dcecff;font-size:10px;font-weight:850}
   .iamccs-overlap-panel{padding:12px;margin-bottom:12px;background:#26251d;border:1px solid rgba(214,182,111,.34);border-radius:7px}.iamccs-overlap-row{display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end}.iamccs-overlap-row input{margin-bottom:0}.iamccs-overlap-preset-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.iamccs-overlap-preset-grid button{width:100%;height:30px;padding:0 7px;font-size:10px;text-align:center;white-space:normal;line-height:1.05;overflow:hidden}.iamccs-tts-convert-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.iamccs-tts-convert-grid button{height:36px;font-size:9px}.iamccs-dte button.iamccs-convert-success{background:#5fb56f;border-color:#a9e6b5;color:#071c0d;box-shadow:0 0 0 2px rgba(95,181,111,.2)}.iamccs-dte button.iamccs-convert-active{outline:2px solid rgba(95,181,111,.46)}.iamccs-tts-node-select{height:30px!important;margin:8px 0 12px}.iamccs-node-actions{display:grid;gap:10px;justify-items:center;margin:10px 0 4px}.iamccs-node-actions button{width:100%;max-width:220px;min-height:38px;height:auto;padding:8px 12px;line-height:1.15}.iamccs-overlap-hint{margin-top:10px;color:#c9bea4;font-size:10px;line-height:1.4}.iamccs-dte.light .iamccs-overlap-hint{color:#6f675b}
   .iamccs-tag-table{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:16px}.iamccs-tag-table button{width:100%;height:30px;padding:0 7px;font-size:10px;text-align:center}.iamccs-tag-table button:nth-child(3n+1){border-color:rgba(126,90,145,.65);color:#ead9f3}.iamccs-tag-table button:nth-child(3n+2){border-color:rgba(81,111,143,.65);color:#dbeaff}.iamccs-tag-table button:nth-child(3n){border-color:rgba(94,125,114,.65);color:#ddf4ea}
   .iamccs-dte-foot{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:#24231d;border-top:1px solid rgba(214,182,111,.22);color:#cabd9f;font-size:10px}.iamccs-dte-foot.iamccs-inject-status{background:#2a2517;color:#f7ecc9;border-top-color:rgba(214,182,111,.34)}.iamccs-dte-foot.iamccs-inject-status-success{background:#1f2b1c;color:#e5f6d7;border-top-color:rgba(132,184,107,.36)}.iamccs-field-wrap{display:flex;flex-direction:column;align-items:stretch;gap:8px;min-height:0;overflow:hidden}.iamccs-field-wrap .iamccs-dte-label{margin-bottom:0;padding:7px 9px}
+  /* The writer works in line cards. Technical export controls stay available, but out of the way. */
+  .iamccs-dte-main{grid-template-columns:258px minmax(0,1fr) 278px}
+  .iamccs-dte-center{grid-template-rows:auto auto minmax(300px,1fr) auto auto}
+  .iamccs-dte-grid{grid-template-columns:1fr;gap:10px;padding-right:0}
+  .iamccs-dte-card{gap:9px;padding:13px 14px}
+  .iamccs-line-top{display:grid;grid-template-columns:minmax(160px,.9fr) minmax(100px,.45fr);gap:9px}
+  .iamccs-line-tags{display:grid;gap:6px;padding:9px 10px;background:rgba(109,141,183,.08);border:1px solid rgba(109,141,183,.26);border-radius:6px}
+  .iamccs-line-tag-row{display:grid;grid-template-columns:76px minmax(0,1fr);gap:8px;align-items:start}
+  .iamccs-line-tag-row > span{padding-top:7px;color:#74674f;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.045em}
+  .iamccs-line-tag-row .iamccs-choice-row{margin:0}
+  .iamccs-line-tag-row .iamccs-choice-chip{height:25px!important;font-size:9px!important}
+  .iamccs-disclosure{margin:10px 0 0;border:1px solid rgba(214,182,111,.27);border-radius:6px;background:rgba(255,255,255,.025)}
+  .iamccs-disclosure > summary{display:flex;align-items:center;justify-content:space-between;gap:8px;cursor:pointer;padding:9px 10px;color:#f0dfb7;font-size:10px;font-weight:900;text-transform:uppercase;letter-spacing:.05em;list-style:none}
+  .iamccs-disclosure > summary::-webkit-details-marker{display:none}.iamccs-disclosure > summary::after{content:"+";font-size:16px;line-height:10px;color:#d6b66f}.iamccs-disclosure[open] > summary::after{content:"-"}
+  .iamccs-disclosure-note{color:#aeb8c5;font-size:9px;font-weight:700;text-transform:none;letter-spacing:0;margin-left:auto}
+  .iamccs-disclosure-body{padding:0 10px 10px}.iamccs-disclosure-body > .iamccs-dte-section{padding:0;border:0;background:transparent}.iamccs-disclosure-body > .iamccs-overlap-panel,.iamccs-disclosure-body > .iamccs-dte-speaker{margin:0}
+  .iamccs-dte-card .iamccs-disclosure{background:rgba(0,0,0,.08)}.iamccs-dte-card .iamccs-disclosure > summary{color:#766242}
+  .iamccs-line-delete{color:#ffb7b7!important;border-color:rgba(185,82,82,.55)!important;background:#321b1b!important}
+  .iamccs-dte-generation{min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;padding:14px;background:#211f18;border:1px solid rgba(214,182,111,.26);border-radius:8px;box-shadow:0 1px 0 rgba(255,255,255,.04)}
+  .iamccs-dte:not(.light) .iamccs-line-tags{background:rgba(109,141,183,.11);border-color:#303b4d}.iamccs-dte:not(.light) .iamccs-line-tag-row > span{color:#aebbd0}.iamccs-dte:not(.light) .iamccs-dte-card .iamccs-disclosure > summary{color:#c9d7ea}
   
   `;
   document.head.appendChild(style);
@@ -1220,6 +1316,7 @@ function buildInjectionPayload(data, fps = 24) {
   const audioSegments = [];
   const localPrompts = [];
   const lengths = [];
+  const speakerTrack = new Map((data.speakers || []).map((speaker, index) => [String(speaker.id || String.fromCharCode(65 + index)), index]));
   (data.lines || []).forEach((line, index) => {
     const duration = Number(line.duration || 0) > 0 ? Number(line.duration) : estimateSeconds(line.text);
     const startSeconds = line.start !== undefined && line.start !== "" ? Number(line.start || 0) : cursor;
@@ -1231,7 +1328,7 @@ function buildInjectionPayload(data, fps = 24) {
     lengths.push(String(length));
     const cleanText = stripFormattingTokens(line.text || "");
     segments.push({ id: "shot_" + String(index + 1).padStart(3, "0") + "_" + speaker.toLowerCase(), type: "text", label: speaker === "B" ? "controcampo_B_" + String(index + 1).padStart(2, "0") : "campo_A_" + String(index + 1).padStart(2, "0"), start, length, ref: Number(line.ref || (speaker === "B" ? 2 : 1)), prompt, dialogue: speaker + ': "' + cleanText + '"', audio_or_dialogue: speaker + ': "' + cleanText + '"', emotion: String(line.emotion || "none"), style: String(line.style || "none"), use_prompt: true, use_guide: false, force: 0, guide_strength: 0, transition: index === 0 ? "opening_field" : "hard_cut" });
-    audioSegments.push({ id: "dlg_" + String(index + 1).padStart(3, "0") + "_" + speaker.toLowerCase(), type: "audio", name: speaker + " " + String(index + 1).padStart(2, "0"), track: modeFromData(data) === "tts_master_unico" ? 0 : (speaker === "B" ? 1 : 0), start, length, audioDurationFrames: length, gain: 1, pan: 0, purpose: "dialogue_pending_tts", speaker, dialogueText: cleanText, pendingTTS: true, source: "IAMCCS_DialogueTagEditor_UI_Inject" });
+    audioSegments.push({ id: "dlg_" + String(index + 1).padStart(3, "0") + "_" + speaker.toLowerCase(), type: "audio", name: speaker + " " + String(index + 1).padStart(2, "0"), track: modeFromData(data) === "tts_master_unico" ? 0 : Number(speakerTrack.get(speaker) ?? (speaker === "B" ? 1 : 0)), start, length, audioDurationFrames: length, gain: 1, pan: 0, purpose: "dialogue_pending_tts", speaker, dialogueText: cleanText, pendingTTS: true, source: "IAMCCS_DialogueTagEditor_UI_Inject" });
     cursor = Math.max(cursor, startSeconds + duration + Number(data.settings?.default_gap_seconds || 0.12) - Math.max(0, Number(line.overlap_after || 0)));
   });
   const zeroStartStems = Boolean(data.settings?.speaker_stems_zero_start) && modeFromData(data) !== "tts_master_unico";
@@ -1248,8 +1345,8 @@ function buildInjectionPayload(data, fps = 24) {
     });
   }
   const durationFrames = Math.max(0, ...segments.map((s) => s.start + s.length), ...audioSegments.map((s) => s.start + s.length));
-  const audioTrackCount = modeFromData(data) === "tts_master_unico" ? 1 : 2;
-  const audioBoard = { schema: "iamccs.audio_board_arranger", schema_version: 1, audioSegments, audioTrackCount, audioSyncMode: "timeline_audio", duration_seconds: durationFrames / fps, frame_rate: fps, masterAudioGain: 1, masterAudioNormalize: false, speakerStemsZeroStart: zeroStartStems, speakerStemSrtLocalZero: data.settings?.speaker_stem_srt_local_zero !== false, bridgeStatus: { source: "DialogueTagEditor UI Inject", pending_tts: true } };
+  const audioTrackCount = modeFromData(data) === "tts_master_unico" ? 1 : Math.max(1, data.speakers?.length || 2);
+  const audioBoard = { schema: "iamccs.audio_board_arranger", schema_version: 1, audioSegments, audioTrackCount, audioSyncMode: "timeline_audio", duration_seconds: durationFrames / fps, frame_rate: fps, masterAudioGain: 1, masterAudioNormalize: false, speakerStemsZeroStart: zeroStartStems, speakerStemSrtLocalZero: data.settings?.speaker_stem_srt_local_zero !== false, audioLaneMode: audioLaneMode(data), bridgeStatus: { source: "DialogueTagEditor UI Inject", pending_tts: true } };
   const timeline = { schema: "iamccs.cine.filmmaker_timeline", schema_version: 2, global_prompt: data.global_prompt || "", prompt: data.global_prompt || "", promptrelay_enabled: true, use_custom_audio: false, audioSyncMode: "timeline_audio", duration_seconds: durationFrames / fps, frame_rate: fps, director_local_prompts: localPrompts.join(" | "), local_prompts: localPrompts.join(" | "), director_segment_lengths: lengths.join(","), segment_lengths: lengths.join(","), segments, audioSegments, audioTrackCount, dialogue: data };
   return { audioBoard, timeline };
 }
@@ -1269,12 +1366,11 @@ function isVisualShotboardRow(row) {
 }
 function mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps = 24) {
   const merged = existingTimeline && typeof existingTimeline === "object" ? JSON.parse(JSON.stringify(existingTimeline)) : {};
-  const promptEntries = (data.lines || []).map((line) => String(line.local_prompt || "").trim()).filter(Boolean);
+  const promptEntries = (data.lines || []).map((line) => String(line.local_prompt || "").trim());
   const visualSegments = Array.isArray(merged.segments) ? merged.segments.filter(isVisualShotboardSegment) : [];
   const visualRows = Array.isArray(merged.rows) ? merged.rows.filter(isVisualShotboardRow) : [];
-  const appliedPromptCount = Math.min(promptEntries.length, visualSegments.length || visualRows.length || 0);
-  const appliedPrompts = promptEntries.slice(0, appliedPromptCount);
-  const segmentLengths = visualSegments.slice(0, appliedPromptCount).map((segment) => String(Math.max(1, Number(segment.length || 1))));
+  const targetCount = Math.max(visualSegments.length, visualRows.length);
+  const appliedPromptIndexes = new Set();
 
   merged.schema = merged.schema || "iamccs.cine.filmmaker_timeline";
   merged.schema_version = Math.max(2, Number(merged.schema_version || 2));
@@ -1283,8 +1379,8 @@ function mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps = 24) {
   merged.frame_rate = Math.max(1, Number(merged.frame_rate || fps || 24));
   merged.dialogue = data;
 
-  visualSegments.slice(0, appliedPromptCount).forEach((segment, index) => {
-    const prompt = appliedPrompts[index];
+  visualSegments.forEach((segment, index) => {
+    const prompt = promptEntries[index];
     if (!prompt) return;
     segment.prompt = prompt;
     segment.relay_prompt = prompt;
@@ -1292,15 +1388,20 @@ function mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps = 24) {
     segment.use_prompt = true;
     segment.relay_manual_off = false;
     segment.promptrelay_manual_off = false;
+    appliedPromptIndexes.add(index);
   });
-  visualRows.slice(0, appliedPromptCount).forEach((row, index) => {
-    const prompt = appliedPrompts[index];
+  visualRows.forEach((row, index) => {
+    const prompt = promptEntries[index];
     if (!prompt) return;
     row.relay_prompt = prompt;
     row.local_prompt = prompt;
     row.use_prompt = true;
+    appliedPromptIndexes.add(index);
   });
 
+  const appliedIndexes = [...appliedPromptIndexes].sort((a, b) => a - b);
+  const appliedPrompts = appliedIndexes.map((index) => promptEntries[index]);
+  const segmentLengths = appliedIndexes.map((index) => String(Math.max(1, Number(visualSegments[index]?.length || 1))));
   if (appliedPrompts.length) {
     merged.director_local_prompts = appliedPrompts.join(" | ");
     merged.local_prompts = appliedPrompts.join(" | ");
@@ -1308,13 +1409,90 @@ function mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps = 24) {
     merged.segment_lengths = segmentLengths.join(",");
     merged.promptrelay_enabled = true;
   }
-  return { timeline: merged, appliedPromptCount, preservedVisualSegments: visualSegments.length };
+  return { timeline: merged, appliedPromptCount: Math.min(appliedPrompts.length, targetCount), preservedVisualSegments: visualSegments.length };
 }
 function fieldLabel(text, extra = "") {
   const label = document.createElement("div");
   label.className = "iamccs-dte-label";
   label.innerHTML = "<span>" + text + "</span><span>" + extra + "</span>";
   return label;
+}
+function disclosure(title, content, open = false, note = "") {
+  const details = document.createElement("details");
+  details.className = "iamccs-disclosure";
+  details.open = Boolean(open);
+  const summary = document.createElement("summary");
+  const label = document.createElement("span");
+  label.textContent = title;
+  summary.append(label);
+  if (note) {
+    const meta = document.createElement("span");
+    meta.className = "iamccs-disclosure-note";
+    meta.textContent = note;
+    summary.append(meta);
+  }
+  const body = document.createElement("div");
+  body.className = "iamccs-disclosure-body";
+  body.append(content);
+  details.append(summary, body);
+  return details;
+}
+function choiceChips(options, active, onPick, cls = "") {
+  const wrap = document.createElement("div");
+  wrap.className = "iamccs-choice-row " + cls;
+  options.forEach(([value, label]) => {
+    const chip = button(label, "");
+    chip.type = "button";
+    chip.className = "iamccs-choice-chip" + (String(value) === String(active) ? " is-active" : "");
+    chip.setAttribute("aria-pressed", String(String(value) === String(active)));
+    // DOM widgets sit over the Comfy canvas: keep canvas gestures from swallowing tag clicks.
+    chip.onpointerdown = (event) => event.stopPropagation();
+    chip.onclick = () => onPick?.(value);
+    wrap.append(chip);
+  });
+  return wrap;
+}
+function voiceDesignPanel(speaker, onChange) {
+  speaker.voice_design ||= {};
+  const panel = document.createElement("div");
+  panel.className = "iamccs-voice-builder";
+  VOICE_DESIGN_COLUMNS.forEach(([key, values]) => {
+    const row = document.createElement("div");
+    row.className = "iamccs-voice-builder-row";
+    row.append(fieldLabel(key, ""));
+    row.append(choiceChips(values.map((value) => [value, value]), speaker.voice_design[key] || "", (value) => {
+      speaker.voice_design[key] = speaker.voice_design[key] === value ? "" : value;
+      speaker.voice_design.instruct = voiceDesignText(speaker);
+      onChange?.();
+    }, "compact"));
+    panel.append(row);
+  });
+  const instruct = input(voiceDesignText(speaker), "OmniVoice instruct");
+  instruct.onchange = () => {
+    speaker.voice_design.instruct = instruct.value;
+    onChange?.();
+  };
+  const preview = document.createElement("div");
+  preview.className = "iamccs-voice-preview";
+  preview.textContent = "OUT > " + voiceDesignText(speaker);
+  panel.append(fieldLabel("OmniVoice", "voice design"), instruct, preview);
+  return panel;
+}
+function validationSummary(data) {
+  const lines = Array.isArray(data?.lines) ? data.lines : [];
+  const speakers = Array.isArray(data?.speakers) ? data.speakers : [];
+  const missingText = lines.filter((line) => !String(line?.text || line?.spoken_text || "").trim()).length;
+  const overlaps = lines.filter((line) => Number(line?.overlap_after || 0) > 0).length;
+  const timed = lines.filter((line) => Number(line?.duration || 0) > 0 || Number(line?.start || -1) >= 0).length;
+  const mode = audioLaneMode(data);
+  return [
+    speakers.length + " speaker" + (speakers.length === 1 ? "" : "s"),
+    lines.length + " line" + (lines.length === 1 ? "" : "s"),
+    overlaps + " overlap",
+    timed + " timed",
+    missingText ? missingText + " empty" : "text ok",
+    mode === "single_master" ? "master" : mode === "speaker_stems_zero_start" ? "stems @ 0" : "timeline stems",
+  ];
 }
 function emotionRoutingValue(data) {
   const value = String(data?.settings?.emotion_routing || "clean_metadata");
@@ -1423,26 +1601,28 @@ function install(node, reason = "install") {
     const head = document.createElement("div");
     head.className = "iamccs-dte-head";
     const title = document.createElement("div");
-    title.innerHTML = '<div class="iamccs-dte-title">IAMCCS Dialogue Tag Editor</div><div class="iamccs-dte-sub">global prompt / local prompts / dialogue lanes / cine_linx</div>';
+    title.innerHTML = '<div class="iamccs-dte-title">Dialogue Studio</div><div class="iamccs-dte-sub">scrivi le battute, definisci gli shot prompt, invia alla pipeline</div>';
     const actions = document.createElement("div");
     actions.className = "iamccs-dte-actions";
-    const addA = button("Add A", "gold");
-    const addB = button("Add B", "gold");
-    const injectBtn = button("Inject UI", "gold iamccs-inject-btn");
-    const zeroStartBtn = button("A+B @ 0", data.settings?.speaker_stems_zero_start ? "active" : "");
-    zeroStartBtn.title = "When active, Speaker A and Speaker B stems both begin at frame 0 while preserving timing inside each speaker lane.";
-    zeroStartBtn.setAttribute("aria-pressed", String(Boolean(data.settings?.speaker_stems_zero_start)));
+    const addA = button("Add line", "gold");
+    const addB = button("Add reply", "");
+    const injectBtn = button("Inject All", "gold iamccs-inject-btn");
+    injectBtn.title = "Invia la timeline provvisoria all'AudioBoard e aggiorna i prompt dello Shotboard";
+    const shotboardBtn = button("Send prompts to Shotboard", "iamccs-shotboard-btn");
+    shotboardBtn.title = "Aggiorna solo prompt globale e prompt locali sugli shot visuali esistenti";
     const boldBtn = button("Bold", "");
     const lightBtn = button(light ? "Dark" : "Light", light ? "" : "active");
     const zOut = button("A-", "");
     const zIn = button("A+", "");
-    actions.append(addA, addB, zeroStartBtn, boldBtn, injectBtn, lightBtn, zOut, zIn);
+    actions.append(addA, addB, boldBtn, injectBtn, shotboardBtn, lightBtn, zOut, zIn);
     head.append(title, actions);
 
     const main = document.createElement("div");
     main.className = "iamccs-dte-main";
     const side = document.createElement("div");
     side.className = "iamccs-dte-side";
+    const generation = document.createElement("div");
+    generation.className = "iamccs-dte-generation";
     const templateSelect = select(DIALOGUE_TEMPLATES, data.settings?.dialogue_template || "dialogue_abab");
     templateSelect.onchange = () => {
       data.settings ||= {};
@@ -1453,16 +1633,46 @@ function install(node, reason = "install") {
       save();
       render();
     };
-    side.append(fieldLabel("Template", "writes example"), templateSelect);
+    side.append(fieldLabel("Scene type"), templateSelect);
     // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
-    side.append(fieldLabel("TTS Mode"));
-    const ttsMode = select([["double_stem_ab", "Double stem A/B"], ["tts_master_unico", "TTS single master"]], modeFromData(data));
-    ttsMode.onchange = () => { data.settings.tts_generation_mode = ttsMode.value; data.settings.output_mode = outputMode(ttsMode.value); save(); render(); };
-    side.append(ttsMode, fieldLabel("Tag Mode"));
+    const validationStrip = document.createElement("div");
+    validationStrip.className = "iamccs-validation-strip";
+    validationSummary(data).forEach((item) => {
+      const chip = document.createElement("span");
+      chip.textContent = item;
+      validationStrip.append(chip);
+    });
+    side.append(fieldLabel("Scene", "ready"), validationStrip);
+    const generationTitle = document.createElement("h4");
+    generationTitle.textContent = "Generate";
+    generation.append(generationTitle);
+    const engineSelect = select(ENGINE_PROFILES, data.settings?.engine_profile || "tts_audio_suite_chatterbox");
+    engineSelect.onchange = () => {
+      data.settings ||= {};
+      data.settings.engine_profile = engineSelect.value;
+      data.settings.tts_export_mode = engineSelect.value === "omnivoice" ? "omnivoice" : data.settings.tts_export_mode;
+      save();
+      render();
+    };
+    generation.append(fieldLabel("Voice engine"), engineSelect);
+    const laneSelect = select([
+      ["speaker_stems_timeline", "One track per character"],
+      ["speaker_stems_zero_start", "Character tracks start at 0"],
+      ["single_master", "One mixed track"],
+    ], audioLaneMode(data));
+    laneSelect.onchange = () => {
+      data.settings ||= {};
+      data.settings.audio_lane_mode = laneSelect.value;
+      save();
+      render();
+    };
+    generation.append(fieldLabel("AudioBoard output"), laneSelect);
+    const technicalSettings = document.createElement("div");
+    technicalSettings.append(fieldLabel("Tag mode"));
     const tagMode = select([["metadata_only", "Metadata only"], ["tts_audio_suite_inline_tags", "Inline tags"]], data.settings.inline_edit_mode || "metadata_only");
     tagMode.onchange = () => { data.settings.inline_edit_mode = tagMode.value; save(); };
-    side.append(tagMode);
-    side.append(fieldLabel("Emotion Routing", "working paths"));
+    technicalSettings.append(tagMode);
+    technicalSettings.append(fieldLabel("Emotion routing"));
     const emotionRoute = select([
       ["clean_metadata", "Clean metadata"],
       ["index_tts_text_emotion", "IndexTTS text emotion"],
@@ -1479,7 +1689,8 @@ function install(node, reason = "install") {
       save();
       render();
     };
-    side.append(emotionRoute);
+    technicalSettings.append(emotionRoute);
+    generation.append(disclosure("Technical settings", technicalSettings, false, "optional"));
     const speakersTitle = document.createElement("h4");
     speakersTitle.textContent = "Speakers";
     side.append(speakersTitle);
@@ -1489,14 +1700,28 @@ function install(node, reason = "install") {
       const id = input(speaker.id || String.fromCharCode(65 + index));
       const name = input(speaker.name || speaker.id || "");
       const voice = input(speaker.voice || "", "voice alias/path");
-      [id, name, voice].forEach((el) => el.onchange = () => {
-        speaker.id = id.value || String.fromCharCode(65 + index);
-        speaker.name = name.value || speaker.id;
+      const persistSpeaker = () => {
+        speaker.name = name.value || speaker.id || String.fromCharCode(65 + index);
         speaker.voice = voice.value || "";
         save();
+      };
+      name.oninput = persistSpeaker;
+      voice.oninput = persistSpeaker;
+      id.onchange = () => {
+        const previousId = String(speaker.id || String.fromCharCode(65 + index));
+        const nextId = String(id.value || String.fromCharCode(65 + index)).trim().toUpperCase();
+        speaker.id = nextId;
+        (data.lines || []).forEach((line) => {
+          if (String(line.speaker || "").toUpperCase() === previousId.toUpperCase()) line.speaker = nextId;
+        });
+        persistSpeaker();
+        scriptText = linesToText(data);
         render();
-      });
-      card.append(fieldLabel("Speaker " + (index + 1)), id, name, voice);
+      };
+      card.append(fieldLabel("Speaker " + (index + 1)), id, name, voice, disclosure("Voice design", voiceDesignPanel(speaker, () => {
+        save();
+        render();
+      }), false, "OmniVoice"));
       side.append(card);
     });
     const conversionPanel = document.createElement("div");
@@ -1525,6 +1750,7 @@ function install(node, reason = "install") {
       ["IndexTTS", "index"],
       ["LongCat", "longcat"],
       ["Chatterbox", "chatterbox"],
+      ["OmniVoice", "omnivoice"],
     ].forEach(([label, mode]) => {
       const convertBtn = button(label, "");
       convertBtn.title = "Apply " + label + " tag format directly to Dialogue Script";
@@ -1565,8 +1791,8 @@ function install(node, reason = "install") {
     nodeActions.className = "iamccs-node-actions";
     nodeActions.append(addTtsNodes, addRig);
     paintConvertButtons("");
-    conversionPanel.append(fieldLabel("TTS Convert", "write tags"), conversionGrid, ttsFormatStatus, fieldLabel("Add Node", "registered"), ttsNodeSelect, nodeActions, conversionStatus);
-    side.append(conversionPanel);
+    conversionPanel.append(fieldLabel("TTS convert", "write tags"), conversionGrid, ttsFormatStatus, fieldLabel("Add node", "registered"), ttsNodeSelect, nodeActions, conversionStatus);
+    generation.append(disclosure("TTS setup", conversionPanel, true, "create rig"));
 
     const center = document.createElement("div");
     center.className = "iamccs-dte-center";
@@ -1580,7 +1806,7 @@ function install(node, reason = "install") {
     global.style.fontSize = Math.round(13 * zoom) + "px";
     global.oninput = () => { data.global_prompt = global.value; save(); };
     global.classList.add("iamccs-global");
-    globalSection.append(fieldLabel("Global Prompt", "sent to Shotboard"), global);
+    globalSection.append(fieldLabel("Global shot prompt", "Shotboard"), global);
     const scriptSection = document.createElement("div");
     scriptSection.className = "iamccs-dte-section";
     scriptArea.className = "iamccs-dte-script iamccs-rich-editor";
@@ -1601,7 +1827,8 @@ function install(node, reason = "install") {
     scriptArea.addEventListener("blur", persistScriptHeight);
     const statusText = () => {
       const overlapCount = (data.lines || []).filter((line) => Number(line.overlap_after || 0) > 0).length;
-      return data.lines.length + " lines | " + (modeFromData(data) === "tts_master_unico" ? "TTS single master" : "Double stem A/B") + " | overlap lines " + overlapCount;
+      const lane = audioLaneMode(data);
+      return data.lines.length + " lines | " + (lane === "single_master" ? "TTS single master" : lane === "speaker_stems_zero_start" ? "Speaker stems @ 0" : "Speaker stems timeline") + " | overlap lines " + overlapCount;
     };
     const overlapValue = document.createElement("input");
     overlapValue.type = "number";
@@ -1666,16 +1893,16 @@ function install(node, reason = "install") {
       renderCards(cardsGrid);
       scriptArea.focus();
     };
-    scriptSection.append(fieldLabel("Dialogue Script", "editor colorato"), scriptArea);
+    scriptSection.append(fieldLabel("Tag script", "advanced editor"), scriptArea);
     const cardsSection = document.createElement("div");
     cardsSection.className = "iamccs-dte-section fill";
     const cardsGrid = document.createElement("div");
     cardsGrid.className = "iamccs-dte-grid";
-    cardsSection.append(fieldLabel("Dialogue + Local Prompts", "editable per line"), cardsGrid);
+    cardsSection.append(fieldLabel("Dialogue", "write each spoken line"), cardsGrid);
     const status = document.createElement("div");
     status.className = "iamccs-dte-foot";
     status.textContent = statusText();
-    center.append(toolbar, globalSection, scriptSection, cardsSection, status);
+    center.append(toolbar, disclosure("Scene direction", globalSection, true, "Shotboard"), cardsSection, disclosure("Tag script", scriptSection, false, "advanced"), status);
 
     const overlapPanel = document.createElement("div");
     overlapPanel.className = "iamccs-overlap-panel";
@@ -1698,23 +1925,11 @@ function install(node, reason = "install") {
     overlapHint.className = "iamccs-overlap-hint";
     overlapHint.textContent = "Agisce sulla riga dove si trova il cursore nel Dialogue Script: inserisce o sostituisce solo overlap:valore.";
     overlapPanel.append(fieldLabel("Overlap", "cursor line"), overlapRow, overlapPresetGrid, overlapHint);
-    side.append(overlapPanel);
-
-    const tags = document.createElement("div");
-    tags.className = "iamccs-dte-tags";
-    // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
-    tags.append(
-      tagPanel("Emotion", EMOTIONS, (name) => modelAwareTagToken("emotion", name, activeTtsMode), () => scriptArea, (name) => insertPerformanceAtCursor("emotion", name)),
-      tagPanel("Style", STYLES, (name) => modelAwareTagToken("style", name, activeTtsMode), () => scriptArea, (name) => insertPerformanceAtCursor("style", name)),
-      tagPanel("Inline", PARAS, (name) => name.startsWith("pause") ? " [" + name + "]" : " <" + name + ">", () => scriptArea, (name) => {
-        if (name.startsWith("pause")) insertAt(scriptArea, " [" + name + "] ");
-        else insertPerformanceAtCursor("para", name);
-      })
-    );
-    main.append(side, center, tags);
+    generation.append(disclosure("Timing and overlap", overlapPanel, false, "advanced"));
+    main.append(side, center, generation);
     const foot = document.createElement("div");
     foot.className = "iamccs-dte-foot";
-    foot.innerHTML = "<span>Inject UI writes visible Shotboard/AudioBoard widgets and temporary dialogue placeholders. Publish real audio replaces those placeholders.</span><span>No &lt;speech1&gt; required.</span>";
+    foot.innerHTML = "<span>Inject All updates AudioBoard and Shotboard. Send prompts to Shotboard changes only visual prompts.</span><span>The selected track mode controls placement.</span>";
     root.append(head, main, foot);
     renderCards(cardsGrid);
 
@@ -1725,21 +1940,68 @@ function install(node, reason = "install") {
     zOut.onclick = () => { zoom = Math.max(0.8, zoom - 0.1); save(); render(); };
     zIn.onclick = () => { zoom = Math.min(1.8, zoom + 0.1); save(); render(); };
     injectBtn.onclick = () => injectVisibleWidgets(node, data, status, injectBtn, foot);
-    zeroStartBtn.onclick = () => {
-      data.settings ||= {};
-      data.settings.speaker_stems_zero_start = !data.settings.speaker_stems_zero_start;
-      save();
-      render();
-    };
+    shotboardBtn.onclick = () => injectShotboardPrompts(node, data, status, shotboardBtn, foot);
 
     function renderCards(container) {
       container.replaceChildren();
+      const speakerOptions = (data.speakers || []).map((speaker, index) => [speaker.id || String.fromCharCode(65 + index), (speaker.id || String.fromCharCode(65 + index)) + " - " + (speaker.name || "Speaker")]);
       (data.lines || []).forEach((line, index) => {
         const card = document.createElement("div");
         card.className = "iamccs-dte-card";
         const head = document.createElement("div");
         head.className = "iamccs-dte-card-head";
         head.innerHTML = "<span>Dialogue " + (line.speaker || "A") + (index + 1) + "</span><span class='iamccs-dte-card-meta'>ref " + (line.ref || (line.speaker === "B" ? 2 : 1)) + "</span>";
+        const removeLine = button("Remove", "iamccs-line-delete");
+        removeLine.title = "Remove this dialogue line";
+        removeLine.onclick = () => {
+          data.lines.splice(index, 1);
+          scriptText = linesToText(data);
+          save();
+          render();
+        };
+        head.append(removeLine);
+        line.tts_params ||= {};
+        const speakerSel = select(speakerOptions.length ? speakerOptions : [["A", "A - Speaker"]], line.speaker || "A");
+        const refInput = input(line.ref || (line.speaker === "B" ? 2 : 1));
+        refInput.type = "number";
+        refInput.min = "1";
+        refInput.step = "1";
+        const startInput = input(line.start ?? "");
+        startInput.type = "number";
+        startInput.min = "0";
+        startInput.step = "0.01";
+        const durationInput = input(line.duration ?? "");
+        durationInput.type = "number";
+        durationInput.min = "0";
+        durationInput.step = "0.01";
+        const speedInput = input(line.tts_params?.speed ?? line.speed ?? "");
+        speedInput.type = "number";
+        speedInput.min = "0.25";
+        speedInput.max = "4";
+        speedInput.step = "0.05";
+        const overlapInput = input(line.overlap_after ?? 0);
+        overlapInput.type = "number";
+        overlapInput.min = "0";
+        overlapInput.step = "0.01";
+        const pauseInput = input(line.pause_after ?? 0);
+        pauseInput.type = "number";
+        pauseInput.min = "0";
+        pauseInput.step = "0.01";
+        const primaryControls = document.createElement("div");
+        primaryControls.className = "iamccs-line-top";
+        primaryControls.append(
+          cardField("Speaker", speakerSel),
+          cardField("Shot", refInput)
+        );
+        const timingControls = document.createElement("div");
+        timingControls.className = "iamccs-dte-card-grid";
+        timingControls.append(
+          cardField("Start", startInput),
+          cardField("Duration", durationInput),
+          cardField("Speed", speedInput),
+          cardField("Overlap", overlapInput),
+          cardField("Pause", pauseInput)
+        );
         const textBox = textarea(line.text || "", "Dialogue text");
         const promptBox = textarea(line.local_prompt || "", "Local prompt");
         textBox.classList.add("iamccs-dialogue");
@@ -1747,8 +2009,31 @@ function install(node, reason = "install") {
         textBox.style.fontSize = Math.round(12 * zoom) + "px";
         promptBox.style.fontSize = Math.round(12 * zoom) + "px";
 
+        const syncMeta = (rerender = false) => {
+          const speakerIndex = Math.max(0, speakerOptions.findIndex(([id]) => id === speakerSel.value));
+          line.speaker = speakerSel.value || "A";
+          line.track = audioLaneMode(data) === "single_master" ? 0 : speakerIndex;
+          line.ref = Math.max(1, Number(refInput.value || 1));
+          if (startInput.value === "") delete line.start;
+          else line.start = Math.max(0, Number(startInput.value || 0));
+          if (durationInput.value === "") delete line.duration;
+          else line.duration = Math.max(0, Number(durationInput.value || 0));
+          line.tts_params ||= {};
+          if (speedInput.value === "") delete line.tts_params.speed;
+          else line.tts_params.speed = Math.max(0.25, Number(speedInput.value || 1));
+          line.overlap_after = Math.max(0, Number(overlapInput.value || 0));
+          line.pause_after = Math.max(0, Number(pauseInput.value || 0));
+          syncScriptFromData();
+          save();
+          if (rerender) renderCards(cardsGrid);
+        };
+        [speakerSel, refInput, startInput, durationInput, speedInput, overlapInput, pauseInput].forEach((control) => {
+          control.onchange = () => syncMeta(control === speakerSel);
+        });
+
         textBox.oninput = () => {
           line.text = textBox.value;
+          line.spoken_text = textBox.value;
           syncScriptFromData();
           save();
         };
@@ -1757,10 +2042,35 @@ function install(node, reason = "install") {
           save();
         };
 
+        const lineTags = document.createElement("div");
+        lineTags.className = "iamccs-line-tags";
+        const addTagRow = (label, options, active, apply) => {
+          const row = document.createElement("div");
+          row.className = "iamccs-line-tag-row";
+          const name = document.createElement("span");
+          name.textContent = label;
+          row.append(name, choiceChips(options, active || "none", (value) => {
+            apply(value === "none" ? "none" : value);
+            syncScriptFromData();
+            save();
+            renderCards(cardsGrid);
+          }, "compact"));
+          lineTags.append(row);
+        };
+        addTagRow("Emotion", [["none", "Natural"], ["calm", "Calm"], ["tense", "Tense"], ["fearful", "Fear"], ["sad", "Sad"], ["angry", "Angry"], ["excited", "Excited"]], line.emotion, (value) => { line.emotion = value; });
+        addTagRow("Delivery", [["none", "Natural"], ["low", "Low"], ["warm", "Warm"], ["whisper", "Whisper"], ["serious", "Serious"], ["authority", "Authority"]], line.style, (value) => { line.style = value; });
+        addTagRow("Action", [["none", "None"], ["Breathing", "Breath"], ["Laughter", "Laugh"], ["Sigh", "Sigh"], ["Uhm", "Uhm"]], line.paralinguistic, (value) => { line.paralinguistic = value; });
+
+        const advancedLine = document.createElement("div");
+        advancedLine.append(fieldLabel("Timing", "optional"), timingControls);
+
         card.append(
           head,
           labelledBox("Text", textBox),
-          labelledBox("Local Prompt", promptBox)
+          primaryControls,
+          lineTags,
+          labelledBox("Local shot prompt", promptBox),
+          disclosure("Timing", advancedLine, false, "optional")
         );
         container.append(card);
       });
@@ -1858,11 +2168,65 @@ function tagPanel(title, values, makeToken, getFallbackTarget = null, onPick = n
   return panel;
 }
 // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
-// By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+function shotboardPlannersFor(node) {
+  const isPlanner = (candidate) => ["IAMCCS_CineShotboardPlannerV3", "IAMCCS_CineShotboardPlannerV4"].includes(nodeType(candidate));
+  const connected = downstream(node, isPlanner);
+  if (connected.length) return { planners: connected, source: "connected" };
+  const all = (Array.isArray(app.graph?._nodes) ? app.graph._nodes : []).filter(isPlanner);
+  return all.length === 1 ? { planners: all, source: "single_workflow_planner" } : { planners: [], source: all.length ? "ambiguous" : "missing" };
+}
+function syncPromptsToShotboard(node, data, fps) {
+  let shotboardCount = 0;
+  let appliedPromptCount = 0;
+  let availableVisualShots = 0;
+  const target = shotboardPlannersFor(node);
+  target.planners.forEach((shotboard) => {
+    const gp = widget(shotboard, "global_prompt");
+    const td = widget(shotboard, "timeline_data");
+    if (gp) { gp.value = data.global_prompt || ""; try { gp.callback?.(gp.value); } catch {} }
+    if (td) {
+      const existingTimeline = safeJsonParse(td.value, {});
+      const merged = mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps);
+      appliedPromptCount += merged.appliedPromptCount;
+      availableVisualShots += merged.preservedVisualSegments;
+      if (typeof shotboard._iamccsCineShotboardV3ApplyExternalTimeline === "function") {
+        shotboard._iamccsCineShotboardV3ApplyExternalTimeline(merged.timeline);
+      } else {
+        td.value = JSON.stringify(merged.timeline, null, 2);
+        try { td.callback?.(td.value); } catch {}
+      }
+    }
+    shotboard.setDirtyCanvas?.(true, true);
+    shotboardCount++;
+  });
+  return { shotboardCount, appliedPromptCount, availableVisualShots, source: target.source };
+}
+function injectShotboardPrompts(node, data, status, buttonEl, foot) {
+  const fps = Number(widget(node, "frame_rate")?.value || 24);
+  if (buttonEl) {
+    buttonEl.disabled = true;
+    buttonEl.textContent = "Sending...";
+  }
+  const result = syncPromptsToShotboard(node, data, fps);
+  const stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  const lineCount = Array.isArray(data.lines) ? data.lines.filter((line) => String(line.local_prompt || "").trim()).length : 0;
+  let message = "Shotboard prompt update: " + result.shotboardCount + " planner, global prompt updated, " + result.appliedPromptCount + "/" + lineCount + " local prompts applied at " + stamp + ".";
+  if (result.shotboardCount === 0) message = result.source === "ambiguous" ? "More than one Shotboard Planner exists. Connect this Dialogue Tag Editor to the target Planner before sending prompts." : "No Shotboard Planner found in this workflow.";
+  else if (lineCount > result.appliedPromptCount) message += " Only existing visual shots are updated; " + Math.max(0, lineCount - result.appliedPromptCount) + " local prompt(s) have no matching shot yet.";
+  status.textContent = message;
+  status?.classList.add("iamccs-inject-status-success");
+  foot?.classList.add("iamccs-inject-status-success");
+  if (buttonEl) {
+    buttonEl.disabled = false;
+    buttonEl.textContent = "Prompts sent";
+    if (buttonEl._iamccsResetTimer) window.clearTimeout(buttonEl._iamccsResetTimer);
+    buttonEl._iamccsResetTimer = window.setTimeout(() => { buttonEl.textContent = "Send prompts to Shotboard"; }, 1800);
+  }
+  app.graph?.setDirtyCanvas?.(true, true);
+}
 function injectVisibleWidgets(node, data, status, injectBtn, foot) {
   const fps = Number(widget(node, "frame_rate")?.value || 24);
   const { audioBoard, timeline } = buildInjectionPayload(data, fps);
-  let shotboardCount = 0;
   let audioBoardCount = 0;
   const pendingCount = Array.isArray(timeline?.audioSegments) ? timeline.audioSegments.filter((seg) => seg?.pendingTTS === true || String(seg?.purpose || "") === "dialogue_pending_tts").length : 0;
   injectBtn?.classList.remove("is-done");
@@ -1874,23 +2238,7 @@ function injectVisibleWidgets(node, data, status, injectBtn, foot) {
   status?.classList.add("iamccs-inject-status");
   foot?.classList.add("iamccs-inject-status");
   status.textContent = "Inject UI in progress...";
-  downstream(node, (candidate) => ["IAMCCS_CineShotboardPlannerV3", "IAMCCS_CineShotboardPlannerV4"].includes(nodeType(candidate))).forEach((shotboard) => {
-    const gp = widget(shotboard, "global_prompt");
-    const td = widget(shotboard, "timeline_data");
-    if (gp) { gp.value = data.global_prompt || ""; try { gp.callback?.(gp.value); } catch {} }
-    if (td) {
-      const existingTimeline = safeJsonParse(td.value, {});
-      const merged = mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps);
-      if (typeof shotboard._iamccsCineShotboardV3ApplyExternalTimeline === "function") {
-        shotboard._iamccsCineShotboardV3ApplyExternalTimeline(merged.timeline);
-      } else {
-        td.value = JSON.stringify(merged.timeline, null, 2);
-        try { td.callback?.(td.value); } catch {}
-      }
-    }
-    shotboard.setDirtyCanvas?.(true, true);
-    shotboardCount++;
-  });
+  const shotboardResult = syncPromptsToShotboard(node, data, fps);
   downstream(node, (candidate) => nodeType(candidate) === "IAMCCS_AudioBoardArranger").forEach((board) => {
     const aw = widget(board, "arranger_data");
     if (aw) { aw.value = JSON.stringify(audioBoard, null, 2); try { aw.callback?.(aw.value); } catch {} }
@@ -1898,7 +2246,7 @@ function injectVisibleWidgets(node, data, status, injectBtn, foot) {
     audioBoardCount++;
   });
   const stamp = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-  status.textContent = "Injected " + shotboardCount + " Shotboard / " + audioBoardCount + " AudioBoard at " + stamp + ". " + (pendingCount > 0 ? pendingCount + " pending dialogue placeholder lane" + (pendingCount === 1 ? "" : "s") + " sent to AudioBoard until Publish real audio." : "Visual UI synced.");
+  status.textContent = "Injected " + shotboardResult.shotboardCount + " Shotboard / " + audioBoardCount + " AudioBoard at " + stamp + ". Global prompt + " + shotboardResult.appliedPromptCount + " local Shotboard prompt(s) updated. " + (pendingCount > 0 ? pendingCount + " pending dialogue placeholder lane" + (pendingCount === 1 ? "" : "s") + " sent to AudioBoard until Publish real audio." : "Visual UI synced.");
   status?.classList.remove("iamccs-inject-status");
   status?.classList.add("iamccs-inject-status-success");
   foot?.classList.remove("iamccs-inject-status");
@@ -1911,7 +2259,7 @@ function injectVisibleWidgets(node, data, status, injectBtn, foot) {
     if (injectBtn._iamccsResetTimer) window.clearTimeout(injectBtn._iamccsResetTimer);
     injectBtn._iamccsResetTimer = window.setTimeout(() => {
       injectBtn.classList.remove("is-done");
-      injectBtn.textContent = "Inject UI";
+      injectBtn.textContent = "Inject All";
       status?.classList.remove("iamccs-inject-status-success");
       foot?.classList.remove("iamccs-inject-status-success");
     }, 1800);

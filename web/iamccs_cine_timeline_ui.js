@@ -162,7 +162,15 @@ function isShotboardV3Class(klass) {
 }
 
 function isShotboardV4Class(klass) {
-    return klass === "IAMCCS_CineShotboardPlannerV4";
+    return klass === "IAMCCS_CineShotboardPlannerV4" || klass === "IAMCCS_CineShotboardPlannerV5V2V";
+}
+
+function isShotboardV5Class(klass) {
+    return klass === "IAMCCS_CineShotboardPlannerV5V2V";
+}
+
+function isShotboardV4BackendClass(klass) {
+    return klass === "IAMCCS_CineShotboardV4Backend";
 }
 
 function getWidget(node, name) {
@@ -390,7 +398,7 @@ function healCineInfoImageBatchLink(node, state) {
 
 function traceLinkedCinePlanner(node) {
     const startInputs = ["timeline_data", "multi_input", "duration_seconds"];
-    const accepted = new Set(["IAMCCS_CineShotboardLite", "IAMCCS_CineShotboardPlannerPro", "IAMCCS_CineShotboardPlannerProV2", "IAMCCS_CineShotboardPlannerV3", "IAMCCS_CineShotboardPlannerV4", "IAMCCS_CineShotboardPlannerProLegacy", "IAMCCS_CineShotboardTimelinePro", "IAMCCS_CineReferenceBoard"]);
+    const accepted = new Set(["IAMCCS_CineShotboardLite", "IAMCCS_CineShotboardPlannerPro", "IAMCCS_CineShotboardPlannerProV2", "IAMCCS_CineShotboardPlannerV3", "IAMCCS_CineShotboardPlannerV4", "IAMCCS_CineShotboardPlannerV5V2V", "IAMCCS_CineShotboardPlannerProLegacy", "IAMCCS_CineShotboardTimelinePro", "IAMCCS_CineReferenceBoard"]);
     for (const inputName of startInputs) {
         let current = getLinkedOriginNode(node, inputName);
         const visited = new Set();
@@ -2136,6 +2144,7 @@ async function saveShotboardPackageViaBackend(board, label, packageName, statusC
 
 async function saveShotboardPackageFolder(board, label, statusCallback = null, packageNameOverride = "", options = {}) {
     const imagePaths = collectPackageImagePaths(board);
+    const audioPaths = collectPackageAudioPaths(board);
     const useSelectedFolderAsPackage = Boolean(options?.useSelectedFolderAsPackage);
     let packageName = sanitizePackageComponent(packageNameOverride || `${sanitizePackageComponent(label)}_${timestampForPackageName()}`);
     if (typeof window.showDirectoryPicker !== "function") {
@@ -2162,8 +2171,11 @@ async function saveShotboardPackageFolder(board, label, statusCallback = null, p
             packageName = sanitizePackageComponent(rootHandle?.name || packageName);
         }
         const imagesHandle = await packageHandle.getDirectoryHandle("images", { create: true });
+        const audioHandle = await packageHandle.getDirectoryHandle("audio", { create: true });
         const pathMap = {};
+        const audioPathMap = {};
         const pendingImageWrites = [];
+        const pendingAudioWrites = [];
         const manifest = {
             metadata: {
                 schema: "iamccs.cine.shotboard.package",
@@ -2176,6 +2188,9 @@ async function saveShotboardPackageFolder(board, label, statusCallback = null, p
             images_dir: "images",
             image_count: imagePaths.length,
             images: [],
+            audio_dir: "audio",
+            audio_count: audioPaths.length,
+            audio: [],
         };
 
         for (let index = 0; index < imagePaths.length; index += 1) {
@@ -2205,15 +2220,51 @@ async function saveShotboardPackageFolder(board, label, statusCallback = null, p
             manifest.images.push(entry);
         }
 
+        for (let index = 0; index < audioPaths.length; index += 1) {
+            const originalPath = audioPaths[index];
+            statusCallback?.(`Reading package audio ${index + 1}/${audioPaths.length}...`);
+            const entry = {
+                index: index + 1,
+                original_path: originalPath,
+                original_name: String(originalPath).split(/[\\/]/).pop() || `audio_${index + 1}.wav`,
+            };
+            try {
+                const blob = await fetchReferenceBlobForPackage(originalPath);
+                const ext = audioExtensionForPackage(originalPath, blob.type);
+                const filename = `audio_${String(index + 1).padStart(3, "0")}.${ext}`;
+                entry.package_path = `audio/${filename}`;
+                entry.comfy_input_path = `${packageName}/audio/${filename}`;
+                entry.path = entry.comfy_input_path;
+                entry.filename = filename;
+                entry.content_type = blob.type || "";
+                entry.bytes = blob.size || 0;
+                entry.data_url = await blobToDataUrl(blob);
+                audioPathMap[originalPath] = entry.path;
+                pendingAudioWrites.push({ filename, blob });
+            } catch (err) {
+                entry.error = String(err?.message || err);
+                console.warn("[IAMCCS Cine Shotboard] package audio export failed", originalPath, err);
+            }
+            manifest.audio.push(entry);
+        }
+
         await clearPackageImageFolder(imagesHandle);
         for (let index = 0; index < pendingImageWrites.length; index += 1) {
             const item = pendingImageWrites[index];
             statusCallback?.(`Writing package image ${index + 1}/${pendingImageWrites.length}...`);
             await writePackageBlobFile(imagesHandle, item.filename, item.blob);
         }
+        await clearPackageImageFolder(audioHandle);
+        for (let index = 0; index < pendingAudioWrites.length; index += 1) {
+            const item = pendingAudioWrites[index];
+            statusCallback?.(`Writing package audio ${index + 1}/${pendingAudioWrites.length}...`);
+            await writePackageBlobFile(audioHandle, item.filename, item.blob);
+        }
 
+        const packagedBoardBase = rewriteBoardForPackage(board, imagePaths, pathMap, manifest.images);
+        rewritePackagedAudioPaths(packagedBoardBase, audioPathMap);
         const packagedBoard = {
-            ...rewriteBoardForPackage(board, imagePaths, pathMap, manifest.images),
+            ...packagedBoardBase,
             metadata: {
                 ...(board?.metadata || {}),
                 packaged_at: manifest.metadata.saved_at,
@@ -2223,12 +2274,15 @@ async function saveShotboardPackageFolder(board, label, statusCallback = null, p
                 name: packageName,
                 images_dir: "images",
                 images: manifest.images,
+                audio_dir: "audio",
+                audio: manifest.audio,
             },
         };
         await writePackageTextFile(packageHandle, "board.json", JSON.stringify(packagedBoard, null, 2));
         await writePackageTextFile(packageHandle, "manifest.json", JSON.stringify(manifest, null, 2));
         const failed = manifest.images.filter((entry) => entry.error).length;
-        statusCallback?.(`Saved package folder: ${packageName}${failed ? ` (${failed} image errors in manifest)` : ""}`);
+        const failedAudio = manifest.audio.filter((entry) => entry.error).length;
+        statusCallback?.(`Saved package folder: ${packageName}${failed || failedAudio ? ` (${failed} image / ${failedAudio} audio errors in manifest)` : ""}`);
     } catch (err) {
         if (String(err?.name || "") === "AbortError") {
             statusCallback?.("Save Package cancelled.");
@@ -2671,6 +2725,117 @@ function rewriteBoardPackagedImagePaths(board, pathMap, nameMap = {}) {
         } catch {}
     }
     return board;
+}
+
+function audioExtensionForPackage(path, contentType = "") {
+    const fromPath = String(path || "").split(/[?#]/)[0].match(/\.([a-z0-9]{2,5})$/i)?.[1];
+    if (fromPath) return fromPath.toLowerCase();
+    const type = String(contentType || "").toLowerCase();
+    if (type.includes("mpeg")) return "mp3";
+    if (type.includes("flac")) return "flac";
+    if (type.includes("ogg")) return "ogg";
+    if (type.includes("aac")) return "aac";
+    if (type.includes("m4a") || type.includes("mp4")) return "m4a";
+    return "wav";
+}
+
+function collectPackageAudioPaths(board) {
+    const paths = [];
+    const seen = new Set();
+    const add = (value) => {
+        const clean = String(value || "").trim();
+        if (clean && !seen.has(clean)) {
+            seen.add(clean);
+            paths.push(clean);
+        }
+    };
+    const visit = (value, ownerKey = "") => {
+        if (Array.isArray(value)) {
+            value.forEach((item) => visit(item, ownerKey));
+        } else if (value && typeof value === "object") {
+            if (ownerKey !== "sourceSegment") {
+                add(value.audioFile || value.audio_file);
+            }
+            Object.entries(value).forEach(([key, item]) => visit(item, key));
+        }
+    };
+    visit(board);
+    return paths;
+}
+
+function rewritePackagedAudioPaths(payload, pathMap) {
+    if (Array.isArray(payload)) {
+        payload.forEach((item) => rewritePackagedAudioPaths(item, pathMap));
+        return;
+    }
+    if (!payload || typeof payload !== "object") return;
+    for (const key of ["audioFile", "audio_file", "sourceAudioFile", "source_audio_file"]) {
+        const value = String(payload[key] || "").trim();
+        const replacement = iamccsPathLookup(pathMap, value) || pathMap[value];
+        if (replacement) {
+            payload[`original_${key}`] = value;
+            payload[key] = replacement;
+        }
+    }
+    Object.values(payload).forEach((item) => rewritePackagedAudioPaths(item, pathMap));
+}
+
+function packagedAudioEntries(board) {
+    const candidates = [
+        board?.package?.audio,
+        board?.audio,
+        board?.manifest?.audio,
+        board?.timeline?.package?.audio,
+    ];
+    for (const candidate of candidates) {
+        if (Array.isArray(candidate)) return candidate.filter((item) => item && typeof item === "object");
+    }
+    return [];
+}
+
+async function uploadPackagedAudioFile(file) {
+    const body = new FormData();
+    body.append("image", file);
+    body.append("subfolder", "IAMCCS_imported_shotboard_audio");
+    body.append("type", "input");
+    body.append("overwrite", "false");
+    const response = await api.fetchApi("/upload/image", { method: "POST", body });
+    if (!response?.ok) throw new Error(`Packaged audio upload failed (${response?.status || "no response"})`);
+    const result = await response.json();
+    const filename = String(result?.name || file.name || "");
+    const subfolder = String(result?.subfolder || "");
+    return subfolder ? `${subfolder}/${filename}` : filename;
+}
+
+async function restorePackagedAudioToComfyInput(board, statusCallback = null) {
+    const entries = packagedAudioEntries(board).filter((entry) => String(entry?.data_url || "").trim());
+    if (!entries.length) return {};
+    const pathMap = {};
+    for (let index = 0; index < entries.length; index += 1) {
+        const entry = entries[index];
+        const fallback = `audio_${String(index + 1).padStart(3, "0")}.${audioExtensionForPackage(entry.filename || entry.original_path || "", entry.content_type || "")}`;
+        const filename = sanitizePackageComponent(iamccsPathBasename(entry.package_path || entry.filename || fallback), fallback);
+        try {
+            statusCallback?.(`Restoring packaged audio ${index + 1}/${entries.length}...`);
+            const file = await fileFromPackageDataUrl(entry.data_url, filename, entry.content_type || "audio/wav");
+            const uploadedPath = await uploadPackagedAudioFile(file);
+            const mapAlias = (value) => {
+                const clean = String(value || "").trim();
+                if (!clean) return;
+                pathMap[clean] = uploadedPath;
+                const normalized = clean.replace(/\\/g, "/").replace(/^\/+/, "");
+                if (normalized) pathMap[normalized] = uploadedPath;
+                const base = iamccsPathBasename(normalized);
+                if (base) pathMap[base] = uploadedPath;
+            };
+            for (const key of ["path", "comfy_input_path", "package_path", "original_path", "filename", "name"]) mapAlias(entry[key]);
+            mapAlias(uploadedPath);
+        } catch (err) {
+            console.warn("[IAMCCS Cine Shotboard] packaged audio restore failed", entry, err);
+        }
+    }
+    if (Object.keys(pathMap).length) rewritePackagedAudioPaths(board, pathMap);
+    return pathMap;
 }
 
 async function packagedReferencePathsForImport(board, statusCallback = null) {
@@ -6716,6 +6881,23 @@ function renderShotboardV3(node) {
     const getDuration = () => Math.max(0.1, Number(durationWidget?.value || 20));
     const getFps = () => Math.max(1, Math.round(Number(fpsWidget?.value || 24)));
     const getTotalFrames = () => Math.max(1, Math.round(getDuration() * getFps()));
+    const timelineTimeUnits = () => {
+        const value = String(timeline?.timeUnits || timeline?.time_units || timeline?.display_mode || timeline?.displayMode || "seconds");
+        return value === "frames" ? "frames" : "seconds";
+    };
+    const setTimelineTimeUnits = (value) => {
+        const next = value === "frames" ? "frames" : "seconds";
+        timeline.timeUnits = next;
+        timeline.time_units = next;
+        timeline.display_mode = next;
+        timeline.displayMode = next;
+    };
+    const timelineMagnetEnabled = () => timeline?.magnetEnabled !== false && timeline?.magnet_enabled !== false;
+    const setTimelineBoolAliases = (keys, value) => {
+        const next = Boolean(value);
+        keys.forEach((key) => { timeline[key] = next; });
+        return next;
+    };
     const clampGuideStrength = (value, fallback = 0) => {
         const parsed = Number(value);
         return Math.max(0, Math.min(1, Number.isFinite(parsed) ? parsed : Number(fallback) || 0));
@@ -6841,6 +7023,12 @@ function renderShotboardV3(node) {
                     : Array.isArray(data.motionClips)
                         ? data.motionClips
                         : [];
+                const timeUnits = ["frames", "seconds"].includes(String(data.timeUnits || data.time_units || data.display_mode || data.displayMode || "seconds"))
+                    ? String(data.timeUnits || data.time_units || data.display_mode || data.displayMode || "seconds")
+                    : "seconds";
+                const audioInputEnabled = Boolean(data.audioInputEnabled ?? data.audio_input_enabled ?? data.use_custom_audio ?? data.useCustomAudio ?? false);
+                const sourceVoiceLock = Boolean(data.sourceVoiceLock ?? data.source_voice_lock ?? data.voiceLock ?? data.voice_lock ?? false);
+                const videoToVideoEnabled = Boolean(data.videoToVideoEnabled ?? data.video_to_video_enabled ?? motionSegments.length);
                 return {
                     schema: data.schema || "iamccs.cine.filmmaker_timeline",
                     schema_version: Number(data.schema_version || 1),
@@ -6855,12 +7043,46 @@ function renderShotboardV3(node) {
                     override_audio: Boolean(data.override_audio ?? data.overrideAudio),
                     inpaintAudio: Boolean(data.inpaintAudio ?? data.inpaint_audio),
                     inpaint_audio: Boolean(data.inpaint_audio ?? data.inpaintAudio),
+                    audioInputEnabled,
+                    audio_input_enabled: audioInputEnabled,
+                    sourceVoiceLock,
+                    source_voice_lock: sourceVoiceLock,
+                    videoToVideoEnabled,
+                    video_to_video_enabled: videoToVideoEnabled,
+                    magnetEnabled: data.magnetEnabled !== undefined ? Boolean(data.magnetEnabled) : data.magnet_enabled !== undefined ? Boolean(data.magnet_enabled) : true,
+                    magnet_enabled: data.magnet_enabled !== undefined ? Boolean(data.magnet_enabled) : data.magnetEnabled !== undefined ? Boolean(data.magnetEnabled) : true,
+                    timeUnits,
+                    time_units: timeUnits,
+                    display_mode: timeUnits,
+                    displayMode: timeUnits,
+                    clipEditMode: String(data.clipEditMode || data.clip_edit_mode || "timeline_trim_split_extend"),
+                    clip_edit_mode: String(data.clip_edit_mode || data.clipEditMode || "timeline_trim_split_extend"),
+                    continuationMode: String(data.continuationMode || data.continuation_mode || "source_video"),
+                    continuation_mode: String(data.continuation_mode || data.continuationMode || "source_video"),
+                    guideFramePolicy: String(data.guideFramePolicy || data.guide_frame_policy || "prompt_behavior_guide_geography"),
+                    guide_frame_policy: String(data.guide_frame_policy || data.guideFramePolicy || "prompt_behavior_guide_geography"),
+                    retakeMode: Boolean(data.retakeMode || data.retake_mode || String(data.clipEditMode || data.clip_edit_mode || "") === "retake_range"),
+                    retakeVideo: data.retakeVideo && typeof data.retakeVideo === "object" ? data.retakeVideo : null,
+                    retakeStart: Math.max(0, Math.round(Number(data.retakeStart ?? data.retake_start ?? 0) || 0)),
+                    retakeLength: Math.max(0, Math.round(Number(data.retakeLength ?? data.retake_length ?? 0) || 0)),
+                    retakeStrength: Math.max(0, Math.min(1, Number(data.retakeStrength ?? data.retake_strength ?? 1) || 1)),
+                    retakePrompt: String(data.retakePrompt ?? data.retake_prompt ?? data.retake_global_prompt ?? ""),
+                    retake_global_prompt: String(data.retake_global_prompt ?? data.retakePrompt ?? data.retake_prompt ?? ""),
+                    normalStartFrame: Math.max(0, Math.round(Number(data.normalStartFrame ?? data.normal_start_frame ?? 0) || 0)),
+                    normalDurationFrames: Math.max(0, Math.round(Number(data.normalDurationFrames ?? data.normal_duration_frames ?? data.duration_frames ?? 0) || 0)),
+                    promptBlocks: Array.isArray(data.promptBlocks) ? data.promptBlocks : Array.isArray(data.prompt_blocks) ? data.prompt_blocks : [],
+                    sourceAudioSegments: Array.isArray(data.sourceAudioSegments) ? data.sourceAudioSegments : Array.isArray(data.source_audio_segments) ? data.source_audio_segments : [],
                     audioSegments: Array.isArray(data.audioSegments) ? data.audioSegments : [],
                     audioTrackCount: Math.max(1, Number(data.audioTrackCount || 1)),
                     masterAudioGain: Math.max(0, Math.min(2, Number(data.masterAudioGain ?? data.master_audio_gain ?? 1) || 1)),
                     masterAudioNormalize: Boolean(data.masterAudioNormalize || data.master_audio_normalize),
                     duration_seconds: objectDurationTruth(data),
                     frame_rate: objectFpsTruth(data),
+                    ic_lora_name: String(data.ic_lora_name || data.icLoraName || data.backend_settings?.ic_lora_name || data.backend_settings?.icLoraName || "None"),
+                    icLoraName: String(data.icLoraName || data.ic_lora_name || data.backend_settings?.icLoraName || data.backend_settings?.ic_lora_name || "None"),
+                    ic_lora_strength: Number(data.ic_lora_strength ?? data.icLoraStrength ?? data.backend_settings?.ic_lora_strength ?? data.backend_settings?.icLoraStrength ?? 1),
+                    icLoraStrength: Number(data.icLoraStrength ?? data.ic_lora_strength ?? data.backend_settings?.icLoraStrength ?? data.backend_settings?.ic_lora_strength ?? 1),
+                    backend_settings: data.backend_settings && typeof data.backend_settings === "object" ? data.backend_settings : {},
                     audioSyncMode: String(data.audioSyncMode || "timeline_audio"),
                     generationStrategy: String(data.generationStrategy || "single_timeline"),
                     flfrealMode: String(data.flfrealMode || data.flfreal_mode || "iamccs_enhanced"),
@@ -6871,7 +7093,7 @@ function renderShotboardV3(node) {
                 };
             }
         } catch {}
-        return { schema: "iamccs.cine.filmmaker_timeline", schema_version: 1, segments: [], rows: [], motionSegments: [], motionClips: [], motionTrackEnabled: isShotboardV4, useCustomMotion: false, use_custom_motion: false, overrideAudio: false, override_audio: false, inpaintAudio: false, inpaint_audio: false, audioSegments: [], audioTrackCount: 1, duration_seconds: null, frame_rate: null, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
+        return { schema: "iamccs.cine.filmmaker_timeline", schema_version: 1, segments: [], rows: [], motionSegments: [], motionClips: [], motionTrackEnabled: isShotboardV4, useCustomMotion: false, use_custom_motion: false, overrideAudio: false, override_audio: false, inpaintAudio: false, inpaint_audio: false, audioInputEnabled: false, audio_input_enabled: false, sourceVoiceLock: false, source_voice_lock: false, videoToVideoEnabled: isShotboardV4, video_to_video_enabled: isShotboardV4, magnetEnabled: true, magnet_enabled: true, timeUnits: "seconds", time_units: "seconds", display_mode: "seconds", displayMode: "seconds", clipEditMode: "timeline_trim_split_extend", clip_edit_mode: "timeline_trim_split_extend", continuationMode: "source_video", continuation_mode: "source_video", guideFramePolicy: "prompt_behavior_guide_geography", guide_frame_policy: "prompt_behavior_guide_geography", retakeMode: false, retakeVideo: null, retakeStart: 0, retakeLength: 0, retakeStrength: 1, retakePrompt: "", retake_global_prompt: "", normalStartFrame: 0, normalDurationFrames: 0, promptBlocks: [], sourceAudioSegments: [], audioSegments: [], audioTrackCount: 1, duration_seconds: null, frame_rate: null, ic_lora_name: "None", icLoraName: "None", ic_lora_strength: 1, icLoraStrength: 1, backend_settings: { ic_lora_name: "None", ic_lora_strength: 1, backend_widgets_are_fallback: true }, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
     }
 
     let timeline = readTimeline();
@@ -7097,6 +7319,11 @@ function renderShotboardV3(node) {
         timelineNotice.style.borderColor = tone === "error" ? purple.danger : purple.play;
         timelineNotice.style.color = tone === "error" ? "#FFE3DD" : "#FFF1BE";
     };
+    const pendingAudioPublishWarning = String(node.properties?.iamccs_audio_publish_warning || "").trim();
+    if (pendingAudioPublishWarning) {
+        delete node.properties.iamccs_audio_publish_warning;
+        window.setTimeout(() => showTimelineNotice(pendingAudioPublishWarning, "warn"), 0);
+    }
     const setDurationSeconds = (seconds, reason = "manual") => {
         const requested = Math.max(0.1, Number(seconds) || 0.1);
         const floor = durationFloorSeconds();
@@ -7241,6 +7468,54 @@ function renderShotboardV3(node) {
         }
         return seg;
     };
+    const IC_LORA_PRESETS = [
+        { value: "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors", label: "Motion track control" },
+        { value: "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors", label: "Union / camera control" },
+        { value: "ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors", label: "Ingredients" },
+        { value: "3DREAL-strong.safetensors", label: "3DREAL strong" },
+        { value: "3DREAL-light.safetensors", label: "3DREAL light" },
+    ];
+    const IC_LORA_PLACEHOLDERS = new Set(["", "none", "ic-lora", "iclora", "ic_lora", "3dreal", "3dreal_reference"]);
+    const icLoraPresetValue = (role = "motion_reference") => {
+        const key = String(role || "").toLowerCase();
+        if (key === "3dreal_reference") return "3DREAL-strong.safetensors";
+        if (key === "camera_reference") return "ltx-2.3-22b-ic-lora-union-control-ref0.5.safetensors";
+        if (key === "ingredients") return "ltx-2.3-22b-ic-lora-ingredients-0.9.safetensors";
+        return "ltx-2.3-22b-ic-lora-motion-track-control-ref0.5.safetensors";
+    };
+    const normalizeIcLoraName = (value, role = "motion_reference") => {
+        const raw = String(value || "").trim();
+        const lower = raw.toLowerCase();
+        if (!IC_LORA_PLACEHOLDERS.has(lower)) return raw;
+        return icLoraPresetValue(role);
+    };
+    const applyIcLoraTruthToSegment = (seg) => {
+        if (!seg) return seg;
+        const role = String(seg.icLoraRole || seg.ic_lora_role || "motion_reference");
+        const name = normalizeIcLoraName(seg.icLoraName || seg.ic_lora_name || seg.lora, role);
+        const strength = Math.max(-100, Math.min(100, Number(seg.icLoraStrength ?? seg.ic_lora_strength ?? 1) || 0));
+        seg.icLoraName = name;
+        seg.ic_lora_name = name;
+        seg.lora = name;
+        seg.icLoraStrength = strength;
+        seg.ic_lora_strength = strength;
+        return seg;
+    };
+    const activeIcLoraSettings = () => {
+        const source = (timeline.motionSegments || [])
+            .filter((seg) => seg && !seg.placeholder && segmentHasMotionMedia(seg))
+            .sort((a, b) => Number(a.start || 0) - Number(b.start || 0))[0];
+        if (!source) {
+            return { name: "None", strength: 1, role: "motion_reference", imageAttentionStrength: 1 };
+        }
+        applyIcLoraTruthToSegment(source);
+        return {
+            name: String(source.icLoraName || source.ic_lora_name || "None"),
+            strength: Math.max(-100, Math.min(100, Number(source.icLoraStrength ?? source.ic_lora_strength ?? 1) || 0)),
+            role: String(source.icLoraRole || source.ic_lora_role || "motion_reference"),
+            imageAttentionStrength: Math.max(0, Math.min(1, Number(source.imageAttentionStrength ?? source.image_attention_strength ?? source.videoAttentionStrength ?? source.video_attention_strength ?? 1) || 0)),
+        };
+    };
     const clampMotionSegment = (seg) => {
         const total = getTotalFrames();
         const next = seg || {};
@@ -7262,6 +7537,9 @@ function renderShotboardV3(node) {
         next.control_mode = next.controlMode;
         next.icLoraRole = String(next.icLoraRole || next.ic_lora_role || "motion_reference");
         next.ic_lora_role = next.icLoraRole;
+        next.imageAttentionStrength = Math.max(0, Math.min(1, Number(next.imageAttentionStrength ?? next.image_attention_strength ?? next.videoAttentionStrength ?? 1) || 0));
+        next.image_attention_strength = next.imageAttentionStrength;
+        applyIcLoraTruthToSegment(next);
         return next;
     };
     const audioSegmentHasMedia = (seg) => Boolean(seg && (String(seg.audioFile || "").trim() || String(seg.audioB64 || "").trim()));
@@ -7437,11 +7715,17 @@ function renderShotboardV3(node) {
     const magnetize = () => {
         const total = getTotalFrames();
         timeline.segments = (timeline.segments || []).map((seg) => clampSegment(seg)).sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
-        let cursor = 0;
-        for (const seg of timeline.segments) {
-            if (Number(seg.start || 0) < cursor) seg.start = cursor;
-            if (seg.start + seg.length > total) seg.length = Math.max(1, total - seg.start);
-            cursor = seg.start + seg.length;
+        if (timelineMagnetEnabled()) {
+            let cursor = 0;
+            for (const seg of timeline.segments) {
+                if (Number(seg.start || 0) < cursor) seg.start = cursor;
+                if (seg.start + seg.length > total) seg.length = Math.max(1, total - seg.start);
+                cursor = seg.start + seg.length;
+            }
+        } else {
+            for (const seg of timeline.segments) {
+                if (seg.start + seg.length > total) seg.length = Math.max(1, total - seg.start);
+            }
         }
         timeline.audioSegments = (timeline.audioSegments || []).map((seg) => clampSegment(seg)).sort((a, b) => (Number(a.track || 0) - Number(b.track || 0)) || (Number(a.start || 0) - Number(b.start || 0)));
         if (isShotboardV4) {
@@ -7640,6 +7924,57 @@ function renderShotboardV3(node) {
             });
         } catch {}
     };
+    const videoPathForRetakeSegment = (seg) => String(seg?.videoFile || seg?.video_file || seg?.imageFile || seg?.image_file || seg?.path || "").trim();
+    const isMainVideoSegmentForRetake = (seg) => String(seg?.type || "") === "video" && !seg?.placeholder && videoPathForRetakeSegment(seg);
+    const selectedMainVideoSegmentForRetake = () => {
+        const videos = (timeline.segments || []).filter((seg) => isMainVideoSegmentForRetake(seg));
+        if (!videos.length) return null;
+        const selectedId = String(timeline.selectedSegmentId || timeline.selected_segment_id || "");
+        if (selectedId) {
+            const selected = videos.find((seg) => String(seg?.id || "") === selectedId);
+            if (selected) return selected;
+        }
+        return videos.slice().sort((a, b) => Number(a.start || 0) - Number(b.start || 0))[0] || null;
+    };
+    const syncRetakeContractFromTimeline = () => {
+        if (!isShotboardV4) return;
+        const editMode = String(timeline.clipEditMode || timeline.clip_edit_mode || "timeline_trim_split_extend");
+        const retakeRequested = editMode === "retake_range";
+        timeline.retakeMode = Boolean(retakeRequested);
+        if (!retakeRequested) return;
+        const fps = getFps();
+        const selectedVideo = selectedMainVideoSegmentForRetake();
+        const videoPath = videoPathForRetakeSegment(selectedVideo);
+        const videoLength = Math.max(1, Math.round(Number(selectedVideo?.length || timeline.retakeLength || getTotalFrames() || Math.round(getDuration() * fps) || 1)));
+        const videoStart = Math.max(0, Math.round(Number(selectedVideo?.start || 0)));
+        const trimStart = Math.max(0, Math.round(Number(selectedVideo?.trimStart || selectedVideo?.trim_start || 0)));
+        timeline.retakeStart = Math.max(0, Math.round(Number(timeline.retakeStart ?? videoStart ?? 0)));
+        if (!Number.isFinite(Number(timeline.retakeStart))) timeline.retakeStart = videoStart;
+        timeline.retakeLength = Math.max(1, Math.round(Number(timeline.retakeLength || videoLength)));
+        timeline.retakeStrength = Math.max(0, Math.min(1, Number(timeline.retakeStrength ?? selectedVideo?.retakeStrength ?? selectedVideo?.guideStrength ?? selectedVideo?.strength ?? 1) || 1));
+        timeline.normalStartFrame = Math.max(0, Math.round(Number(timeline.normalStartFrame ?? 0) || 0));
+        timeline.normalDurationFrames = Math.max(1, Math.round(Number(timeline.normalDurationFrames || getTotalFrames() || videoLength)));
+        const retakePrompt = String(timeline.retake_global_prompt || timeline.retakePrompt || promptArea?.value || promptWidget?.value || timeline.global_prompt || "").trim();
+        timeline.retake_global_prompt = retakePrompt;
+        timeline.retakePrompt = retakePrompt;
+        if (videoPath) {
+            const previous = timeline.retakeVideo && typeof timeline.retakeVideo === "object" ? timeline.retakeVideo : {};
+            timeline.retakeVideo = {
+                ...previous,
+                id: previous.id || selectedVideo?.id || "retake_video",
+                type: "video",
+                imageFile: videoPath,
+                videoFile: videoPath,
+                fileName: selectedVideo?.fileName || selectedVideo?.name || videoPath.split(/[\\/]/).pop() || videoPath,
+                start: 0,
+                length: videoLength,
+                trimStart,
+                videoDurationFrames: Math.max(videoLength + trimStart, Number(previous.videoDurationFrames || 0) || videoLength),
+                frame_rate: fps,
+                source: "shotboard_main_video_lane",
+            };
+        }
+    };
     const writeTimeline = (options = {}) => {
         if (!options.skipDomSync) syncTimelineTextFromDom();
         neutralizeLegacyStepTransitions();
@@ -7647,6 +7982,7 @@ function renderShotboardV3(node) {
         cleanupAudioPlaceholdersOverlappingMedia();
         magnetize();
         normalizeTimelineSegmentReferences();
+        syncRetakeContractFromTimeline();
         const fps = getFps();
         const effectiveDurationSeconds = getDuration();
         timeline.duration_seconds = effectiveDurationSeconds;
@@ -7655,6 +7991,11 @@ function renderShotboardV3(node) {
         const audioHasMedia = (timeline.audioSegments || []).some((seg) => audioSegmentHasMedia(seg));
         const motionHasMedia = isShotboardV4 && (timeline.motionSegments || []).some((seg) => segmentHasMotionMedia(seg) && !seg.placeholder);
         const useCustomMotion = Boolean(isShotboardV4 && timeline.motionTrackEnabled !== false && (timeline.useCustomMotion || timeline.use_custom_motion || motionHasMedia));
+        if (isShotboardV4) {
+            timeline.motionSegments = (timeline.motionSegments || []).map((seg) => clampMotionSegment(seg));
+            timeline.motionClips = timeline.motionSegments;
+        }
+        const icLoraSettings = isShotboardV4 ? activeIcLoraSettings() : { name: "None", strength: 1, role: "motion_reference", imageAttentionStrength: 1 };
         const durationFrames = getTotalFrames();
         const visual = (timeline.segments || [])
             .filter((seg) => String(seg.type || "image") !== "audio" && !seg.placeholder)
@@ -7736,6 +8077,56 @@ function renderShotboardV3(node) {
                 guide_strength: guideStrength,
             };
         }
+        const promptBlocks = visual
+            .filter((seg) => String(seg.prompt ?? seg.local_prompt ?? seg.relay_prompt ?? "").trim())
+            .map((seg, index) => ({
+                id: String(seg.promptBlockId || seg.prompt_block_id || `prompt_${index + 1}`),
+                clipId: String(seg.id || ""),
+                start: Math.max(0, Math.round(Number(seg.start || 0))),
+                length: Math.max(1, Math.round(Number(seg.length || 1))),
+                prompt: String(seg.prompt ?? seg.local_prompt ?? seg.relay_prompt ?? "").trim(),
+                enabled: seg.relay_manual_off !== true && seg.promptrelay_manual_off !== true,
+            }));
+        const sourceAudioSegments = isShotboardV4 && Boolean(timeline.audioInputEnabled || timeline.audio_input_enabled) && Boolean(timeline.sourceVoiceLock || timeline.source_voice_lock)
+            ? visual
+                .filter((seg) => isTimelineVideoSegment(seg) && videoPathForSegment(seg))
+                .map((seg, index) => ({
+                    id: String(seg.audioSourceId || seg.audio_source_id || `source_audio_${index + 1}`),
+                    clipId: String(seg.id || ""),
+                    type: "source_video_audio",
+                    audioFile: videoPathForSegment(seg),
+                    videoFile: videoPathForSegment(seg),
+                    start: Math.max(0, Math.round(Number(seg.start || 0))),
+                    length: Math.max(1, Math.round(Number(seg.length || 1))),
+                    trimStart: Math.max(0, Math.round(Number(seg.trimStart || seg.trim_start || 0))),
+                    track: Math.max(0, Math.round(Number(seg.audioTrack || seg.track || 0) || 0)),
+                    source: "video_clip_voice_lock",
+                }))
+            : (Array.isArray(timeline.sourceAudioSegments) ? timeline.sourceAudioSegments : []);
+        timeline.promptBlocks = promptBlocks;
+        timeline.prompt_blocks = promptBlocks;
+        timeline.sourceAudioSegments = sourceAudioSegments;
+        timeline.source_audio_segments = sourceAudioSegments;
+        const timelineControlContract = isShotboardV4 ? {
+            video_lane: "main",
+            motion_lane: "ic_lora_reference",
+            audio_lane: "audio",
+            supports_video_scrub: true,
+            supports_video_trim: true,
+            supports_split_at_playhead: true,
+            supports_source_voice_lock: true,
+            supports_audio_inpaint: true,
+            supports_retake_range: true,
+            supports_in_out_points: true,
+            time_units: timelineTimeUnits(),
+            magnet_enabled: timelineMagnetEnabled(),
+            clip_edit_mode: String(timeline.clipEditMode || timeline.clip_edit_mode || "timeline_trim_split_extend"),
+            retake_mode: Boolean(timeline.retakeMode),
+            retake_has_video: Boolean(timeline.retakeVideo && typeof timeline.retakeVideo === "object"),
+            continuation_mode: String(timeline.continuationMode || timeline.continuation_mode || "source_video"),
+            guide_frame_policy: String(timeline.guideFramePolicy || timeline.guide_frame_policy || "prompt_behavior_guide_geography"),
+        } : {};
+        const videoTimelineEnabled = Boolean(timeline.videoToVideoEnabled ?? timeline.video_to_video_enabled ?? (motionHasMedia || visual.some((seg) => isTimelineVideoSegment(seg))));
         node.properties = node.properties || {};
         const nextTruthRevision = Math.max(
             Number(node.properties.iamccs_v3_timeline_revision || 0),
@@ -7763,10 +8154,60 @@ function renderShotboardV3(node) {
             use_custom_motion: useCustomMotion,
             useCustomMotion,
             motionTrackEnabled: isShotboardV4 ? timeline.motionTrackEnabled !== false : undefined,
+            videoToVideoEnabled: isShotboardV4 ? videoTimelineEnabled : undefined,
+            video_to_video_enabled: isShotboardV4 ? videoTimelineEnabled : undefined,
+            audioInputEnabled: isShotboardV4 ? Boolean(timeline.audioInputEnabled || timeline.audio_input_enabled) : undefined,
+            audio_input_enabled: isShotboardV4 ? Boolean(timeline.audioInputEnabled || timeline.audio_input_enabled) : undefined,
+            sourceVoiceLock: isShotboardV4 ? Boolean(timeline.sourceVoiceLock || timeline.source_voice_lock) : undefined,
+            source_voice_lock: isShotboardV4 ? Boolean(timeline.sourceVoiceLock || timeline.source_voice_lock) : undefined,
+            magnetEnabled: isShotboardV4 ? timelineMagnetEnabled() : undefined,
+            magnet_enabled: isShotboardV4 ? timelineMagnetEnabled() : undefined,
+            timeUnits: isShotboardV4 ? timelineTimeUnits() : undefined,
+            time_units: isShotboardV4 ? timelineTimeUnits() : undefined,
+            display_mode: isShotboardV4 ? timelineTimeUnits() : undefined,
+            displayMode: isShotboardV4 ? timelineTimeUnits() : undefined,
+            clipEditMode: isShotboardV4 ? String(timeline.clipEditMode || timeline.clip_edit_mode || "timeline_trim_split_extend") : undefined,
+            clip_edit_mode: isShotboardV4 ? String(timeline.clip_edit_mode || timeline.clipEditMode || "timeline_trim_split_extend") : undefined,
+            continuationMode: isShotboardV4 ? String(timeline.continuationMode || timeline.continuation_mode || "source_video") : undefined,
+            continuation_mode: isShotboardV4 ? String(timeline.continuation_mode || timeline.continuationMode || "source_video") : undefined,
+            guideFramePolicy: isShotboardV4 ? String(timeline.guideFramePolicy || timeline.guide_frame_policy || "prompt_behavior_guide_geography") : undefined,
+            guide_frame_policy: isShotboardV4 ? String(timeline.guide_frame_policy || timeline.guideFramePolicy || "prompt_behavior_guide_geography") : undefined,
+            retakeMode: isShotboardV4 ? Boolean(timeline.retakeMode) : undefined,
+            retake_mode: isShotboardV4 ? Boolean(timeline.retakeMode) : undefined,
+            retakeVideo: isShotboardV4 ? (timeline.retakeVideo || null) : undefined,
+            retake_video: isShotboardV4 ? (timeline.retakeVideo || null) : undefined,
+            retakeStart: isShotboardV4 ? Math.max(0, Math.round(Number(timeline.retakeStart || 0))) : undefined,
+            retake_start: isShotboardV4 ? Math.max(0, Math.round(Number(timeline.retakeStart || 0))) : undefined,
+            retakeLength: isShotboardV4 ? Math.max(0, Math.round(Number(timeline.retakeLength || 0))) : undefined,
+            retake_length: isShotboardV4 ? Math.max(0, Math.round(Number(timeline.retakeLength || 0))) : undefined,
+            retakeStrength: isShotboardV4 ? Math.max(0, Math.min(1, Number(timeline.retakeStrength ?? 1) || 1)) : undefined,
+            retake_strength: isShotboardV4 ? Math.max(0, Math.min(1, Number(timeline.retakeStrength ?? 1) || 1)) : undefined,
+            retakePrompt: isShotboardV4 ? String(timeline.retakePrompt || timeline.retake_global_prompt || "") : undefined,
+            retake_prompt: isShotboardV4 ? String(timeline.retakePrompt || timeline.retake_global_prompt || "") : undefined,
+            retake_global_prompt: isShotboardV4 ? String(timeline.retake_global_prompt || timeline.retakePrompt || "") : undefined,
+            normalStartFrame: isShotboardV4 ? Math.max(0, Math.round(Number(timeline.normalStartFrame || 0))) : undefined,
+            normal_start_frame: isShotboardV4 ? Math.max(0, Math.round(Number(timeline.normalStartFrame || 0))) : undefined,
+            normalDurationFrames: isShotboardV4 ? Math.max(1, Math.round(Number(timeline.normalDurationFrames || durationFrames || 1))) : undefined,
+            normal_duration_frames: isShotboardV4 ? Math.max(1, Math.round(Number(timeline.normalDurationFrames || durationFrames || 1))) : undefined,
             override_audio: isShotboardV4 ? Boolean(timeline.overrideAudio || timeline.override_audio) : undefined,
             overrideAudio: isShotboardV4 ? Boolean(timeline.overrideAudio || timeline.override_audio) : undefined,
             inpaint_audio: isShotboardV4 ? Boolean(timeline.inpaintAudio || timeline.inpaint_audio) : undefined,
             inpaintAudio: isShotboardV4 ? Boolean(timeline.inpaintAudio || timeline.inpaint_audio) : undefined,
+            ic_lora_name: isShotboardV4 ? icLoraSettings.name : undefined,
+            icLoraName: isShotboardV4 ? icLoraSettings.name : undefined,
+            ic_lora_strength: isShotboardV4 ? icLoraSettings.strength : undefined,
+            icLoraStrength: isShotboardV4 ? icLoraSettings.strength : undefined,
+            ic_lora_role: isShotboardV4 ? icLoraSettings.role : undefined,
+            image_attention_strength: isShotboardV4 ? icLoraSettings.imageAttentionStrength : undefined,
+            backend_settings: isShotboardV4 ? {
+                ...(timeline.backend_settings && typeof timeline.backend_settings === "object" ? timeline.backend_settings : {}),
+                ic_lora_name: icLoraSettings.name,
+                ic_lora_strength: icLoraSettings.strength,
+                ic_lora_role: icLoraSettings.role,
+                image_attention_strength: icLoraSettings.imageAttentionStrength,
+                motion_segments_drive_ic_lora: motionHasMedia,
+                backend_widgets_are_fallback: true,
+            } : undefined,
             audioSyncMode: String(timeline.audioSyncMode || "timeline_audio"),
             generationStrategy: String(timeline.generationStrategy || "single_timeline"),
             director_local_prompts: effectiveDirectorPrompts.join(" | "),
@@ -7796,6 +8237,11 @@ function renderShotboardV3(node) {
             segments: timeline.segments,
             motionSegments: isShotboardV4 ? timeline.motionSegments : undefined,
             motionClips: isShotboardV4 ? timeline.motionSegments : undefined,
+            promptBlocks: isShotboardV4 ? promptBlocks : undefined,
+            prompt_blocks: isShotboardV4 ? promptBlocks : undefined,
+            sourceAudioSegments: isShotboardV4 ? sourceAudioSegments : undefined,
+            source_audio_segments: isShotboardV4 ? sourceAudioSegments : undefined,
+            timelineControlContract: isShotboardV4 ? timelineControlContract : undefined,
             audioSegments: timeline.audioSegments,
             rows: timelineRows,
             multiGeneration,
@@ -7857,6 +8303,37 @@ function renderShotboardV3(node) {
             motionTrackEnabled: isShotboardV4 ? source.motionTrackEnabled !== false : false,
             useCustomMotion: Boolean(source.useCustomMotion ?? source.use_custom_motion ?? (Array.isArray(source.motionSegments) && source.motionSegments.length)),
             use_custom_motion: Boolean(source.use_custom_motion ?? source.useCustomMotion ?? (Array.isArray(source.motionSegments) && source.motionSegments.length)),
+            videoToVideoEnabled: Boolean(source.videoToVideoEnabled ?? source.video_to_video_enabled ?? timeline.videoToVideoEnabled ?? isShotboardV4),
+            video_to_video_enabled: Boolean(source.video_to_video_enabled ?? source.videoToVideoEnabled ?? timeline.video_to_video_enabled ?? isShotboardV4),
+            audioInputEnabled: Boolean(source.audioInputEnabled ?? source.audio_input_enabled ?? timeline.audioInputEnabled),
+            audio_input_enabled: Boolean(source.audio_input_enabled ?? source.audioInputEnabled ?? timeline.audio_input_enabled),
+            sourceVoiceLock: Boolean(source.sourceVoiceLock ?? source.source_voice_lock ?? timeline.sourceVoiceLock),
+            source_voice_lock: Boolean(source.source_voice_lock ?? source.sourceVoiceLock ?? timeline.source_voice_lock),
+            magnetEnabled: source.magnetEnabled !== undefined ? Boolean(source.magnetEnabled) : source.magnet_enabled !== undefined ? Boolean(source.magnet_enabled) : timelineMagnetEnabled(),
+            magnet_enabled: source.magnet_enabled !== undefined ? Boolean(source.magnet_enabled) : source.magnetEnabled !== undefined ? Boolean(source.magnetEnabled) : timelineMagnetEnabled(),
+            timeUnits: String(source.timeUnits || source.time_units || source.display_mode || source.displayMode || timeline.timeUnits || "seconds") === "frames" ? "frames" : "seconds",
+            time_units: String(source.time_units || source.timeUnits || source.display_mode || source.displayMode || timeline.time_units || "seconds") === "frames" ? "frames" : "seconds",
+            display_mode: String(source.display_mode || source.timeUnits || source.time_units || source.displayMode || timeline.display_mode || "seconds") === "frames" ? "frames" : "seconds",
+            displayMode: String(source.displayMode || source.timeUnits || source.time_units || source.display_mode || timeline.displayMode || "seconds") === "frames" ? "frames" : "seconds",
+            clipEditMode: String(source.clipEditMode || source.clip_edit_mode || timeline.clipEditMode || "timeline_trim_split_extend"),
+            clip_edit_mode: String(source.clip_edit_mode || source.clipEditMode || timeline.clip_edit_mode || "timeline_trim_split_extend"),
+            continuationMode: String(source.continuationMode || source.continuation_mode || timeline.continuationMode || "source_video"),
+            continuation_mode: String(source.continuation_mode || source.continuationMode || timeline.continuation_mode || "source_video"),
+            guideFramePolicy: String(source.guideFramePolicy || source.guide_frame_policy || timeline.guideFramePolicy || "prompt_behavior_guide_geography"),
+            guide_frame_policy: String(source.guide_frame_policy || source.guideFramePolicy || timeline.guide_frame_policy || "prompt_behavior_guide_geography"),
+            retakeMode: Boolean(source.retakeMode ?? source.retake_mode ?? timeline.retakeMode ?? false),
+            retakeVideo: source.retakeVideo && typeof source.retakeVideo === "object" ? source.retakeVideo : (timeline.retakeVideo || null),
+            retakeStart: Math.max(0, Math.round(Number(source.retakeStart ?? source.retake_start ?? timeline.retakeStart ?? 0) || 0)),
+            retakeLength: Math.max(0, Math.round(Number(source.retakeLength ?? source.retake_length ?? timeline.retakeLength ?? 0) || 0)),
+            retakeStrength: Math.max(0, Math.min(1, Number(source.retakeStrength ?? source.retake_strength ?? timeline.retakeStrength ?? 1) || 1)),
+            retakePrompt: String(source.retakePrompt ?? source.retake_prompt ?? source.retake_global_prompt ?? timeline.retakePrompt ?? timeline.retake_global_prompt ?? ""),
+            retake_global_prompt: String(source.retake_global_prompt ?? source.retakePrompt ?? source.retake_prompt ?? timeline.retake_global_prompt ?? timeline.retakePrompt ?? ""),
+            normalStartFrame: Math.max(0, Math.round(Number(source.normalStartFrame ?? source.normal_start_frame ?? timeline.normalStartFrame ?? 0) || 0)),
+            normalDurationFrames: Math.max(0, Math.round(Number(source.normalDurationFrames ?? source.normal_duration_frames ?? source.duration_frames ?? timeline.normalDurationFrames ?? 0) || 0)),
+            promptBlocks: Array.isArray(source.promptBlocks) ? source.promptBlocks : Array.isArray(source.prompt_blocks) ? source.prompt_blocks : (timeline.promptBlocks || []),
+            prompt_blocks: Array.isArray(source.prompt_blocks) ? source.prompt_blocks : Array.isArray(source.promptBlocks) ? source.promptBlocks : (timeline.prompt_blocks || []),
+            sourceAudioSegments: Array.isArray(source.sourceAudioSegments) ? source.sourceAudioSegments : Array.isArray(source.source_audio_segments) ? source.source_audio_segments : (timeline.sourceAudioSegments || []),
+            source_audio_segments: Array.isArray(source.source_audio_segments) ? source.source_audio_segments : Array.isArray(source.sourceAudioSegments) ? source.sourceAudioSegments : (timeline.source_audio_segments || []),
             overrideAudio: Boolean(source.overrideAudio ?? source.override_audio ?? timeline.overrideAudio),
             override_audio: Boolean(source.override_audio ?? source.overrideAudio ?? timeline.override_audio),
             inpaintAudio: Boolean(source.inpaintAudio ?? source.inpaint_audio ?? timeline.inpaintAudio),
@@ -7884,6 +8361,28 @@ function renderShotboardV3(node) {
         timeline.motionSegments = (timeline.motionSegments || []).map((seg) => clampMotionSegment({ ...(seg || {}), id: seg?.id || newId("mot") }));
         timeline.motionClips = timeline.motionSegments;
         if (timeline.motionTrackEnabled === undefined) timeline.motionTrackEnabled = true;
+        if (timeline.magnetEnabled === undefined && timeline.magnet_enabled === undefined) setTimelineBoolAliases(["magnetEnabled", "magnet_enabled"], true);
+        if (timeline.audioInputEnabled === undefined && timeline.audio_input_enabled === undefined) setTimelineBoolAliases(["audioInputEnabled", "audio_input_enabled"], false);
+        if (timeline.sourceVoiceLock === undefined && timeline.source_voice_lock === undefined) setTimelineBoolAliases(["sourceVoiceLock", "source_voice_lock"], false);
+        if (timeline.videoToVideoEnabled === undefined && timeline.video_to_video_enabled === undefined) setTimelineBoolAliases(["videoToVideoEnabled", "video_to_video_enabled"], true);
+        setTimelineTimeUnits(timelineTimeUnits());
+        const loadedRetakeMode = Boolean(timeline.retakeMode || timeline.retake_mode);
+        timeline.clipEditMode = String(timeline.clipEditMode || timeline.clip_edit_mode || "timeline_trim_split_extend");
+        if (loadedRetakeMode && timeline.clipEditMode === "timeline_trim_split_extend") timeline.clipEditMode = "retake_range";
+        timeline.clip_edit_mode = timeline.clipEditMode;
+        timeline.continuationMode = String(timeline.continuationMode || timeline.continuation_mode || "source_video");
+        timeline.continuation_mode = timeline.continuationMode;
+        timeline.guideFramePolicy = String(timeline.guideFramePolicy || timeline.guide_frame_policy || "prompt_behavior_guide_geography");
+        timeline.guide_frame_policy = timeline.guideFramePolicy;
+        timeline.retakeMode = Boolean(loadedRetakeMode || timeline.clipEditMode === "retake_range");
+        if (timeline.retakeVideo === undefined) timeline.retakeVideo = null;
+        timeline.retakeStart = Math.max(0, Math.round(Number(timeline.retakeStart || timeline.retake_start || 0) || 0));
+        timeline.retakeLength = Math.max(0, Math.round(Number(timeline.retakeLength || timeline.retake_length || 0) || 0));
+        timeline.retakeStrength = Math.max(0, Math.min(1, Number(timeline.retakeStrength ?? timeline.retake_strength ?? 1) || 1));
+        timeline.retakePrompt = String(timeline.retakePrompt ?? timeline.retake_prompt ?? timeline.retake_global_prompt ?? "");
+        timeline.retake_global_prompt = String(timeline.retake_global_prompt ?? timeline.retakePrompt ?? "");
+        timeline.normalStartFrame = Math.max(0, Math.round(Number(timeline.normalStartFrame || timeline.normal_start_frame || 0) || 0));
+        timeline.normalDurationFrames = Math.max(0, Math.round(Number(timeline.normalDurationFrames || timeline.normal_duration_frames || 0) || 0));
     }
     const collapsedNodeHeight = () => {
         const tracks = Math.max(1, Math.round(Number(timeline.audioTrackCount || 1)));
@@ -8150,6 +8649,19 @@ function renderShotboardV3(node) {
                 timeline_id: timelineId,
                 saved_at: new Date().toISOString(),
             };
+            // Store each take's real audio lane beside its visual timeline. The
+            // multi map remains canonical, while this makes a package import
+            // self-contained even when the active timeline was T01 at save time.
+            const timelineAudio = multiAudioSegmentsForTake(multi, take);
+            visual.audioSegments = cloneForMultiTimeline(timelineAudio, []);
+            visual.audioTrackCount = Math.max(1, ...timelineAudio.map((seg) => Math.max(0, Number(seg?.track || 0)) + 1));
+            visual.audioSyncMode = "timeline_audio";
+            visual.audio_data = JSON.stringify({
+                audioSegments: visual.audioSegments,
+                audioTrackCount: visual.audioTrackCount,
+                use_custom_audio: visual.audioSegments.some((seg) => String(seg?.audioFile || seg?.audioB64 || "").trim()),
+                audioSyncMode: "timeline_audio",
+            });
             const localPaths = collectVisualTimelineImagePaths(visual, refPaths());
             for (const path of localPaths) addAllPath(path);
             const images = localPaths.map((path, index) => ({
@@ -8168,10 +8680,12 @@ function renderShotboardV3(node) {
                     schema_version: 1,
                     saved_at: visual.saved_at,
                     image_count: localPaths.length,
+                    audio_count: timelineAudio.length,
                 },
                 timeline: visual,
                 image_paths: localPaths,
                 images,
+                audioSegments: cloneForMultiTimeline(timelineAudio, []),
             };
         });
         const nextMultiGeneration = {
@@ -8748,6 +9262,25 @@ function renderShotboardV3(node) {
         wrap.append(span, ctrl);
         settings.appendChild(wrap);
     };
+    const addTimelineChoiceSetting = (label, value, choices, onChange) => {
+        const wrap = document.createElement("label");
+        wrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
+        const span = document.createElement("span");
+        span.textContent = label;
+        const ctrl = makeChoiceSelect(String(value), choices, (next) => {
+            onChange(next);
+            writeTimeline();
+            draw();
+        });
+        styleValueControls(ctrl);
+        wrap.append(span, ctrl);
+        settings.appendChild(wrap);
+        return ctrl;
+    };
+    const addTimelineBoolSetting = (label, active, onChange) => addTimelineChoiceSetting(label, active ? "on" : "off", [
+        { value: "on", label: "On" },
+        { value: "off", label: "Off" },
+    ], (next) => onChange(next === "on"));
     addSelectSetting("Resize", "image_resize_method", ["crop", "pad", "keep proportion", "stretch"]);
     addSetting("Multiple", "image_multiple_of", "1", "1");
     addSetting("Relay softness", "promptrelay_epsilon", "0.0001", "0.0001");
@@ -8759,6 +9292,31 @@ function renderShotboardV3(node) {
     styleValueControls(guidePolicy);
     guidePolicyWrap.append(guidePolicyLabel, guidePolicy);
     settings.appendChild(guidePolicyWrap);
+
+    if (isShotboardV4) {
+        addTimelineChoiceSetting("Units", timelineTimeUnits(), [
+            { value: "seconds", label: "Seconds" },
+            { value: "frames", label: "Frames" },
+        ], setTimelineTimeUnits);
+        addTimelineBoolSetting("Magnet", timelineMagnetEnabled(), (active) => setTimelineBoolAliases(["magnetEnabled", "magnet_enabled"], active));
+        addTimelineBoolSetting("Audio In", Boolean(timeline.audioInputEnabled || timeline.audio_input_enabled), (active) => setTimelineBoolAliases(["audioInputEnabled", "audio_input_enabled"], active));
+        addTimelineBoolSetting("Voice", Boolean(timeline.sourceVoiceLock || timeline.source_voice_lock), (active) => setTimelineBoolAliases(["sourceVoiceLock", "source_voice_lock"], active));
+        addTimelineBoolSetting("Inpaint", Boolean(timeline.inpaintAudio || timeline.inpaint_audio), (active) => setTimelineBoolAliases(["inpaintAudio", "inpaint_audio"], active));
+        addTimelineChoiceSetting("Edit", String(timeline.clipEditMode || timeline.clip_edit_mode || "timeline_trim_split_extend"), [
+            { value: "timeline_trim_split_extend", label: "Trim/Split" },
+            { value: "extend_source", label: "Extend" },
+            { value: "retake_range", label: "Retake" },
+            { value: "combine_takes", label: "Combine" },
+        ], (next) => {
+            timeline.clipEditMode = next;
+            timeline.clip_edit_mode = next;
+            timeline.retakeMode = next === "retake_range";
+            if (timeline.retakeMode) {
+                timeline.retake_global_prompt = String(timeline.retake_global_prompt || timeline.retakePrompt || promptArea?.value || promptWidget?.value || "");
+                timeline.retakePrompt = timeline.retake_global_prompt;
+            }
+        });
+    }
 
     const parityWrap = document.createElement("label");
     parityWrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
@@ -9036,7 +9594,7 @@ function renderShotboardV3(node) {
     }
 
     function frameLabel(frame) {
-        return `${(frame / getFps()).toFixed(2)}s`;
+        return timelineTimeUnits() === "frames" ? `${Math.round(Number(frame || 0))}f` : `${(frame / getFps()).toFixed(2)}s`;
     }
 
     function chooseFrameRulerStep(total, viewportWidth) {
@@ -9096,7 +9654,7 @@ function renderShotboardV3(node) {
         frameRuler.appendChild(marker);
         const info = document.createElement("div");
         info.style.cssText = `position:absolute;right:7px;top:5px;color:#FFFFFF;font-size:10px;font-weight:950;background:rgba(0,0,0,.78);padding:3px 6px;border:1px solid ${purple.accent};border-radius:4px;pointer-events:none;text-shadow:0 1px 2px #000;`;
-        info.textContent = `${total}f / ${fps}fps`;
+        info.textContent = timelineTimeUnits() === "frames" ? `${total}f / ${fps}fps` : `${(total / fps).toFixed(2)}s / ${fps}fps`;
         frameRuler.appendChild(info);
     }
 
@@ -9148,7 +9706,7 @@ function renderShotboardV3(node) {
         ruler.appendChild(marker);
         const last = document.createElement("div");
         last.style.cssText = `position:absolute;right:6px;top:5px;color:#FFFFFF;font-size:10px;font-weight:950;background:rgba(0,0,0,.78);padding:3px 6px;border:1px solid ${purple.accent};border-radius:4px;pointer-events:none;text-shadow:0 1px 2px #000;`;
-        last.textContent = `${seconds.toFixed(2)}s`;
+        last.textContent = timelineTimeUnits() === "frames" ? `${total}f` : `${seconds.toFixed(2)}s`;
         ruler.appendChild(last);
     }
 
@@ -9158,7 +9716,7 @@ function renderShotboardV3(node) {
         scrub.max = String(total);
         scrub.value = String(playFrame);
         scrub.style.setProperty("--iamccs-play-progress", `${total ? (playFrame / total) * 100 : 0}%`);
-        timeReadout.textContent = `${(playFrame / getFps()).toFixed(2)}s`;
+        timeReadout.textContent = frameLabel(playFrame);
         playBtn.textContent = isPlaying ? "Pause" : "Play";
         loopBtn.style.borderColor = isLooping ? purple.play : purple.border;
         loopBtn.style.color = isLooping ? "#FFF2B8" : purple.text;
@@ -11491,6 +12049,7 @@ function renderShotboardV3(node) {
     }
 
     function makeIcLoraBlock(seg) {
+        applyIcLoraTruthToSegment(seg);
         const total = getTotalFrames();
         const left = (Number(seg.start || 0) / total) * 100;
         const width = Math.max(1, (Number(seg.length || 1) / total) * 100);
@@ -11498,7 +12057,7 @@ function renderShotboardV3(node) {
         const strength = Math.max(0, Math.min(2, Number(seg.videoStrength ?? seg.video_strength ?? 1) || 0));
         const attention = Math.max(0, Math.min(2, Number(seg.videoAttentionStrength ?? seg.video_attention_strength ?? 1) || 0));
         const role = String(seg.icLoraRole || seg.ic_lora_role || "motion_reference");
-        const loraHint = String(seg.icLoraName || seg.ic_lora_name || seg.lora || "IC-LoRA").replace(/\.safetensors$/i, "");
+        const loraHint = String(seg.icLoraName || seg.ic_lora_name || seg.lora || "None").replace(/\.safetensors$/i, "");
         const block = document.createElement("div");
         block.className = "iamccs-v4-ic-lora-clip";
         block.style.cssText = [
@@ -12843,11 +13402,17 @@ function renderShotboardV3(node) {
                     else if (key === "videoAttentionStrength") {
                         seg.videoAttentionStrength = Math.max(0, Math.min(2, raw || 0));
                         seg.video_attention_strength = seg.videoAttentionStrength;
+                        seg.imageAttentionStrength = Math.max(0, Math.min(1, seg.videoAttentionStrength));
+                        seg.image_attention_strength = seg.imageAttentionStrength;
+                    }
+                    else if (key === "icLoraStrength") {
+                        seg.icLoraStrength = Math.max(-100, Math.min(100, raw || 0));
+                        seg.ic_lora_strength = seg.icLoraStrength;
                     }
                     clampMotionSegment(seg);
                     writeTimeline({ force: true });
                     draw();
-                }, { liveInput: key === "videoStrength" || key === "videoAttentionStrength" });
+                }, { liveInput: key === "videoStrength" || key === "videoAttentionStrength" || key === "icLoraStrength" });
                 ctrl.style.gridTemplateColumns = "22px minmax(44px,1fr) 22px";
                 ctrl.style.gap = "5px";
                 ctrl.querySelectorAll("button").forEach((button) => {
@@ -12862,7 +13427,7 @@ function renderShotboardV3(node) {
                 const card = document.createElement("div");
                 card.style.cssText = [
                     "display:grid",
-                    "grid-template-columns:34px minmax(160px,1fr) minmax(220px,1.1fr) 78px 78px 78px 90px 100px 58px 34px",
+                    "grid-template-columns:34px minmax(140px,.85fr) minmax(160px,.75fr) minmax(220px,1fr) 68px 68px 68px 72px 78px 88px 52px 34px",
                     "gap:8px",
                     "align-items:end",
                     "margin:0 0 6px 0",
@@ -12906,15 +13471,55 @@ function renderShotboardV3(node) {
                     { value: "camera_reference", label: "Camera guide" },
                     { value: "motion_brush", label: "Motion brush" },
                 ], (value) => {
+                    const previousDefault = icLoraPresetValue(seg.icLoraRole || seg.ic_lora_role || "motion_reference");
                     seg.icLoraRole = value;
                     seg.ic_lora_role = value;
-                    seg.icLoraName = value === "3dreal_reference" ? "3DREAL" : seg.icLoraName || "IC-LoRA";
+                    const currentName = String(seg.icLoraName || seg.ic_lora_name || seg.lora || "").trim();
+                    if (IC_LORA_PLACEHOLDERS.has(currentName.toLowerCase()) || currentName === previousDefault) {
+                        seg.icLoraName = icLoraPresetValue(value);
+                        seg.ic_lora_name = seg.icLoraName;
+                        seg.lora = seg.icLoraName;
+                    }
+                    applyIcLoraTruthToSegment(seg);
                     writeTimeline({ force: true });
                     draw();
                 });
                 role.style.height = "28px";
                 styleValueControls(role);
                 roleWrap.append(roleLabel, role);
+
+                const loraWrap = document.createElement("label");
+                loraWrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:9px;font-weight:900;text-align:center;min-width:0;`;
+                const loraLabel = document.createElement("span");
+                loraLabel.textContent = "Model LoRA";
+                const loraSelect = document.createElement("select");
+                const selectedLora = normalizeIcLoraName(seg.icLoraName || seg.ic_lora_name || seg.lora, seg.icLoraRole || seg.ic_lora_role);
+                const presetValues = new Set(IC_LORA_PRESETS.map((item) => item.value));
+                IC_LORA_PRESETS.forEach((item) => {
+                    const opt = document.createElement("option");
+                    opt.value = item.value;
+                    opt.textContent = item.label;
+                    loraSelect.appendChild(opt);
+                });
+                if (selectedLora && !presetValues.has(selectedLora)) {
+                    const opt = document.createElement("option");
+                    opt.value = selectedLora;
+                    opt.textContent = selectedLora.replace(/\.safetensors$/i, "");
+                    loraSelect.appendChild(opt);
+                }
+                loraSelect.value = selectedLora;
+                loraSelect.style.cssText = inputBase() + `height:28px;background:${purple.valueBg};border-color:rgba(129,211,204,.50);color:${purple.valueText};font-weight:850;text-align:center;`;
+                loraSelect.onpointerdown = (event) => event.stopPropagation();
+                loraSelect.onchange = () => {
+                    seg.icLoraName = loraSelect.value;
+                    seg.ic_lora_name = loraSelect.value;
+                    seg.lora = loraSelect.value;
+                    applyIcLoraTruthToSegment(seg);
+                    writeTimeline({ force: true });
+                    draw();
+                };
+                protectControlDrag(loraSelect);
+                loraWrap.append(loraLabel, loraSelect);
 
                 const overrideWrap = document.createElement("label");
                 overrideWrap.style.cssText = `display:flex;flex-direction:column;align-items:center;justify-content:end;gap:5px;color:${purple.muted};font-size:9px;font-weight:900;text-align:center;`;
@@ -12952,10 +13557,12 @@ function renderShotboardV3(node) {
                     protectControlDrag(badge),
                     meta,
                     roleWrap,
+                    loraWrap,
                     motionNumber(seg, "Start", "start"),
                     motionNumber(seg, "Len", "length"),
                     motionNumber(seg, "Trim", "trimStart"),
-                    motionNumber(seg, "Strength", "videoStrength", "0.05", "0", "2"),
+                    motionNumber(seg, "LoRA", "icLoraStrength", "0.05", "-100", "100"),
+                    motionNumber(seg, "Video", "videoStrength", "0.05", "0", "2"),
                     motionNumber(seg, "Attention", "videoAttentionStrength", "0.05", "0", "2"),
                     overrideWrap,
                     protectControlDrag(remove)
@@ -13484,6 +14091,16 @@ function renderShotboardV3(node) {
                     replaceTarget.video_duration_frames = sourceFrames;
                     replaceTarget.trimStart = 0;
                     replaceTarget.trim_start = 0;
+                    replaceTarget.inPoint = 0;
+                    replaceTarget.in_point = 0;
+                    replaceTarget.outPoint = replaceTarget.length;
+                    replaceTarget.out_point = replaceTarget.length;
+                    replaceTarget.editMode = String(timeline.clipEditMode || timeline.clip_edit_mode || "timeline_trim_split_extend");
+                    replaceTarget.edit_mode = replaceTarget.editMode;
+                    replaceTarget.sourceRole = "editorial_video";
+                    replaceTarget.source_role = "editorial_video";
+                    replaceTarget.sourceVoiceLock = Boolean(timeline.sourceVoiceLock || timeline.source_voice_lock);
+                    replaceTarget.source_voice_lock = replaceTarget.sourceVoiceLock;
                     replaceTarget.ref = 0;
                     replaceTarget.use_video = true;
                     replaceTarget.use_guide = true;
@@ -13519,6 +14136,16 @@ function renderShotboardV3(node) {
                     sourceHeight: info.height,
                     sourceFps: getFps(),
                     source_fps: getFps(),
+                    inPoint: 0,
+                    in_point: 0,
+                    outPoint: length,
+                    out_point: length,
+                    editMode: String(timeline.clipEditMode || timeline.clip_edit_mode || "timeline_trim_split_extend"),
+                    edit_mode: String(timeline.clipEditMode || timeline.clip_edit_mode || "timeline_trim_split_extend"),
+                    sourceRole: "editorial_video",
+                    source_role: "editorial_video",
+                    sourceVoiceLock: Boolean(timeline.sourceVoiceLock || timeline.source_voice_lock),
+                    source_voice_lock: Boolean(timeline.sourceVoiceLock || timeline.source_voice_lock),
                     ref: 0,
                     label: file.name.replace(/\.[^.]+$/, "") || `video_${index + 1}`,
                     prompt: "",
@@ -13754,6 +14381,7 @@ function renderShotboardV3(node) {
                 const room = Math.max(1, getTotalFrames() - Math.min(cursor, Math.max(0, getTotalFrames() - 1)));
                 const length = Math.min(Math.max(1, info.durationFrames), Math.max(defaultLen(), room));
                 ensureDurationForFrames(cursor + length);
+                const inferredRole = /3d|real|render/i.test(file.name) ? "3dreal_reference" : "motion_reference";
                 const seg = clampMotionSegment({
                     id: newId("mot"),
                     type: "motion_video",
@@ -13769,8 +14397,21 @@ function renderShotboardV3(node) {
                     sourceWidth: info.width,
                     sourceHeight: info.height,
                     controlMode: "ic_lora_video",
-                    icLoraRole: /3d|real|render/i.test(file.name) ? "3dreal_reference" : "motion_reference",
-                    icLoraName: /3d|real|render/i.test(file.name) ? "3DREAL" : "IC-LoRA",
+                    icLoraRole: inferredRole,
+                    ic_lora_role: inferredRole,
+                    icLoraName: icLoraPresetValue(inferredRole),
+                    ic_lora_name: icLoraPresetValue(inferredRole),
+                    lora: icLoraPresetValue(inferredRole),
+                    icLoraStrength: 1,
+                    ic_lora_strength: 1,
+                    sourceRole: "motion_reference",
+                    source_role: "motion_reference",
+                    editMode: "trim_extend",
+                    edit_mode: "trim_extend",
+                    inPoint: 0,
+                    in_point: 0,
+                    outPoint: length,
+                    out_point: length,
                     videoStrength: 1,
                     videoAttentionStrength: 1,
                     audioOverride: false,
@@ -14030,6 +14671,9 @@ function renderShotboardV3(node) {
         }
         applyImportedSettings(settingsData, "board.settings");
         applyImportedSettings(board, workflowBoard ? "workflow.shotboard.widgets" : "board.root");
+        await restorePackagedAudioToComfyInput(board, (message) => {
+            showTimelineNotice(message, "warn");
+        });
         const paths = await packagedReferencePathsForImport(board, (message) => {
             showTimelineNotice(message, /failed/i.test(String(message || "")) ? "error" : "warn");
         });
@@ -14079,6 +14723,89 @@ function renderShotboardV3(node) {
             applyImportedSettings(loadedTimeline.settings, `${loadedTimelineSource}.settings`);
             applyImportedSettings(loadedTimeline, loadedTimelineSource);
         }
+        const restoreMultiPackageTimelines = (baseTimeline) => {
+            if (!baseTimeline || typeof baseTimeline !== "object") return baseTimeline;
+            const entries = [
+                ...(Array.isArray(board.timelines) ? board.timelines : []),
+                ...(Array.isArray(data?.timelines) && data.timelines !== board.timelines ? data.timelines : []),
+            ].filter((entry) => entry && typeof entry === "object");
+            const baseMulti = baseTimeline.multiGeneration && typeof baseTimeline.multiGeneration === "object"
+                ? cloneForMultiTimeline(baseTimeline.multiGeneration, {})
+                : (board.multiGeneration && typeof board.multiGeneration === "object" ? cloneForMultiTimeline(board.multiGeneration, {}) : {});
+            const shouldRestore = entries.length > 0 || boardIsMultiTimelinePackage(board) || Object.keys(baseMulti.visualTimelines || {}).length > 1;
+            if (!shouldRestore) return baseTimeline;
+            const visualTimelines = normalizeVisualTimelineMap(baseMulti.visualTimelines || board.visualTimelines || {});
+            const audioByTimeline = baseMulti.audioByTimeline && typeof baseMulti.audioByTimeline === "object"
+                ? cloneForMultiTimeline(baseMulti.audioByTimeline, {})
+                : {};
+            const durationByTimeline = baseMulti.durationByTimeline && typeof baseMulti.durationByTimeline === "object"
+                ? cloneForMultiTimeline(baseMulti.durationByTimeline, {})
+                : {};
+            const timelineDurations = baseMulti.timelineDurations && typeof baseMulti.timelineDurations === "object"
+                ? cloneForMultiTimeline(baseMulti.timelineDurations, {})
+                : {};
+            const importedFps = Math.max(1, Number(baseTimeline.frame_rate || fpsWidget?.value || 24));
+            for (const entry of entries) {
+                const item = entry.timeline && typeof entry.timeline === "object" ? cloneForMultiTimeline(entry.timeline, {}) : cloneForMultiTimeline(entry, {});
+                const take = multiTimelineTakeFromId(item.timeline_id || entry.timeline_id || entry.take || 1);
+                const timelineId = multiTimelineId(take);
+                item.timeline_id = timelineId;
+                visualTimelines[timelineId] = {
+                    ...defaultVisualTimeline(timelineId),
+                    ...(visualTimelines[timelineId] && typeof visualTimelines[timelineId] === "object" ? visualTimelines[timelineId] : {}),
+                    ...item,
+                    timeline_id: timelineId,
+                };
+                let entryAudio = Array.isArray(entry.audioSegments) ? entry.audioSegments : (Array.isArray(item.audioSegments) ? item.audioSegments : []);
+                if (!entryAudio.length && typeof item.audio_data === "string") {
+                    try { entryAudio = JSON.parse(item.audio_data)?.audioSegments || []; } catch {}
+                }
+                if (entryAudio.length) {
+                    audioByTimeline[timelineId] = entryAudio.filter((seg) => seg && typeof seg === "object").map((seg) => ({
+                        ...cloneForMultiTimeline(seg, {}),
+                        timelineId,
+                        multiTakeIndex: take,
+                        start: Math.max(0, Math.round(Number(seg?.localStart ?? seg?.start ?? 0) || 0)),
+                        localStart: Math.max(0, Math.round(Number(seg?.localStart ?? seg?.start ?? 0) || 0)),
+                    }));
+                }
+                const audioEnd = Math.max(0, ...(audioByTimeline[timelineId] || []).map((seg) => Math.max(0, Number(seg?.start || 0)) + Math.max(1, Number(seg?.length || seg?.audioDurationFrames || 1))));
+                const duration = Number(item.duration_seconds || item.duration || 0) || (audioEnd > 0 ? audioEnd / importedFps : 0);
+                if (duration > 0) {
+                    durationByTimeline[timelineId] = Number(duration.toFixed(6));
+                    timelineDurations[timelineId] = Number(duration.toFixed(6));
+                }
+            }
+            const ids = Array.from(new Set([
+                ...(Array.isArray(baseMulti.timelineIds) ? baseMulti.timelineIds.map((id) => multiTimelineId(multiTimelineTakeFromId(id))) : []),
+                ...Object.keys(visualTimelines),
+                ...Object.keys(audioByTimeline),
+            ])).sort((a, b) => multiTimelineTakeFromId(a) - multiTimelineTakeFromId(b));
+            const activeTake = Math.max(1, Number(baseMulti.activeTake || board.activeTake || 1));
+            const activeTimelineId = multiTimelineId(activeTake);
+            const restoredMulti = {
+                ...baseMulti,
+                enabled: true,
+                activeTake,
+                activeTimelineId,
+                timelineIds: ids,
+                visualTimelines,
+                audioByTimeline,
+                durationByTimeline,
+                timelineDurations,
+                restoredFromMultiPackage: true,
+            };
+            const activeVisual = visualTimelines[activeTimelineId] || visualTimelines[ids[0]] || null;
+            const activeAudio = audioByTimeline[activeTimelineId] || audioByTimeline[ids[0]] || [];
+            return {
+                ...baseTimeline,
+                ...(activeVisual && typeof activeVisual === "object" ? activeVisual : {}),
+                multiGeneration: restoredMulti,
+                audioSegments: activeAudio,
+                audioTrackCount: Math.max(1, ...activeAudio.map((seg) => Math.max(0, Number(seg?.track || 0)) + 1)),
+            };
+        };
+        loadedTimeline = restoreMultiPackageTimelines(loadedTimeline);
         if (!importedDefaultForceExplicit) {
             const inferredDefaultForce = inferDefaultForceFromTimeline(loadedTimeline || board);
             if (Number.isFinite(Number(inferredDefaultForce))) {
@@ -14359,14 +15086,16 @@ function renderShotboardV3(node) {
         stopPlayback();
         promptArea.value = "";
         setWidgetValue(node, "global_prompt", "");
-        timeline = { schema: "iamccs.cine.filmmaker_timeline", schema_version: 2, segments: [], motionSegments: [], motionClips: [], motionTrackEnabled: isShotboardV4, useCustomMotion: false, use_custom_motion: false, overrideAudio: false, override_audio: false, inpaintAudio: false, inpaint_audio: false, audioSegments: [], audioTrackCount: 1, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
+        timeline = { schema: "iamccs.cine.filmmaker_timeline", schema_version: 2, segments: [], motionSegments: [], motionClips: [], motionTrackEnabled: isShotboardV4, useCustomMotion: false, use_custom_motion: false, overrideAudio: false, override_audio: false, inpaintAudio: false, inpaint_audio: false, audioInputEnabled: false, audio_input_enabled: false, sourceVoiceLock: false, source_voice_lock: false, videoToVideoEnabled: isShotboardV4, video_to_video_enabled: isShotboardV4, magnetEnabled: true, magnet_enabled: true, timeUnits: "seconds", time_units: "seconds", display_mode: "seconds", displayMode: "seconds", clipEditMode: "timeline_trim_split_extend", clip_edit_mode: "timeline_trim_split_extend", continuationMode: "source_video", continuation_mode: "source_video", guideFramePolicy: "prompt_behavior_guide_geography", guide_frame_policy: "prompt_behavior_guide_geography", promptBlocks: [], sourceAudioSegments: [], audioSegments: [], audioTrackCount: 1, ic_lora_name: "None", icLoraName: "None", ic_lora_strength: 1, icLoraStrength: 1, backend_settings: { ic_lora_name: "None", ic_lora_strength: 1, backend_widgets_are_fallback: true }, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
         selectedId = null;
         clearOwnReferencePaths(node);
         writeTimeline();
         draw();
     };
 
-    const shotboardWidgetLabel = isShotboardV4Class(nodeClassName(node)) ? "Cine Shotboard V4" : "Cine Shotboard V3";
+    const shotboardWidgetLabel = nodeClassName(node) === "IAMCCS_CineShotboardPlannerV5V2V"
+        ? "Cine Shotboard V5"
+        : isShotboardV4Class(nodeClassName(node)) ? "Cine Shotboard V4" : "Cine Shotboard V3";
     const widget = node.addDOMWidget(shotboardWidgetLabel, "iamccs_cine_shotboard_v3", root, { serialize: false });
     node._iamccsCineShotboardV3Widget = widget;
     const v3RigidWidth = SHOTBOARD_V3_RIGID_WIDTH;
@@ -15601,6 +16330,98 @@ function installIamccsLowZoomOverlay(node, key, buildLines) {
     node[key] = true;
 }
 
+function renderShotboardV4BackendControl(node) {
+    if (!node) return;
+    node.color = "#314340";
+    node.bgcolor = "#161A1B";
+    node.boxcolor = "#B06B35";
+    [
+        "timeline_data",
+        "global_prompt",
+        "start_frame",
+        "duration_frames",
+        "frame_rate",
+        "use_custom_audio",
+        "use_custom_motion",
+        "inpaint_audio",
+        "override_audio",
+        "custom_width",
+        "custom_height",
+        "resize_method",
+        "divisible_by",
+        "img_compression",
+        "epsilon",
+    ].forEach((name) => hideWidget(getWidget(node, name)));
+
+    if (node._iamccsShotboardV4BackendControlReady) {
+        try { node._iamccsShotboardV4BackendRefresh?.(); } catch {}
+        return;
+    }
+    node._iamccsShotboardV4BackendControlReady = true;
+
+    const root = document.createElement("div");
+    root.style.cssText = [
+        "box-sizing:border-box",
+        "width:100%",
+        "padding:10px",
+        "border-radius:7px",
+        "border:1px solid rgba(176,107,53,.55)",
+        "background:linear-gradient(135deg,rgba(43,48,49,.96),rgba(25,32,30,.96) 58%,rgba(52,34,20,.92))",
+        "color:#F0EEE6",
+        "font-family:Arial,sans-serif",
+        "font-size:11px",
+        "line-height:1.35",
+        "box-shadow:inset 0 1px 0 rgba(255,255,255,.06)",
+    ].join(";");
+    const title = document.createElement("div");
+    title.textContent = "Shotboard V4 Backend Control";
+    title.style.cssText = "font-weight:900;font-size:12px;color:#F3C37B;margin-bottom:7px;";
+    const status = document.createElement("div");
+    status.style.cssText = "font-weight:800;color:#CFE2D1;margin-bottom:5px;";
+    const sourceLine = document.createElement("div");
+    sourceLine.style.cssText = "color:#B9C8BE;margin-bottom:4px;white-space:normal;overflow-wrap:anywhere;";
+    const promptLine = document.createElement("div");
+    promptLine.style.cssText = "color:#EDE2CC;white-space:normal;overflow-wrap:anywhere;";
+    const modeLine = document.createElement("div");
+    modeLine.style.cssText = "margin-top:5px;color:#B9C8BE;";
+    root.append(title, status, sourceLine, promptLine, modeLine);
+
+    const refresh = () => {
+        const source = getLinkedInputSourceInfo(node, "cine_linx");
+        const linked = source?.node || null;
+        const linkedClass = source?.nodeClass || "";
+        const isTimelineSource = Boolean(linked && (isShotboardV3Class(linkedClass) || linkedClass === "IAMCCS_CineInfo"));
+        let data = {};
+        if (linked) {
+            const timelineText = String(getWidget(linked, "timeline_data")?.value || "");
+            try { data = JSON.parse(timelineText || "{}"); } catch { data = {}; }
+        }
+        const retake = Boolean(data.retakeMode);
+        const prompt = String((retake ? data.retake_global_prompt : data.global_prompt) || data.global_prompt || data.prompt || getWidget(node, "global_prompt")?.value || "").trim();
+        const duration = Number(
+            data.normalDurationFrames
+            ?? data.duration_frames
+            ?? (Number(data.duration_seconds || 0) * Number(data.frame_rate || 24))
+            ?? getWidget(node, "duration_frames")?.value
+            ?? 0
+        ) || 0;
+        const fps = Number(data.frame_rate || getWidget(node, "frame_rate")?.value || 24) || 24;
+        status.textContent = isTimelineSource ? "Control source: linked Shotboard cine_linx" : "Control source: backend fallback";
+        sourceLine.textContent = linked
+            ? `Input cine_linx: ${String(linked.title || linkedClass || "linked node")} -> ${String(source.outputName || "cine_linx")}`
+            : "Input cine_linx is not connected. Backend fallback widgets will be used.";
+        promptLine.textContent = `Prompt used by backend: ${prompt ? prompt.slice(0, 260) : "(empty)"}`;
+        const editMode = String(data.clipEditMode || data.clip_edit_mode || (retake ? "retake_range" : "timeline_trim_split_extend"));
+        modeLine.textContent = `Mode: ${retake ? "retake/source video" : editMode} | ${duration ? `${Math.round(duration)} frames` : "duration fallback"} @ ${fps} fps`;
+    };
+    node._iamccsShotboardV4BackendRefresh = refresh;
+    refresh();
+
+    const widget = node.addDOMWidget("iamccs_v4_backend_control", "iamccs_v4_backend_control", root, { serialize: false });
+    widget.computeSize = (width) => [Math.max(420, Number(width || 420)), 118];
+    lockNodeMinimumSize(node, [520, 260], { lockResize: false });
+}
+
 function renderForNode(node) {
     const klass = nodeClassName(node);
     try {
@@ -15608,7 +16429,7 @@ function renderForNode(node) {
         if (klass === "IAMCCS_CineShotboardLite") {
             lockNodeMinimumSize(node, SHOTBOARD_LITE_NODE_MIN_SIZE, { lockResize: true });
         }
-        if (isShotboardV3Class(klass)) {
+        if (isShotboardV3Class(klass) && !isShotboardV5Class(klass)) {
             const collapsed = Boolean(node.properties?.iamccs_v3_collapsed);
             lockNodeMinimumSize(node, [SHOTBOARD_V3_RIGID_WIDTH, collapsed ? SHOTBOARD_V3_COLLAPSED_HEIGHT : SHOTBOARD_V3_OPEN_HEIGHT], { lockResize: false, lockWidth: true });
         }
@@ -15619,7 +16440,8 @@ function renderForNode(node) {
         if (klass === "IAMCCS_CinePromptRelayLatentShapeSync") renderPromptRelayShapeSync(node);
         if (klass === "IAMCCS_CineLTXSequencer") renderKeyframeEditor(node);
         if (klass === "IAMCCS_CinePromptRelayTimeline") renderPromptRelayEditor(node);
-        if (isShotboardV3Class(klass)) {
+        if (isShotboardV4BackendClass(klass)) renderShotboardV4BackendControl(node);
+        if (isShotboardV3Class(klass) && !isShotboardV5Class(klass)) {
             renderShotboardV3(node);
             installIamccsLowZoomOverlay(node, "_iamccsShotboardLowZoomOverlay", () => {
                 let data = {};
@@ -15650,7 +16472,7 @@ function renderForNode(node) {
 
 function scheduleRender(node, options = {}) {
     const klass = nodeClassName(node);
-    if (klass !== "IAMCCS_CineLTXSequencer" && klass !== "IAMCCS_CinePromptRelayLatentShapeSync" && klass !== "IAMCCS_CinePromptRelayTimeline" && klass !== "IAMCCS_CineShotboardLite" && klass !== "IAMCCS_CineShotboardTimelinePro" && klass !== "IAMCCS_CineShotboardPlannerPro" && klass !== "IAMCCS_CineShotboardPlannerProV2" && !isShotboardV3Class(klass) && klass !== "IAMCCS_CineShotboardPlannerProLegacy" && klass !== "IAMCCS_CineFLFEngineSimple" && klass !== "IAMCCS_CineInfo" && klass !== "IAMCCS_CinePromptArchitect" && klass !== "IAMCCS_BoardMaker" && klass !== "IAMCCS_CineMusicVideoPlanner") return;
+    if (klass !== "IAMCCS_CineLTXSequencer" && klass !== "IAMCCS_CinePromptRelayLatentShapeSync" && klass !== "IAMCCS_CinePromptRelayTimeline" && klass !== "IAMCCS_CineShotboardLite" && klass !== "IAMCCS_CineShotboardTimelinePro" && klass !== "IAMCCS_CineShotboardPlannerPro" && klass !== "IAMCCS_CineShotboardPlannerProV2" && !isShotboardV3Class(klass) && !isShotboardV4BackendClass(klass) && klass !== "IAMCCS_CineShotboardPlannerProLegacy" && klass !== "IAMCCS_CineFLFEngineSimple" && klass !== "IAMCCS_CineInfo" && klass !== "IAMCCS_CinePromptArchitect" && klass !== "IAMCCS_BoardMaker" && klass !== "IAMCCS_CineMusicVideoPlanner") return;
     if (Array.isArray(node._iamccsCineRenderTimers)) {
         node._iamccsCineRenderTimers.forEach((timer) => window.clearTimeout(timer));
     }
@@ -15715,7 +16537,7 @@ app.registerExtension({
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         const name = String(nodeData?.name || nodeData?.class_type || "");
-        if (name !== "IAMCCS_CineLTXSequencer" && name !== "IAMCCS_CinePromptRelayLatentShapeSync" && name !== "IAMCCS_CinePromptRelayTimeline" && name !== "IAMCCS_CineShotboardLite" && name !== "IAMCCS_CineShotboardTimelinePro" && name !== "IAMCCS_CineShotboardPlannerPro" && name !== "IAMCCS_CineShotboardPlannerProV2" && !isShotboardV3Class(name) && name !== "IAMCCS_CineShotboardPlannerProLegacy" && name !== "IAMCCS_CineFLFEngineSimple" && name !== "IAMCCS_CineInfo" && name !== "IAMCCS_CinePromptArchitect" && name !== "IAMCCS_BoardMaker" && name !== "IAMCCS_CineMusicVideoPlanner") return;
+        if (name !== "IAMCCS_CineLTXSequencer" && name !== "IAMCCS_CinePromptRelayLatentShapeSync" && name !== "IAMCCS_CinePromptRelayTimeline" && name !== "IAMCCS_CineShotboardLite" && name !== "IAMCCS_CineShotboardTimelinePro" && name !== "IAMCCS_CineShotboardPlannerPro" && name !== "IAMCCS_CineShotboardPlannerProV2" && !isShotboardV3Class(name) && !isShotboardV4BackendClass(name) && name !== "IAMCCS_CineShotboardPlannerProLegacy" && name !== "IAMCCS_CineFLFEngineSimple" && name !== "IAMCCS_CineInfo" && name !== "IAMCCS_CinePromptArchitect" && name !== "IAMCCS_BoardMaker" && name !== "IAMCCS_CineMusicVideoPlanner") return;
         if (nodeType.prototype._iamccsCineTimelineWrapped) return;
         nodeType.prototype._iamccsCineTimelineWrapped = true;
         const onNodeCreated = nodeType.prototype.onNodeCreated;

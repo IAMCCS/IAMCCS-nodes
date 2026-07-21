@@ -234,6 +234,27 @@ def _generation_index_from_segments(segments: List[Dict[str, Any]]) -> Dict[str,
     }
 
 
+def _is_multigeneration_lane_publish(audio_tracks: Dict[str, Any], payload: Dict[str, Any], segments: List[Dict[str, Any]]) -> bool:
+    layers = audio_tracks.get("multiGeneration") if isinstance(audio_tracks.get("multiGeneration"), dict) else {}
+    payload_multi = payload.get("multiGeneration") if isinstance(payload.get("multiGeneration"), dict) else {}
+    if bool(audio_tracks.get("multigeneration_lane_publish")):
+        return True
+    if not any(
+        value.get("enabled") or value.get("pluriPublishEnabled") or value.get("physicalChunks") or value.get("publishV2")
+        for value in (layers, payload_multi)
+        if isinstance(value, dict)
+    ):
+        return False
+    return any(
+        bool(seg.get("multiGenerationClip"))
+        or bool(seg.get("physicalChunk"))
+        or str(seg.get("audioPublishSchema") or "") == "iamccs.audio.publish.v2"
+        or str(seg.get("timelineId") or "").upper().startswith("T")
+        for seg in segments
+        if isinstance(seg, dict)
+    )
+
+
 class IAMCCS_BusOut:
     """Expose the AudioBoardArranger master bus and up to five stem tracks from cine_linx."""
 
@@ -284,6 +305,11 @@ class IAMCCS_BusOut:
         payload = _payload(out_linx)
 
         audio_tracks = resources.get("cine_audio_tracks") if isinstance(resources.get("cine_audio_tracks"), dict) else {}
+        source_master_segment = audio_tracks.get("source_master_segment") if isinstance(audio_tracks.get("source_master_segment"), dict) else {}
+        master_audio_asset = audio_tracks.get("master_audio_asset") if isinstance(audio_tracks.get("master_audio_asset"), dict) else resources.get("cine_audio_master_audio_asset", {})
+        if not isinstance(master_audio_asset, dict):
+            master_audio_asset = {}
+        roll_contract = audio_tracks.get("roll_contract") if isinstance(audio_tracks.get("roll_contract"), dict) else resources.get("cine_roll_contract", {})
         source_segments = _segments(audio_tracks.get("all_segments") if isinstance(audio_tracks, dict) else payload.get("audioSegments"))
         if not source_segments:
             source_segments = _segments(audio_tracks.get("segments") if isinstance(audio_tracks, dict) else payload.get("audioSegments"))
@@ -304,9 +330,10 @@ class IAMCCS_BusOut:
         shotboard_segments = _segments(audio_tracks.get("shotboard_segments"))
         selected_segments = source_segments
         selected_track_settings = copy.deepcopy(track_settings)
+        multi_lane_publish = _is_multigeneration_lane_publish(audio_tracks, payload, source_segments)
         if str(mode) == "from_arranger_bus":
             bus_mode = shotboard_bus_mode or raw_bus_mode or "all_tracks"
-            if _is_only_first_mode(bus_mode) and shotboard_segments:
+            if _is_only_first_mode(bus_mode) and shotboard_segments and not multi_lane_publish:
                 selected_segments = shotboard_segments
                 selected_track_settings = copy.deepcopy(track_settings[:1]) if isinstance(track_settings, list) else []
         elif str(mode) == "master_plus_stems_max_5":
@@ -350,6 +377,7 @@ class IAMCCS_BusOut:
             "mode": str(mode),
             "bus_mode": bus_mode,
             "shotboard_bus_mode": shotboard_bus_mode,
+            "multigeneration_lane_publish": bool(multi_lane_publish),
             "segments": selected_segments_audible,
             "all_segments": selected_segments_all,
             "masterBus": copy.deepcopy(master_bus),
@@ -361,6 +389,9 @@ class IAMCCS_BusOut:
             "duration_frames": _max_end(selected_segments_audible),
             "track_count": MAX_TRACK_OUTS,
             "has_media": any(str(seg.get("audioFile", "")).strip() or str(seg.get("audioB64", "")).strip() for seg in selected_segments_audible),
+            "source_master_segment": copy.deepcopy(source_master_segment),
+            "master_audio_asset": copy.deepcopy(master_audio_asset),
+            "roll_contract": copy.deepcopy(roll_contract) if isinstance(roll_contract, dict) else {},
         }
         manifest = {
             "schema": "iamccs.audio_bus_out.manifest",
@@ -372,6 +403,9 @@ class IAMCCS_BusOut:
             "master": master_out,
             "tracks": track_outs,
             "effect_graph_json": effect_graph,
+            "source_master_segment": copy.deepcopy(source_master_segment),
+            "master_audio_asset": copy.deepcopy(master_audio_asset),
+            "roll_contract": copy.deepcopy(roll_contract) if isinstance(roll_contract, dict) else {},
         }
         generation_index = _generation_index_from_segments(selected_segments_audible)
         manifest["generation_index"] = generation_index
@@ -383,6 +417,7 @@ class IAMCCS_BusOut:
             "bus_mode": bus_mode,
             "shotboard_bus_mode": shotboard_bus_mode,
             "master_segments": len(selected_segments_audible),
+            "master_audio_asset": bool(master_audio_asset),
             "all_master_segments": len(selected_segments_all),
             "track_segments": [len(track.get("segments", [])) for track in track_outs],
             "generation_take_count": generation_index.get("take_count", 0),

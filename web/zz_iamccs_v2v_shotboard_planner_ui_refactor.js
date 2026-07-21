@@ -2,7 +2,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 const NODE_CLASS = "IAMCCS_ShotboardPlannerV2V";
-const VERSION = "2026-07-11-shotboard-v2v-media-dock-ui4";
+const VERSION = "2026-07-12-shotboard-v2v-settings-meter-ui5";
 const WIDTH = 1840;
 const WIDGET_HEIGHT = 980;
 const NODE_HEIGHT = 1040;
@@ -190,18 +190,25 @@ function injectStyle() {
     const style = existing || document.createElement("style");
     style.id = "iamccs-shotboard-v2v-style";
     style.textContent = `
-.iamccs-v2v-board{box-sizing:border-box;width:100%;height:100%;padding:10px 12px;border:1px solid rgba(95,198,218,.58);border-radius:6px;background:#0f1419;color:#eef5f8;font-family:Inter,Arial,sans-serif;font-size:12px;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
+.iamccs-v2v-board{position:relative;box-sizing:border-box;width:100%;height:100%;padding:10px 12px;border:1px solid rgba(95,198,218,.58);border-radius:6px;background:#0f1419;color:#eef5f8;font-family:Inter,Arial,sans-serif;font-size:12px;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
 .iamccs-v2v-board *{box-sizing:border-box;letter-spacing:0}
 .iamccs-v2v-board.is-full-editor{position:fixed;left:18px;right:18px;top:18px;bottom:18px;width:auto!important;height:auto!important;z-index:999999;border-color:#d8b860;background:#10151a;box-shadow:0 24px 80px rgba(0,0,0,.72),inset 0 1px 0 rgba(255,255,255,.08)}
-.iamccs-v2v-board.is-full-editor .iamccs-v2v-main{grid-template-columns:430px minmax(0,1fr) 500px}
+.iamccs-v2v-board.is-full-editor .iamccs-v2v-main{grid-template-columns:430px minmax(0,1fr) 360px}
 .iamccs-v2v-board.is-full-editor .iamccs-v2v-timebar{min-height:calc(100vh - 300px)}
-.iamccs-v2v-board.is-full-editor .iamccs-v2v-track{height:36vh}
-.iamccs-v2v-board.is-full-editor .iamccs-v2v-handle{height:36vh}
-.iamccs-v2v-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto;align-items:center;gap:14px;height:34px;margin:0 0 10px;border-bottom:1px solid rgba(95,198,218,.28)}
+.iamccs-v2v-board.is-full-editor .iamccs-v2v-track{height:clamp(210px,36vh,360px)}
+.iamccs-v2v-board.is-full-editor .iamccs-v2v-handle{height:100%}
+.iamccs-v2v-head{display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:10px;height:34px;margin:0 0 10px;border-bottom:1px solid rgba(95,198,218,.28)}
 .iamccs-v2v-title{font-size:18px;font-weight:900;color:#fff;white-space:nowrap}
 .iamccs-v2v-path{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;color:#9fb3c1;font-size:11px}
 .iamccs-v2v-head-editor{height:24px;min-width:112px;padding:0 12px;border-color:#62c99e;background:#1e5b4c;color:#f3fff9}
-.iamccs-v2v-main{display:grid;grid-template-columns:minmax(410px,430px) minmax(0,1fr) minmax(390px,500px);gap:12px;height:calc(100% - 44px);min-height:0}
+.iamccs-v2v-head-settings{height:24px;min-width:92px;padding:0 12px;border-color:#8db5e4;background:#203a59;color:#edf6ff}
+.iamccs-v2v-settings-drawer{display:none;position:absolute;z-index:40;top:50px;right:10px;bottom:10px;width:min(560px,calc(100% - 20px));min-height:0;flex-direction:column;border:1px solid rgba(141,181,228,.74);border-radius:6px;background:#111821;box-shadow:0 20px 60px rgba(0,0,0,.7),inset 0 1px 0 rgba(255,255,255,.07);overflow:hidden}
+.iamccs-v2v-settings-drawer.is-open{display:flex}
+.iamccs-v2v-settings-head{height:42px;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:0 10px;border-bottom:1px solid rgba(141,181,228,.32);background:#17283b;color:#eef7ff;font-size:12px;font-weight:900;text-transform:uppercase}
+.iamccs-v2v-settings-head small{color:#9cb4ca;font-size:10px;font-weight:800}
+.iamccs-v2v-settings-close{height:26px;padding:0 10px;border:1px solid #9eb8d2;border-radius:3px;background:#29445f;color:#f4fbff;font-size:10px;font-weight:900;cursor:pointer}
+.iamccs-v2v-settings-drawer .iamccs-v2v-panel-body{padding:10px;overflow-y:auto}
+.iamccs-v2v-main{display:grid;grid-template-columns:minmax(410px,430px) minmax(0,1fr) minmax(300px,360px);gap:12px;height:calc(100% - 44px);min-height:0}
 .iamccs-v2v-panel{min-height:0;display:flex;flex-direction:column;border:1px solid rgba(160,184,205,.28);border-radius:5px;background:#141c24;overflow:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.04)}
 .iamccs-v2v-panel.preview{border-color:rgba(112,202,222,.44);background:#121921}
 .iamccs-v2v-panel.timeline{border-color:rgba(218,184,96,.46);background:#14120f}
@@ -222,9 +229,13 @@ function injectStyle() {
 .iamccs-v2v-preview-monitor{height:268px;border:1px solid rgba(118,214,235,.38);border-radius:5px;background:#05090d;display:flex;align-items:center;justify-content:center;overflow:hidden;color:#8ea8b6;position:relative}
 .iamccs-v2v-preview-monitor::before{content:"SOURCE";position:absolute;left:10px;top:8px;padding:3px 7px;border:1px solid rgba(118,214,235,.45);border-radius:3px;background:rgba(8,17,23,.86);color:#d9fbff;font-size:10px;font-weight:900;z-index:2}
 .iamccs-v2v-preview-monitor img,.iamccs-v2v-preview-monitor video{width:100%;height:100%;object-fit:contain;background:#05090d}
-.iamccs-v2v-backend-preview-strip{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px}
-.iamccs-v2v-backend-preview{height:68px;border:1px solid rgba(160,184,205,.24);border-radius:3px;background:#05090d;overflow:hidden;display:flex;align-items:center;justify-content:center;color:#7f919d;font-size:10px;font-weight:800;text-transform:uppercase}
-.iamccs-v2v-backend-preview video,.iamccs-v2v-backend-preview img{width:100%;height:100%;object-fit:cover;background:#05090d}
+.iamccs-v2v-backend-preview-panel{border-color:rgba(118,214,235,.46);background:#101a22}
+.iamccs-v2v-backend-preview-strip{display:flex;flex-direction:column;gap:9px;margin:0}
+.iamccs-v2v-backend-preview{height:clamp(132px,18vh,188px);min-height:118px;border:1px solid rgba(160,184,205,.3);border-radius:4px;background:#05090d;overflow:hidden;display:flex;flex-direction:column;color:#7f919d;font-size:10px;font-weight:800;text-transform:uppercase}
+.iamccs-v2v-preview-slot-head{height:25px;flex:0 0 25px;display:flex;align-items:center;padding:0 8px;border-bottom:1px solid rgba(160,184,205,.18);background:#142531;color:#d9f6ff;font-size:10px;font-weight:900;letter-spacing:.04em}
+.iamccs-v2v-preview-slot-media{position:relative;flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.iamccs-v2v-backend-preview video,.iamccs-v2v-backend-preview img{width:100%;height:100%;object-fit:contain;background:#05090d}
+.iamccs-v2v-preview-slot-media .iamccs-v2v-preview-placeholder{min-height:100%}
 .iamccs-v2v-preview-placeholder{width:100%;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;background:radial-gradient(circle at 50% 36%,#143442,#061016 62%);color:#bfd8e1;text-align:center;font-size:12px;font-weight:800}
 .iamccs-v2v-preview-placeholder span{color:#7f9ba8;font-size:11px;font-weight:700}
 .iamccs-v2v-resize{height:13px;display:flex;align-items:center;justify-content:center;border-top:1px solid rgba(160,184,205,.14);background:#111c25;cursor:row-resize;color:#7fa6b6;font-size:9px;font-weight:900}
@@ -270,18 +281,18 @@ function injectStyle() {
 .iamccs-v2v-prompt-grid textarea{height:58px}
 .iamccs-v2v-timeline-card{min-height:0;border:1px solid rgba(218,184,96,.34);border-radius:7px;background:#0b1117;overflow:hidden;display:flex;flex-direction:column}
 .iamccs-v2v-timeline-head{height:34px;display:flex;align-items:center;justify-content:space-between;padding:0 10px;background:#271f13;color:#f6e7b4;font-size:11px;font-weight:900;text-transform:uppercase}
-.iamccs-v2v-timebar{position:relative;flex:1;min-height:500px;background:#091016;overflow:hidden}
-.iamccs-v2v-ruler{position:absolute;left:26px;right:26px;top:18px;height:32px;border-bottom:1px solid rgba(151,181,201,.24);color:#9aaebd;font-size:10px}
-.iamccs-v2v-tick{position:absolute;top:18px;width:1px;height:12px;background:rgba(151,181,201,.34)}
+.iamccs-v2v-timebar{position:relative;flex:1;min-height:0;display:flex;flex-direction:column;background:#091016;overflow:hidden;padding:0 0 2px}
+.iamccs-v2v-ruler{position:relative;left:auto;right:auto;top:auto;height:34px;flex:0 0 34px;margin:0 16px;border-bottom:1px solid rgba(151,181,201,.24);color:#9aaebd;font-size:10px}
+.iamccs-v2v-tick{position:absolute;top:19px;width:1px;height:12px;background:rgba(151,181,201,.34)}
 .iamccs-v2v-tick span{position:absolute;top:-16px;left:-12px;color:#8ea3b2;font-size:10px}
-.iamccs-v2v-track{position:absolute;left:34px;right:34px;top:74px;height:250px;border:1px solid rgba(218,184,96,.46);border-radius:4px;background:#060a0f;overflow:hidden;cursor:crosshair}
+.iamccs-v2v-track{position:relative;left:auto;right:auto;top:auto;height:clamp(180px,32vh,310px);flex:0 1 310px;margin:12px 16px 0;border:1px solid rgba(218,184,96,.46);border-radius:4px;background:#060a0f;overflow:hidden;cursor:crosshair}
 .iamccs-v2v-timeline-media{position:absolute;inset:0;background:linear-gradient(90deg,#111b24,#182838);overflow:hidden}
 .iamccs-v2v-timeline-media video{width:100%;height:100%;object-fit:cover;filter:saturate(.9) contrast(.92);opacity:.9}
 .iamccs-v2v-timeline-media-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#758a99;font-size:12px;background:repeating-linear-gradient(90deg,#101822 0,#101822 34px,#142130 34px,#142130 68px)}
 .iamccs-v2v-timeline-shade{position:absolute;top:0;bottom:0;background:rgba(0,0,0,.56);backdrop-filter:saturate(.7)}
 .iamccs-v2v-selected{position:absolute;top:0;bottom:0;background:linear-gradient(180deg,rgba(52,160,135,.38),rgba(61,103,154,.42));box-shadow:inset 0 0 0 2px rgba(167,245,255,.55)}
 .iamccs-v2v-selected::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(255,255,255,.08),rgba(255,255,255,0));pointer-events:none}
-.iamccs-v2v-handle{position:absolute;top:0;width:20px;height:250px;margin-left:-10px;border:1px solid #f4e6b8;border-radius:3px;background:#f3ead1;color:#0d1a22;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;cursor:ew-resize;box-shadow:0 8px 22px rgba(0,0,0,.34);z-index:6}
+.iamccs-v2v-handle{position:absolute;top:0;width:20px;height:100%;margin-left:-10px;border:1px solid #f4e6b8;border-radius:3px;background:#f3ead1;color:#0d1a22;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:900;cursor:ew-resize;box-shadow:0 8px 22px rgba(0,0,0,.34);z-index:6}
 .iamccs-v2v-handle.is-active{background:#d6b65d;border-color:#fff1b4;color:#060606;box-shadow:0 0 0 2px rgba(214,182,93,.24),0 8px 22px rgba(0,0,0,.34)}
 .iamccs-v2v-playhead{position:absolute;top:0;bottom:0;width:2px;background:#d6b65d;box-shadow:0 0 0 1px rgba(0,0,0,.55),0 0 12px rgba(214,182,93,.7);pointer-events:none;z-index:7}
 .iamccs-v2v-playhead::before{content:"";position:absolute;top:-9px;left:-6px;width:14px;height:14px;background:#d6b65d;clip-path:polygon(50% 100%,0 0,100% 0)}
@@ -289,10 +300,13 @@ function injectStyle() {
 .iamccs-v2v-frame-bubble{display:none}
 .iamccs-v2v-frame-bubble canvas{width:100%;height:58px;display:block;background:#020405}
 .iamccs-v2v-frame-bubble span{display:block;height:20px;line-height:20px;padding:0 6px;background:#211a10;color:#f8e8b5;font-size:10px;font-weight:900;text-align:center;font-variant-numeric:tabular-nums}
-.iamccs-v2v-segment-head{position:absolute;left:34px;right:34px;top:344px;height:18px;display:flex;justify-content:space-between;color:#9fb5c6;font-size:10px;font-weight:900;text-transform:uppercase}
-.iamccs-v2v-segments{position:absolute;left:34px;right:34px;top:366px;height:64px;display:flex;gap:6px;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;padding-bottom:5px;border:1px solid rgba(160,184,205,.18);border-radius:4px;background:#081018;padding:6px}
-.iamccs-v2v-segment{height:100%;border-radius:3px;background:#273a50;border:1px solid rgba(196,220,236,.24);display:flex;align-items:center;justify-content:center;color:#e6f4fb;font-size:11px;font-weight:900;min-width:110px;flex:1 0 110px;overflow:hidden}
-.iamccs-v2v-playbar{position:absolute;left:34px;right:34px;top:448px;height:42px;border:1px solid rgba(218,184,96,.24);border-radius:4px;background:#12100d;display:grid;grid-template-columns:112px minmax(0,1fr) 74px;gap:10px;align-items:center;padding:0 10px}
+.iamccs-v2v-segment-head{position:relative;left:auto;right:auto;top:auto;height:24px;flex:0 0 24px;margin:10px 16px 0;display:flex;justify-content:space-between;color:#9fb5c6;font-size:10px;font-weight:900;text-transform:uppercase}
+.iamccs-v2v-segments{position:relative;left:auto;right:auto;top:auto;height:78px;flex:0 0 78px;display:flex;gap:6px;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;margin:0 16px;padding:6px;border:1px solid rgba(160,184,205,.18);border-radius:4px;background:#081018}
+.iamccs-v2v-segment{height:100%;min-width:126px;flex:1 0 126px;border-radius:3px;background:#273a50;border:1px solid rgba(196,220,236,.24);display:flex;flex-direction:column;align-items:stretch;justify-content:center;gap:5px;padding:7px 8px;color:#e6f4fb;font-size:11px;font-weight:900;overflow:hidden}
+.iamccs-v2v-segment-code{display:flex;justify-content:space-between;gap:5px;color:#f7e6ae;font-size:10px}
+.iamccs-v2v-segment-meter{height:7px;border:1px solid rgba(196,220,236,.25);border-radius:2px;background:#101c27;overflow:hidden}
+.iamccs-v2v-segment-meter i{display:block;height:100%;background:linear-gradient(90deg,#d6b65d,#71d4e7);box-shadow:0 0 10px rgba(113,212,231,.22)}
+.iamccs-v2v-playbar{position:relative;left:auto;right:auto;top:auto;height:46px;flex:0 0 46px;margin:10px 16px 12px;border:1px solid rgba(218,184,96,.24);border-radius:4px;background:#12100d;display:grid;grid-template-columns:112px minmax(0,1fr) 74px;gap:10px;align-items:center;padding:0 10px}
 .iamccs-v2v-playbar button{height:28px;border:1px solid rgba(218,184,96,.48);border-radius:3px;background:#2a2115;color:#f7e6ae;font-size:11px;font-weight:900;cursor:pointer}
 .iamccs-v2v-transfer-controls{display:grid;grid-template-columns:30px 46px 30px;gap:3px}
 .iamccs-v2v-analog{height:6px;border-radius:8px;background:linear-gradient(90deg,#8d7440,#2c3d4e);position:relative;cursor:ew-resize;box-shadow:inset 0 1px 0 rgba(255,255,255,.15)}
@@ -499,6 +513,7 @@ function renderShotboardV2V(node) {
     poseResultInput.type = "file";
     poseResultInput.accept = "image/*,video/*";
     poseResultInput.style.display = "none";
+    const poseUploadResult = button("Upload Result", "warn");
     root.append(videoInput, imageInput, poseResultInput);
 
     const head = document.createElement("div");
@@ -506,9 +521,11 @@ function renderShotboardV2V(node) {
     const title = document.createElement("div");
     title.className = "iamccs-v2v-title";
     title.textContent = "IAMCCS Shotboard Planner V2V";
+    const settingsBtn = button("Settings");
+    settingsBtn.classList.add("iamccs-v2v-head-settings");
     const openEditorBtn = button("Open Editor", "good");
     openEditorBtn.classList.add("iamccs-v2v-head-editor");
-    head.append(title, status, openEditorBtn);
+    head.append(title, status, settingsBtn, openEditorBtn);
     root.appendChild(head);
 
     const main = document.createElement("div");
@@ -567,7 +584,7 @@ function renderShotboardV2V(node) {
     resultActions.appendChild(poseUploadResult);
     const backendPreviewStrip = document.createElement("div");
     backendPreviewStrip.className = "iamccs-v2v-backend-preview-strip";
-    resultCard.append(resultBox, resultActions, backendPreviewStrip);
+    resultCard.append(resultBox, resultActions);
     mediaStack.append(sourceCard, imageCard, resultCard);
     mediaBody.appendChild(mediaStack);
     mediaPanel.appendChild(mediaBody);
@@ -670,8 +687,14 @@ function renderShotboardV2V(node) {
     main.appendChild(timelinePanel);
 
     const optionsPanel = document.createElement("section");
-    optionsPanel.className = "iamccs-v2v-panel controls";
-    optionsPanel.innerHTML = `<div class="iamccs-v2v-panel-head"><span>V2V Controls</span><span>backend values</span></div>`;
+    optionsPanel.className = "iamccs-v2v-settings-drawer controls";
+    const settingsHead = document.createElement("div");
+    settingsHead.className = "iamccs-v2v-settings-head";
+    settingsHead.innerHTML = `<span>V2V Settings <small>active mode controls</small></span>`;
+    const settingsCloseBtn = button("Close Settings");
+    settingsCloseBtn.classList.add("iamccs-v2v-settings-close");
+    settingsHead.appendChild(settingsCloseBtn);
+    optionsPanel.appendChild(settingsHead);
     const optionsBody = document.createElement("div");
     optionsBody.className = "iamccs-v2v-panel-body";
     const normalBtn = button("Normal VRAM");
@@ -727,7 +750,6 @@ function renderShotboardV2V(node) {
     const poseResultPath = input("text", read(node, "pose_transfer_result_path", ""));
     const poseUploadImage = button("Upload Image", "good");
     const poseUploadVideo = button("Upload Video", "good");
-    const poseUploadResult = button("Upload Result", "warn");
     const poseUseSource = button("Use Source");
     const poseUseReference = button("Use Reference");
     const mapBackendBtn = button("Map Backend", "good");
@@ -859,7 +881,19 @@ function renderShotboardV2V(node) {
         Object.assign(document.createElement("div"), { className: "iamccs-v2v-note", textContent: "Mode metadata is now carried by the planner. SCAIL-2, WanAnimate and Pose Transfer are prepared for their backend bridge/workflow wiring." })
     );
     optionsPanel.appendChild(optionsBody);
-    main.appendChild(optionsPanel);
+
+    const backendPreviewPanel = document.createElement("section");
+    backendPreviewPanel.className = "iamccs-v2v-panel preview iamccs-v2v-backend-preview-panel";
+    backendPreviewPanel.innerHTML = `<div class="iamccs-v2v-panel-head"><span>Mode Preview</span><span class="iamccs-v2v-preview-mode-badge">active backend</span></div>`;
+    const backendPreviewBody = document.createElement("div");
+    backendPreviewBody.className = "iamccs-v2v-panel-body";
+    const backendPreviewStatus = document.createElement("div");
+    backendPreviewStatus.className = "iamccs-v2v-mode-hint";
+    const backendPreviewModeBadge = backendPreviewPanel.querySelector(".iamccs-v2v-preview-mode-badge");
+    backendPreviewBody.append(backendPreviewStatus, backendPreviewStrip);
+    backendPreviewPanel.appendChild(backendPreviewBody);
+    main.appendChild(backendPreviewPanel);
+    root.appendChild(optionsPanel);
 
     function numberValue(el, fallback) {
         const n = Number(el.value);
@@ -917,6 +951,7 @@ function renderShotboardV2V(node) {
         modePanel.querySelectorAll(".iamccs-v2v-mode-section").forEach((section) => {
             section.classList.toggle("is-hidden", section.dataset.mode !== mode);
         });
+        renderBackendPreviews();
     }
 
     function trimValues() {
@@ -1204,17 +1239,33 @@ function renderShotboardV2V(node) {
     }
 
     function renderBackendPreviews() {
+        const mode = activeBackendMode();
         const items = backendPreviewItems();
+        const labels = {
+            ltx_simple: ["Final video", "Draft / source", "Pose / reference"],
+            scail2: ["SCAIL final", "SAM 3.1 preview", "Mask / pose"],
+            wananimate: ["WanAnimate final", "SAM 3.1 preview", "Control / pose"],
+            pose_transfer: ["Result image", "Driver pose", "Reference"],
+        }[mode] || ["Final", "Preview", "Control"];
+        const modeLabel = BACKEND_MODES[mode]?.label || mode;
+        if (backendPreviewModeBadge) backendPreviewModeBadge.textContent = modeLabel;
+        backendPreviewStatus.textContent = `${modeLabel} · previews follow the selected mode`;
         backendPreviewStrip.innerHTML = "";
         for (let i = 0; i < 3; i++) {
             const cell = document.createElement("div");
             cell.className = "iamccs-v2v-backend-preview";
+            const slotHead = document.createElement("div");
+            slotHead.className = "iamccs-v2v-preview-slot-head";
+            slotHead.textContent = labels[i];
+            const slotMedia = document.createElement("div");
+            slotMedia.className = "iamccs-v2v-preview-slot-media";
             const item = items[i];
             if (item?.url) {
-                appendPreviewMedia(cell, item);
+                appendPreviewMedia(slotMedia, item);
             } else {
-                cell.textContent = i === 0 ? "final" : i === 1 ? "sam / mask" : "pose";
+                slotMedia.innerHTML = `<div class="iamccs-v2v-preview-placeholder"><b>${labels[i]}</b><span>waiting for backend preview</span></div>`;
             }
+            cell.append(slotHead, slotMedia);
             backendPreviewStrip.appendChild(cell);
         }
     }
@@ -1277,7 +1328,8 @@ function renderShotboardV2V(node) {
         const playLeft = (state.playheadSec / dur) * 100;
         const activeStart = state.activeTrim === "start";
         const activeEnd = state.activeTrim !== "start";
-        const segCount = Math.max(1, Math.ceil((end - start) / Math.max(0.01, Number(data.segment_seconds || 10))));
+        const segmentSeconds = Math.max(0.01, Number(data.segment_seconds || 10));
+        const segCount = Math.max(1, Math.ceil((end - start) / segmentSeconds));
         const ticks = [];
         const tickCount = Math.min(8, Math.max(2, Math.ceil(dur)));
         for (let i = 0; i <= tickCount; i++) {
@@ -1314,6 +1366,11 @@ function renderShotboardV2V(node) {
             const item = document.createElement("div");
             item.className = "iamccs-v2v-segment";
             item.textContent = `S${i + 1} · ${Number(data.segment_seconds).toFixed(2)}s`;
+            const segmentStart = start + (i * segmentSeconds);
+            const segmentEnd = Math.min(end, segmentStart + segmentSeconds);
+            const meterLeft = Math.max(0, Math.min(100, (segmentStart / dur) * 100));
+            const meterWidth = Math.max(1, Math.min(100 - meterLeft, ((segmentEnd - segmentStart) / dur) * 100));
+            item.innerHTML = `<div class="iamccs-v2v-segment-code"><span>S${i + 1}</span><span>${segmentStart.toFixed(2)}-${segmentEnd.toFixed(2)}s</span></div><div class="iamccs-v2v-segment-meter"><i style="width:${meterWidth}%;margin-left:${meterLeft}%"></i></div>`;
             segs.appendChild(item);
         }
         scrubStart.textContent = `${start.toFixed(2)}s`;
@@ -1588,6 +1645,13 @@ function renderShotboardV2V(node) {
     sam31PreviewBtn.onclick = () => { write(node, "enable_sam31_preview", !sam31PreviewBtn.classList.contains("is-active")); setActiveButtons(); commit(); };
     wanBackgroundLockBtn.onclick = () => { write(node, "wan_background_lock", !wanBackgroundLockBtn.classList.contains("is-active")); setActiveButtons(); commit(); };
     wanControlPreviewBtn.onclick = () => { write(node, "wan_control_preview", !wanControlPreviewBtn.classList.contains("is-active")); setActiveButtons(); commit(); };
+    const toggleSettings = (open = !optionsPanel.classList.contains("is-open")) => {
+        optionsPanel.classList.toggle("is-open", Boolean(open));
+        settingsBtn.classList.toggle("is-active", Boolean(open));
+        settingsBtn.textContent = open ? "Close Settings" : "Settings";
+    };
+    settingsBtn.onclick = () => toggleSettings();
+    settingsCloseBtn.onclick = () => toggleSettings(false);
     openEditorBtn.onclick = () => {
         const open = !root.classList.contains("is-full-editor");
         root.classList.toggle("is-full-editor", open);

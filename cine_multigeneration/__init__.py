@@ -123,12 +123,130 @@ def _output_dir() -> str:
     return os.path.abspath(os.path.join(os.getcwd(), "output"))
 
 
-def _save_video_take_preview(session_key: Any, slot: int, images: Any, root: str) -> Dict[str, Any]:
-    if Image is None or not torch.is_tensor(images) or images.ndim < 4 or int(images.shape[0]) <= 0:
-        return {}
+def _preview_video_metadata(path: str, root: str, fps: float) -> Dict[str, Any]:
+    out_dir = _output_dir()
+    rel_dir = os.path.relpath(root, out_dir)
+    if rel_dir == ".":
+        rel_dir = ""
+    name = os.path.basename(path)
+    return {
+        "preview_video": {
+            "filename": name,
+            "subfolder": rel_dir.replace("\\", "/"),
+            "type": "output",
+            "fps": float(fps),
+            "schema": 2,
+            "codec": "h264_yuv420p",
+        },
+        "preview_video_file": name,
+        "preview_video_path": path,
+        "preview_video_subfolder": rel_dir.replace("\\", "/"),
+        "preview_video_type": "output",
+        "preview_video_fps": float(fps),
+        "preview_video_schema": 2,
+        "preview_video_codec": "h264_yuv420p",
+    }
+
+
+def _write_video_take_preview(images: Any, path: str, fps: float) -> Dict[str, Any]:
+    """Write a lightweight H.264 monitor proxy without changing the parked take."""
+    if not torch.is_tensor(images) or images.ndim < 4 or int(images.shape[0]) <= 0:
+        return {"preview_video_error": "No video frames available for preview."}
     try:
-        total_frames = int(images.shape[0])
-        stamp = int(time.time() * 1000)
+        if os.path.isfile(path) and os.path.getsize(path) > 1024:
+            return {"preview_video_path": path}
+        import imageio_ffmpeg  # type: ignore
+
+        first = images[0].detach()
+        if first.ndim == 3 and first.shape[0] in (1, 3, 4) and first.shape[-1] not in (1, 3, 4):
+            first = first.permute(1, 2, 0)
+        if first.ndim != 3:
+            raise ValueError("Preview frame has no RGB dimensions.")
+        height = int(first.shape[0])
+        width = int(first.shape[1])
+        if width <= 0 or height <= 0:
+            raise ValueError("Preview frame dimensions are invalid.")
+        preview_fps = max(1.0, min(30.0, float(fps or 24.0)))
+        # Chromium/Electron does not reliably decode the RGB/4:4:4 output
+        # ffmpeg may infer from tensor frames. Force the browser-safe H.264
+        # 4:2:0 profile used only for the monitor proxy.
+        output_params = ["-movflags", "+faststart", "-preset", "veryfast", "-pix_fmt", "yuv420p"]
+        if width > 960:
+            output_params.extend(["-vf", "scale=960:-2"])
+        writer = imageio_ffmpeg.write_frames(
+            path,
+            (width, height),
+            fps=preview_fps,
+            codec="libx264",
+            quality=7,
+            macro_block_size=2,
+            ffmpeg_log_level="error",
+            output_params=output_params,
+        )
+        writer.send(None)
+        try:
+            for index in range(int(images.shape[0])):
+                frame = images[index].detach()
+                if frame.ndim == 3 and frame.shape[0] in (1, 3, 4) and frame.shape[-1] not in (1, 3, 4):
+                    frame = frame.permute(1, 2, 0)
+                if frame.shape[-1] == 1:
+                    frame = frame.repeat(1, 1, 3)
+                elif frame.shape[-1] > 3:
+                    frame = frame[..., :3]
+                if frame.dtype != torch.uint8:
+                    frame = torch.clamp(frame.float(), 0.0, 1.0).mul(255.0).round().to(torch.uint8)
+                writer.send(frame.contiguous().cpu().numpy().tobytes())
+        finally:
+            writer.close()
+        if not os.path.isfile(path) or os.path.getsize(path) <= 1024:
+            raise RuntimeError("FFmpeg did not create a readable preview video.")
+        return {"preview_video_path": path, "preview_video_fps": preview_fps}
+    except Exception as exc:
+        try:
+            if os.path.exists(path):
+                os.remove(path)
+        except Exception:
+            pass
+        return {"preview_video_error": str(exc)}
+
+
+def ensure_parked_take_preview_video(parking_path: Any) -> Dict[str, Any]:
+    """Materialize an H.264 monitor proxy for a previously parked take on demand."""
+    path = os.path.abspath(str(parking_path or ""))
+    if not path or not os.path.isfile(path):
+        raise FileNotFoundError("Parked take file was not found.")
+    if not path.lower().endswith(".iamccs_take.pt"):
+        raise ValueError("Preview source must be an IAMCCS parked take.")
+    root = os.path.dirname(path)
+    preview_path = os.path.splitext(path)[0] + "_preview_v2.mp4"
+    data = torch.load(path, map_location="cpu")
+    if not isinstance(data, dict) or not torch.is_tensor(data.get("images")):
+        raise ValueError("Parked take contains no readable video frames.")
+    fps = max(1.0, float(data.get("fps") or 24.0))
+    result = _write_video_take_preview(
+        _images_from_parking_tensor(data["images"], data.get("image_storage")),
+        preview_path,
+        fps,
+    )
+    if result.get("preview_video_error"):
+        raise RuntimeError(str(result["preview_video_error"]))
+    return _preview_video_metadata(preview_path, root, float(result.get("preview_video_fps") or fps))
+
+
+def _save_video_take_preview(session_key: Any, slot: int, images: Any, root: str, fps: float = 24.0, preview_stem: str = "") -> Dict[str, Any]:
+    if not torch.is_tensor(images) or images.ndim < 4 or int(images.shape[0]) <= 0:
+        return {}
+    total_frames = int(images.shape[0])
+    stamp = int(time.time() * 1000)
+    stem = _safe_slug(preview_stem or f"T{int(slot):02d}_A{int(slot):02d}_{stamp}")
+    preview_path = os.path.join(root, f"{stem}_preview_v2.mp4")
+    preview = _write_video_take_preview(images, preview_path, fps)
+    output = _preview_video_metadata(preview_path, root, float(preview.get("preview_video_fps") or fps)) if preview.get("preview_video_path") else {}
+    if preview.get("preview_video_error"):
+        output["preview_video_error"] = preview["preview_video_error"]
+    if Image is None:
+        return output
+    try:
         preview_items: List[Dict[str, Any]] = []
         out_dir = _output_dir()
         rel_dir = os.path.relpath(root, out_dir)
@@ -146,8 +264,8 @@ def _save_video_take_preview(session_key: Any, slot: int, images: Any, root: str
             frame = frame.clamp(0, 1)
             array = (frame.numpy() * 255.0).round().astype("uint8")
             preview_name = f"T{int(slot):02d}_A{int(slot):02d}_{stamp}_preview_{int(frame_index):05d}.png"
-            preview_path = os.path.join(root, preview_name)
-            Image.fromarray(array).save(preview_path)
+            preview_image_path = os.path.join(root, preview_name)
+            Image.fromarray(array).save(preview_image_path)
             if not first_name:
                 first_name = preview_name
             preview_items.append({
@@ -156,16 +274,17 @@ def _save_video_take_preview(session_key: Any, slot: int, images: Any, root: str
                 "subfolder": rel_dir.replace("\\", "/"),
                 "type": "output",
             })
-        return {
+        output.update({
             "preview_image": first_name,
             "preview_image_file": first_name,
             "preview_image_path": os.path.join(root, first_name) if first_name else "",
             "preview_subfolder": rel_dir.replace("\\", "/"),
             "preview_type": "output",
             "preview_strip": preview_items,
-        }
+        })
     except Exception as exc:
-        return {"preview_error": str(exc)}
+        output["preview_error"] = str(exc)
+    return output
 
 
 def _safe_json_loads(value: Any, fallback: Any) -> Any:
@@ -274,6 +393,250 @@ def _max_end(segments: List[Dict[str, Any]]) -> int:
     return max([_safe_int(seg.get("start", 0), 0) + _safe_int(seg.get("length", 1), 1) for seg in segments] or [0])
 
 
+def _safe_bool(value: Any, fallback: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return bool(fallback)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return bool(fallback)
+
+
+def _roll_contract_from_linx(cine_linx: Any, fps: float = 24.0) -> Dict[str, Any]:
+    linx = cine_linx if isinstance(cine_linx, dict) else {}
+    resources = linx.get("resources", {}) if isinstance(linx.get("resources", {}), dict) else {}
+    payload = resources.get("cine_payload") if isinstance(resources.get("cine_payload"), dict) else {}
+    candidates = [
+        resources.get("cine_roll_contract"),
+        resources.get("cine_audio_tracks", {}).get("roll_contract") if isinstance(resources.get("cine_audio_tracks"), dict) else None,
+        payload.get("roll_contract"),
+        payload.get("roll"),
+    ]
+    raw = next((item for item in candidates if isinstance(item, dict)), {})
+    safe_fps = max(1.0, _safe_float(raw.get("frame_rate", fps), fps))
+    enabled = _safe_bool(raw.get("enabled", False), False)
+    seconds = max(0.0, min(30.0, _safe_float(raw.get("seconds", 1.0), 1.0)))
+    frames = max(0, _safe_int(raw.get("frames", seconds * safe_fps), 0)) if enabled else 0
+    if enabled and frames <= 0:
+        enabled = False
+    return {
+        "schema": "iamccs.audio.roll_contract",
+        "schema_version": 1,
+        "enabled": bool(enabled),
+        "seconds": float(frames / safe_fps if frames > 0 else seconds),
+        "frames": int(frames),
+        "frame_rate": float(safe_fps),
+        "mode": "generation_duration_extension",
+        "first_take_pre_frames": 0,
+        "subsequent_take_pre_frames": int(frames),
+        "post_frames": int(frames),
+    }
+
+
+def _master_source_segment_from_manifest(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    master = manifest.get("master") if isinstance(manifest.get("master"), dict) else {}
+    source = master.get("source_master_segment") if isinstance(master.get("source_master_segment"), dict) else {}
+    if not source:
+        source = manifest.get("source_master_segment") if isinstance(manifest.get("source_master_segment"), dict) else {}
+    def has_media(item: Any) -> bool:
+        return isinstance(item, dict) and bool(
+            str(item.get("audioFile") or item.get("audioB64") or "").strip()
+            or str(item.get("sourceAudioFile") or item.get("sourceAudioB64") or "").strip()
+        )
+
+    def materialize_source(item: Dict[str, Any]) -> Dict[str, Any]:
+        out = copy.deepcopy(item)
+        source_file = str(out.get("sourceAudioFile") or "").strip()
+        source_b64 = str(out.get("sourceAudioB64") or "").strip()
+        if source_file and not str(out.get("audioFile") or "").strip():
+            out["audioFile"] = source_file
+        if source_b64 and not str(out.get("audioB64") or "").strip() and not str(out.get("audioFile") or "").strip():
+            out["audioB64"] = source_b64
+        if out.get("sourceAudioUploadType") and not out.get("audioUploadType"):
+            out["audioUploadType"] = out.get("sourceAudioUploadType")
+        if out.get("sourceAudioDurationFrames"):
+            out["audioDurationFrames"] = max(
+                _safe_int(out.get("audioDurationFrames"), 0),
+                _safe_int(out.get("sourceAudioDurationFrames"), 0),
+            )
+        if out.get("sourceTrimStart") is not None:
+            out["trimStart"] = _safe_int(out.get("sourceTrimStart"), _safe_int(out.get("trimStart"), 0))
+        return out
+
+    if isinstance(source, dict) and has_media(source):
+        return materialize_source(source)
+
+    # A previous publish may have stripped sourceSegment.audioFile while the
+    # physical T-lane still carries sourceAudioFile metadata. Reconstruct the
+    # original source here so post-roll is real audio, not padded silence.
+    candidates: List[Dict[str, Any]] = []
+    candidates.extend(_segments(master.get("segments")))
+    for track in manifest.get("tracks") if isinstance(manifest.get("tracks"), list) else []:
+        if isinstance(track, dict):
+            candidates.extend(_segments(track.get("segments")))
+    for item in candidates:
+        source_file = str(item.get("sourceAudioFile") or "").strip()
+        source_b64 = str(item.get("sourceAudioB64") or "").strip()
+        # Never mistake the 15 s physical T-lane WAV for the original source.
+        # It is exactly the file that needs roll headroom.
+        if not source_file and not source_b64:
+            is_physical_chunk = bool(item.get("physicalChunk")) or str(item.get("audioPublishSchema") or "") == "iamccs.audio.publish.v2" or str(item.get("timelineId") or "").startswith("T")
+            if is_physical_chunk:
+                continue
+            source_file = str(item.get("audioFile") or "").strip()
+            source_b64 = str(item.get("audioB64") or "").strip()
+        if not source_file and not source_b64:
+            continue
+        return materialize_source({
+            "id": str(item.get("sourceSegmentId") or item.get("id") or "master_audio"),
+            "name": str(item.get("sourceName") or item.get("name") or item.get("fileName") or "master_audio"),
+            "audioFile": source_file,
+            "audioB64": source_b64,
+            "audioUploadType": item.get("sourceAudioUploadType") or item.get("audioUploadType") or "input",
+            "trimStart": _safe_int(item.get("sourceTrimStart"), 0),
+            "sourceAudioDurationFrames": _safe_int(item.get("sourceAudioDurationFrames"), 0),
+            "audioDurationFrames": _safe_int(item.get("sourceAudioDurationFrames"), 0),
+        })
+    return {}
+
+
+def _extend_visual_timeline_for_roll(visual: Dict[str, Any], target_frames: int, fps: float) -> Dict[str, Any]:
+    out = copy.deepcopy(visual) if isinstance(visual, dict) else {}
+    target = max(1, _safe_int(target_frames, 1))
+    raw_segments = out.get("segments") if isinstance(out.get("segments"), list) else []
+    segments = [copy.deepcopy(item) for item in raw_segments if isinstance(item, dict)]
+    visual_indexes = [
+        index for index, item in enumerate(segments)
+        if str(item.get("type", "image") or "image").lower() not in {"audio", "text"}
+        and not _safe_bool(item.get("placeholder", False), False)
+    ]
+    if visual_indexes:
+        last_index = max(visual_indexes, key=lambda index: _safe_int(segments[index].get("start", segments[index].get("frame", 0)), 0))
+        last = segments[last_index]
+        start = max(0, _safe_int(last.get("start", last.get("frame", 0)), 0))
+        current_end = start + max(1, _safe_int(last.get("length", last.get("len", 1)), 1))
+        if current_end < target:
+            last["length"] = int(target - start)
+            last["len"] = int(target - start)
+        segments[last_index] = last
+    out["segments"] = segments
+    for key in ("shotClips", "shots"):
+        if isinstance(out.get(key), list):
+            out[key] = copy.deepcopy(segments)
+    out["duration_frames"] = int(target)
+    out["duration_seconds"] = float(target) / max(1.0, float(fps))
+    out["roll_applied"] = True
+    out["roll_mode"] = "generation_duration_extension"
+    return out
+
+
+def _roll_audio_segment(
+    source: Dict[str, Any],
+    take: Dict[str, Any],
+    generation_start: int,
+    generation_duration: int,
+    track_layout: str,
+) -> Dict[str, Any]:
+    out = copy.deepcopy(source)
+    take_index = max(1, _safe_int(take.get("take_index"), 1))
+    source_start = _safe_int(source.get("start", 0), 0)
+    relative_start = max(0, int(generation_start) - source_start)
+    out["id"] = f"{source.get('id', 'master_audio')}_{_take_timeline_id(take_index)}_roll"
+    out["start"] = 0
+    out["length"] = max(1, int(generation_duration))
+    out["trimStart"] = max(0, _safe_int(source.get("trimStart", 0), 0) + relative_start)
+    out["audioDurationFrames"] = max(
+        out["length"],
+        _safe_int(source.get("audioDurationFrames", source.get("length", out["length"])), out["length"]),
+    )
+    out["timelineId"] = _take_timeline_id(take_index)
+    out["multiTakeIndex"] = int(take_index)
+    out["multiGenerationClip"] = True
+    out["rollAudioSource"] = True
+    out["sourceSegmentId"] = str(source.get("id", ""))
+    out["sourceGlobalStart"] = int(generation_start)
+    out["sourceGlobalEnd"] = int(generation_start + generation_duration)
+    out["track"] = 0 if str(track_layout) == "collapse_to_lane_1" else max(0, _safe_int(source.get("track", 0), 0))
+    out["sourceTrack"] = max(0, _safe_int(source.get("track", 0), 0))
+    return out
+
+
+def _apply_roll_to_take(take: Dict[str, Any], roll: Dict[str, Any], fps: float, source_master: Dict[str, Any], track_layout: str) -> None:
+    take_index = max(1, _safe_int(take.get("take_index"), 1))
+    nominal_start = max(0, _safe_int(take.get("global_start_frames", take.get("source_global_start_frames", 0)), 0))
+    nominal_duration = max(1, _safe_int(take.get("nominal_duration_frames", take.get("duration_frames", 1)), 1))
+    nominal_end = nominal_start + nominal_duration
+    requested = max(0, _safe_int(roll.get("frames", 0), 0)) if _safe_bool(roll.get("enabled"), False) else 0
+    # Roll is an extension of the real source window, never a request for
+    # synthetic silence.  A final split may have less material than the
+    # requested post-roll, while a trimmed source can also limit pre-roll.
+    source_start = max(0, _safe_int(source_master.get("start", 0), 0)) if isinstance(source_master, dict) else 0
+    source_trim_start = max(0, _safe_int(source_master.get("trimStart", 0), 0)) if isinstance(source_master, dict) else 0
+    source_total_frames = max(0, _safe_int(
+        source_master.get("audioDurationFrames", source_master.get("length", 0)) if isinstance(source_master, dict) else 0,
+        0,
+    ))
+    source_end = source_start + max(0, source_total_frames - source_trim_start)
+    pre_available = max(0, nominal_start - source_start)
+    post_available = max(0, source_end - nominal_end) if source_total_frames > 0 else requested
+    pre_frames = min(requested, pre_available) if requested > 0 else 0
+    post_frames = min(requested, post_available) if requested > 0 else 0
+    generation_start = max(source_start, nominal_start - pre_frames)
+    generation_end = nominal_end + post_frames
+    generation_duration = max(1, generation_end - generation_start)
+    take["nominal_global_start_frames"] = int(nominal_start)
+    take["nominal_global_end_frames"] = int(nominal_end)
+    take["nominal_duration_frames"] = int(nominal_duration)
+    take["generation_start_frames"] = int(generation_start)
+    take["generation_end_frames"] = int(generation_end)
+    take["generation_duration_frames"] = int(generation_duration)
+    take["pre_roll_frames"] = int(pre_frames)
+    take["post_roll_frames"] = int(post_frames)
+    take["pre_roll_seconds"] = float(pre_frames) / max(1.0, float(fps))
+    take["post_roll_seconds"] = float(post_frames) / max(1.0, float(fps))
+    take["roll_contract"] = copy.deepcopy(roll)
+    take["roll_contract"]["requested_frames"] = int(requested)
+    take["roll_contract"]["effective_pre_frames"] = int(pre_frames)
+    take["roll_contract"]["effective_post_frames"] = int(post_frames)
+    take["roll_contract"]["source_end_frames"] = int(source_end)
+    take["roll_contract"]["clamped_to_source"] = bool(pre_frames < requested or post_frames < requested)
+    take["duration_frames"] = int(generation_duration)
+    take["duration_seconds"] = float(generation_duration) / max(1.0, float(fps))
+    if requested > 0 and (pre_frames < requested or post_frames < requested):
+        print(
+            "[IAMCCS MultiTimelineBridge] ROLL_AUDIO_CLAMP "
+            f"take=T{take_index:02d} requested={requested}f "
+            f"effective_pre={pre_frames}f effective_post={post_frames}f "
+            f"source_window={source_start}:{source_end} nominal={nominal_start}:{nominal_end}"
+        )
+    if source_master and (str(source_master.get("audioFile", "") or "").strip() or str(source_master.get("audioB64", "") or "").strip()):
+        take["nominal_audioSegments"] = copy.deepcopy(take.get("audioSegments", []))
+        take["audioSegments"] = [_roll_audio_segment(source_master, take, generation_start, generation_duration, track_layout)]
+        print(
+            "[IAMCCS MultiTimelineBridge] ROLL_AUDIO_SOURCE "
+            f"take=T{take_index:02d} file={source_master.get('audioFile') or '<b64>'} "
+            f"trim_start={_safe_int(source_master.get('trimStart'), 0)} "
+            f"available_frames={_safe_int(source_master.get('audioDurationFrames'), 0)} "
+            f"window={generation_start}:{generation_end}"
+        )
+    elif requested > 0:
+        print(
+            "[IAMCCS MultiTimelineBridge] ROLL_AUDIO_SOURCE_MISSING "
+            f"take=T{take_index:02d} window={generation_start}:{generation_end}. "
+            "The physical chunk has no readable reference to the original source."
+        )
+    visual = take.get("visual_timeline") if isinstance(take.get("visual_timeline"), dict) else {}
+    if visual:
+        take["visual_timeline"] = _extend_visual_timeline_for_roll(visual, generation_duration, fps)
+        take["visual_timeline"]["nominal_duration_frames"] = int(nominal_duration)
+        take["visual_timeline"]["pre_roll_frames"] = int(pre_frames)
+        take["visual_timeline"]["post_roll_frames"] = int(post_frames)
+
+
 def _parse_track_jsons(track_jsons: Tuple[Any, ...]) -> List[Dict[str, Any]]:
     parsed: List[Dict[str, Any]] = []
     for index, value in enumerate(track_jsons):
@@ -316,6 +679,10 @@ def _bus_manifest(
     master = copy.deepcopy(master)
     master["segments"] = _segments(master.get("segments"))
     master["duration_frames"] = max(_safe_int(master.get("duration_frames", 0), 0), _max_end(master["segments"]))
+    audio_tracks = resources.get("cine_audio_tracks") if isinstance(resources.get("cine_audio_tracks"), dict) else {}
+    source_master_segment = audio_tracks.get("source_master_segment") if isinstance(audio_tracks.get("source_master_segment"), dict) else {}
+    if source_master_segment and not master.get("source_master_segment"):
+        master["source_master_segment"] = copy.deepcopy(source_master_segment)
 
     tracks = _parse_track_jsons(track_jsons)
     if not tracks and isinstance(manifest.get("tracks"), list):
@@ -355,6 +722,7 @@ def _bus_manifest(
         "master": master,
         "tracks": tracks[:MAX_TRACK_OUTS],
         "generation_index": generation_index,
+        "source_master_segment": copy.deepcopy(master.get("source_master_segment", {})),
     }
 
 
@@ -425,6 +793,11 @@ def _timeline_for_take(take: Dict[str, Any], fps: float, track_layout: str) -> D
         "frame_rate": float(fps),
         "duration_frames": _safe_int(take.get("duration_frames", 0), 0),
         "duration_seconds": _safe_int(take.get("duration_frames", 0), 0) / max(1.0, float(fps)),
+        "nominal_duration_frames": _safe_int(take.get("nominal_duration_frames", take.get("duration_frames", 0)), 0),
+        "generation_start_frames": _safe_int(take.get("generation_start_frames", take.get("global_start_frames", 0)), 0),
+        "generation_end_frames": _safe_int(take.get("generation_end_frames", take.get("global_end_frames", 0)), 0),
+        "pre_roll_frames": _safe_int(take.get("pre_roll_frames", 0), 0),
+        "post_roll_frames": _safe_int(take.get("post_roll_frames", 0), 0),
         "audioSegments": segments,
         "audioTrackCount": track_count,
         "audioBusMode": "all_tracks",
@@ -472,6 +845,12 @@ def _take_package_for_active_take(
         "audio_track_index": max(0, take_index - 1),
         "duration_frames": int(duration_frames),
         "duration_seconds": duration_frames / max(1.0, float(fps)),
+        "nominal_duration_frames": int(_safe_int(active_take.get("nominal_duration_frames", duration_frames), duration_frames)),
+        "generation_start_frames": int(_safe_int(active_take.get("generation_start_frames", active_take.get("global_start_frames", 0)), 0)),
+        "generation_end_frames": int(_safe_int(active_take.get("generation_end_frames", active_take.get("global_end_frames", duration_frames)), duration_frames)),
+        "pre_roll_frames": int(_safe_int(active_take.get("pre_roll_frames", 0), 0)),
+        "post_roll_frames": int(_safe_int(active_take.get("post_roll_frames", 0), 0)),
+        "roll_contract": copy.deepcopy(active_take.get("roll_contract", {})) if isinstance(active_take.get("roll_contract"), dict) else {},
         "frame_rate": float(fps),
         "tail_trim_frames": int(tail_trim_frames),
         "global_prompt": global_prompt,
@@ -638,6 +1017,60 @@ def _apply_active_take(
     track_layout: str,
 ) -> None:
     fps = _safe_float(generation_index.get("frame_rate", 24.0), 24.0)
+    # The planner owns the visual timeline.  A bridge input may omit the
+    # optional visual_timelines_json while cine_board_timeline_data still
+    # contains the selected T01/T02 contract.  Recover it before packaging
+    # the take so a roll cannot extend audio alone.
+    active_visual = active_take.get("visual_timeline") if isinstance(active_take.get("visual_timeline"), dict) else {}
+    active_visual_segments = active_visual.get("segments") if isinstance(active_visual.get("segments"), list) else []
+    visual_recovered = False
+    if not active_visual_segments:
+        board_timeline = _safe_json_loads(_resources(cine_linx).get("cine_board_timeline_data"), {})
+        multi = board_timeline.get("multiGeneration") if isinstance(board_timeline, dict) and isinstance(board_timeline.get("multiGeneration"), dict) else {}
+        visuals = multi.get("visualTimelines") if isinstance(multi.get("visualTimelines"), dict) else {}
+        timeline_id = str(active_take.get("timeline_id") or _take_timeline_id(active_take.get("take_index", 1)))
+        candidates = [timeline_id]
+        take_number = _safe_int(active_take.get("take_index", 1), 1)
+        if take_number > 0:
+            candidates.extend([_take_timeline_id(take_number), f"T{take_number}"])
+        for candidate_key in candidates:
+            candidate = visuals.get(candidate_key)
+            if isinstance(candidate, dict) and isinstance(candidate.get("segments"), list) and candidate.get("segments"):
+                active_visual = copy.deepcopy(candidate)
+                active_visual_segments = active_visual.get("segments", [])
+                visual_recovered = True
+                break
+
+    target_visual_frames = max(0, _safe_int(active_take.get("duration_frames", 0), 0))
+    if active_visual_segments and target_visual_frames > 0:
+        current_visual_end = _max_end([
+            item for item in active_visual_segments
+            if isinstance(item, dict)
+            and str(item.get("type", "image") or "image").lower() not in {"audio", "text"}
+            and not _safe_bool(item.get("placeholder", False), False)
+        ])
+        if current_visual_end < target_visual_frames:
+            active_visual = _extend_visual_timeline_for_roll(active_visual, target_visual_frames, fps)
+            print(
+                "[IAMCCS MultiTimelineBridge] VISUAL_ROLL_CONTRACT "
+                f"timeline={active_take.get('timeline_id', '')} "
+                f"visual_end_before={int(current_visual_end)} "
+                f"visual_end_after={int(target_visual_frames)} "
+                f"extended_frames={int(target_visual_frames - current_visual_end)}"
+            )
+        else:
+            active_visual = copy.deepcopy(active_visual)
+            active_visual["duration_frames"] = int(target_visual_frames)
+            active_visual["duration_seconds"] = float(target_visual_frames) / max(1.0, float(fps))
+        active_take["visual_timeline"] = active_visual
+        active_visual_segments = active_visual.get("segments") if isinstance(active_visual.get("segments"), list) else []
+        if visual_recovered:
+            print(
+                "[IAMCCS MultiTimelineBridge] VISUAL_TIMELINE_RECOVERED "
+                f"timeline={active_take.get('timeline_id', '')} segments={len(active_visual_segments)} "
+                f"duration_frames={int(target_visual_frames)} source=cine_board_timeline_data"
+            )
+
     take_timeline = _timeline_for_take(active_take, fps, track_layout)
     take_package = _take_package_for_active_take(generation_index, active_take, take_timeline, fps)
     duration_frames = _safe_int(take_timeline.get("duration_frames", 0), 0)
@@ -658,6 +1091,9 @@ def _apply_active_take(
     resources["cine_multigeneration_take_audio_timeline_json"] = take_timeline_json
     resources["cine_audio_timeline"] = copy.deepcopy(take_timeline)
     resources["cine_audio_timeline_json"] = take_timeline_json
+    resources["cine_roll_contract"] = copy.deepcopy(active_take.get("roll_contract", {})) if isinstance(active_take.get("roll_contract"), dict) else {}
+    resources["cine_visual_segments_json"] = _json_dump(active_visual_segments)
+    payload["visual_segments"] = copy.deepcopy(active_visual_segments)
     resources["cine_audio_tracks"] = {
         "source": "IAMCCS_MultiTimelineBridge_active_take",
         "shotboard_segments": copy.deepcopy(take_segments),
@@ -668,6 +1104,8 @@ def _apply_active_take(
         "source_end_frames": int(duration_frames),
         "timeline_id": str(active_take.get("timeline_id", "")),
         "active_take": int(active_take.get("take_index", generation_index.get("active_take", 1)) or 1),
+        "source_master_segment": copy.deepcopy(resources.get("cine_audio_source_master_segment", {})) if isinstance(resources.get("cine_audio_source_master_segment"), dict) else {},
+        "roll_contract": copy.deepcopy(active_take.get("roll_contract", {})) if isinstance(active_take.get("roll_contract"), dict) else {},
     }
     resources["cine_use_custom_audio"] = bool(take_timeline.get("use_custom_audio", False))
     resources["cine_duration_seconds"] = float(duration_seconds)
@@ -690,6 +1128,35 @@ def _apply_active_take(
     payload["audioTrackCount"] = take_timeline["audioTrackCount"]
     payload["use_custom_audio"] = bool(take_timeline["use_custom_audio"])
     payload["audioSyncMode"] = "timeline_audio"
+
+    # Keep the routed visual contract in the linx itself. TakeRouter consumes
+    # this resource when its optional timeline_data widget is empty, which is
+    # the normal workflow path.
+    board_timeline = _safe_json_loads(resources.get("cine_board_timeline_data"), {})
+    if isinstance(board_timeline, dict) and active_visual:
+        timeline_id = str(active_take.get("timeline_id") or _take_timeline_id(active_take.get("take_index", 1)))
+        multi = board_timeline.get("multiGeneration") if isinstance(board_timeline.get("multiGeneration"), dict) else {}
+        visuals = multi.get("visualTimelines") if isinstance(multi.get("visualTimelines"), dict) else {}
+        visuals[timeline_id] = copy.deepcopy(active_visual)
+        multi.update({
+            "enabled": True,
+            "activeTake": int(active_take.get("take_index", 1) or 1),
+            "activeTimelineId": timeline_id,
+            "visualTimelines": visuals,
+        })
+        board_timeline["multiGeneration"] = multi
+        board_timeline["visualTimelines"] = visuals
+        board_timeline["activeTake"] = int(active_take.get("take_index", 1) or 1)
+        board_timeline["activeTimelineId"] = timeline_id
+        board_timeline["segments"] = copy.deepcopy(active_visual_segments)
+        board_timeline["rows"] = copy.deepcopy(active_visual.get("rows", [])) if isinstance(active_visual.get("rows"), list) else []
+        board_timeline["duration_seconds"] = float(active_visual.get("duration_seconds", duration_seconds) or duration_seconds)
+        board_timeline["frame_rate"] = float(active_visual.get("frame_rate", fps) or fps)
+        board_timeline["roll_contract"] = copy.deepcopy(active_take.get("roll_contract", {}))
+        board_timeline_json = _json_dump(board_timeline)
+        resources["cine_board_timeline_data"] = board_timeline_json
+        outputs["timeline_data"] = board_timeline_json
+        payload["timeline_data"] = board_timeline_json
 
     outputs["generation_index_json"] = _json_dump(generation_index)
     outputs["active_take_json"] = _json_dump(active_take)
@@ -1289,6 +1756,13 @@ class IAMCCS_MultiTimelineBridge:
                 take["take_audio_timeline"] = _timeline_for_take(take, fps, str(take_track_layout))
                 takes.append(take)
 
+        roll_contract = _roll_contract_from_linx(cine_linx, fps)
+        if roll_contract.get("enabled") and roll_contract.get("frames", 0) > 0:
+            source_master_segment = _master_source_segment_from_manifest(manifest)
+            for take in takes:
+                _apply_roll_to_take(take, roll_contract, fps, source_master_segment, str(take_track_layout))
+                take["take_audio_timeline"] = _timeline_for_take(take, fps, str(take_track_layout))
+
         shotboard_identity = _shotboard_timeline_identity_from_linx(cine_linx)
         upstream_identity = shotboard_identity or _active_identity_from_linx(cine_linx)
         upstream_take = _safe_int(upstream_identity.get("take_index"), 0) if upstream_identity else 0
@@ -1304,13 +1778,40 @@ class IAMCCS_MultiTimelineBridge:
             local_take["visual_timeline_key"] = local_take["timeline_id"]
             if isinstance(visual_timelines, dict):
                 local_take["visual_timeline"] = visual_timelines.get(local_take["timeline_id"]) or local_take.get("visual_timeline")
+            # A published single chunk is local to its own file and therefore
+            # often starts at frame 0 even when Shotboard selected T02/T03.
+            # Restore its nominal global position before applying roll again;
+            # otherwise later takes receive post-roll but never pre-roll.
+            if roll_contract.get("enabled") and roll_contract.get("frames", 0) > 0:
+                nominal_duration = max(
+                    1,
+                    _safe_int(
+                        local_take.get("nominal_duration_frames", local_take.get("duration_frames", chunk_frames)),
+                        chunk_frames,
+                    ),
+                )
+                nominal_start = max(0, (upstream_take - 1) * chunk_frames)
+                local_take["global_start_frames"] = int(nominal_start)
+                local_take["global_end_frames"] = int(nominal_start + nominal_duration)
+                local_take["source_global_start_frames"] = int(nominal_start)
+                local_take["source_global_end_frames"] = int(nominal_start + nominal_duration)
+                _apply_roll_to_take(
+                    local_take,
+                    roll_contract,
+                    fps,
+                    _master_source_segment_from_manifest(manifest),
+                    str(take_track_layout),
+                )
+                local_take["take_audio_timeline"] = _timeline_for_take(local_take, fps, str(take_track_layout))
             local_take["take_audio_timeline"] = _timeline_for_take(local_take, fps, str(take_track_layout))
             print(
                 "[IAMCCS MultiTimelineBridge] LOCAL_ACTIVE_TAKE_REMAP "
                 f"from=T{old_take:02d} "
                 f"to=T{upstream_take:02d} "
                 f"timeline={local_take.get('timeline_id')} "
-                f"reason=single_local_audio_chunk"
+                f"reason=single_local_audio_chunk "
+                f"nominal_start_frames={local_take.get('nominal_global_start_frames', local_take.get('global_start_frames', 0))} "
+                f"generation_duration_frames={local_take.get('generation_duration_frames', local_take.get('duration_frames', 0))}"
             )
 
         requested_active_take = max(1, _safe_int(active_take, 1))
@@ -1375,6 +1876,8 @@ class IAMCCS_MultiTimelineBridge:
             "take_track_layout": str(take_track_layout),
             "takes": takes,
             "take_audio_contract": take_audio_contract,
+            "roll_contract": copy.deepcopy(roll_contract),
+            "roll_enabled": bool(roll_contract.get("enabled")),
             "bus_generation_index": manifest.get("generation_index") if isinstance(manifest.get("generation_index"), dict) else {},
             # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
             # tail_trim_frames=0: trimming is handled by IAMCCS_LTXVideoDurationCrop before VideoEditor parks.
@@ -1427,6 +1930,8 @@ class IAMCCS_MultiTimelineBridge:
             "active_take": active_take_number,
             "source_segments": len(source_segments),
             "active_segments": len(active_take.get("audioSegments", [])),
+            "roll_contract": roll_contract,
+            "roll_audio_source": bool(_master_source_segment_from_manifest(manifest)),
             "prechunked": bool(active_take.get("prechunked", False)),
             "active_timeline_id": active_timeline_id,
             "active_audio_lane": active_audio_lane,
@@ -1790,6 +2295,30 @@ def _load_audio_manifest_entry(item: Dict[str, Any]) -> Dict[str, Any] | None:
     if not path:
         return None
     waveform, sample_rate = _load_audio_waveform_file(path)
+    trim_start = _safe_float(
+        item.get("_render_trim_start_seconds")
+        or item.get("renderTrimStartSeconds")
+        or item.get("render_trim_start_seconds"),
+        0.0,
+    )
+    trim_end = _safe_float(
+        item.get("_render_trim_end_seconds")
+        or item.get("renderTrimEndSeconds")
+        or item.get("render_trim_end_seconds"),
+        0.0,
+    )
+    if trim_end <= trim_start:
+        pre_roll_frames = _safe_int(item.get("preRollFrames") or item.get("pre_roll_frames"), 0)
+        nominal_duration = _safe_float(item.get("nominalDurationSeconds") or item.get("nominal_duration_seconds"), 0.0)
+        if pre_roll_frames > 0:
+            trim_start = pre_roll_frames / max(1.0, _safe_float(item.get("fps"), 24.0))
+        if nominal_duration > 0:
+            trim_end = trim_start + nominal_duration
+    if trim_end > trim_start:
+        sample_count = max(1, int(waveform.shape[-1]))
+        start_sample = max(0, min(sample_count - 1, int(round(trim_start * int(sample_rate or 44100)))))
+        end_sample = max(start_sample + 1, min(sample_count, int(round(trim_end * int(sample_rate or 44100)))))
+        waveform = waveform[..., start_sample:end_sample].contiguous()
     return {"waveform": waveform, "sample_rate": int(sample_rate or 44100)}
 
 
@@ -1831,6 +2360,137 @@ def _manifest_master_audio_item(manifest: Dict[str, Any], assets: Dict[str, Any]
         ]).lower()
         if "master" in text:
             return item
+    return {}
+
+
+def _master_audio_asset_from_linx(linx: Any) -> Dict[str, Any]:
+    if not isinstance(linx, dict):
+        return {}
+    resources = _resources(linx)
+    outputs = _outputs(linx)
+    payload = _payload(linx)
+    containers = (linx, resources, outputs, payload)
+    candidates: List[Dict[str, Any]] = []
+    for container in containers:
+        for key in ("cine_audio_master_audio_asset", "master_audio_asset", "masterAudioAsset", "master_audio", "master_excerpt"):
+            item = container.get(key)
+            if isinstance(item, dict):
+                candidates.append(item)
+        multi = container.get("multiGeneration")
+        if isinstance(multi, dict):
+            for key in ("master_audio_asset", "masterAudioAsset", "master_audio", "masterExcerpt"):
+                item = multi.get(key)
+                if isinstance(item, dict):
+                    candidates.append(item)
+    for item in candidates:
+        asset = copy.deepcopy(item)
+        if not str(asset.get("path") or asset.get("audioFile") or asset.get("filename") or asset.get("fileName") or "").strip():
+            continue
+        asset.setdefault("id", "master_audio")
+        asset.setdefault("role", "master_audio")
+        asset.setdefault("audioLane", "MASTER")
+        asset.setdefault("timelineId", "MASTER")
+        return asset
+    return {}
+
+
+def _master_audio_fingerprint(item: Any) -> Tuple[str, ...]:
+    if not isinstance(item, dict):
+        return ()
+    return tuple(str(item.get(key) or "").strip() for key in (
+        "masterRangeSignature",
+        "sourceSegmentId",
+        "sourceAudioFile",
+        "audioFile",
+        "path",
+        "filename",
+        "fileName",
+        "physicalStartFrame",
+        "physicalDurationFrames",
+        "duration_seconds",
+        "duration",
+    ))
+
+
+def _replace_manifest_master_audio(manifest: Dict[str, Any], master_asset: Dict[str, Any], fps: float) -> bool:
+    if not isinstance(manifest, dict) or not isinstance(master_asset, dict):
+        return False
+    asset = copy.deepcopy(master_asset)
+    if not str(asset.get("path") or asset.get("audioFile") or asset.get("filename") or asset.get("fileName") or "").strip():
+        return False
+    asset.update({
+        "id": "master_audio",
+        "role": "master_audio",
+        "type": "audio",
+        "takeIndex": 0,
+        "timelineId": "MASTER",
+        "audioLane": "MASTER",
+    })
+    duration = _safe_float(
+        asset.get("duration_seconds") or asset.get("duration") or asset.get("physicalDurationFrames", 0) / max(1.0, fps),
+        0.0,
+    )
+    assets = manifest.setdefault("assets", {})
+    if not isinstance(assets, dict):
+        assets = {}
+        manifest["assets"] = assets
+    # There can be only one active master. Leaving master_excerpt behind makes
+    # legacy lookup pick an older song before the newly published master_audio.
+    manifest.pop("master_excerpt", None)
+    manifest.pop("master_audio", None)
+    assets.pop("master_excerpt", None)
+    assets.pop("master_audio", None)
+    manifest["master_audio"] = copy.deepcopy(asset)
+    assets["master_audio"] = copy.deepcopy(asset)
+    clips = manifest.setdefault("clips", [])
+    if not isinstance(clips, list):
+        clips = []
+        manifest["clips"] = clips
+    clips[:] = [
+        clip for clip in clips
+        if not (
+            isinstance(clip, dict)
+            and (
+                str(clip.get("id") or "") == "clip_MASTER_AUDIO"
+                or str(clip.get("trackId") or "").strip().upper() in {"AM", "MASTER"}
+                or str(clip.get("audioLane") or "").strip().upper() == "MASTER"
+                or str(clip.get("role") or "").strip().lower() in {"master_audio", "master_excerpt"}
+            )
+        )
+    ]
+    if duration > 0:
+        clips.append({
+            "id": "clip_MASTER_AUDIO",
+            "assetId": "master_audio",
+            "type": "audio",
+            "takeIndex": 0,
+            "timelineId": "MASTER",
+            "audioLane": "MASTER",
+            "startTime": 0.0,
+            "duration": float(duration),
+            "trimStart": 0.0,
+            "trimEnd": float(duration),
+            "trackId": "AM",
+            "trackIndex": 10,
+            "muted": False,
+            "volume": 1.0,
+            "linkedClipIds": [],
+            "role": "master_audio",
+        })
+    _update_manifest_duration(manifest)
+    return True
+
+
+def _manifest_master_audio_clip(manifest: Dict[str, Any]) -> Dict[str, Any]:
+    clips = manifest.get("clips") if isinstance(manifest.get("clips"), list) else []
+    for clip in clips:
+        if not isinstance(clip, dict):
+            continue
+        track_id = str(clip.get("trackId") or "").strip().upper()
+        role = str(clip.get("role") or "").strip().lower()
+        lane = str(clip.get("audioLane") or "").strip().upper()
+        if track_id in {"AM", "MASTER"} or lane == "MASTER" or role in {"master_audio", "master_excerpt"}:
+            return clip
     return {}
 
 
@@ -1905,7 +2565,11 @@ def _persist_video_take(
     root = _parking_root(session_key)
     filename = f"T{int(slot):02d}_A{int(slot):02d}_{int(time.time() * 1000)}.iamccs_take.pt"
     path = os.path.join(root, filename)
-    embedded_audio = comp.audio if comp.audio is not None else audio
+    # The AUDIO socket carries the original timeline waveform assembled by the
+    # backend.  VIDEO.audio is the LTX audio-latent reconstruction and cannot
+    # be used as an editorial/master reference: it is lossy and can drift from
+    # the source that drove lip sync.  Keep it only as a legacy fallback.
+    embedded_audio = audio if audio is not None else comp.audio
     images = comp.images
     original_frames = int(images.shape[0])
     exact_target_frames = max(0, _safe_int(target_duration_frames, 0))
@@ -1965,7 +2629,14 @@ def _persist_video_take(
             "This usually means the ComfyUI output drive is full or the file is locked. "
             f"Target: {path}"
         ) from exc
-    preview = _save_video_take_preview(session_key, slot, images, root)
+    preview = _save_video_take_preview(
+        session_key,
+        slot,
+        images,
+        root,
+        fps=fps,
+        preview_stem=os.path.splitext(filename)[0],
+    )
     return {
         "parking_tensor_path": path,
         "parking_tensor_file": filename,
@@ -2164,6 +2835,74 @@ def _mix_editor_audio_tracks(audio_tracks: List[Any]) -> Any:
         padded.append(waveform)
     mixed = torch.stack(padded, dim=0).sum(dim=0).clamp(-1.0, 1.0)
     return {"waveform": mixed, "sample_rate": int(target_rate or 44100)}
+
+
+def _mix_manual_audio_into_timeline(
+    base_audio: Any,
+    manual_items: List[Tuple[Dict[str, Any], Dict[str, Any]]],
+    frame_count: int,
+    fps: float,
+) -> Any:
+    """Place manual AudioBoard editor clips at their manifest timeline positions."""
+    loaded: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
+    for clip, asset in manual_items:
+        if not isinstance(clip, dict) or not isinstance(asset, dict):
+            continue
+        audio = _load_manual_audio_clip(asset)
+        if isinstance(audio, dict) and audio.get("waveform") is not None:
+            loaded.append((clip, audio))
+    base_waveform, base_rate = _audio_waveform(base_audio)
+    if base_waveform is None and not loaded:
+        return None
+    target_rate = int(base_rate or 0)
+    if target_rate <= 0 and loaded:
+        target_rate = int(loaded[0][1].get("sample_rate") or 44100)
+    target_rate = max(1, target_rate or 44100)
+    target_channels = int(base_waveform.shape[-2]) if base_waveform is not None else 1
+    for _, audio in loaded:
+        waveform = audio.get("waveform")
+        if torch.is_tensor(waveform):
+            target_channels = max(target_channels, int(waveform.shape[-2]))
+    target_samples = max(1, int(round(max(1, int(frame_count)) / max(1.0, float(fps)) * target_rate)))
+    mixed = torch.zeros((1, target_channels, target_samples), dtype=torch.float32)
+
+    def add_audio(waveform: torch.Tensor, sample_rate: int, destination: int, volume: float = 1.0) -> None:
+        nonlocal mixed
+        if sample_rate != target_rate:
+            waveform = torchaudio.functional.resample(waveform, sample_rate, target_rate)
+        waveform = _normalize_audio_channels(waveform, target_channels).to(dtype=torch.float32, device=mixed.device)
+        destination = max(0, int(destination))
+        if destination >= target_samples:
+            return
+        count = min(target_samples - destination, int(waveform.shape[-1]))
+        if count <= 0:
+            return
+        mixed[..., destination:destination + count] += waveform[..., :count] * float(volume)
+
+    if base_waveform is not None:
+        add_audio(base_waveform, int(base_rate or target_rate), 0)
+    for clip, audio in loaded:
+        waveform = audio.get("waveform")
+        if not torch.is_tensor(waveform):
+            continue
+        sample_rate = int(audio.get("sample_rate") or target_rate)
+        if sample_rate != target_rate:
+            waveform = torchaudio.functional.resample(waveform, sample_rate, target_rate)
+            sample_rate = target_rate
+        source_start = max(0, int(round(max(0.0, _safe_float(clip.get("trimStart"), 0.0)) * sample_rate)))
+        source_end = int(waveform.shape[-1])
+        clip_duration = max(0.001, _safe_float(clip.get("duration"), 0.0))
+        requested = max(1, int(round(clip_duration * sample_rate)))
+        source_end = min(source_end, source_start + requested)
+        if source_end <= source_start:
+            continue
+        add_audio(
+            waveform[..., source_start:source_end],
+            sample_rate,
+            int(round(max(0.0, _safe_float(clip.get("startTime"), 0.0)) * target_rate)),
+            _safe_float(clip.get("volume", 1.0), 1.0),
+        )
+    return {"waveform": mixed.clamp(-1.0, 1.0), "sample_rate": target_rate}
 
 
 def _active_take_from_linx(cine_linx: Any, fallback: int = 1) -> int:
@@ -2369,10 +3108,22 @@ def _build_routed_timeline_data(
         0.0,
     )
     package_duration = _safe_float(take_package.get("duration_seconds"), 0.0)
+    package_frames = max(0, _safe_int(take_package.get("duration_frames"), 0))
+    roll_contract = take_package.get("roll_contract") if isinstance(take_package.get("roll_contract"), dict) else {}
+    roll_enabled = _safe_bool(roll_contract.get("enabled"), False) and _safe_int(roll_contract.get("frames"), 0) > 0
     if visual_duration <= 0:
         visual_duration = package_duration if package_duration > 0 else _safe_float(base.get("duration_seconds"), 0.0)
     visual_frames = max(1, int(round(visual_duration * fps)))
-    package_frames = max(0, _safe_int(take_package.get("duration_frames"), 0))
+    # A roll is a real generation-duration extension, not only an editor handle.
+    # Older Shotboard timeline data can still contain the nominal visual length;
+    # promote that visual contract to the immutable TakePackage duration before
+    # the backend samples, otherwise audio may be 17s while video remains 15s.
+    if roll_enabled and package_frames > visual_frames:
+        active_visual = _extend_visual_timeline_for_roll(active_visual, package_frames, fps)
+        visual_segments = active_visual.get("segments") if isinstance(active_visual.get("segments"), list) else []
+        visual_rows = active_visual.get("rows") if isinstance(active_visual.get("rows"), list) else []
+        visual_duration = package_duration if package_duration > 0 else float(package_frames) / max(1.0, fps)
+        visual_frames = int(package_frames)
     mismatch_frames = abs(visual_frames - package_frames) if package_frames > 0 else 0
     if str(duration_policy) == "hard_fail_mismatch" and package_frames > 0 and mismatch_frames > 1:
         raise ValueError(
@@ -2885,13 +3636,31 @@ def _append_video_take_to_manifest(
     target_duration_seconds: float | None = None,
     target_duration_frames: int | None = None,
     tail_trim_frames: int | None = None,
+    nominal_duration_seconds: float | None = None,
+    nominal_duration_frames: int | None = None,
+    pre_roll_frames: int | None = None,
+    post_roll_frames: int | None = None,
+    roll_contract: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     take_index = max(1, int(take_index))
     comp = _video_components(video)
     fps = float(comp.frame_rate or manifest.get("fps") or 24.0)
     source_duration = int(comp.images.shape[0]) / max(1.0, fps)
-    target_duration = _safe_float(target_duration_seconds, 0.0)
-    duration = min(source_duration, target_duration) if target_duration > 0 else source_duration
+    requested_pre_roll_frames = max(0, _safe_int(pre_roll_frames, 0))
+    requested_post_roll_frames = max(0, _safe_int(post_roll_frames, 0))
+    requested_nominal_frames = max(0, _safe_int(nominal_duration_frames, 0))
+    requested_nominal_seconds = _safe_float(nominal_duration_seconds, 0.0)
+    if requested_nominal_frames <= 0 and requested_nominal_seconds > 0:
+        requested_nominal_frames = max(1, int(round(requested_nominal_seconds * max(1.0, fps))))
+    requested_roll_frames = requested_nominal_frames + requested_pre_roll_frames + requested_post_roll_frames
+    requested_target_frames = max(0, _safe_int(target_duration_frames, 0))
+    requested_target_seconds = _safe_float(target_duration_seconds, 0.0)
+    parking_target_frames = max(requested_target_frames, requested_roll_frames)
+    parking_target_seconds = max(
+        requested_target_seconds,
+        float(requested_roll_frames) / max(1.0, fps) if requested_roll_frames > 0 else 0.0,
+    )
+    duration = min(source_duration, parking_target_seconds) if parking_target_seconds > 0 else source_duration
     duration = max(1.0 / max(1.0, fps), float(duration))
     video_track_id, video_track_index = _editor_track_for_take(take_index, "video")
     audio_track_id, audio_track_index = _editor_track_for_take(take_index, "audio")
@@ -2904,12 +3673,36 @@ def _append_video_take_to_manifest(
         video,
         clip_audio,
         target_duration_seconds=duration,
-        target_duration_frames=target_duration_frames,
+        target_duration_frames=parking_target_frames,
         tail_trim_frames=tail_trim_frames,
     )
     parked_frames = max(1, _safe_int(persisted.get("parking_frames"), int(comp.images.shape[0])))
     parked_duration = _safe_float(persisted.get("parking_duration_seconds"), duration)
-    duration = max(1.0 / max(1.0, fps), float(parked_duration))
+    requested_pre_roll_frames = min(requested_pre_roll_frames, max(0, parked_frames - 1))
+    nominal_frames = requested_nominal_frames
+    if nominal_frames <= 0:
+        nominal_frames = max(1, parked_frames - requested_pre_roll_frames - requested_post_roll_frames)
+    nominal_frames = min(nominal_frames, max(1, parked_frames - requested_pre_roll_frames))
+    post_roll_frames_actual = min(
+        requested_post_roll_frames,
+        max(0, parked_frames - requested_pre_roll_frames - nominal_frames),
+    )
+    nominal_start_frames = requested_pre_roll_frames
+    nominal_end_frames = min(parked_frames, nominal_start_frames + nominal_frames)
+    nominal_frames = max(1, nominal_end_frames - nominal_start_frames)
+    duration = float(nominal_frames) / max(1.0, fps)
+    nominal_start_seconds = float(nominal_start_frames) / max(1.0, fps)
+    nominal_end_seconds = float(nominal_end_frames) / max(1.0, fps)
+    roll_contract_data = copy.deepcopy(roll_contract) if isinstance(roll_contract, dict) else {}
+    roll_contract_data.update({
+        "enabled": bool(nominal_start_frames or post_roll_frames_actual),
+        "pre_roll_frames": int(nominal_start_frames),
+        "post_roll_frames": int(post_roll_frames_actual),
+        "nominal_duration_frames": int(nominal_frames),
+        "generation_duration_frames": int(parked_frames),
+        "nominal_source_start_frames": int(nominal_start_frames),
+        "nominal_source_end_frames": int(nominal_end_frames),
+    })
     asset_id = f"take_T{take_index:02d}_video"
     asset = {
         "id": asset_id,
@@ -2921,8 +3714,13 @@ def _append_video_take_to_manifest(
         "duration": float(parked_duration),
         "source_duration": float(source_duration),
         "timeline_duration": float(parked_duration),
-        "target_duration_frames": max(0, _safe_int(target_duration_frames, 0)),
+        "target_duration_frames": int(parking_target_frames),
         "tail_trim_frames": max(0, _safe_int(tail_trim_frames, 0)),
+        "nominal_duration": float(duration),
+        "nominal_duration_frames": int(nominal_frames),
+        "pre_roll_frames": int(nominal_start_frames),
+        "post_roll_frames": int(post_roll_frames_actual),
+        "roll_contract": copy.deepcopy(roll_contract_data),
         "fps": float(fps),
         "frames": int(parked_frames),
         "width": int(comp.images.shape[2]),
@@ -2946,17 +3744,30 @@ def _append_video_take_to_manifest(
         "audioLane": _take_audio_lane_name(take_index),
         "startTime": float(start),
         "duration": float(duration),
-        "sourceDuration": float(duration),
+        "sourceDuration": float(parked_duration),
         "rawSourceDuration": float(source_duration),
-        "trimStart": 0.0,
-        "trimEnd": float(duration),
+        "nominalDuration": float(duration),
+        "nominalDurationFrames": int(nominal_frames),
+        "generationDuration": float(parked_duration),
+        "generationDurationFrames": int(parked_frames),
+        "preRoll": float(nominal_start_seconds),
+        "postRoll": float(post_roll_frames_actual / max(1.0, fps)),
+        "preRollFrames": int(nominal_start_frames),
+        "postRollFrames": int(post_roll_frames_actual),
+        "rollContract": copy.deepcopy(roll_contract_data),
+        "sourceDurationLimit": float(parked_duration),
+        "trimStart": float(nominal_start_seconds),
+        "trimEnd": float(nominal_end_seconds),
         "trackId": video_track_id,
         "trackIndex": video_track_index,
         "muted": False,
         "volume": 1.0,
         "linkedClipIds": [],
     })
-    audio_source = comp.audio if comp.audio is not None else clip_audio
+    # Preserve the same source-of-truth rule in the editable lane manifest.
+    # This keeps T02's visible waveform and nominal trim aligned to the master
+    # rather than to LTX's reconstructed audio component.
+    audio_source = clip_audio if clip_audio is not None else comp.audio
     audio_entry = _audio_manifest_entry(take_index, audio_source, session_key=session_key, root=_parking_root(session_key)) if audio_source is not None else None
     if audio_entry:
         audio_asset_id = f"take_T{take_index:02d}_audio"
@@ -2967,9 +3778,22 @@ def _append_video_take_to_manifest(
             "timelineId": _take_timeline_id(take_index),
             "audioLane": _take_audio_lane_name(take_index),
             "duration": float(audio_entry.get("duration_seconds") or duration),
+            "timeline_duration": float(audio_entry.get("duration_seconds") or parked_duration),
+            "nominal_duration": float(duration),
+            "nominal_duration_frames": int(nominal_frames),
+            "pre_roll_frames": int(nominal_start_frames),
+            "post_roll_frames": int(post_roll_frames_actual),
+            "roll_contract": copy.deepcopy(roll_contract_data),
             **audio_entry,
         }
         audio_clip_id = f"clip_T{take_index:02d}_A"
+        audio_source_duration = max(
+            1.0 / max(1.0, fps),
+            _safe_float(audio_entry.get("duration_seconds"), parked_duration),
+        )
+        audio_trim_start = min(nominal_start_seconds, max(0.0, audio_source_duration - (1.0 / max(1.0, fps))))
+        audio_trim_end = min(audio_source_duration, audio_trim_start + duration)
+        audio_clip_duration = max(1.0 / max(1.0, fps), audio_trim_end - audio_trim_start)
         manifest["clips"].append({
             "id": audio_clip_id,
             "assetId": audio_asset_id,
@@ -2978,13 +3802,22 @@ def _append_video_take_to_manifest(
             "timelineId": _take_timeline_id(take_index),
             "audioLane": _take_audio_lane_name(take_index),
             "startTime": float(start),
-            # Editor display duration follows the parked video take. The source
-            # audio duration is preserved separately so the UI can draw the real
-            # waveform without making A-lanes look shorter than the V-lanes.
-            "duration": float(duration),
-            "sourceDuration": float(_safe_float(audio_entry.get("duration_seconds"), duration)),
-            "trimStart": 0.0,
-            "trimEnd": float(duration),
+            # The editor displays the nominal window while the complete audio
+            # source remains available for non-destructive roll reveals.
+            "duration": float(audio_clip_duration),
+            "sourceDuration": float(audio_source_duration),
+            "nominalDuration": float(audio_clip_duration),
+            "nominalDurationFrames": int(round(audio_clip_duration * max(1.0, fps))),
+            "generationDuration": float(audio_source_duration),
+            "generationDurationFrames": int(round(audio_source_duration * max(1.0, fps))),
+            "preRoll": float(audio_trim_start),
+            "postRoll": float(max(0.0, audio_source_duration - audio_trim_end)),
+            "preRollFrames": int(round(audio_trim_start * max(1.0, fps))),
+            "postRollFrames": int(round(max(0.0, audio_source_duration - audio_trim_end) * max(1.0, fps))),
+            "rollContract": copy.deepcopy(roll_contract_data),
+            "sourceDurationLimit": float(audio_source_duration),
+            "trimStart": float(audio_trim_start),
+            "trimEnd": float(audio_trim_end),
             "trackId": audio_track_id,
             "trackIndex": audio_track_index,
             "muted": False,
@@ -3171,6 +4004,15 @@ class IAMCCS_ShotboardVideoEditorV1:
                 target_duration_seconds=_safe_float(take_package.get("duration_seconds"), 0.0) if isinstance(take_package, dict) else 0.0,
                 target_duration_frames=_safe_int(take_package.get("duration_frames"), 0) if isinstance(take_package, dict) else 0,
                 tail_trim_frames=_safe_int(take_package.get("tail_trim_frames"), 0) if isinstance(take_package, dict) else 0,
+                nominal_duration_seconds=(
+                    _safe_float(take_package.get("nominal_duration_seconds"), 0.0)
+                    or _safe_float(take_package.get("nominal_duration_frames"), 0.0) / max(1.0, fps)
+                    if isinstance(take_package, dict) else 0.0
+                ),
+                nominal_duration_frames=_safe_int(take_package.get("nominal_duration_frames"), 0) if isinstance(take_package, dict) else 0,
+                pre_roll_frames=_safe_int(take_package.get("pre_roll_frames"), 0) if isinstance(take_package, dict) else 0,
+                post_roll_frames=_safe_int(take_package.get("post_roll_frames"), 0) if isinstance(take_package, dict) else 0,
+                roll_contract=take_package.get("roll_contract") if isinstance(take_package, dict) and isinstance(take_package.get("roll_contract"), dict) else {},
             )
             collected.append({
                 "take_index": int(take_index),
@@ -3180,42 +4022,15 @@ class IAMCCS_ShotboardVideoEditorV1:
         if master_audio is not None:
             master = _audio_manifest_entry(0, master_audio, session_key=session_key, root=_parking_root(session_key))
             if master:
-                manifest["master_audio"] = master
-                master_duration = _safe_float(master.get("duration_seconds"), 0.0)
-                manifest.setdefault("assets", {})["master_audio"] = {
-                    "id": "master_audio",
-                    "type": "audio",
-                    "takeIndex": 0,
-                    "timelineId": "MASTER",
-                    "audioLane": "MASTER",
-                    "duration": float(master_duration),
-                    **master,
-                }
-                clips = manifest.setdefault("clips", [])
-                clips[:] = [
-                    clip for clip in clips
-                    if not (isinstance(clip, dict) and str(clip.get("id")) == "clip_MASTER_AUDIO")
-                ]
-                if master_duration > 0:
-                    clips.append({
-                        "id": "clip_MASTER_AUDIO",
-                        "assetId": "master_audio",
-                        "type": "audio",
-                        "takeIndex": 0,
-                        "timelineId": "MASTER",
-                        "audioLane": "MASTER",
-                        "startTime": 0.0,
-                        "duration": float(master_duration),
-                        "trimStart": 0.0,
-                        "trimEnd": float(master_duration),
-                        "trackId": "AM",
-                        "trackIndex": 10,
-                        "muted": False,
-                        "volume": 1.0,
-                        "linkedClipIds": [],
-                        "role": "master_audio",
-                    })
-                    _update_manifest_duration(manifest)
+                _replace_manifest_master_audio(manifest, master, fps)
+        else:
+            published_master = _master_audio_asset_from_linx(cine_linx) or _master_audio_asset_from_linx(cine_editor_linx)
+            existing_master = _manifest_master_audio_item(
+                manifest,
+                manifest.get("assets") if isinstance(manifest.get("assets"), dict) else {},
+            )
+            if published_master and _master_audio_fingerprint(published_master) != _master_audio_fingerprint(existing_master):
+                _replace_manifest_master_audio(manifest, published_master, fps)
         manifest_json = _json_dump(manifest)
         _VIDEO_EDITOR_MANIFEST_REGISTRY[_safe_slug(session_key)] = copy.deepcopy(manifest)
         editor_linx_out = _clone_linx(
@@ -3227,7 +4042,8 @@ class IAMCCS_ShotboardVideoEditorV1:
         editor_inputs = {
             "video_slots_present": [index for index, item in enumerate(videos, start=1) if item is not None],
             "audio_slots_present": [index for index, item in enumerate(audios, start=1) if item is not None],
-            "master_audio_present": bool(master_audio is not None),
+            "master_audio_present": bool(master_audio is not None or _manifest_master_audio_item(manifest, manifest.get("assets") if isinstance(manifest.get("assets"), dict) else {})),
+            "master_audio_source": "AUDIO socket" if master_audio is not None else ("cine_linx master_audio_asset" if _manifest_master_audio_item(manifest, manifest.get("assets") if isinstance(manifest.get("assets"), dict) else {}) else ""),
             "take_package_present": bool(isinstance(take_package, dict) and bool(take_package)),
             "session_key": str(session_key),
             "collect_policy": str(collect_policy),
@@ -3365,6 +4181,8 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
         for clip in clips:
             asset = assets.get(str(clip.get("assetId"))) if isinstance(assets.get(str(clip.get("assetId"))), dict) else {}
             parked = _load_parked_video_clip(asset)
+            if parked is None and bool(asset.get("manual")):
+                parked = _load_manual_video_clip(asset)
             if parked is None:
                 raise ValueError(f"IAMCCS ShotboardVideoEditorRenderV1: missing parked video asset for clip {clip.get('id')}.")
             comp = parked
@@ -3405,6 +4223,17 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
         if effective_audio_policy == "use_master_audio":
             # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
             master_item = _manifest_master_audio_item(manifest, assets)
+            master_clip = _manifest_master_audio_clip(manifest)
+            if isinstance(master_item, dict) and isinstance(master_clip, dict):
+                master_item = copy.deepcopy(master_item)
+                if master_clip.get("renderTrimStartSeconds") is not None:
+                    master_item["_render_trim_start_seconds"] = master_clip.get("renderTrimStartSeconds")
+                if master_clip.get("renderTrimEndSeconds") is not None:
+                    master_item["_render_trim_end_seconds"] = master_clip.get("renderTrimEndSeconds")
+                if master_clip.get("preRollFrames") is not None:
+                    master_item["preRollFrames"] = master_clip.get("preRollFrames")
+                if master_clip.get("nominalDurationSeconds") is not None:
+                    master_item["nominalDurationSeconds"] = master_clip.get("nominalDurationSeconds")
             audio = _load_audio_manifest_entry(master_item)
             master_audio_source = str(master_item.get("role") or master_item.get("id") or "master_audio") if isinstance(master_item, dict) else ""
             if audio is None:
@@ -3418,6 +4247,20 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
             audio = first.audio
         elif effective_audio_policy == "concat_clip_audio":
             audio = _concat_audio(audio_items)
+            manual_audio_items = []
+            for clip in manifest.get("clips", []):
+                if not isinstance(clip, dict) or str(clip.get("type")) != "audio":
+                    continue
+                track_id = str(clip.get("trackId") or "").strip().upper()
+                audio_lane = str(clip.get("audioLane") or "").strip().upper()
+                role = str(clip.get("role") or "").strip().lower()
+                if track_id in {"AM", "MASTER"} or audio_lane == "MASTER" or role in {"master_audio", "master_excerpt"}:
+                    continue
+                asset = assets.get(str(clip.get("assetId"))) if isinstance(assets.get(str(clip.get("assetId"))), dict) else {}
+                if bool(asset.get("manual")):
+                    manual_audio_items.append((clip, asset))
+            if manual_audio_items:
+                audio = _mix_manual_audio_into_timeline(audio, manual_audio_items, int(frames.shape[0]), fps)
         video = InputImpl.VideoFromComponents(Types.VideoComponents(
             images=frames,
             audio=audio,

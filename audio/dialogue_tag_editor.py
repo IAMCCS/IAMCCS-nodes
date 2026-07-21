@@ -8,6 +8,46 @@ from typing import Any, Dict, List, Tuple
 
 
 SUPERNODE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX"
+DEFAULT_GLOBAL_PROMPT = "cinematic field and reverse-field dialogue, hard cut coverage, one dominant speaking face per shot, visible mouth movement, natural audio-driven performance, silent listener reaction, stable identities, coherent eyelines"
+DEFAULT_DIALOGUE = {
+    "schema": "iamccs.dialogue_scene",
+    "schema_version": 3,
+    "global_prompt": DEFAULT_GLOBAL_PROMPT,
+    "settings": {
+        "editor_profile": "dialogue",
+        "engine_profile": "tts_audio_suite_chatterbox",
+        "output_mode": "speaker_stems_for_overlap",
+        "audio_lane_mode": "speaker_stems_timeline",
+        "speaker_stems_zero_start": False,
+        "speaker_stem_srt_local_zero": False,
+        "inline_edit_mode": "metadata_only",
+        "default_gap_seconds": 0.12,
+    },
+    "speakers": [
+        {
+            "id": "A",
+            "name": "Man A",
+            "voice": "speaker_a_low_tense",
+            "reference_text": "Keep your voice low. We do not know who is listening.",
+            "language": "en",
+            "voice_design": {"gender": "male", "age": "adult", "pitch": "low", "style": "tense", "accent": "", "dialect": "", "instruct": "male, adult, low pitch, tense"},
+        },
+        {
+            "id": "B",
+            "name": "Man B",
+            "voice": "speaker_b_controlled_whisper",
+            "reference_text": "Good. Now we finally have something worth protecting.",
+            "language": "en",
+            "voice_design": {"gender": "male", "age": "adult", "pitch": "medium", "style": "controlled whisper", "accent": "", "dialect": "", "instruct": "male, adult, medium pitch, controlled whisper"},
+        },
+    ],
+    "lines": [
+        {"id": "line_001", "speaker": "A", "text": "You said the signal was dead. Then why is that receiver still blinking?", "emotion": "tense", "style": "low", "paralinguistic": "Breathing", "overlap_after": 0.18, "ref": 1, "track": 0, "local_prompt": "hard cut, Man A close-up, Man A speaks clearly, visible mouth movement, tense controlled delivery, Man B listens quietly"},
+        {"id": "line_002", "speaker": "B", "text": "Because someone on the other side wants us to think we are alone.", "emotion": "serious", "style": "whisper", "paralinguistic": "none", "overlap_after": 0.12, "ref": 2, "track": 1, "local_prompt": "hard cut, Man B close-up, Man B speaks clearly, visible mouth movement, guarded quiet answer, Man A listens quietly"},
+        {"id": "line_003", "speaker": "A", "text": "If we open that door, we may be giving them exactly what they came for.", "emotion": "fearful", "style": "dry", "paralinguistic": "Sigh", "overlap_after": 0.1, "ref": 1, "track": 0, "local_prompt": "hard cut, Man A tighter close-up, Man A speaks clearly, visible mouth movement, fear held under discipline"},
+        {"id": "line_004", "speaker": "B", "text": "Then we do not open it. We make them knock twice.", "emotion": "coldness", "style": "authority", "paralinguistic": "none", "overlap_after": 0.0, "ref": 2, "track": 1, "local_prompt": "hard cut, Man B close-up, Man B speaks clearly, visible mouth movement, decisive controlled authority"},
+    ],
+}
 
 
 def _path_has_model_files(path: str) -> bool:
@@ -204,8 +244,135 @@ def _para_value(value: Any) -> str:
     return f"<{text}>"
 
 
+def _audio_lane_mode(settings: Dict[str, Any], output_mode: str) -> str:
+    raw = str(settings.get("audio_lane_mode") or settings.get("tts_generation_mode") or "").strip().lower()
+    if raw in {"single_master", "tts_master_unico", "flatten_for_single_track"} or str(output_mode) == "flatten_for_single_track":
+        return "single_master"
+    if raw in {"speaker_stems_zero_start", "double_stem_ab_zero", "a_b_zero"} or bool(settings.get("speaker_stems_zero_start", False)):
+        return "speaker_stems_zero_start"
+    return "speaker_stems_timeline"
+
+
+def _voice_design_instruct(speaker: Dict[str, Any]) -> str:
+    design = speaker.get("voice_design") if isinstance(speaker.get("voice_design"), dict) else {}
+    explicit = _clean_text(design.get("instruct"))
+    if explicit:
+        return explicit
+    parts = []
+    for key in ("gender", "age", "pitch", "style", "accent", "dialect"):
+        value = _clean_text(design.get(key))
+        if value and value.lower() != "none":
+            parts.append(value)
+    return ", ".join(parts)
+
+
+def _normalise_dialogue_scene(data: Dict[str, Any], frame_rate: float, speech_wpm: float, default_gap_seconds: float, output_mode: str, inline_edit_mode: str) -> Dict[str, Any]:
+    scene = copy.deepcopy(DEFAULT_DIALOGUE)
+    if isinstance(data, dict):
+        scene.update({key: copy.deepcopy(value) for key, value in data.items() if key not in {"settings", "speakers", "lines"}})
+        scene["settings"] = {**copy.deepcopy(DEFAULT_DIALOGUE["settings"]), **(data.get("settings") if isinstance(data.get("settings"), dict) else {})}
+        if isinstance(data.get("speakers"), list) and data.get("speakers"):
+            scene["speakers"] = [copy.deepcopy(item) for item in data.get("speakers", []) if isinstance(item, dict)]
+        if isinstance(data.get("lines"), list) and data.get("lines"):
+            scene["lines"] = [copy.deepcopy(item) for item in data.get("lines", []) if isinstance(item, dict)]
+
+    settings = scene.setdefault("settings", {})
+    lane_mode = _audio_lane_mode(settings, output_mode)
+    settings["audio_lane_mode"] = lane_mode
+    settings["output_mode"] = "flatten_for_single_track" if lane_mode == "single_master" else "speaker_stems_for_overlap"
+    settings["speaker_stems_zero_start"] = lane_mode == "speaker_stems_zero_start"
+    settings["speaker_stem_srt_local_zero"] = bool(settings.get("speaker_stem_srt_local_zero", lane_mode == "speaker_stems_zero_start"))
+    settings["inline_edit_mode"] = str(settings.get("inline_edit_mode") or inline_edit_mode or "metadata_only")
+    settings["engine_profile"] = _resolve_engine_profile(settings.get("engine_profile"))
+    settings["speech_wpm"] = float(speech_wpm)
+    settings["frame_rate"] = float(frame_rate)
+    settings["default_gap_seconds"] = float(settings.get("default_gap_seconds", default_gap_seconds))
+
+    scene["schema"] = "iamccs.dialogue_scene"
+    scene["schema_version"] = 3
+    scene["global_prompt"] = str(scene.get("global_prompt") or scene.get("prompt") or DEFAULT_GLOBAL_PROMPT).strip()
+
+    speakers = scene.get("speakers") if isinstance(scene.get("speakers"), list) else []
+    if not speakers:
+        speakers = copy.deepcopy(DEFAULT_DIALOGUE["speakers"])
+    clean_speakers = []
+    for index, raw in enumerate(speakers):
+        speaker = dict(raw)
+        speaker["id"] = str(speaker.get("id") or chr(65 + index)).strip() or chr(65 + index)
+        speaker["name"] = str(speaker.get("name") or speaker["id"]).strip()
+        speaker["voice"] = str(speaker.get("voice") or "").strip()
+        speaker["reference_text"] = str(speaker.get("reference_text") or speaker.get("reference") or "").strip()
+        speaker["language"] = str(speaker.get("language") or "").strip()
+        design = speaker.get("voice_design") if isinstance(speaker.get("voice_design"), dict) else {}
+        speaker["voice_design"] = {key: str(design.get(key) or "").strip() for key in ("gender", "age", "pitch", "style", "accent", "dialect", "instruct")}
+        speaker["voice_design"]["instruct"] = _voice_design_instruct(speaker)
+        clean_speakers.append(speaker)
+    scene["speakers"] = clean_speakers
+
+    lookup = _speaker_lookup(clean_speakers)
+    raw_lines = scene.get("lines") if isinstance(scene.get("lines"), list) else []
+    if not raw_lines:
+        raw_lines = copy.deepcopy(DEFAULT_DIALOGUE["lines"])
+    clean_lines = []
+    for index, raw in enumerate(raw_lines):
+        line = dict(raw)
+        speaker_token = str(line.get("speaker") or clean_speakers[index % len(clean_speakers)].get("id") or "A").strip()
+        speaker = lookup.get(_speaker_key(speaker_token)) or clean_speakers[index % len(clean_speakers)]
+        text = _clean_text(line.get("spoken_text") or line.get("text") or line.get("dialogue"))
+        if not text:
+            continue
+        tts_params = line.get("tts_params") if isinstance(line.get("tts_params"), dict) else {}
+        for key in ("duration", "speed", "seed"):
+            if line.get(key) not in (None, "") and key not in tts_params:
+                tts_params[key] = line.get(key)
+        line.update({
+            "id": str(line.get("id") or f"line_{index + 1:03d}"),
+            "speaker": str(speaker.get("id") or speaker_token),
+            "speaker_name": str(speaker.get("name") or speaker_token),
+            "text": text,
+            "spoken_text": text,
+            "emotion": str(line.get("emotion") or "none"),
+            "style": str(line.get("style") or "none"),
+            "paralinguistic": str(line.get("paralinguistic") or "none"),
+            "overlap_after": max(0.0, _float(line.get("overlap_after"), 0.0)),
+            "pause_after": max(0.0, _float(line.get("pause_after"), 0.0)),
+            "ref": int(_float(line.get("ref"), 1 if index % 2 == 0 else 2)),
+            "track": int(max(0, _float(line.get("track"), clean_speakers.index(speaker) if speaker in clean_speakers else index % 2))),
+            "tts_params": tts_params,
+        })
+        clean_lines.append(line)
+    scene["lines"] = clean_lines
+    return scene
+
+
+def _omnivoice_nonverbal(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() == "none":
+        return ""
+    key = re.sub(r"[^a-z0-9:.]+", "_", text.lower()).strip("_")
+    aliases = {
+        "laughter": "laughter",
+        "laugh": "laughter",
+        "breathing": "breath",
+        "breath": "breath",
+        "sigh": "sigh",
+        "uhm": "uhm",
+        "surprise_oh": "oh",
+        "question_ei": "ei",
+        "confirmation_en": "en",
+    }
+    if key.startswith("pause:"):
+        return f"[{key}]"
+    return f"[{aliases.get(key, key)}]"
+
+
+def _is_omnivoice_profile(engine_profile: str) -> bool:
+    profile = str(engine_profile or "").strip().lower()
+    return profile in {"omnivoice", "tts_omnivoice", "omnivoice_voice_design", "tts_audio_suite_omnivoice"}
+
+
 def _format_dialogue_text(line: Dict[str, Any], speaker: Dict[str, Any], engine_profile: str, inline_edit_mode: str) -> str:
-    text = _clean_text(line.get("text"))
+    text = _clean_text(line.get("spoken_text") or line.get("text"))
     if not text:
         return ""
     speaker_id = str(speaker.get("id") or line.get("speaker") or "A").strip() or "A"
@@ -217,6 +384,23 @@ def _format_dialogue_text(line: Dict[str, Any], speaker: Dict[str, Any], engine_
         prefix_parts.append(language)
     if seed:
         prefix_parts.append(f"seed:{seed}")
+
+    if _is_omnivoice_profile(engine_profile):
+        params = line.get("tts_params") if isinstance(line.get("tts_params"), dict) else {}
+        for key in ("duration", "speed", "seed"):
+            value = params.get(key, line.get(key))
+            if value not in (None, "") and str(value).strip():
+                prefix_parts.append(f"{key}:{str(value).strip()}")
+        prefix = "[" + "|".join(prefix_parts) + "]"
+        nonverbal = _omnivoice_nonverbal(line.get("paralinguistic"))
+        pause = _float(line.get("pause_after"), 0.0)
+        suffix = []
+        if nonverbal:
+            suffix.append(nonverbal)
+        if pause > 0:
+            suffix.append(f"[pause:{pause:.2f}]")
+        return f"{prefix} {text} {' '.join(suffix)}".strip()
+
     prefix = "[" + "|".join(prefix_parts) + "]"
 
     if str(engine_profile).lower() in {"plain", "longcat"}:
@@ -239,21 +423,17 @@ def _format_dialogue_text(line: Dict[str, Any], speaker: Dict[str, Any], engine_
 
 
 def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: float, min_line_seconds: float, default_gap_seconds: float, output_mode: str, inline_edit_mode: str) -> Dict[str, Any]:
-    global_prompt = str(data.get("global_prompt") or data.get("prompt") or "").strip()
-    if not global_prompt:
-        global_prompt = "cinematic field and reverse-field dialogue, hard cut coverage, one dominant speaking face per shot, visible mouth movement, natural audio-driven performance, silent listener reaction, stable identities, coherent eyelines"
-    speakers = data.get("speakers") if isinstance(data.get("speakers"), list) else []
-    if not speakers:
-        speakers = copy.deepcopy(DEFAULT_DIALOGUE["speakers"])
-    speakers = [dict(item) for item in speakers if isinstance(item, dict)]
-    for index, speaker in enumerate(speakers):
-        speaker["id"] = str(speaker.get("id") or chr(65 + index))
-        speaker["name"] = str(speaker.get("name") or speaker["id"])
+    data = _normalise_dialogue_scene(data, frame_rate, speech_wpm, default_gap_seconds, output_mode, inline_edit_mode)
+    settings_data = data.get("settings") if isinstance(data.get("settings"), dict) else {}
+    output_mode = str(settings_data.get("output_mode") or output_mode)
+    inline_edit_mode = str(settings_data.get("inline_edit_mode") or inline_edit_mode)
+    default_gap_seconds = float(settings_data.get("default_gap_seconds", default_gap_seconds))
+    audio_lane_mode = str(settings_data.get("audio_lane_mode") or _audio_lane_mode(settings_data, output_mode))
+    global_prompt = str(data.get("global_prompt") or data.get("prompt") or DEFAULT_GLOBAL_PROMPT).strip()
+    speakers = [dict(item) for item in data.get("speakers", []) if isinstance(item, dict)]
 
     lookup = _speaker_lookup(speakers)
-    raw_lines = data.get("lines") if isinstance(data.get("lines"), list) else []
-    if not raw_lines:
-        raw_lines = copy.deepcopy(DEFAULT_DIALOGUE["lines"])
+    raw_lines = data.get("lines") if isinstance(data.get("lines"), list) else copy.deepcopy(DEFAULT_DIALOGUE["lines"])
 
     lines: List[Dict[str, Any]] = []
     cursor = 0.0
@@ -263,7 +443,7 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
         line = dict(raw)
         speaker_token = str(line.get("speaker") or speakers[index % len(speakers)].get("id") or "A").strip()
         speaker = lookup.get(_speaker_key(speaker_token)) or speakers[index % len(speakers)]
-        text = _clean_text(line.get("text") or line.get("dialogue"))
+        text = _clean_text(line.get("spoken_text") or line.get("text") or line.get("dialogue"))
         if not text:
             continue
         duration = _float(line.get("duration"), 0.0)
@@ -282,8 +462,9 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
             "end": round(end, 3),
             "overlap_after": round(overlap_after, 3),
             "text": text,
+            "spoken_text": text,
             "estimated": bool(_float(raw.get("duration"), 0.0) <= 0),
-            "track": max(0, _float(line.get("track"), speakers.index(speaker) if speaker in speakers else index % 2)),
+            "track": int(max(0, _float(line.get("track"), speakers.index(speaker) if speaker in speakers else index % 2))),
             "ref": int(_float(line.get("ref"), 1 if index % 2 == 0 else 2)),
         })
         lines.append(line)
@@ -304,8 +485,8 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
         export_lines = flattened
     else:
         export_lines = lines
-    settings_data = data.get("settings") if isinstance(data.get("settings"), dict) else {}
-    zero_start_stems = bool(settings_data.get("speaker_stems_zero_start", False)) and not single_track_mode
+    zero_start_stems = audio_lane_mode == "speaker_stems_zero_start" and not single_track_mode
+    stem_srt_local_zero = (zero_start_stems or bool(settings_data.get("speaker_stem_srt_local_zero", False))) and not single_track_mode
     # Speaker stem media should be generated on its own local timebase so the WAV
     # does not contain leading silence. The AudioBoard lane start keeps the real
     # timeline position unless the user explicitly enables A+B @ 0.
@@ -313,9 +494,9 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
     for line in export_lines:
         key = str(line.get("speaker") or line.get("speaker_name") or "A")
         start = max(0.0, _float(line.get("start"), 0.0))
-        stem_media_offsets[key] = min(stem_media_offsets.get(key, start), start)
+        stem_media_offsets[key] = min(stem_media_offsets.get(key, start), start) if stem_srt_local_zero else 0.0
 
-    engine_profile = _resolve_engine_profile(data.get("settings", {}).get("engine_profile"))
+    engine_profile = _resolve_engine_profile(settings_data.get("engine_profile"))
     master_srt_parts: List[str] = []
     tagged_parts: List[str] = []
     stem_srt: Dict[str, List[str]] = {}
@@ -355,6 +536,8 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
             "speakerName": str(speaker.get("name") or key),
             "dialogueText": str(line.get("text") or ""),
             "ttsText": formatted,
+            "ttsParams": copy.deepcopy(line.get("tts_params") if isinstance(line.get("tts_params"), dict) else {}),
+            "audioLaneMode": audio_lane_mode,
             "emotion": str(line.get("emotion") or "none"),
             "style": str(line.get("style") or "none"),
             "pendingTTS": True,
@@ -406,14 +589,18 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
     }
     payload = {
         "schema": "iamccs.dialogue_tag_editor",
-        "schema_version": 1,
+        "schema_version": 3,
+        "dialogue_scene": data,
         "global_prompt": global_prompt,
         "local_prompts": local_prompt_parts,
         "segment_lengths": segment_length_parts,
         "settings": {
-            **(data.get("settings") if isinstance(data.get("settings"), dict) else {}),
+            **settings_data,
             "engine_profile": engine_profile,
             "output_mode": output_mode,
+            "audio_lane_mode": audio_lane_mode,
+            "speaker_stems_zero_start": zero_start_stems,
+            "speaker_stem_srt_local_zero": stem_srt_local_zero,
             "inline_edit_mode": inline_edit_mode,
             "speech_wpm": float(speech_wpm),
             "frame_rate": float(frame_rate),
@@ -422,6 +609,12 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
         "lines": lines,
         "export_lines": export_lines,
         "speaker_stem_start_frames": ({key: 0 for key in ordered_keys} if zero_start_stems else _speaker_stem_start_frames(export_lines, frame_rate)) if not single_track_mode else {},
+        "export_profiles": {
+            "single_master": {"output_mode": "flatten_for_single_track", "description": "One master dialogue track from frame 0."},
+            "speaker_stems_zero_start": {"output_mode": "speaker_stems_for_overlap", "speaker_stems_zero_start": True, "description": "One stem per speaker, each stem starts at frame 0."},
+            "speaker_stems_timeline": {"output_mode": "speaker_stems_for_overlap", "speaker_stems_zero_start": False, "description": "One stem per speaker, preserving silence gaps on the timeline."},
+            "omnivoice": {"engine_profile": "omnivoice", "description": "OmniVoice-ready tags use bracket non-verbal events and speaker voice_design.instruct metadata."},
+        },
         "master_srt": "".join(master_srt_parts).strip(),
         "tagged_text": "\n".join(tagged_parts).strip(),
         "speaker_srt": {key: "".join(stem_srt.get(key, [])).strip() for key in ordered_keys},
@@ -437,6 +630,8 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
             "frame_rate": float(frame_rate),
             "speakerStemStartFrames": ({key: 0 for key in ordered_keys} if zero_start_stems else _speaker_stem_start_frames(export_lines, frame_rate)) if not single_track_mode else {},
             "speakerStemsZeroStart": zero_start_stems,
+            "speakerStemSrtLocalZero": stem_srt_local_zero,
+            "audioLaneMode": audio_lane_mode,
             "masterAudioGain": 1.0,
             "masterAudioNormalize": False,
         },
@@ -449,7 +644,7 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
 class IAMCCS_DialogueTagEditor:
     """App-style dialogue/tag planner that writes one cine_linx payload for TTS, AudioBoard and Shotboard."""
 
-    DEFAULT_DATA = json.dumps({"schema": "iamccs.dialogue_tag_editor", "schema_version": 2, "global_prompt": "cinematic field and reverse-field dialogue, hard cut coverage, one dominant speaking face per shot, visible mouth movement, natural audio-driven performance, silent listener reaction, stable identities, coherent eyelines", "settings": {"engine_profile": "tts_audio_suite_chatterbox", "output_mode": "speaker_stems_for_overlap", "speaker_stems_zero_start": False, "inline_edit_mode": "metadata_only", "default_gap_seconds": 0.12, "text_theme": "light_boxes", "font_zoom": 1.0}, "speakers": [{"id": "A", "name": "Man A", "voice": "speaker_a_low_tense", "reference_text": "Keep your voice low. We do not know who is listening.", "language": "en"}, {"id": "B", "name": "Man B", "voice": "speaker_b_controlled_whisper", "reference_text": "Good. Now we finally have something worth protecting.", "language": "en"}], "lines": [{"id": "line_001", "speaker": "A", "text": "You said the signal was dead. Then why is that receiver still blinking?", "emotion": "tense", "style": "low", "paralinguistic": "Breathing", "overlap_after": 0.18, "ref": 1, "track": 0, "local_prompt": "hard cut, Man A close-up, Man A speaks clearly, visible mouth movement, tense controlled delivery, Man B listens quietly"}, {"id": "line_002", "speaker": "B", "text": "Because someone on the other side wants us to think we are alone.", "emotion": "serious", "style": "whisper", "paralinguistic": "none", "overlap_after": 0.12, "ref": 2, "track": 1, "local_prompt": "hard cut, Man B close-up, Man B speaks clearly, visible mouth movement, guarded quiet answer, Man A listens quietly"}, {"id": "line_003", "speaker": "A", "text": "If we open that door, we may be giving them exactly what they came for.", "emotion": "fearful", "style": "dry", "paralinguistic": "Sigh", "overlap_after": 0.1, "ref": 1, "track": 0, "local_prompt": "hard cut, Man A tighter close-up, Man A speaks clearly, visible mouth movement, fear held under discipline"}, {"id": "line_004", "speaker": "B", "text": "Then we do not open it. We make them knock twice.", "emotion": "coldness", "style": "authority", "paralinguistic": "none", "overlap_after": 0.0, "ref": 2, "track": 1, "local_prompt": "hard cut, Man B close-up, Man B speaks clearly, visible mouth movement, decisive controlled authority"}]}, indent=2, ensure_ascii=False)
+    DEFAULT_DATA = json.dumps(DEFAULT_DIALOGUE, indent=2, ensure_ascii=False)
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -504,8 +699,10 @@ class IAMCCS_DialogueTagEditor:
         duration_seconds = float(shotboard_timeline.get("duration_seconds", 0.0) or 0.0)
         resources.update({
             "dialogue_tag_editor": payload,
+            "dialogue_scene": payload.get("dialogue_scene", payload),
             "dialogue_script_planner": payload,
             "cine_dialogue_json": json.dumps(payload, ensure_ascii=False, indent=2),
+            "cine_dialogue_scene_json": json.dumps(payload.get("dialogue_scene", payload), ensure_ascii=False, indent=2),
             "cine_dialogue_master_srt": master_srt,
             "cine_dialogue_tagged_text": tagged_text,
             "cine_dialogue_speaker_srt_json": speaker_srt_json,

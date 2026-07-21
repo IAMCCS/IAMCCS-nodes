@@ -91,6 +91,109 @@ def _first_dict(*values: Any) -> Dict[str, Any]:
     return {}
 
 
+def _safe_bool(value: Any, fallback: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return bool(fallback)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on", "enabled"}:
+        return True
+    if text in {"0", "false", "no", "off", "disabled"}:
+        return False
+    return bool(fallback)
+
+
+def _roll_contract(data: Dict[str, Any], fps: float) -> Dict[str, Any]:
+    raw = data.get("roll") if isinstance(data.get("roll"), dict) else {}
+    if not raw and isinstance(data.get("roll_contract"), dict):
+        raw = data.get("roll_contract")
+    enabled = _safe_bool(raw.get("enabled", data.get("roll_enabled", False)), False)
+    seconds = max(0.0, min(30.0, _safe_float(raw.get("seconds", data.get("roll_seconds", 1.0)), 1.0)))
+    safe_fps = max(1.0, float(fps or 24.0))
+    frames = max(0, _safe_int(seconds * safe_fps, 0)) if enabled else 0
+    if enabled and frames <= 0:
+        enabled = False
+    seconds = frames / safe_fps if frames > 0 else seconds
+    return {
+        "schema": "iamccs.audio.roll_contract",
+        "schema_version": 1,
+        "enabled": bool(enabled),
+        "seconds": float(seconds),
+        "frames": int(frames),
+        "frame_rate": float(safe_fps),
+        "mode": "generation_duration_extension",
+        "first_take_pre_frames": 0,
+        "subsequent_take_pre_frames": int(frames),
+        "post_frames": int(frames),
+        "truth": "Roll extends the requested generation window exactly like a user-selected custom duration. Nominal Shotboard slot timing remains unchanged.",
+    }
+
+
+def _source_master_segment(data: Dict[str, Any]) -> Dict[str, Any]:
+    multi = data.get("multiGeneration") if isinstance(data.get("multiGeneration"), dict) else {}
+    candidates = [
+        multi.get("sourceSegment") if isinstance(multi.get("sourceSegment"), dict) else None,
+        data.get("sourceMasterSegment") if isinstance(data.get("sourceMasterSegment"), dict) else None,
+        data.get("masterExcerpt") if isinstance(data.get("masterExcerpt"), dict) else None,
+    ]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        source = copy.deepcopy(candidate)
+        for key in ("waveformPeaks", "waveformCache", "decodedWaveform"):
+            source.pop(key, None)
+        if str(source.get("audioFile", "") or "").strip() or str(source.get("audioB64", "") or "").strip():
+            return source
+    return {}
+
+
+def _master_audio_asset(data: Dict[str, Any]) -> Dict[str, Any]:
+    multi = data.get("multiGeneration") if isinstance(data.get("multiGeneration"), dict) else {}
+    candidates = [
+        data.get("masterAudioAsset") if isinstance(data.get("masterAudioAsset"), dict) else None,
+        data.get("master_audio_asset") if isinstance(data.get("master_audio_asset"), dict) else None,
+        multi.get("masterAudioAsset") if isinstance(multi.get("masterAudioAsset"), dict) else None,
+        multi.get("master_audio_asset") if isinstance(multi.get("master_audio_asset"), dict) else None,
+        data.get("masterExcerpt") if isinstance(data.get("masterExcerpt"), dict) else None,
+        multi.get("masterExcerpt") if isinstance(multi.get("masterExcerpt"), dict) else None,
+    ]
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        asset = copy.deepcopy(candidate)
+        for key in ("dataUrl", "waveformPeaks", "waveformCache", "decodedWaveform"):
+            asset.pop(key, None)
+        if str(asset.get("audioFile") or asset.get("path") or asset.get("filename") or asset.get("fileName") or "").strip():
+            asset.setdefault("id", "master_audio")
+            asset.setdefault("role", "master_audio")
+            asset.setdefault("timelineId", "MASTER")
+            asset.setdefault("audioLane", "MASTER")
+            return asset
+    return {}
+
+
+def _is_multigeneration_lane_publish(data: Dict[str, Any], segments: List[Dict[str, Any]]) -> bool:
+    """Keep physical T-lanes available to the bridge even when the UI uses Only First."""
+    multi = data.get("multiGeneration") if isinstance(data.get("multiGeneration"), dict) else {}
+    multi_enabled = bool(
+        multi.get("enabled")
+        or multi.get("pluriPublishEnabled")
+        or multi.get("physicalChunks")
+        or multi.get("publishV2")
+    )
+    if not multi_enabled:
+        return False
+    return any(
+        bool(seg.get("multiGenerationClip"))
+        or bool(seg.get("physicalChunk"))
+        or str(seg.get("audioPublishSchema") or "") == "iamccs.audio.publish.v2"
+        or str(seg.get("timelineId") or "").upper().startswith("T")
+        for seg in segments
+        if isinstance(seg, dict)
+    )
+
+
 class IAMCCS_AudioBoardArranger:
     """DAW-style audio lane arranger that writes Shotboard V3 audioSegments through cine_linx."""
 
@@ -278,6 +381,8 @@ class IAMCCS_AudioBoardArranger:
         timeline["audioBusMode"] = str(data.get("audioBusMode", "all_tracks") or "all_tracks")
         timeline["onlyFirstTrack"] = bool(data.get("onlyFirstTrack", False))
         timeline["audioSyncMode"] = str(data.get("audioSyncMode", "timeline_audio") or "timeline_audio")
+        timeline["roll"] = _roll_contract(data, fps)
+        timeline["roll_contract"] = timeline["roll"]
         timeline["use_custom_audio"] = any(str(seg.get("audioFile", "")).strip() or str(seg.get("audioB64", "")).strip() for seg in segments)
         timeline["frame_rate"] = _safe_float(timeline.get("frame_rate", data.get("frame_rate", fps)), fps)
         max_end = max([_safe_int(seg.get("start", 0), 0) + _safe_int(seg.get("length", 1), 1) for seg in segments] or [0])
@@ -305,6 +410,8 @@ class IAMCCS_AudioBoardArranger:
             "audioBusMode": timeline["audioBusMode"],
             "onlyFirstTrack": timeline["onlyFirstTrack"],
             "audioSyncMode": timeline["audioSyncMode"],
+            "roll": timeline["roll"],
+            "roll_contract": timeline["roll_contract"],
         }
         timeline["audio_data"] = json.dumps(audio_data, ensure_ascii=False)
         return json.dumps(timeline, ensure_ascii=False, indent=2)
@@ -361,9 +468,14 @@ class IAMCCS_AudioBoardArranger:
         track_settings = self._track_settings_for_count(track_settings, source_track_count)
         source_segments = self._segments_with_track_mix(raw_source_segments, track_settings, source_track_count)
         bus_mode_raw = str(data.get("audioBusMode", "all_tracks") or "all_tracks").strip().lower()
-        only_first = bool(data.get("onlyFirstTrack", False)) or bus_mode_raw in {"only_first", "shotboard_only_first", "first_track", "first"}
+        only_first_requested = bool(data.get("onlyFirstTrack", False)) or bus_mode_raw in {"only_first", "shotboard_only_first", "first_track", "first"}
+        multi_lane_publish = _is_multigeneration_lane_publish(data, source_segments)
+        # Split T Lanes intentionally leaves the UI in Only First for normal
+        # Shotboard publication. The runtime still needs every physical lane so
+        # the bridge can route T01/A1, T02/A2, and later takes.
+        only_first = bool(only_first_requested and not multi_lane_publish)
         bus_mode = "all_tracks"
-        shotboard_mode = "only_first" if only_first else "all_tracks"
+        shotboard_mode = "multigeneration_lanes" if multi_lane_publish else ("only_first" if only_first else "all_tracks")
         segments = source_segments
         shotboard_segments = [seg for seg in source_segments if _safe_int(seg.get("track", 0), 0) == 0] if only_first else source_segments
         export_track_count = source_track_count
@@ -389,6 +501,9 @@ class IAMCCS_AudioBoardArranger:
         shotboard_data["trackSettings"] = shotboard_track_settings
         shotboard_data["audioBusMode"] = "shotboard_only_first" if only_first else "all_tracks"
         shotboard_data["onlyFirstTrack"] = only_first
+        roll_contract = _roll_contract(data, fps)
+        source_master_segment = _source_master_segment(full_data)
+        master_audio_asset = _master_audio_asset(full_data)
         audio_timeline = {
             "audioSegments": segments,
             "audioTrackCount": export_track_count,
@@ -403,6 +518,12 @@ class IAMCCS_AudioBoardArranger:
             "shotboardAudioTrackCount": shotboard_track_count,
             "shotboardAudioMode": shotboard_mode,
             "audioSyncMode": str(data.get("audioSyncMode", "timeline_audio") or "timeline_audio"),
+            "roll": roll_contract,
+            "roll_contract": roll_contract,
+            "multiGeneration": copy.deepcopy(full_data.get("multiGeneration", {})) if isinstance(full_data.get("multiGeneration"), dict) else {},
+            "sourceMasterSegment": source_master_segment,
+            "masterAudioAsset": master_audio_asset,
+            "master_audio_asset": master_audio_asset,
         }
         shotboard_audio_timeline = copy.deepcopy(audio_timeline)
         shotboard_audio_timeline["audioSegments"] = shotboard_segments
@@ -451,7 +572,6 @@ class IAMCCS_AudioBoardArranger:
         shotboard_max_end = max([_safe_int(seg.get("start", 0), 0) + _safe_int(seg.get("length", 1), 1) for seg in shotboard_segments] or [0])
         duration_frames = shotboard_max_end or source_max_end
         duration_s = (duration_frames / fps) if duration_frames else max(0.0, _safe_float(data.get("duration_seconds", 0.0), 0.0))
-
         out_linx = _clone_linx(cine_linx)
         resources = _resources(out_linx)
         outputs = _outputs(out_linx)
@@ -477,6 +597,8 @@ class IAMCCS_AudioBoardArranger:
                 "shotboard_selected_tracks": [0] if only_first else list(range(max(1, source_track_count))),
                 "bus_mode": bus_mode,
                 "shotboard_bus_mode": shotboard_mode,
+                "only_first_requested": bool(only_first_requested),
+                "multigeneration_lane_publish": bool(multi_lane_publish),
                 "master_gain": audio_timeline["masterAudioGain"],
                 "master_normalize": audio_timeline["masterAudioNormalize"],
                 "master_mono": audio_timeline["masterMono"],
@@ -484,6 +606,9 @@ class IAMCCS_AudioBoardArranger:
                 "track_settings": export_track_settings,
                 "all_track_settings": copy.deepcopy(track_settings),
                 "shotboard_track_settings": shotboard_track_settings,
+                "source_master_segment": source_master_segment,
+                "master_audio_asset": master_audio_asset,
+                "roll_contract": roll_contract,
             },
             "cine_audio_layers": {
                 "arranger": full_data,
@@ -492,9 +617,14 @@ class IAMCCS_AudioBoardArranger:
                 "policy": str(sync_policy),
                 "bus_mode": bus_mode,
                 "shotboard_bus_mode": shotboard_mode,
+                "multigeneration_lane_publish": bool(multi_lane_publish),
+                "roll_contract": roll_contract,
             },
             "cine_audio_effect_graph_json": effect_graph_json,
             "cine_use_custom_audio": bool(shotboard_has_media and str(sync_policy) == "audio_lanes_drive_custom_audio"),
+            "cine_roll_contract": roll_contract,
+            "cine_audio_source_master_segment": source_master_segment,
+            "cine_audio_master_audio_asset": master_audio_asset,
         })
         if duration_s > 0:
             resources["cine_duration_seconds"] = float(duration_s)
@@ -515,6 +645,10 @@ class IAMCCS_AudioBoardArranger:
             "onlyFirstTrack": only_first,
             "use_custom_audio": bool(shotboard_has_media and str(sync_policy) == "audio_lanes_drive_custom_audio"),
             "audioSyncMode": audio_timeline["audioSyncMode"],
+            "roll": roll_contract,
+            "roll_contract": roll_contract,
+            "masterAudioAsset": master_audio_asset,
+            "master_audio_asset": master_audio_asset,
         })
         outputs.update({
             "audio_timeline_json": audio_timeline_json,
@@ -522,6 +656,7 @@ class IAMCCS_AudioBoardArranger:
             "audio_effect_graph_json": effect_graph_json,
             "duration_seconds": float(duration_s),
             "max_frames": int(duration_frames) if duration_frames > 0 else 0,
+            "roll_contract_json": json.dumps(roll_contract, ensure_ascii=False),
         })
         out_linx["type"] = SUPERNODE_LINX_TYPE
         out_linx["mode"] = "iamccs_audio_board_arranger"
@@ -537,8 +672,12 @@ class IAMCCS_AudioBoardArranger:
             "shotboard_tracks": shotboard_track_count,
             "bus_mode": bus_mode,
             "shotboard_bus_mode": shotboard_mode,
+            "multigeneration_lane_publish": bool(multi_lane_publish),
             "has_media": bool(has_media),
             "duration_seconds": float(duration_s),
+            "roll": roll_contract,
+            "source_master_segment": bool(source_master_segment),
+            "master_audio_asset": bool(master_audio_asset),
             "sync_policy": str(sync_policy),
             "truth": "External/generated audio that should drive video is exported as Shotboard V3 audioSegments/custom audio through cine_linx.",
         })

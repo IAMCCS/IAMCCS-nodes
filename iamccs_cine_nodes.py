@@ -4763,11 +4763,49 @@ class IAMCCS_CineFilmmakerBackend:
             max_frames = _round_ltx_frames(max_frames, str(payload.get("ltx_round_mode", "up_8n_plus_1")))
         audio_end_frames = self._timeline_end_frames(audio_timeline_json, "audioSegments")
         visual_end_frames = self._timeline_end_frames(visual_segments_json, "segments")
+        duration_target_frames = int(round(float(duration_seconds) * max(1, int(frame_rate))))
+        visual_contract_repaired = False
+        visual_contract_report = {}
+        if (
+            int(visual_end_frames) > 0
+            and int(duration_target_frames) > 0
+            and int(visual_end_frames) < int(duration_target_frames)
+        ):
+            raw_visual_segments = _safe_json_loads(visual_segments_json, [])
+            if isinstance(raw_visual_segments, dict):
+                raw_visual_segments = raw_visual_segments.get("segments", [])
+            repaired_segments, visual_contract_report = IAMCCS_CineShotboardPlannerV3._normalise_visual_segments_contract(
+                raw_visual_segments,
+                int(duration_target_frames),
+            )
+            if isinstance(visual_contract_report, dict) and visual_contract_report.get("changed"):
+                visual_segments_json = json.dumps(repaired_segments, ensure_ascii=False)
+                visual_end_frames = self._timeline_end_frames(visual_segments_json, "segments")
+                resources["cine_visual_segments_json"] = visual_segments_json
+                if isinstance(payload, dict):
+                    payload["visual_segments"] = copy.deepcopy(repaired_segments)
+                repair_compile = IAMCCS_CineShotboardPlannerV3._compile_flfreal_timeline(
+                    timeline_data=json.dumps({"segments": repaired_segments, "frame_rate": int(frame_rate)}, ensure_ascii=False),
+                    duration_seconds=float(duration_seconds),
+                    frame_rate=int(frame_rate),
+                    ltx_round_mode=str(payload.get("ltx_round_mode", "up_8n_plus_1") or "up_8n_plus_1"),
+                )
+                if isinstance(repair_compile, dict):
+                    local_prompts = str(repair_compile.get("local_prompts", "") or "")
+                    segment_lengths = str(repair_compile.get("segment_lengths", "") or "")
+                    max_frames = max(max_frames, _safe_int(repair_compile.get("max_frames", 0), 0))
+                visual_contract_repaired = True
+                print(
+                    "[IAMCCS FilmmakerBackend] VISUAL_CONTRACT_REPAIR "
+                    f"visual_end_before={int(visual_contract_report.get('visual_end_before', 0))} "
+                    f"visual_end_after={int(visual_end_frames)} "
+                    f"target_frames={int(duration_target_frames)} "
+                    f"extended_frames={int(visual_contract_report.get('extended_frames', 0))}"
+                )
         timeline_end_frames = max(
             audio_end_frames,
             visual_end_frames,
         )
-        duration_target_frames = int(round(float(duration_seconds) * max(1, int(frame_rate))))
         if (
             str(payload.get("filmmaker_schema", "") if isinstance(payload, dict) else "") == "iamccs.cine.filmmaker_timeline"
             and int(visual_end_frames) > 0
@@ -5049,6 +5087,8 @@ class IAMCCS_CineFilmmakerBackend:
             "guide_data_count": len(guide_data.get("images", [])),
             "guide_data_source": guide_data_source,
             "visual_timeline_source": routed_timeline_source,
+            "visual_contract_repaired": bool(visual_contract_repaired),
+            "visual_contract_report": visual_contract_report,
             "image_loading": {
                 "mode": "ltx_director_style_internal_load_resize_compress",
                 "resize_method": image_resize_method,

@@ -1,5 +1,12 @@
 # IAMCCS Nodes - Changelog
 
+## 2026-07-21 - version 1.5.1 - Multigen Roll, Master Audio EDL Export and AudioBoard UX
+
+- Added non-destructive pre-roll/post-roll support to the multigen editorial path.
+- Added master-audio EDL export so revealed roll windows retain correct audio/video lip sync.
+- Added IAMCCS Shotboarder Aud+Vid Exporter PRO direct-master workflow and encoded output preview.
+- Improved AudioBoard control grouping and readability.
+
 ## 2026-07-12 - version 1.5.0 - Shotboard multigen pipeline, Shotboard Editor and AudioBoard
 
 - Added the integrated Shotboard multi-timeline generation pipeline and take/audio routing.

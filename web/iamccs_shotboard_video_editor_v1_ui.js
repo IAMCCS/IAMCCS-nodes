@@ -3,14 +3,15 @@ import { api } from "../../scripts/api.js";
 
 const TYPE = "IAMCCS_ShotboardVideoEditorV1";
 const RENDER_TYPE = "IAMCCS_ShotboardVideoEditorRenderV1";
-const STYLE_ID = "iamccs-shotboard-video-editor-v1-style";
-const UI_VERSION = "20260710-replace-prj-selection-waveforms";
+const STYLE_ID = "iamccs-shotboard-video-editor-v1-style-monitor-compatible";
+const UI_VERSION = "20260721-independent-monitor-transport";
 const NODE_SIZE = [1600, 1560];
 const CHROME_HEIGHT = 156;
 const WIDGET_HEIGHT = NODE_SIZE[1] - CHROME_HEIGHT;
 const LANE_HEAD_WIDTH = 92;
 const MIN_TIMELINE_PX_PER_SECOND = 44;
 const TIMELINE_TAIL_PAD_SECONDS = 4;
+const SNAP_THRESHOLD_SECONDS = 0.22;
 
 function nodeType(node) {
   return String(node?.comfyClass || node?.type || node?.constructor?.type || "");
@@ -189,7 +190,7 @@ function manifestFromNode(node) {
     tracks: EDITOR_TRACKS.map((track) => ({ ...track })),
     duration_seconds: 20,
     assembly_order: [],
-    ui_state: { playhead: 0, zoom_seconds: 20 },
+    ui_state: { playhead: 0, zoom_seconds: 20, link_enabled: false, snap_enabled: false },
   }));
 }
 
@@ -280,10 +281,19 @@ function setEditorRenderAudioPolicy(manifest, policy) {
 }
 
 function manifestMasterAudioAsset(manifest) {
-  if (manifest?.master_excerpt && typeof manifest.master_excerpt === "object") return manifest.master_excerpt;
-  if (manifest?.master_audio && typeof manifest.master_audio === "object") return manifest.master_audio;
   const assets = manifest?.assets && typeof manifest.assets === "object" ? manifest.assets : {};
-  return assets.master_excerpt || assets.master_audio || null;
+  const candidates = [
+    manifest?.master_audio,
+    assets.master_audio,
+    manifest?.master_excerpt,
+    assets.master_excerpt,
+  ].filter((item) => item && typeof item === "object");
+  return candidates.find((item) => [
+    item.waveform_peaks,
+    item.waveformPeaks,
+    item.peaks,
+    item.waveform,
+  ].map(normalizeWaveformPeaks).some((peaks) => peaks.length)) || candidates[0] || null;
 }
 
 function hasActiveMasterAudioClip(manifest) {
@@ -350,7 +360,7 @@ function ensureMasterAudioLaneClip(manifest) {
   if (!asset || typeof asset !== "object") return data;
   data.assets = data.assets && typeof data.assets === "object" ? data.assets : {};
   data.clips = Array.isArray(data.clips) ? data.clips : [];
-  const assetId = data.assets.master_excerpt || asset.role === "master_excerpt" || data.master_excerpt
+  const assetId = String(asset.role || asset.id || "").toLowerCase() === "master_excerpt"
     ? "master_excerpt"
     : "master_audio";
   data.assets[assetId] = {
@@ -362,6 +372,23 @@ function ensureMasterAudioLaneClip(manifest) {
     role: assetId,
     ...asset,
   };
+  const embeddedWaveform = [
+    asset.waveform_peaks,
+    asset.waveformPeaks,
+    asset.peaks,
+    asset.waveform,
+  ].map(normalizeWaveformPeaks).find((peaks) => peaks.length) || [];
+  if (embeddedWaveform.length) {
+    data.assets[assetId].waveform_peaks = embeddedWaveform;
+    data.assets[assetId].waveformPeaks = embeddedWaveform;
+    data.assets[assetId].waveformReal = true;
+    data.assets[assetId].waveform_source = data.assets[assetId].waveform_source || "published_audio_decode";
+  }
+  const masterClipFallback = data.clips.find((clip) => isMasterClip(clip));
+  if (masterClipFallback && embeddedWaveform.length) {
+    masterClipFallback.waveform_peaks = embeddedWaveform;
+    masterClipFallback.waveformPeaks = embeddedWaveform;
+  }
   if (assetId === "master_excerpt") data.master_excerpt = data.master_excerpt || { ...asset, id: "master_excerpt", role: "master_excerpt" };
   if (assetId === "master_audio") data.master_audio = data.master_audio || { ...asset, id: "master_audio", role: "master_audio" };
   const duration = Math.max(
@@ -373,6 +400,39 @@ function ensureMasterAudioLaneClip(manifest) {
     Number(asset.trimEnd || 0)
   );
   if (duration <= 0) return data;
+  const fps = Math.max(1, Number(data.fps || 24));
+  const preRollFrames = Math.max(
+    0,
+    Number(asset.preRollFrames || asset.pre_roll_frames || 0),
+    Math.round(Math.max(0, Number(asset.renderTrimStartSeconds || 0)) * fps),
+  );
+  const postRollFrames = Math.max(
+    0,
+    Number(asset.postRollFrames || asset.post_roll_frames || 0),
+    Math.round(Math.max(0, duration - Number(asset.renderTrimEndSeconds || duration)) * fps),
+  );
+  const renderNominalStart = Math.max(0, Number(asset.renderTrimStartSeconds || 0));
+  const renderNominalEnd = Math.max(renderNominalStart, Number(asset.renderTrimEndSeconds || 0));
+  const nominalDuration = Math.max(
+    0,
+    Number(asset.nominalDurationSeconds || asset.nominal_duration || 0),
+    Number(asset.nominalDurationFrames || asset.nominal_duration_frames || 0) / fps,
+    renderNominalEnd > renderNominalStart ? renderNominalEnd - renderNominalStart : 0,
+    duration - ((preRollFrames + postRollFrames) / fps),
+  );
+  const hasRollWindow = preRollFrames > 0 || postRollFrames > 0 || nominalDuration < duration - (1 / fps);
+  const nominalStart = Math.max(0, Math.min(Math.max(0, duration - (1 / fps)), preRollFrames / fps));
+  const nominalEnd = Math.max(
+    nominalStart + (1 / fps),
+    Math.min(duration, nominalStart + Math.max(1 / fps, nominalDuration)),
+  );
+  const rollWindowKey = [
+    String(asset.audioFile || asset.path || asset.filename || asset.fileName || "master_audio"),
+    duration.toFixed(6),
+    preRollFrames,
+    postRollFrames,
+    nominalEnd.toFixed(6),
+  ].join("|");
   const existing = data.clips.find((clip) => clip && (clip.id === "clip_MASTER_AUDIO" || isMasterClip(clip)));
   const masterClip = existing || {
     id: "clip_MASTER_AUDIO",
@@ -391,9 +451,37 @@ function ensureMasterAudioLaneClip(manifest) {
   masterClip.timelineId = "MASTER";
   masterClip.audioLane = "MASTER";
   masterClip.startTime = Math.max(0, Number(masterClip.startTime || 0));
-  masterClip.duration = Math.max(0.1, Number(masterClip.duration || duration));
-  masterClip.trimStart = Math.max(0, Number(masterClip.trimStart || 0));
-  masterClip.trimEnd = Math.max(masterClip.trimStart + 0.1, Number(masterClip.trimEnd || duration));
+  masterClip.sourceDuration = duration;
+  masterClip.sourceDurationLimit = duration;
+  masterClip.generationDuration = duration;
+  masterClip.generationDurationFrames = Math.max(1, Math.round(duration * fps));
+  masterClip.preRollFrames = preRollFrames;
+  masterClip.postRollFrames = postRollFrames;
+  masterClip.rollContract = asset.rollContract && typeof asset.rollContract === "object"
+    ? JSON.parse(JSON.stringify(asset.rollContract))
+    : {};
+  masterClip.nominalDurationSeconds = Math.max(1 / fps, nominalEnd - nominalStart);
+  masterClip.nominalDurationFrames = Math.max(1, Math.round(masterClip.nominalDurationSeconds * fps));
+  const shouldInitializeNominalWindow = hasRollWindow
+    && String(masterClip.rollWindowKey || "") !== rollWindowKey
+    && !Boolean(masterClip.rollWindowLinkedToVideo);
+  if (shouldInitializeNominalWindow) {
+    masterClip.duration = masterClip.nominalDurationSeconds;
+    masterClip.trimStart = nominalStart;
+    masterClip.trimEnd = nominalEnd;
+    masterClip.renderTrimStartSeconds = nominalStart;
+    masterClip.renderTrimEndSeconds = nominalEnd;
+  } else {
+    masterClip.duration = Math.max(0.1, Number(masterClip.duration || (hasRollWindow ? masterClip.nominalDurationSeconds : duration)));
+    masterClip.trimStart = Math.max(0, Number(masterClip.trimStart || (hasRollWindow ? nominalStart : 0)));
+    masterClip.trimEnd = Math.max(masterClip.trimStart + 0.1, Number(masterClip.trimEnd || (hasRollWindow ? nominalEnd : duration)));
+  }
+  if (!shouldInitializeNominalWindow) {
+    masterClip.nominalDurationSeconds = Math.max(1 / fps, masterClip.trimEnd - masterClip.trimStart);
+    masterClip.nominalDurationFrames = Math.max(1, Math.round(masterClip.nominalDurationSeconds * fps));
+  }
+  masterClip.rollDisplayMode = hasRollWindow ? "nominal_window_v1" : "physical_window";
+  masterClip.rollWindowKey = rollWindowKey;
   masterClip.trackId = "AM";
   masterClip.trackIndex = 10;
   masterClip.muted = Boolean(masterClip.muted);
@@ -443,11 +531,42 @@ function repairEditorHiddenWidgets(node, manifestText = "") {
 }
 
 function previewUrl(item) {
+  if (typeof item === "string") return /^(data:|blob:|https?:\/\/)/i.test(item) ? item : "";
+  if (item?.url || item?.dataUrl) return String(item.url || item.dataUrl);
   if (!item?.filename) return "";
   const filename = encodeURIComponent(item.filename);
   const type = encodeURIComponent(item.type || "output");
   const subfolder = encodeURIComponent(item.subfolder || "");
   return api.apiURL(`/view?filename=${filename}&type=${type}&subfolder=${subfolder}`);
+}
+
+function monitorVideoUrl(item) {
+  if (typeof item === "string") return /^(data:|blob:|https?:\/\/)/i.test(item) ? item : "";
+  if (item?.url || item?.dataUrl) return String(item.url || item.dataUrl);
+  if (!item?.filename) return "";
+  const filename = encodeURIComponent(item.filename);
+  const type = encodeURIComponent(item.type || "output");
+  const subfolder = encodeURIComponent(item.subfolder || "");
+  // Keep media on the exact page origin. This avoids a localhost/127.0.0.1
+  // origin mismatch that can make Chromium reject a valid monitor proxy.
+  return `/view?filename=${filename}&type=${type}&subfolder=${subfolder}`;
+}
+
+function advancedMonitorVideoUrl(item, monitorWidth = 640, fps = 24) {
+  if (!item || typeof item === "string" || item?.url || item?.dataUrl || !item?.filename) return "";
+  const width = Math.max(320, Math.min(1280, Math.round(Number(monitorWidth) || 640)));
+  const params = new URLSearchParams({
+    filename: String(item.filename),
+    type: String(item.type || "output"),
+    subfolder: String(item.subfolder || ""),
+    // This is the VideoHelperSuite Advanced Preview route. It transcodes the
+    // parked H.264 proxy to a browser-streamable realtime WebM preview.
+    format: "video/h264-mp4",
+    frame_rate: String(Math.max(1, Math.round(Number(fps) || 24))),
+    force_size: `${width}x?`,
+    deadline: "realtime",
+  });
+  return api.apiURL(`/vhs/viewvideo?${params.toString()}`);
 }
 
 function uniqueNonEmpty(values) {
@@ -466,6 +585,25 @@ function assetForClip(manifest, clip) {
   return manifest?.assets?.[clip?.assetId] || null;
 }
 
+function audioAssetForClip(manifest, clip) {
+  return assetForClip(manifest, clip) || (isMasterClip(clip) ? manifestMasterAudioAsset(manifest) : null);
+}
+
+function normalizeWaveformPeaks(value) {
+  if (Array.isArray(value)) return value;
+  if (typeof value === "string") {
+    const parsed = parseJson(value, null);
+    if (Array.isArray(parsed)) return parsed;
+    if (parsed && typeof parsed === "object") {
+      return normalizeWaveformPeaks(parsed.waveform_peaks || parsed.waveformPeaks || parsed.peaks);
+    }
+  }
+  if (value && typeof value === "object") {
+    return normalizeWaveformPeaks(value.waveform_peaks || value.waveformPeaks || value.peaks);
+  }
+  return [];
+}
+
 function imageForClip(manifest, clip, localSeconds) {
   const asset = assetForClip(manifest, clip);
   const strip = Array.isArray(asset?.preview_strip) ? asset.preview_strip : [];
@@ -481,19 +619,53 @@ function imageForClip(manifest, clip, localSeconds) {
   return previewUrl(strip[index]);
 }
 
-function audioPeaksForClip(manifest, clip) {
+function videoPreviewUrlForClip(manifest, clip) {
   const asset = assetForClip(manifest, clip);
-  const raw = Array.isArray(asset?.waveform_peaks)
-    ? asset.waveform_peaks
-    : Array.isArray(asset?.waveformPeaks)
-      ? asset.waveformPeaks
-      : Array.isArray(asset?.peaks)
-        ? asset.peaks
-        : Array.isArray(clip?.waveform_peaks)
-          ? clip.waveform_peaks
-          : Array.isArray(clip?.waveformPeaks)
-            ? clip.waveformPeaks
-            : [];
+  if (!asset || typeof asset !== "object") return "";
+  const parkedTake = Boolean(asset.parking_tensor_path || asset.parked_tensor_path);
+  // Monitor proxies written before schema 2 used a pixel format that Chromium
+  // can reject. A parked take will regenerate its compatible proxy on demand.
+  if (parkedTake && Number(asset.preview_video_schema || 0) < 2) return "";
+  const direct = monitorVideoUrl(asset.preview_video || asset.previewVideo || asset.monitor_preview_video);
+  if (direct) return direct;
+  const filename = String(asset.preview_video_file || asset.previewVideoFile || "").trim();
+  if (!filename) return "";
+  return monitorVideoUrl({
+    filename,
+    subfolder: asset.preview_video_subfolder || asset.previewVideoSubfolder || asset.preview_subfolder || "",
+    type: asset.preview_video_type || asset.previewVideoType || asset.preview_type || "output",
+  });
+}
+
+function advancedVideoPreviewUrlForClip(manifest, clip, monitorWidth = 640) {
+  const asset = assetForClip(manifest, clip);
+  if (!asset || typeof asset !== "object") return "";
+  const parkedTake = Boolean(asset.parking_tensor_path || asset.parked_tensor_path);
+  if (parkedTake && Number(asset.preview_video_schema || 0) < 2) return "";
+  const preview = asset.preview_video || asset.previewVideo || asset.monitor_preview_video;
+  if (preview && typeof preview === "object") {
+    const advanced = advancedMonitorVideoUrl(preview, monitorWidth, asset.preview_video_fps || manifest?.fps || 24);
+    if (advanced) return advanced;
+  }
+  const filename = String(asset.preview_video_file || asset.previewVideoFile || "").trim();
+  if (!filename) return "";
+  return advancedMonitorVideoUrl({
+    filename,
+    subfolder: asset.preview_video_subfolder || asset.previewVideoSubfolder || asset.preview_subfolder || "",
+    type: asset.preview_video_type || asset.previewVideoType || asset.preview_type || "output",
+  }, monitorWidth, asset.preview_video_fps || manifest?.fps || 24);
+}
+
+function audioPeaksForClip(manifest, clip) {
+  const asset = audioAssetForClip(manifest, clip);
+  const raw = [
+    asset?.waveform_peaks,
+    asset?.waveformPeaks,
+    asset?.peaks,
+    asset?.waveform,
+    clip?.waveform_peaks,
+    clip?.waveformPeaks,
+  ].map(normalizeWaveformPeaks).find((peaks) => peaks.length) || [];
   return raw
     .map((peak) => {
       if (peak && typeof peak === "object") {
@@ -507,15 +679,26 @@ function audioPeaksForClip(manifest, clip) {
     .filter((peak) => peak.max > 0 || peak.rms > 0);
 }
 
+function visibleAudioPeaksForClip(manifest, clip) {
+  const peaks = audioPeaksForClip(manifest, clip);
+  if (!peaks.length) return peaks;
+  const sourceDuration = clipSourceDuration(manifest, clip);
+  const start = Math.max(0, Math.min(sourceDuration, Number(clip?.trimStart || 0)));
+  const end = Math.max(start + 0.001, Math.min(sourceDuration, Number(clip?.trimEnd || sourceDuration)));
+  const first = Math.max(0, Math.floor((start / sourceDuration) * peaks.length));
+  const last = Math.min(peaks.length, Math.ceil((end / sourceDuration) * peaks.length));
+  return peaks.slice(Math.min(first, peaks.length - 1), Math.max(first + 1, last));
+}
+
 function shouldRefreshRealWaveform(manifest, clip) {
-  const asset = assetForClip(manifest, clip);
+  const asset = audioAssetForClip(manifest, clip);
   if (audioPeaksForClip(manifest, clip).length && (asset?.waveformReal !== false || asset?.collected_runtime)) return false;
   const urls = audioCandidateUrlsForClip(manifest, clip);
   return Boolean(asset && urls.length && (!asset.waveformReal || !urls.includes(String(asset.waveform_source_url || ""))));
 }
 
 function audioCandidateUrlsForClip(manifest, clip) {
-  const asset = assetForClip(manifest, clip);
+  const asset = audioAssetForClip(manifest, clip);
   if (!asset) return [];
   const urls = [];
   const pushDirect = (url) => {
@@ -568,7 +751,7 @@ async function fetchArrayBufferWithTimeout(url, timeoutMs = 7000) {
 }
 
 function clipSourceDuration(manifest, clip) {
-  const asset = assetForClip(manifest, clip);
+  const asset = clip?.type === "audio" ? audioAssetForClip(manifest, clip) : assetForClip(manifest, clip);
   return Math.max(
     0.1,
     Number(clip?.sourceDuration || 0),
@@ -579,7 +762,7 @@ function clipSourceDuration(manifest, clip) {
 }
 
 function clipEditableDuration(manifest, clip) {
-  const asset = assetForClip(manifest, clip);
+  const asset = clip?.type === "audio" ? audioAssetForClip(manifest, clip) : assetForClip(manifest, clip);
   const sourceDuration = clipSourceDuration(manifest, clip);
   const explicitLimit = Math.max(
     0,
@@ -633,6 +816,17 @@ function clipEndSeconds(clip) {
   return Math.max(0, Number(clip?.startTime || 0) + Number(clip?.duration || 0));
 }
 
+function syncMasterClipRenderTrim(manifest, clip) {
+  if (!clip || !isMasterClip(clip)) return;
+  const fps = Math.max(1, Number(manifest?.fps || 24));
+  const trimStart = Math.max(0, Number(clip.trimStart || 0));
+  const trimEnd = Math.max(trimStart + (1 / fps), Number(clip.trimEnd || trimStart + Number(clip.duration || 0)));
+  clip.renderTrimStartSeconds = trimStart;
+  clip.renderTrimEndSeconds = trimEnd;
+  clip.nominalDurationSeconds = Math.max(1 / fps, trimEnd - trimStart);
+  clip.nominalDurationFrames = Math.max(1, Math.round(clip.nominalDurationSeconds * fps));
+}
+
 function manifestEndSeconds(manifest) {
   const clips = Array.isArray(manifest?.clips) ? manifest.clips : [];
   return Math.max(0, ...clips.map(clipEndSeconds));
@@ -651,6 +845,8 @@ function installStyle() {
     .iamccs-sve button, .iamccs-sve select, .iamccs-sve input { height:28px; border:1px solid #5f6f74; background:#222c30; color:#e9f2ef; font-size:11px; font-weight:800; padding:0 10px; box-shadow:inset 0 1px 0 rgba(255,255,255,.08); }
     .iamccs-sve button:hover { border-color:#d2bd78; background:#2c383c; }
     .iamccs-sve button.on { background:#d6aa55; color:#10100d; border-color:#f0ce83; box-shadow:inset 0 0 0 2px rgba(255,255,255,.18); }
+    .iamccs-sve .clip.linked { outline:2px solid rgba(255,226,115,.92); outline-offset:-2px; }
+    .iamccs-sve .clip.linked::after { content:"LINKED"; position:absolute; left:4px; top:3px; z-index:9; padding:1px 4px; background:rgba(14,18,17,.84); color:#ffe98f; border:1px solid rgba(255,226,115,.72); font:9px/11px Consolas,monospace; pointer-events:none; }
     .iamccs-sve button.tap-feedback { transform:translateY(1px); border-color:#fff0b2 !important; box-shadow:inset 0 0 0 2px rgba(255,255,255,.26),0 0 0 2px rgba(214,170,85,.42),0 0 14px rgba(214,170,85,.38) !important; filter:brightness(1.16); }
     .iamccs-sve button.gold { background:#c79a4a; color:#111; border-color:#edcf89; }
     .iamccs-sve .top { display:grid; grid-template-columns:168px 398px minmax(0,1fr); gap:8px; min-height:0; padding:6px; border:1px solid #30393b; background:#101618; }
@@ -681,6 +877,12 @@ function installStyle() {
     .iamccs-sve-purge-confirm .actions { display:flex; justify-content:flex-end; gap:6px; }
     .iamccs-sve-purge-confirm button { min-width:76px; height:26px; padding:0 9px; border:1px solid #687b7e; border-radius:4px; background:#182326; color:#e7f1e8; cursor:pointer; font-size:10px; font-weight:900; }
     .iamccs-sve-purge-confirm button.confirm { border-color:#e0a85d; background:linear-gradient(180deg,#70451f,#3b2415); color:#ffe8bd; }
+    .iamccs-sve-media-picker { position:fixed; z-index:2147483600; width:278px; max-width:calc(100vw - 16px); padding:10px; border:1px solid #d7b667; background:linear-gradient(180deg,#263033,#0d1315); color:#f4f8e9; box-shadow:0 12px 28px rgba(0,0,0,.58),0 0 0 1px rgba(255,226,168,.12) inset; font:11px/1.35 Inter,system-ui,sans-serif; }
+    .iamccs-sve-media-picker strong { display:block; margin-bottom:4px; color:#ffe4a2; font-weight:900; }
+    .iamccs-sve-media-picker > span { display:block; margin-bottom:9px; color:#bfd0ce; font-size:10px; }
+    .iamccs-sve-media-picker .actions { display:flex; justify-content:flex-end; gap:6px; }
+    .iamccs-sve-media-picker button { min-width:82px; height:26px; padding:0 9px; border:1px solid #687b7e; background:#182326; color:#e7f1e8; cursor:pointer; font-size:10px; font-weight:900; }
+    .iamccs-sve-media-picker button.choose { border-color:#e0a85d; background:linear-gradient(180deg,#70451f,#3b2415); color:#ffe8bd; }
     .iamccs-sve .render-controls { display:flex; gap:6px; align-items:center; border-left:1px solid #344145; padding-left:8px; margin-left:2px; }
     .iamccs-sve .mini-field { display:flex; align-items:center; gap:4px; height:28px; border:1px solid #4d5d61; background:#0b1314; padding:0 6px; color:#ffe4a2; font-size:10px; font-weight:900; white-space:nowrap; }
     .iamccs-sve .mini-field input { width:52px; height:22px; padding:0 5px; text-align:center; font-family:Consolas,monospace; background:#071011; color:#edffe8; }
@@ -693,10 +895,10 @@ function installStyle() {
     .iamccs-sve .pool-item.on { border-color:#e7bd67; background:#302816; }
     .iamccs-sve .monitor-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; height:100%; min-height:0; }
     .iamccs-sve .screen { position:relative; border:1px solid #344145; background:#020606; height:100%; min-height:0; overflow:hidden; display:flex; align-items:center; justify-content:center; }
-    .iamccs-sve .screen img { width:100%; height:100%; object-fit:contain; display:none; background:#050909; }
-    .iamccs-sve .screen .empty { position:absolute; inset:20px; border:1px dashed #2e4145; display:flex; align-items:center; justify-content:center; color:#61777a; font-size:12px; }
-    .iamccs-sve .screen .tag { position:absolute; left:8px; bottom:8px; background:#050909; border:1px solid #2a3c40; padding:4px 7px; font-family:Consolas,monospace; font-size:10px; }
-    .iamccs-sve .source-transport { position:absolute; left:8px; right:8px; top:30px; height:30px; display:flex; gap:4px; justify-content:center; pointer-events:auto; opacity:.92; }
+    .iamccs-sve .screen img, .iamccs-sve .screen video { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; display:none; background:#050909; }
+    .iamccs-sve .screen .empty { position:absolute; z-index:2; inset:20px; border:1px dashed #2e4145; display:flex; align-items:center; justify-content:center; color:#61777a; font-size:12px; }
+    .iamccs-sve .screen .tag { position:absolute; z-index:3; left:8px; bottom:8px; background:#050909; border:1px solid #2a3c40; padding:4px 7px; font-family:Consolas,monospace; font-size:10px; }
+    .iamccs-sve .source-transport { position:absolute; z-index:3; left:8px; right:8px; top:30px; height:30px; display:flex; gap:4px; justify-content:center; pointer-events:auto; opacity:.92; }
     .iamccs-sve .source-transport button { height:24px; min-width:38px; padding:0 7px; background:#172629; }
     .iamccs-sve .timeline-wrap { min-height:0; margin:0; border:1px solid #45565a; background:#080d0e; overflow:hidden; display:grid; grid-template-rows:40px minmax(0,1fr) 84px; }
     .iamccs-sve .meter { height:38px; display:grid; grid-template-columns:${LANE_HEAD_WIDTH}px 1fr; border-bottom:1px solid #344145; background:#10191b; cursor:crosshair; overflow:hidden; user-select:none; }
@@ -728,7 +930,9 @@ function installStyle() {
     .iamccs-sve .clip-title { position:absolute; left:6px; top:3px; font-size:10px; text-shadow:0 1px 2px #000; z-index:2; }
     .iamccs-sve .film { position:absolute; inset:0; display:flex; opacity:.85; }
     .iamccs-sve .film img { height:100%; width:54px; object-fit:cover; border-right:1px solid rgba(255,255,255,.18); }
-    .iamccs-sve .wave { position:absolute; inset:0; opacity:.9; }
+    /* A canvas is a replaced element: inset alone preserves its intrinsic 700 px width.
+       Stretch it to the clip so long master excerpts render across their full timeline span. */
+    .iamccs-sve .wave { position:absolute; inset:0; width:100%; height:100%; display:block; opacity:.9; }
     .iamccs-sve .handle { position:absolute; top:0; width:14px; height:100%; background:linear-gradient(90deg,rgba(255,225,139,.92),rgba(255,225,139,.32)); cursor:ew-resize; z-index:6; touch-action:none; }
     .iamccs-sve .handle.left { left:0; }
     .iamccs-sve .handle.right { right:0; }
@@ -797,7 +1001,7 @@ function makeButton(label, fn, cls = "") {
   return b;
 }
 
-async function uploadEditorAudioFile(file, options = {}) {
+async function uploadEditorMediaFile(file, options = {}) {
   const body = new FormData();
   body.append("image", file);
   if (options.subfolder) body.append("subfolder", String(options.subfolder));
@@ -814,6 +1018,10 @@ async function uploadEditorAudioFile(file, options = {}) {
     filename,
     subfolder,
   };
+}
+
+async function uploadEditorAudioFile(file, options = {}) {
+  return uploadEditorMediaFile(file, options);
 }
 
 function audioFileDuration(file) {
@@ -849,6 +1057,116 @@ function pickEditorAudioFile() {
     document.body.appendChild(input);
     input.click();
   });
+}
+
+function pickEditorVideoFile() {
+  return new Promise((resolve) => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "video/*,.mp4,.mov,.mkv,.webm,.avi,.m4v";
+    input.style.display = "none";
+    const finish = (file) => {
+      try { input.remove(); } catch {}
+      resolve(file || null);
+    };
+    input.addEventListener("change", () => finish(input.files?.[0] || null), { once: true });
+    document.body.appendChild(input);
+    input.click();
+  });
+}
+
+async function inspectVideoFile(file) {
+  if (!file) return { duration: 0, preview_strip: [] };
+  const video = document.createElement("video");
+  const url = URL.createObjectURL(file);
+  video.preload = "metadata";
+  video.muted = true;
+  video.playsInline = true;
+  video.src = url;
+  const waitForSeek = (time) => new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      video.removeEventListener("seeked", finish);
+      resolve();
+    };
+    video.addEventListener("seeked", finish, { once: true });
+    window.setTimeout(finish, 900);
+    try { video.currentTime = Math.max(0, Number(time) || 0); } catch { finish(); }
+  });
+  try {
+    await new Promise((resolve, reject) => {
+      video.onloadedmetadata = resolve;
+      video.onerror = () => reject(new Error("video metadata could not be read"));
+      video.load();
+    });
+    const duration = Number.isFinite(video.duration) ? Math.max(0, video.duration) : 0;
+    const strip = [];
+    if (duration > 0 && video.videoWidth > 0 && video.videoHeight > 0) {
+      const width = 320;
+      const height = Math.max(64, Math.round(width * video.videoHeight / video.videoWidth));
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        const count = Math.min(10, Math.max(4, Math.ceil(duration / 3)));
+        for (let index = 0; index < count; index += 1) {
+          const at = count <= 1 ? 0 : Math.min(duration - 0.001, (index / (count - 1)) * duration);
+          await waitForSeek(at);
+          ctx.fillStyle = "#050909";
+          ctx.fillRect(0, 0, width, height);
+          try { ctx.drawImage(video, 0, 0, width, height); } catch {}
+          strip.push(canvas.toDataURL("image/jpeg", 0.78));
+        }
+      }
+    }
+    return { duration, preview_strip: strip };
+  } finally {
+    try { video.pause(); } catch {}
+    try { URL.revokeObjectURL(url); } catch {}
+  }
+}
+
+function showManualMediaPicker(button, kind, onFile) {
+  document.querySelectorAll(".iamccs-sve-media-picker").forEach((item) => item.remove());
+  const panel = document.createElement("div");
+  panel.className = "iamccs-sve-media-picker";
+  const label = kind === "video" ? "VIDEO" : "AUDIO";
+  panel.innerHTML = `<strong>Add ${label}</strong><span>Select a ${label.toLowerCase()} file from your computer.</span>`;
+  const actions = document.createElement("div");
+  actions.className = "actions";
+  const choose = document.createElement("button");
+  choose.type = "button";
+  choose.className = "choose";
+  choose.textContent = `Choose ${label}`;
+  const cancel = document.createElement("button");
+  cancel.type = "button";
+  cancel.textContent = "Cancel";
+  actions.append(choose, cancel);
+  panel.appendChild(actions);
+  document.body.appendChild(panel);
+  const close = () => panel.remove();
+  cancel.onclick = close;
+  choose.onclick = async () => {
+    choose.disabled = true;
+    choose.textContent = "Opening...";
+    const file = kind === "video" ? await pickEditorVideoFile() : await pickEditorAudioFile();
+    close();
+    if (file) await onFile(file);
+  };
+  const rect = button?.getBoundingClientRect?.();
+  const place = () => {
+    if (!panel.isConnected) return;
+    const width = panel.offsetWidth || 278;
+    const left = Math.max(8, Math.min(Number(rect?.left || 8), window.innerWidth - width - 8));
+    const top = Math.max(8, Math.min(Number(rect?.bottom || 8) + 7, window.innerHeight - panel.offsetHeight - 8));
+    panel.style.left = `${left}px`;
+    panel.style.top = `${top}px`;
+  };
+  place();
+  requestAnimationFrame(place);
 }
 
 function setNodeSize(node) {
@@ -909,6 +1227,8 @@ function installEditor(node, reason = "install") {
   let currentAudioClipId = "";
   let currentAudioUrl = "";
   const waveformPeakJobs = new Set();
+  const previewVideoJobs = new Set();
+  const monitorVideoState = new WeakMap();
   let selectedClipId = "";
   let selectedTrackId = String(manifest.ui_state?.selected_track_id || "");
   let replaceProjectOnInject = false;
@@ -1007,7 +1327,12 @@ function installEditor(node, reason = "install") {
   const clipAtTime = (kind = "video") => {
     return (manifest.clips || [])
       .filter((clip) => clip.type === kind && playhead >= Number(clip.startTime || 0) && playhead < Number(clip.startTime || 0) + Number(clip.duration || 0))
-      .sort((a, b) => Number(b.trackIndex || 0) - Number(a.trackIndex || 0))[0] || null;
+      // Smaller trackIndex is the visually higher lane: V1 must beat V2/V3.
+      .sort((a, b) => {
+        const trackDelta = Number(a.trackIndex || 0) - Number(b.trackIndex || 0);
+        if (trackDelta) return trackDelta;
+        return Number(a.takeIndex || 0) - Number(b.takeIndex || 0);
+      })[0] || null;
   };
 
   const audioClipAtTime = (time = playhead) => {
@@ -1077,8 +1402,236 @@ function installEditor(node, reason = "install") {
     }
   };
 
+  const ensureBrowserVideoPreview = (clip) => {
+    const asset = assetForClip(manifest, clip);
+    const parkingPath = String(asset?.parking_tensor_path || asset?.parked_tensor_path || "").trim();
+    const jobKey = String(asset?.id || parkingPath || clip?.id || "");
+    if (!asset || !parkingPath || !jobKey || videoPreviewUrlForClip(manifest, clip) || previewVideoJobs.has(jobKey)) return;
+    const lastFailure = Number(asset._iamccsPreviewVideoFailedAt || 0);
+    if (lastFailure && Date.now() - lastFailure < 10000) return;
+    previewVideoJobs.add(jobKey);
+    const sessionKey = String(manifest?.session_key || widget(node, "session_key")?.value || "shotboard_video_editor_v1").trim() || "shotboard_video_editor_v1";
+    api.fetchApi("/api/iamccs/cine/video_editor/ensure_preview_video", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session_key: sessionKey, parking_tensor_path: parkingPath }),
+    })
+      .then(async (response) => {
+        const result = await response.json().catch(() => ({}));
+        if (!response.ok || !result?.ok) throw new Error(result?.error || `HTTP ${response.status}`);
+        asset.preview_video = result.preview_video;
+        asset.preview_video_file = result.preview_video_file;
+        asset.preview_video_path = result.preview_video_path;
+        asset.preview_video_subfolder = result.preview_video_subfolder;
+        asset.preview_video_type = result.preview_video_type;
+        asset.preview_video_fps = result.preview_video_fps;
+        asset.preview_video_schema = result.preview_video_schema;
+        asset.preview_video_codec = result.preview_video_codec;
+        delete asset._iamccsPreviewVideoFailedAt;
+        saveManifest(node, manifest);
+        updateMonitor();
+      })
+      .catch((error) => {
+        asset._iamccsPreviewVideoFailedAt = Date.now();
+        console.warn("[IAMCCS ShotboardVideoEditorV1] monitor proxy creation failed", error);
+      })
+      .finally(() => previewVideoJobs.delete(jobKey));
+  };
+
+  const setMonitorVideo = (video, image, empty, url, localTime, shouldPlay, fallbackUrl = "") => {
+    if (!video) return false;
+    if (!url) {
+      const previousState = monitorVideoState.get(video);
+      if (previousState) {
+        previousState.requestedUrl = "";
+        previousState.url = "";
+        previousState.fallbackUrl = "";
+        previousState.ready = false;
+      }
+      if (video.dataset.previewUrl) {
+        try { video.pause(); } catch {}
+        video.removeAttribute("src");
+        try { video.load(); } catch {}
+        delete video.dataset.previewUrl;
+      }
+      video.style.display = "none";
+      return false;
+    }
+    let state = monitorVideoState.get(video);
+    if (!state) {
+      state = { requestedUrl: "", url: "", fallbackUrl: "", pendingTime: 0, pendingPlay: false, ready: false };
+      monitorVideoState.set(video, state);
+    }
+    const changed = state.requestedUrl !== url;
+    state.pendingTime = Math.max(0, Number(localTime || 0));
+    state.pendingPlay = Boolean(shouldPlay);
+    const sync = () => {
+      if (video.dataset.previewUrl !== state.url || video.readyState < 1) return;
+      const duration = Number(video.duration || 0);
+      const desired = duration > 0 ? Math.min(Math.max(0, duration - 0.001), state.pendingTime) : state.pendingTime;
+      const threshold = state.pendingPlay ? 0.34 : 0.025;
+      if (!Number.isFinite(Number(video.currentTime)) || Math.abs(Number(video.currentTime || 0) - desired) > threshold) {
+        try { video.currentTime = desired; } catch {}
+      }
+      if (state.pendingPlay) {
+        if (video.paused) video.play().catch(() => {});
+      } else if (!video.paused) {
+        try { video.pause(); } catch {}
+      }
+    };
+    const showFallback = () => {
+      state.ready = false;
+      video.style.display = "none";
+      const hasImage = Boolean(image?.getAttribute("src"));
+      if (image && hasImage) image.style.display = "block";
+      if (empty) empty.style.display = hasImage ? "none" : "flex";
+    };
+    const startLoad = () => {
+      video.dataset.previewUrl = state.url;
+      try { video.pause(); } catch {}
+      video.src = state.url;
+      try { video.load(); } catch {}
+      showFallback();
+    };
+    const useCompatibilityFallback = () => {
+      const nextUrl = String(state.fallbackUrl || "").trim();
+      if (!nextUrl || nextUrl === state.url) return false;
+      state.url = nextUrl;
+      state.fallbackUrl = "";
+      state.ready = false;
+      startLoad();
+      return true;
+    };
+    const showVideo = () => {
+      if (video.dataset.previewUrl !== state.url || video.readyState < 2) return;
+      state.ready = true;
+      sync();
+      video.style.display = "block";
+      if (image) image.style.display = "none";
+      if (empty) empty.style.display = "none";
+    };
+    if (changed) {
+      state.requestedUrl = url;
+      state.url = url;
+      state.fallbackUrl = String(fallbackUrl || "").trim() === url ? "" : String(fallbackUrl || "").trim();
+      state.ready = false;
+      video.onloadedmetadata = sync;
+      video.onloadeddata = showVideo;
+      video.oncanplay = showVideo;
+      video.onerror = () => {
+        if (!useCompatibilityFallback()) showFallback();
+      };
+      startLoad();
+    } else if (state.ready) {
+      sync();
+      showVideo();
+    } else {
+      showFallback();
+    }
+    return Boolean(state.ready);
+  };
+
   const selectedClip = () => (manifest.clips || []).find((clip) => clip.id === selectedClipId) || null;
   const trackIdForClip = (clip) => isMasterClip(clip) ? "AM" : String(clip?.trackId || "");
+  const isLinkModeEnabled = () => Boolean(manifest?.ui_state?.link_enabled);
+  const isSnapModeEnabled = () => Boolean(manifest?.ui_state?.snap_enabled);
+  const clipPairKey = (clip) => {
+    if (!clip || isMasterClip(clip)) return "";
+    const take = Math.max(0, Math.round(Number(clip.takeIndex || 0)));
+    if (take > 0) return `take:${take}`;
+    const timeline = String(clip.timelineId || "").trim().toUpperCase();
+    if (timeline) return `timeline:${timeline}`;
+    const trackId = String(clip.trackId || "").trim().toUpperCase();
+    const suffix = trackId.match(/(\d+)$/)?.[1] || "";
+    return suffix ? `track:${suffix}` : "";
+  };
+  const unlinkAllTimelineClips = (owner = manifest) => {
+    let changed = false;
+    for (const clip of owner?.clips || []) {
+      if (isMasterClip(clip)) continue;
+      if (Array.isArray(clip.linkedClipIds) && clip.linkedClipIds.length) changed = true;
+      if (clip.link_group_id || clip.linked) changed = true;
+      clip.linkedClipIds = [];
+      delete clip.link_group_id;
+      delete clip.linked;
+    }
+    return changed;
+  };
+  const syncLinkedClipPairs = (owner = manifest) => {
+    if (!owner || !Array.isArray(owner.clips)) return false;
+    const before = JSON.stringify(owner.clips.map((clip) => ({
+      id: clip?.id,
+      linkedClipIds: clip?.linkedClipIds,
+      link_group_id: clip?.link_group_id,
+      linked: clip?.linked,
+    })));
+    unlinkAllTimelineClips(owner);
+    if (owner.ui_state?.link_enabled) {
+      const videos = owner.clips.filter((clip) => clip?.type === "video" && !isMasterClip(clip));
+      const audios = owner.clips.filter((clip) => clip?.type === "audio" && !isMasterClip(clip));
+      const usedAudio = new Set();
+      for (const video of videos) {
+        const key = clipPairKey(video);
+        if (!key) continue;
+        const audio = audios.find((candidate) => !usedAudio.has(candidate.id) && clipPairKey(candidate) === key);
+        if (!audio) continue;
+        usedAudio.add(audio.id);
+        const group = `link_${key.replace(/[^A-Za-z0-9:_-]+/g, "_")}`;
+        video.linkedClipIds = [audio.id];
+        audio.linkedClipIds = [video.id];
+        video.link_group_id = group;
+        audio.link_group_id = group;
+        video.linked = true;
+        audio.linked = true;
+      }
+    }
+    const after = JSON.stringify(owner.clips.map((clip) => ({
+      id: clip?.id,
+      linkedClipIds: clip?.linkedClipIds,
+      link_group_id: clip?.link_group_id,
+      linked: clip?.linked,
+    })));
+    return before !== after;
+  };
+  const linkedClipsFor = (clip) => {
+    if (!isLinkModeEnabled() || !clip || isMasterClip(clip)) return [];
+    const ids = new Set(Array.isArray(clip.linkedClipIds) ? clip.linkedClipIds.map((id) => String(id)) : []);
+    return (manifest.clips || []).filter((candidate) => candidate !== clip && ids.has(String(candidate?.id || "")));
+  };
+  const snapTimelineTime = (value) => {
+    const bounded = Math.max(0, Math.min(timelineDuration(), Number(value) || 0));
+    if (!isSnapModeEnabled()) return bounded;
+    const nearestSecond = Math.round(bounded);
+    return Math.abs(nearestSecond - bounded) <= SNAP_THRESHOLD_SECONDS ? nearestSecond : bounded;
+  };
+  const setLinkMode = (enabled, button = null) => {
+    manifest.ui_state = manifest.ui_state || {};
+    manifest.ui_state.link_enabled = Boolean(enabled);
+    syncLinkedClipPairs(manifest);
+    if (button) {
+      button.dataset.stickyOn = enabled ? "1" : "";
+      button.classList.toggle("on", Boolean(enabled));
+      button.setAttribute("aria-pressed", enabled ? "true" : "false");
+    }
+    persist();
+    renderTimeline();
+    if (status) status.textContent = enabled
+      ? "Link ON: matching video/audio clips move, trim and cut together."
+      : "Link OFF: video and audio clips are unlinked and edit independently.";
+  };
+  const setSnapMode = (enabled, button = null) => {
+    manifest.ui_state = manifest.ui_state || {};
+    manifest.ui_state.snap_enabled = Boolean(enabled);
+    if (button) {
+      button.dataset.stickyOn = enabled ? "1" : "";
+      button.classList.toggle("on", Boolean(enabled));
+      button.setAttribute("aria-pressed", enabled ? "true" : "false");
+    }
+    persist();
+    if (status) status.textContent = enabled
+      ? "Snap ON: playhead and edit edges attract to whole seconds."
+      : "Snap OFF: free timeline positioning.";
+  };
   const selectedLaneId = () => {
     const clip = selectedClip();
     return clip ? trackIdForClip(clip) : String(selectedTrackId || "");
@@ -1094,22 +1647,51 @@ function installEditor(node, reason = "install") {
   const updateMonitor = () => {
     const sourceImg = root.querySelector(".source-img");
     const programImg = root.querySelector(".program-img");
+    const sourceVideo = root.querySelector(".source-video");
+    const programVideo = root.querySelector(".program-video");
     const sourceEmpty = root.querySelector(".source-empty");
     const programEmpty = root.querySelector(".program-empty");
     const selectedForSource = selectedClipId ? (manifest.clips || []).find((item) => item.id === selectedClipId) : null;
-    const sourceClip = selectedForSource?.type === "video" ? selectedForSource : clipAtTime("video");
+    // Source is an explicit, independent monitor. It must never become a
+    // second Program monitor merely because the Program playhead advances.
+    const sourceClip = selectedForSource?.type === "video" ? selectedForSource : null;
     const programClip = clipAtTime("video");
-    if (!selectedClipId) currentSourceClipId = sourceClip?.id || "";
+    if (!sourceClip) currentSourceClipId = "";
     const sourceDuration = sourceClip ? Number(sourceClip.duration || 0) : 0;
     if (selectedClipId && sourceClip?.id && currentSourceClipId !== sourceClip.id) {
       currentSourceClipId = sourceClip.id;
       sourceHead = 0;
     }
-    const sourceLocal = sourceClip
-      ? (selectedClipId ? Math.max(0, Math.min(sourceDuration, sourceHead)) : Math.max(0, playhead - Number(sourceClip.startTime || 0)))
-      : 0;
+    const sourceLocal = sourceClip ? Math.max(0, Math.min(sourceDuration, sourceHead)) : 0;
+    // A parked take may include invisible pre/post roll. Timeline-local time
+    // starts at the clip's trim window, while a browser video proxy starts at
+    // the physical take's frame zero. Keep those coordinate systems explicit.
+    const monitorMediaTime = (clip, timelineLocal) => {
+      if (!clip) return 0;
+      const physicalDuration = clipSourceDuration(manifest, clip);
+      const trimStart = Math.max(0, Math.min(physicalDuration, Number(clip.trimStart || 0)));
+      const trimEnd = Math.max(
+        trimStart + 0.001,
+        Math.min(physicalDuration, Number(clip.trimEnd || physicalDuration)),
+      );
+      return Math.max(trimStart, Math.min(trimEnd - 0.001, trimStart + Math.max(0, Number(timelineLocal || 0))));
+    };
+    const sourceMediaTime = monitorMediaTime(sourceClip, sourceLocal);
     const sourceUrl = sourceClip ? imageForClip(manifest, sourceClip, sourceLocal) : "";
-    const programUrl = programClip ? imageForClip(manifest, programClip, Math.max(0, playhead - Number(programClip.startTime || 0))) : "";
+    const programTimelineLocal = programClip ? Math.max(0, playhead - Number(programClip.startTime || 0)) : 0;
+    const programMediaTime = monitorMediaTime(programClip, programTimelineLocal);
+    const programUrl = programClip ? imageForClip(manifest, programClip, programTimelineLocal) : "";
+    const sourceVideoUrl = sourceClip ? videoPreviewUrlForClip(manifest, sourceClip) : "";
+    const programWidth = Math.max(320, Number(programVideo?.clientWidth || programImg?.clientWidth || 640));
+    // Program reads the finished browser-native proxy directly. Unlike a
+    // realtime transcode, it keeps running while ComfyUI is generating a take.
+    // VHS remains an automatic compatibility fallback only.
+    const programVideoUrl = programClip ? videoPreviewUrlForClip(manifest, programClip) : "";
+    const programVideoFallbackUrl = programClip
+      ? advancedVideoPreviewUrlForClip(manifest, programClip, programWidth)
+      : "";
+    if (sourceClip && !sourceVideoUrl) ensureBrowserVideoPreview(sourceClip);
+    if (programClip && !programVideoUrl) ensureBrowserVideoPreview(programClip);
     const setMonitorImage = (img, empty, url) => {
       if (!img) return;
       if (!url) {
@@ -1118,19 +1700,26 @@ function installEditor(node, reason = "install") {
         if (empty) empty.style.display = "flex";
         return;
       }
-      img.onerror = () => {
-        img.removeAttribute("src");
-        img.style.display = "none";
-        if (empty) empty.style.display = "flex";
-      };
-      img.onload = () => {
-        img.style.display = "block";
-        if (empty) empty.style.display = "none";
-      };
-      img.src = url;
+      if (img.dataset.previewUrl !== url) {
+        img.dataset.previewUrl = url;
+        img.onerror = () => {
+          img.removeAttribute("src");
+          img.style.display = "none";
+          if (empty) empty.style.display = "flex";
+        };
+        img.onload = () => {
+          img.style.display = "block";
+          if (empty) empty.style.display = "none";
+        };
+        img.src = url;
+      }
     };
-    setMonitorImage(sourceImg, sourceEmpty, sourceUrl);
-    setMonitorImage(programImg, programEmpty, programUrl);
+    if (!setMonitorVideo(sourceVideo, sourceImg, sourceEmpty, sourceVideoUrl, sourceMediaTime, sourcePlaying)) {
+      setMonitorImage(sourceImg, sourceEmpty, sourceUrl);
+    }
+    if (!setMonitorVideo(programVideo, programImg, programEmpty, programVideoUrl || programVideoFallbackUrl, programMediaTime, playing, programVideoFallbackUrl)) {
+      setMonitorImage(programImg, programEmpty, programUrl);
+    }
     const clock = root.querySelector(".clock");
     if (clock) clock.textContent = `${fmtTime(playhead)} / ${fmtTime(timelineDuration())}`;
     const rulerHead = root.querySelector(".ruler-track > .playhead");
@@ -1253,6 +1842,7 @@ function installEditor(node, reason = "install") {
             peaks.push({ max, rms: Math.sqrt(sum / Math.max(1, count)) });
           }
           asset.waveform_peaks = peaks;
+          asset.waveformPeaks = peaks;
           asset.waveformReal = true;
           asset.waveform_source = "webaudio_decode";
           asset.waveform_source_url = url;
@@ -1267,7 +1857,12 @@ function installEditor(node, reason = "install") {
       throw lastError || new Error("no readable audio preview url");
     } catch (error) {
       console.warn("[IAMCCS ShotboardVideoEditorV1] real waveform decode failed", error);
-      if (asset) asset.waveform_error = String(error?.message || error || "decode failed");
+      if (asset) {
+        asset.waveformReal = false;
+        asset.waveform_error = String(error?.message || error || "decode failed");
+        asset.waveform_source = "webaudio_decode_failed";
+        persist();
+      }
       renderTimeline();
     } finally {
       waveformPeakJobs.delete(jobKey);
@@ -1275,8 +1870,8 @@ function installEditor(node, reason = "install") {
   }
 
   const renderWave = (clip) => {
-    const peaks = audioPeaksForClip(manifest, clip);
-    const asset = assetForClip(manifest, clip);
+    const peaks = visibleAudioPeaksForClip(manifest, clip);
+    const asset = audioAssetForClip(manifest, clip);
     const canvas = document.createElement("canvas");
     canvas.className = "wave real-wave";
     drawWaveCanvas(canvas, peaks, asset?.waveform_error || "");
@@ -1289,12 +1884,13 @@ function installEditor(node, reason = "install") {
     const el = document.createElement("div");
     const isMasterAudio = isMasterClip(clip);
     const sourceDuration = clipEditableDuration(manifest, clip);
-    el.className = `clip ${clip.type === "audio" ? "audio" : ""}${isMasterAudio ? " master_audio" : ""}${selectedClipId === clip.id ? " selected" : ""}`;
+    const isLinked = Boolean(clip.linked && Array.isArray(clip.linkedClipIds) && clip.linkedClipIds.length);
+    el.className = `clip ${clip.type === "audio" ? "audio" : ""}${isMasterAudio ? " master_audio" : ""}${isLinked ? " linked" : ""}${selectedClipId === clip.id ? " selected" : ""}`;
     el.dataset.clipId = String(clip.id || "");
     el.dataset.audioLane = String(clip.audioLane || clip.trackId || "");
     el.style.left = `${Number(clip.startTime || 0) * scale}px`;
     el.style.width = `${Math.max(32, Number(clip.duration || 1) * scale)}px`;
-    el.title = `Drag center to move. Drag edges to trim. Source ${fmtTime(sourceDuration)}.`;
+    el.title = `${isLinked ? "Linked video/audio. " : ""}Drag center to move. Drag edges to trim. Source ${fmtTime(sourceDuration)}.`;
     const title = document.createElement("div");
     title.className = "clip-title";
     title.textContent = isMasterAudio
@@ -1374,23 +1970,30 @@ function installEditor(node, reason = "install") {
     selectedTrackId = trackIdForClip(clip);
     const startX = event.clientX;
     const startTime = Number(clip.startTime || 0);
+    const dragTargets = [clip, ...linkedClipsFor(clip)].filter((item, index, items) => item && items.indexOf(item) === index);
+    const dragStartTimes = new Map(dragTargets.map((item) => [item.id, Number(item.startTime || 0)]));
     const pointerTarget = event.currentTarget || event.target;
     try { pointerTarget?.setPointerCapture?.(event.pointerId); } catch {}
     const move = (ev) => {
       ev.preventDefault?.();
       const dt = clientDeltaToTimelineCssPx(ev.clientX - startX) / pxPerSecond();
-      clip.startTime = Math.max(0, startTime + dt);
+      const nextStart = snapTimelineTime(Math.max(0, startTime + dt));
+      const appliedDelta = nextStart - startTime;
+      for (const target of dragTargets) {
+        target.startTime = Math.max(0, Number(dragStartTimes.get(target.id) || 0) + appliedDelta);
+        updateClipElementPreview(target, "MOVE");
+      }
+      clip.startTime = nextStart;
       playhead = clip.startTime;
-      updateClipElementPreview(clip, "MOVE");
       updateMonitor();
-      if (status) status.textContent = `Move clip: ${fmtTime(clip.startTime)} -> ${fmtTime(clip.startTime + Number(clip.duration || 0))}.`;
+      if (status) status.textContent = `${dragTargets.length > 1 ? "Move linked clips" : "Move clip"}: ${fmtTime(clip.startTime)} -> ${fmtTime(clip.startTime + Number(clip.duration || 0))}.`;
     };
     const up = (ev) => {
       try { pointerTarget?.releasePointerCapture?.(event.pointerId); } catch {}
       window.removeEventListener("pointermove", move, true);
       window.removeEventListener("pointerup", up, true);
       window.removeEventListener("pointercancel", up, true);
-      finishClipElementPreview(clip);
+      for (const target of dragTargets) finishClipElementPreview(target);
       persist();
       renderTimeline();
     };
@@ -1409,41 +2012,71 @@ function installEditor(node, reason = "install") {
     const startDur = Number(clip.duration || 1);
     const startTrimIn = Math.max(0, Number(clip.trimStart || 0));
     const startTrimOut = Math.max(startTrimIn + 0.1, Number(clip.trimEnd || startTrimIn + startDur));
-    const sourceDuration = clipEditableDuration(manifest, clip);
-    const fixedTimelineEnd = startStart + startDur;
+    const trimTargets = [clip, ...linkedClipsFor(clip)].filter((item, index, items) => item && items.indexOf(item) === index);
+    const trimSnapshots = new Map(trimTargets.map((item) => [item.id, {
+      start: Number(item.startTime || 0),
+      duration: Math.max(0.1, Number(item.duration || 1)),
+      trimIn: Math.max(0, Number(item.trimStart || 0)),
+      trimOut: Math.max(Math.max(0.1, Number(item.trimStart || 0)) + 0.1, Number(item.trimEnd || Number(item.trimStart || 0) + Number(item.duration || 1))),
+    }]));
     const pointerTarget = event.currentTarget || event.target;
     try { pointerTarget?.setPointerCapture?.(event.pointerId); } catch {}
     const move = (ev) => {
       ev.preventDefault?.();
       const dt = clientDeltaToTimelineCssPx(ev.clientX - startX) / pxPerSecond();
+      const primary = trimSnapshots.get(clip.id);
+      if (!primary) return;
       if (edge === "left") {
+        const fixedTimelineEnd = primary.start + primary.duration;
+        const minStart = Math.max(0, primary.start - primary.trimIn);
         const maxStart = fixedTimelineEnd - 0.1;
-        const minStart = Math.max(0, startStart - startTrimIn);
-        const nextStart = Math.max(minStart, Math.min(maxStart, startStart + dt));
-        const nextTrimIn = Math.max(0, Math.min(startTrimOut - 0.1, startTrimIn + (nextStart - startStart)));
-        clip.startTime = nextStart;
-        clip.trimStart = nextTrimIn;
-        clip.duration = Math.max(0.1, fixedTimelineEnd - nextStart);
-        clip.trimEnd = Math.max(nextTrimIn + 0.1, Math.min(sourceDuration, startTrimOut));
+        const rawStart = Math.max(minStart, Math.min(maxStart, primary.start + dt));
+        const nextStart = Math.max(minStart, Math.min(maxStart, snapTimelineTime(rawStart)));
+        const appliedDelta = nextStart - primary.start;
+        for (const target of trimTargets) {
+          const snapshot = trimSnapshots.get(target.id);
+          if (!snapshot) continue;
+          const targetSourceDuration = clipEditableDuration(manifest, target);
+          const targetEnd = snapshot.start + snapshot.duration;
+          const targetMinStart = Math.max(0, snapshot.start - snapshot.trimIn);
+          const targetStart = Math.max(targetMinStart, Math.min(targetEnd - 0.1, snapshot.start + appliedDelta));
+          const targetTrimIn = Math.max(0, Math.min(snapshot.trimOut - 0.1, snapshot.trimIn + (targetStart - snapshot.start)));
+          target.startTime = targetStart;
+          target.trimStart = targetTrimIn;
+          target.duration = Math.max(0.1, targetEnd - targetStart);
+          target.trimEnd = Math.max(targetTrimIn + 0.1, Math.min(targetSourceDuration, snapshot.trimOut));
+          updateClipElementPreview(target, "TRIM IN");
+        }
       } else {
-        const maxDuration = Math.max(0.1, sourceDuration - startTrimIn);
-        clip.duration = Math.max(0.1, Math.min(maxDuration, startDur + dt));
-        clip.trimStart = startTrimIn;
-        clip.trimEnd = Math.max(startTrimIn + 0.1, Math.min(sourceDuration, startTrimIn + clip.duration));
+        const primarySourceDuration = clipEditableDuration(manifest, clip);
+        const maxDuration = Math.max(0.1, primarySourceDuration - primary.trimIn);
+        const rawEnd = Math.max(primary.start + 0.1, Math.min(primary.start + maxDuration, primary.start + primary.duration + dt));
+        const nextEnd = Math.max(primary.start + 0.1, Math.min(primary.start + maxDuration, snapTimelineTime(rawEnd)));
+        const appliedDelta = nextEnd - (primary.start + primary.duration);
+        for (const target of trimTargets) {
+          const snapshot = trimSnapshots.get(target.id);
+          if (!snapshot) continue;
+          const targetSourceDuration = clipEditableDuration(manifest, target);
+          const targetMaxDuration = Math.max(0.1, targetSourceDuration - snapshot.trimIn);
+          target.duration = Math.max(0.1, Math.min(targetMaxDuration, snapshot.duration + appliedDelta));
+          target.trimStart = snapshot.trimIn;
+          target.trimEnd = Math.max(snapshot.trimIn + 0.1, Math.min(targetSourceDuration, snapshot.trimIn + target.duration));
+          updateClipElementPreview(target, "TRIM OUT");
+       }
       }
+      for (const target of trimTargets) syncMasterClipRenderTrim(manifest, target);
       playhead = edge === "left"
         ? clip.startTime
         : Math.max(clip.startTime, clip.startTime + clip.duration - 0.001);
-      updateClipElementPreview(clip, edge === "left" ? "TRIM IN" : "TRIM OUT");
       updateMonitor();
-      if (status) status.textContent = `${edge === "left" ? "Trim in" : "Trim out"}: ${fmtTime(clip.startTime)} -> ${fmtTime(clip.startTime + clip.duration)}.`;
+      if (status) status.textContent = `${trimTargets.length > 1 ? "Trim linked clips" : "Trim"} ${edge === "left" ? "in" : "out"}: ${fmtTime(clip.startTime)} -> ${fmtTime(clip.startTime + clip.duration)}.`;
     };
     const up = () => {
       try { pointerTarget?.releasePointerCapture?.(event.pointerId); } catch {}
       window.removeEventListener("pointermove", move, true);
       window.removeEventListener("pointerup", up, true);
       window.removeEventListener("pointercancel", up, true);
-      finishClipElementPreview(clip);
+      for (const target of trimTargets) finishClipElementPreview(target);
       persist();
       renderTimeline();
     };
@@ -1454,6 +2087,20 @@ function installEditor(node, reason = "install") {
 
   const renderTimeline = () => {
     manifest = manifestFromNode(node);
+    const linkButton = root.querySelector("button[data-editor-link]");
+    if (linkButton) {
+      linkButton.classList.toggle("on", isLinkModeEnabled());
+      linkButton.dataset.stickyOn = isLinkModeEnabled() ? "1" : "";
+      linkButton.setAttribute("aria-pressed", isLinkModeEnabled() ? "true" : "false");
+    }
+    const snapButton = root.querySelector("button[data-editor-snap]");
+    if (snapButton) {
+      snapButton.classList.toggle("on", isSnapModeEnabled());
+      snapButton.dataset.stickyOn = isSnapModeEnabled() ? "1" : "";
+      snapButton.setAttribute("aria-pressed", isSnapModeEnabled() ? "true" : "false");
+    }
+    const linkMetadataChanged = syncLinkedClipPairs(manifest);
+    if (linkMetadataChanged) saveManifest(node, manifest);
     let clamped = false;
     for (const clip of manifest.clips || []) {
       clamped = clampClipToEditableDuration(manifest, clip) || clamped;
@@ -1563,7 +2210,7 @@ function installEditor(node, reason = "install") {
 
   const seekFromPointer = (event, origin = "ruler") => {
     event?.preventDefault?.();
-    playhead = clientXToTimelineTime(event.clientX, origin, event.clientY, event.target);
+    playhead = snapTimelineTime(clientXToTimelineTime(event.clientX, origin, event.clientY, event.target));
     persist();
     syncAudioPlayback(true);
     updateMonitor();
@@ -1594,6 +2241,9 @@ function installEditor(node, reason = "install") {
 
   function play() {
     if (playing) return;
+    // Program transport owns the program monitor and its timeline audio.
+    // A previously-running Source transport must not keep advancing beside it.
+    stopSourcePlayback(false);
     playing = true;
     root.querySelector(".play-btn")?.classList.add("on");
     playStartMs = performance.now();
@@ -1617,6 +2267,7 @@ function installEditor(node, reason = "install") {
 
   function stop() {
     playing = false;
+    stopSourcePlayback(false);
     root.querySelector(".play-btn")?.classList.remove("on");
     if (timer) clearInterval(timer);
     timer = null;
@@ -1634,31 +2285,99 @@ function installEditor(node, reason = "install") {
     updateMonitor();
   }
 
-  function addManual(kind) {
-    const path = window.prompt(`Path ${kind.toUpperCase()} da aggiungere alla timeline:`);
-    if (!path) return;
-    const index = (manifest.clips || []).length + 1;
-    const assetId = `manual_${kind}_${Date.now()}`;
-    manifest.assets[assetId] = { id: assetId, type: kind, path, duration: 5, manual: true };
-    manifest.clips.push({
-      id: `clip_manual_${index}`,
-      assetId,
-      type: kind,
-      startTime: Number(manifest.duration_seconds || 0),
-      duration: 5,
-      trimStart: 0,
-      trimEnd: 5,
-      trackId: kind === "video" ? "V1" : "A1",
-      trackIndex: kind === "video" ? 0 : 5,
-      manual: true,
-      muted: false,
-      volume: 1,
+  function firstFreeManualTrack(kind, startTime, duration) {
+    const prefix = kind === "video" ? "V" : "A";
+    const firstIndex = kind === "video" ? 0 : 5;
+    const start = Math.max(0, Number(startTime || 0));
+    const end = start + Math.max(0.001, Number(duration || 0));
+    for (let offset = 0; offset < 5; offset += 1) {
+      const trackIndex = firstIndex + offset;
+      const trackId = `${prefix}${offset + 1}`;
+      const occupied = (manifest.clips || []).some((clip) => {
+        if (!clip || clip.type !== kind || isMasterClip(clip)) return false;
+        if (String(clip.trackId || "") !== trackId) return false;
+        const clipStart = Number(clip.startTime || 0);
+        const clipEnd = clipStart + Math.max(0.001, Number(clip.duration || 0));
+        return start < clipEnd && end > clipStart;
+      });
+      if (!occupied) return { trackId, trackIndex };
+    }
+    return null;
+  }
+
+  function addManual(kind, button = null) {
+    showManualMediaPicker(button, kind, async (file) => {
+      try {
+        if (status) status.textContent = `Reading ${kind} ${file.name || "file"}...`;
+        const details = kind === "video"
+          ? await inspectVideoFile(file)
+          : { duration: await audioFileDuration(file), preview_strip: [] };
+        const duration = Math.max(0, Number(details.duration || 0));
+        if (!(duration > 0)) throw new Error(`Could not read ${kind} duration.`);
+        const startTime = Math.max(0, Number(manifest.duration_seconds || 0));
+        const track = firstFreeManualTrack(kind, startTime, duration);
+        if (!track) throw new Error(`All ${kind === "video" ? "V1-V5" : "A1-A5"} lanes are occupied at the insertion point.`);
+        if (status) status.textContent = `Uploading ${kind} ${file.name || "file"}...`;
+        const uploaded = await uploadEditorMediaFile(file, {
+          subfolder: "IAMCCS_video_editor_manual",
+          type: "input",
+        });
+        const index = (manifest.clips || []).length + 1;
+        const clipId = `clip_manual_${kind}_${Date.now()}_${index}`;
+        const assetId = `manual_${kind}_${Date.now()}_${index}`;
+        const asset = {
+          id: assetId,
+          type: kind,
+          path: uploaded.path,
+          mediaPath: uploaded.path,
+          media_path: uploaded.path,
+          fileName: uploaded.filename || file.name,
+          filename: uploaded.filename || file.name,
+          uploadType: uploaded.type || "input",
+          duration,
+          source_duration: duration,
+          manual: true,
+        };
+        if (kind === "video") {
+          asset.videoFile = uploaded.path;
+          asset.videoUploadType = uploaded.type || "input";
+          asset.preview_strip = Array.isArray(details.preview_strip) ? details.preview_strip : [];
+        } else {
+          asset.audioFile = uploaded.path;
+          asset.audioUploadType = uploaded.type || "input";
+          asset.audio_preview_file = uploaded.filename || file.name;
+          asset.audio_preview_subfolder = uploaded.subfolder || "";
+          asset.audio_preview_type = uploaded.type || "input";
+          asset.waveformReal = false;
+        }
+        manifest.assets = manifest.assets && typeof manifest.assets === "object" ? manifest.assets : {};
+        manifest.assets[assetId] = asset;
+        manifest.clips.push({
+          id: clipId,
+          assetId,
+          type: kind,
+          startTime,
+          duration,
+          trimStart: 0,
+          trimEnd: duration,
+          trackId: track.trackId,
+          trackIndex: track.trackIndex,
+          manual: true,
+          muted: false,
+          volume: 1,
+        });
+        manifest.duration_seconds = Math.max(Number(manifest.duration_seconds || 0), startTime + duration);
+        selectedTrackId = track.trackId;
+        selectedClipId = clipId;
+        syncLinkedClipPairs(manifest);
+        persist();
+        renderTimeline();
+        if (status) status.textContent = `${kind === "video" ? "Video" : "Audio"} added to ${track.trackId}. Duration ${fmtTime(duration)}.`;
+      } catch (error) {
+        if (status) status.textContent = `Add ${kind} failed: ${error?.message || error}`;
+        console.warn(`[IAMCCS ShotboardVideoEditorV1] add ${kind} failed`, error);
+      }
     });
-    manifest.duration_seconds = Number(manifest.duration_seconds || 0) + 5;
-    selectedTrackId = kind === "video" ? "V1" : "A1";
-    selectedClipId = `clip_manual_${index}`;
-    persist();
-    renderTimeline();
   }
 
   async function runVideoEditorParkingPurge(button, sessionKey) {
@@ -1817,6 +2536,117 @@ function installEditor(node, reason = "install") {
     if (status) status.textContent = `MA added. Master lane has priority over T-lane audio chunks. Duration ${fmtTime(duration)}.`;
   }
 
+  function adoptPublishedMasterAudioAsset(asset, activate = false) {
+    if (!asset || typeof asset !== "object") return false;
+    const path = String(asset.audioFile || asset.path || asset.filename || asset.fileName || "").trim();
+    if (!path) return false;
+    const masterAsset = {
+      ...JSON.parse(JSON.stringify(asset)),
+      id: "master_audio",
+      role: "master_audio",
+      type: "audio",
+      takeIndex: 0,
+      timelineId: "MASTER",
+      audioLane: "MASTER",
+      audioFile: path,
+      path,
+      audioUploadType: asset.audioUploadType || asset.type || "input",
+      audio_preview_file: asset.audio_preview_file || asset.filename || asset.fileName,
+      audio_preview_subfolder: asset.audio_preview_subfolder || asset.subfolder || "",
+      audio_preview_type: asset.audio_preview_type || asset.audioUploadType || asset.type || "input",
+      duration: Number(asset.duration || asset.duration_seconds || 0),
+      duration_seconds: Number(asset.duration_seconds || asset.duration || 0),
+      masterLinkSource: "IAMCCS_AudioBoardArranger",
+    };
+    manifest.assets = manifest.assets && typeof manifest.assets === "object" ? manifest.assets : {};
+    manifest.assets.master_audio = masterAsset;
+    manifest.master_audio = JSON.parse(JSON.stringify(masterAsset));
+    if (manifest.master_excerpt) delete manifest.master_excerpt;
+    delete manifest.assets.master_excerpt;
+    ensureMasterAudioLaneClip(manifest);
+    const masterClip = (manifest.clips || []).find((clip) => isMasterClip(clip));
+    if (masterClip) {
+      masterClip.sourceSegmentId = String(asset.sourceSegmentId || "");
+      masterClip.physicalStartFrame = Number(asset.physicalStartFrame || 0);
+      masterClip.physicalDurationFrames = Number(asset.physicalDurationFrames || 0);
+      masterClip.nominalDurationFrames = Number(asset.nominalDurationFrames || 0);
+      masterClip.preRollFrames = Number(asset.preRollFrames || 0);
+      masterClip.postRollFrames = Number(asset.postRollFrames || 0);
+      masterClip.rollContract = asset.rollContract && typeof asset.rollContract === "object"
+        ? JSON.parse(JSON.stringify(asset.rollContract))
+        : {};
+      masterClip.rollWindowLinkedToVideo = false;
+    }
+    if (activate) mergeMasterAudioToVideo();
+    else {
+      saveManifest(node, manifest);
+      renderTimeline();
+      if (status) status.textContent = `Master audio parked in AM. Physical duration ${fmtTime(masterAsset.duration_seconds || 0)}.`;
+    }
+    return true;
+  }
+
+  function mergeMasterAudioToVideo() {
+    const asset = manifestMasterAudioAsset(manifest);
+    if (!asset || !String(asset.audioFile || asset.path || asset.filename || asset.fileName || "").trim()) {
+      if (status) status.textContent = "MERGE MA: no published master audio asset is present. Use AudioBoard MA mode and Publish first.";
+      return false;
+    }
+    const videoClips = (manifest.clips || [])
+      .filter((clip) => clip && String(clip.type || "") === "video")
+      .sort((a, b) => Number(a.startTime || 0) - Number(b.startTime || 0));
+    if (!videoClips.length) {
+      if (status) status.textContent = "MERGE MA: generate or add at least one video clip first.";
+      return false;
+    }
+    ensureMasterAudioLaneClip(manifest);
+    const masterClip = (manifest.clips || []).find((clip) => isMasterClip(clip));
+    if (!masterClip) return false;
+    const videoStart = Math.max(0, Number(videoClips[0].startTime || 0));
+    const videoEnd = Math.max(videoStart, ...videoClips.map((clip) => Number(clip.startTime || 0) + Number(clip.duration || 0)));
+    const videoDuration = Math.max(0.001, videoEnd - videoStart);
+    const physicalDuration = Math.max(0.001, Number(asset.duration_seconds || asset.duration || 0), videoDuration);
+    const fpsValue = Math.max(1, Number(manifest.fps || 24));
+    const preRollFrames = Math.max(0, Number(asset.preRollFrames || 0));
+    const preRollSeconds = preRollFrames / fpsValue;
+    const nominalEnd = Math.max(
+      preRollSeconds + (1 / fpsValue),
+      Math.min(physicalDuration, preRollSeconds + videoDuration),
+    );
+    masterClip.startTime = videoStart;
+    masterClip.sourceDuration = physicalDuration;
+    masterClip.sourceDurationLimit = physicalDuration;
+    masterClip.generationDuration = physicalDuration;
+    masterClip.duration = Math.max(1 / fpsValue, nominalEnd - preRollSeconds);
+    masterClip.trimStart = Math.max(0, Math.min(physicalDuration - (1 / fpsValue), preRollSeconds));
+    masterClip.trimEnd = nominalEnd;
+    masterClip.nominalStartTime = videoStart;
+    masterClip.nominalDurationSeconds = masterClip.duration;
+    masterClip.nominalDurationFrames = Math.max(1, Math.round(masterClip.duration * fpsValue));
+    masterClip.renderTrimStartSeconds = masterClip.trimStart;
+    masterClip.renderTrimEndSeconds = masterClip.trimEnd;
+    masterClip.linkedClipIds = videoClips.map((clip) => String(clip.id || "")).filter(Boolean);
+    masterClip.linkMode = "nominal_video_timeline";
+    masterClip.rollWindowLinkedToVideo = true;
+    masterClip.audioPriority = "master_over_chunks";
+    masterClip.muted = false;
+    setEditorRenderAudioPolicy(manifest, "use_master_audio");
+    manifest.master_audio = { ...manifest.master_audio, renderTrimStartSeconds: masterClip.renderTrimStartSeconds, renderTrimEndSeconds: masterClip.renderTrimEndSeconds };
+    manifest.assets.master_audio = { ...manifest.assets.master_audio, renderTrimStartSeconds: masterClip.renderTrimStartSeconds, renderTrimEndSeconds: masterClip.renderTrimEndSeconds };
+    manifest.duration_seconds = Math.max(Number(manifest.duration_seconds || 0), videoEnd, masterClip.startTime + masterClip.duration);
+    saveManifest(node, manifest);
+    const renderNode = findLinkedRenderNode();
+    if (renderNode) {
+      forceNodeWidgetValue(renderNode, "editor_manifest_json", 0, JSON.stringify(manifest, null, 2));
+      forceNodeWidgetValue(renderNode, "audio_policy", 1, "use_master_audio");
+    }
+    selectedClipId = "clip_MASTER_AUDIO";
+    selectedTrackId = "AM";
+    renderTimeline();
+    if (status) status.textContent = `MERGE MA active: one continuous master linked to ${videoClips.length} video clip(s), no chunk concatenation.`;
+    return true;
+  }
+
   function deleteSelectedClip() {
     const clip = selectedClip();
     if (!clip) {
@@ -1854,29 +2684,67 @@ function installEditor(node, reason = "install") {
       if (status) status.textContent = "Select a clip before cutting.";
       return;
     }
-    const start = Number(clip.startTime || 0);
-    const duration = Number(clip.duration || 0);
-    const end = start + duration;
-    if (playhead <= start + 0.05 || playhead >= end - 0.05) {
+    const editHead = snapTimelineTime(playhead);
+    const cutTargets = [clip, ...linkedClipsFor(clip)].filter((item, index, items) => item && items.indexOf(item) === index);
+    const eligibleTargets = cutTargets.filter((target) => {
+      const start = Number(target.startTime || 0);
+      const end = start + Number(target.duration || 0);
+      return editHead > start + 0.05 && editHead < end - 0.05;
+    });
+    if (eligibleTargets.length !== cutTargets.length) {
+      if (status) status.textContent = "Linked clips must cover the playhead together before cutting.";
+      return;
+    }
+    if (!eligibleTargets.length) {
       if (status) status.textContent = "Move playhead inside the selected clip before cutting.";
       return;
     }
-    const leftDuration = playhead - start;
-    const rightDuration = end - playhead;
-    const right = JSON.parse(JSON.stringify(clip));
-    right.id = `${clip.id}_cut_${Date.now()}`;
-    right.startTime = playhead;
-    right.duration = rightDuration;
-    right.trimStart = Number(clip.trimStart || 0) + leftDuration;
-    right.trimEnd = Number(clip.trimEnd || Number(clip.trimStart || 0) + duration);
-    clip.duration = leftDuration;
-    clip.trimEnd = Number(clip.trimStart || 0) + leftDuration;
-    manifest.clips.push(right);
-    selectedClipId = right.id;
-    selectedTrackId = trackIdForClip(right);
+    const rightClips = [];
+    for (const target of eligibleTargets) {
+      const start = Number(target.startTime || 0);
+      const duration = Number(target.duration || 0);
+      const end = start + duration;
+      const leftDuration = editHead - start;
+      const rightDuration = end - editHead;
+      const right = JSON.parse(JSON.stringify(target));
+      right.id = `${target.id}_cut_${Date.now()}_${rightClips.length}`;
+      right.startTime = editHead;
+      right.duration = rightDuration;
+      right.trimStart = Number(target.trimStart || 0) + leftDuration;
+      right.trimEnd = Number(target.trimEnd || Number(target.trimStart || 0) + duration);
+      target.duration = leftDuration;
+      target.trimEnd = Number(target.trimStart || 0) + leftDuration;
+      rightClips.push(right);
+    }
+    const leftIds = eligibleTargets.map((target) => String(target.id));
+    const rightIds = rightClips.map((target) => String(target.id));
+    if (isLinkModeEnabled() && eligibleTargets.length > 1) {
+      eligibleTargets.forEach((target, index) => {
+        target.linkedClipIds = leftIds.filter((id) => id !== String(target.id));
+        target.link_group_id = `link_cut_left_${editHead}`;
+        target.linked = true;
+      });
+      rightClips.forEach((target, index) => {
+        target.linkedClipIds = rightIds.filter((id) => id !== String(target.id));
+        target.link_group_id = `link_cut_right_${editHead}`;
+        target.linked = true;
+      });
+    } else {
+      eligibleTargets[0].linkedClipIds = [];
+      delete eligibleTargets[0].link_group_id;
+      delete eligibleTargets[0].linked;
+      rightClips[0].linkedClipIds = [];
+      delete rightClips[0].link_group_id;
+      delete rightClips[0].linked;
+    }
+    manifest.clips.push(...rightClips);
+    const selectedRight = rightClips[eligibleTargets.indexOf(clip)] || rightClips[0];
+    selectedClipId = selectedRight.id;
+    selectedTrackId = trackIdForClip(selectedRight);
+    playhead = editHead;
     persist();
     renderTimeline();
-    if (status) status.textContent = `Cut created at ${fmtTime(playhead)}.`;
+    if (status) status.textContent = `${eligibleTargets.length > 1 ? "Linked cut" : "Cut"} created at ${fmtTime(editHead)}.`;
   }
 
   function trimSelectedToPlayhead(edge = "out") {
@@ -1885,24 +2753,39 @@ function installEditor(node, reason = "install") {
       if (status) status.textContent = "Select a clip before trimming.";
       return;
     }
-    const start = Number(clip.startTime || 0);
-    const end = start + Number(clip.duration || 0);
-    if (playhead <= start || playhead >= end) {
+    const editHead = snapTimelineTime(playhead);
+    const trimTargets = [clip, ...linkedClipsFor(clip)].filter((item, index, items) => item && items.indexOf(item) === index);
+    const eligibleTargets = trimTargets.filter((target) => {
+      const start = Number(target.startTime || 0);
+      const end = start + Number(target.duration || 0);
+      return editHead > start && editHead < end;
+    });
+    if (eligibleTargets.length !== trimTargets.length) {
+      if (status) status.textContent = "Linked clips must cover the playhead together before trimming.";
+      return;
+    }
+    if (!eligibleTargets.length) {
       if (status) status.textContent = "Playhead must be inside selected clip.";
       return;
     }
-    if (edge === "in") {
-      const delta = playhead - start;
-      clip.startTime = playhead;
-      clip.duration = Math.max(0.1, end - playhead);
-      clip.trimStart = Math.max(0, Number(clip.trimStart || 0) + delta);
-    } else {
-      clip.duration = Math.max(0.1, playhead - start);
-      clip.trimEnd = Number(clip.trimStart || 0) + clip.duration;
+    for (const target of eligibleTargets) {
+      const start = Number(target.startTime || 0);
+      const end = start + Number(target.duration || 0);
+      if (edge === "in") {
+        const delta = editHead - start;
+        target.startTime = editHead;
+        target.duration = Math.max(0.1, end - editHead);
+        target.trimStart = Math.max(0, Number(target.trimStart || 0) + delta);
+      } else {
+        target.duration = Math.max(0.1, editHead - start);
+        target.trimEnd = Number(target.trimStart || 0) + target.duration;
+      }
+      syncMasterClipRenderTrim(manifest, target);
     }
+    playhead = editHead;
     persist();
     renderTimeline();
-    if (status) status.textContent = `${edge === "in" ? "Trim in" : "Trim out"} applied at ${fmtTime(playhead)}.`;
+    if (status) status.textContent = `${eligibleTargets.length > 1 ? "Linked " : ""}${edge === "in" ? "Trim in" : "Trim out"} applied at ${fmtTime(editHead)}.`;
   }
 
   function findLinkedRenderNode() {
@@ -1959,6 +2842,104 @@ function installEditor(node, reason = "install") {
     return wanted;
   }
 
+  function repairRenderVideoInputs(branchOutput, renderNode, allowedIds) {
+    const renderId = String(renderNode?.id ?? "");
+    if (!renderId || !branchOutput || typeof branchOutput !== "object") return 0;
+    const numericRenderId = Number(renderId);
+    const renderLink = [Number.isFinite(numericRenderId) ? numericRenderId : renderId, 0];
+    const exporterType = "IAMCCS_shotboarder_aud+vid_exporter_PRO";
+    const consumerTypes = new Set([exporterType, "SaveVideo", "VHS_VideoCombine"]);
+    let repaired = 0;
+
+    for (const promptNode of Object.values(branchOutput)) {
+      if (!promptNode || typeof promptNode !== "object") continue;
+      if (!consumerTypes.has(String(promptNode.class_type || ""))) continue;
+      promptNode.inputs = promptNode.inputs && typeof promptNode.inputs === "object"
+        ? promptNode.inputs
+        : {};
+      const linkedVideo = promptNode.inputs.video;
+      const linkedOrigin = Array.isArray(linkedVideo) ? String(linkedVideo[0] ?? "") : "";
+      if (linkedOrigin && allowedIds.has(linkedOrigin)) continue;
+      promptNode.inputs.video = renderLink.slice();
+      repaired += 1;
+    }
+    return repaired;
+  }
+
+  function masterAudioFileFromManifest(sourceManifest) {
+    const asset = manifestMasterAudioAsset(sourceManifest);
+    return String(
+      asset?.path
+      || asset?.audioFile
+      || asset?.audio_file
+      || asset?.filename
+      || asset?.fileName
+      || ""
+    ).trim();
+  }
+
+  function exporterAudioEdlFromManifest(sourceManifest) {
+    const clips = Array.isArray(sourceManifest?.clips) ? sourceManifest.clips : [];
+    // Only source-window metadata is needed by the exporter. Keeping this
+    // handoff compact avoids duplicating waveform/preview payloads in the
+    // isolated render prompt.
+    const fields = [
+      "id", "type", "takeIndex", "timelineId", "startTime", "duration",
+      "nominalDuration", "nominalDurationFrames", "trimStart", "trimEnd",
+      "preRoll", "preRollFrames",
+    ];
+    const videoClips = clips
+      .filter((clip) => clip && String(clip.type || "").toLowerCase() === "video")
+      .map((clip) => Object.fromEntries(fields.filter((field) => field in clip).map((field) => [field, clip[field]])));
+    return JSON.stringify({
+      schema: "iamccs.shotboard_export_audio_edl.v1",
+      fps: Number(sourceManifest?.fps || 24),
+      clips: videoClips,
+    });
+  }
+
+  function configureRenderExportInputs(branchOutput, renderNode, allowedIds) {
+    const renderId = String(renderNode?.id ?? "");
+    if (!renderId || !branchOutput || typeof branchOutput !== "object") return 0;
+    const numericRenderId = Number(renderId);
+    const renderLink = [Number.isFinite(numericRenderId) ? numericRenderId : renderId, 0];
+    const exporterType = "IAMCCS_shotboarder_aud+vid_exporter_PRO";
+    const consumerTypes = new Set([exporterType, "SaveVideo", "VHS_VideoCombine"]);
+    const masterPath = masterAudioFileFromManifest(manifest);
+    let repaired = 0;
+
+    for (const promptNode of Object.values(branchOutput)) {
+      if (!promptNode || typeof promptNode !== "object") continue;
+      if (!consumerTypes.has(String(promptNode.class_type || ""))) continue;
+      promptNode.inputs = promptNode.inputs && typeof promptNode.inputs === "object"
+        ? promptNode.inputs
+        : {};
+      const linkedVideo = promptNode.inputs.video;
+      const linkedOrigin = Array.isArray(linkedVideo) ? String(linkedVideo[0] ?? "") : "";
+      if (!linkedOrigin || !allowedIds.has(linkedOrigin)) {
+        promptNode.inputs.video = renderLink.slice();
+        repaired += 1;
+      }
+      if (String(promptNode.class_type || "") === exporterType) {
+        // The editor manifest already contains the uploaded master excerpt.
+        // Removing linked AUDIO/SuperNode inputs keeps this isolated render
+        // from re-evaluating AudioBoard, Shotboard, or the video backend.
+        delete promptNode.inputs.audio;
+        delete promptNode.inputs.cine_linx;
+        delete promptNode.inputs.metadata_json;
+        promptNode.inputs.editor_audio_edl_json = exporterAudioEdlFromManifest(manifest);
+        if (masterPath) {
+          promptNode.inputs.audio_source_mode = "master_file_direct";
+          promptNode.inputs.master_audio_file = masterPath;
+        } else {
+          delete promptNode.inputs.master_audio_file;
+        }
+        repaired += 1;
+      }
+    }
+    return repaired;
+  }
+
   function manualRenderPrompt(renderNode) {
     if (!manifestMasterAudioAsset(manifest)) {
       copyMasterAudioBundle(manifest, manifestFromRenderNode(renderNode));
@@ -1996,6 +2977,13 @@ function installEditor(node, reason = "install") {
             if (allowed.has(String(id))) branchOutput[id] = promptNode;
           }
           branchOutput[renderId] = manualRenderPrompt(renderNode);
+          const repairedExportInputs = configureRenderExportInputs(branchOutput, renderNode, allowed);
+          if (repairedExportInputs > 0) {
+            console.info(
+              "[IAMCCS ShotboardVideoEditorV1] isolated render/export branch configured",
+              { renderNode: renderId, repairedExportInputs, masterAudioDirect: Boolean(masterAudioFileFromManifest(manifest)) },
+            );
+          }
           if (Object.keys(branchOutput).length > 1) {
             output = branchOutput;
             workflow = full?.workflow || workflow;
@@ -2172,15 +3160,19 @@ function installEditor(node, reason = "install") {
     return clipAtTime("video");
   }
 
-  function stopSourcePlayback() {
+  function stopSourcePlayback(refresh = true) {
     sourcePlaying = false;
     if (sourceRaf) cancelAnimationFrame(sourceRaf);
     sourceRaf = 0;
     root.querySelector(".source-play-btn")?.classList.remove("on");
+    if (refresh) updateMonitor();
   }
 
   function setSourceHeadForClip(clip, value) {
     if (!clip) return;
+    // A manual source seek must cancel the running source clock first;
+    // otherwise its next RAF tick restores the old playback position.
+    stopSourcePlayback(false);
     const duration = Math.max(0, Number(clip.duration || 0));
     selectedClipId = clip.id;
     currentSourceClipId = clip.id;
@@ -2212,6 +3204,8 @@ function installEditor(node, reason = "install") {
       stopSourcePlayback();
       return;
     }
+    // Source transport is deliberately isolated from the Program transport.
+    if (playing) stop();
     selectedClipId = clip.id;
     currentSourceClipId = clip.id;
     const duration = Math.max(0, Number(clip.duration || 0));
@@ -2229,7 +3223,7 @@ function installEditor(node, reason = "install") {
       sourceHead = sourceStartHead + ((now - sourceStartMs) / 1000);
       if (sourceHead >= duration) {
         sourceHead = Math.max(0, duration - (1 / Math.max(1, Number(manifest.fps || 24))));
-        stopSourcePlayback();
+        stopSourcePlayback(false);
         updateMonitor();
         return;
       }
@@ -2264,6 +3258,11 @@ function installEditor(node, reason = "install") {
         return;
       }
       manifest = normalizeManifestTracks(parsed);
+      manifest.ui_state = {
+        link_enabled: false,
+        snap_enabled: false,
+        ...(manifest.ui_state && typeof manifest.ui_state === "object" ? manifest.ui_state : {}),
+      };
       playhead = Math.min(Number(manifest.ui_state?.playhead || 0), timelineDuration());
       selectedClipId = String(manifest.ui_state?.selected_clip_id || "");
       selectedTrackId = String(manifest.ui_state?.selected_track_id || "");
@@ -2287,7 +3286,7 @@ function installEditor(node, reason = "install") {
       tracks: EDITOR_TRACKS.map((track) => ({ ...track })),
       duration_seconds: 20,
       assembly_order: [],
-      ui_state: { playhead: 0 },
+      ui_state: { playhead: 0, link_enabled: false, snap_enabled: false },
       cleared_at: Date.now() / 1000,
     });
     playhead = 0;
@@ -2338,7 +3337,17 @@ function installEditor(node, reason = "install") {
     makeButton("Trim Out", () => trimSelectedToPlayhead("out")),
     makeButton("Clear", () => resetEditorProject("clear"), "gold"),
     makeButton("Razor", () => splitSelectedClip()),
-    makeButton("Snap", (b) => b.classList.toggle("on")),
+    (() => {
+      const button = makeButton("Snap 1s", (b) => setSnapMode(!isSnapModeEnabled(), b));
+      button.dataset.editorSnap = "1";
+      button.title = "Magnetic snapping for the playhead and clip edges at whole seconds.";
+      button.setAttribute("aria-pressed", isSnapModeEnabled() ? "true" : "false");
+      if (isSnapModeEnabled()) {
+        button.dataset.stickyOn = "1";
+        button.classList.add("on");
+      }
+      return button;
+    })(),
     (() => {
       const button = makeButton("Open Editor", () => openFullscreenEditor(), "gold");
       button.dataset.openEditor = "1";
@@ -2376,10 +3385,20 @@ function installEditor(node, reason = "install") {
   clock.textContent = `${fmtTime(0)} / ${fmtTime(manifest.duration_seconds || 0)}`;
   const takesActions = document.createElement("div");
   takesActions.className = "takes-actions";
+  const linkButton = makeButton("Link", (button) => setLinkMode(!isLinkModeEnabled(), button));
+  linkButton.dataset.editorLink = "1";
+  linkButton.title = "Link matching video/audio takes. When off, edits affect only the selected clip.";
+  linkButton.setAttribute("aria-pressed", isLinkModeEnabled() ? "true" : "false");
+  if (isLinkModeEnabled()) {
+    linkButton.dataset.stickyOn = "1";
+    linkButton.classList.add("on");
+  }
   takesActions.append(
-    makeButton("Add Video", () => addManual("video"), "gold"),
-    makeButton("Add Audio", () => addManual("audio"), "gold"),
+    linkButton,
+    makeButton("Add Video", (button) => addManual("video", button), "gold"),
+    makeButton("Add Audio", (button) => addManual("audio", button), "gold"),
     makeButton("Add MA", () => addMasterAudioClip(), "gold"),
+    makeButton("MERGE MA", () => mergeMasterAudioToVideo(), "gold"),
     makeButton("Purge", purgeVideoEditorParking, "danger"),
     makeButton("Delete Selected", () => deleteSelectedClip()),
   );
@@ -2393,8 +3412,8 @@ function installEditor(node, reason = "install") {
   const monitors = document.createElement("div");
   monitors.className = "monitor-grid";
   monitors.innerHTML = `
-    <div class="monitor"><div class="panel-title">SOURCE MONITOR</div><div class="screen"><img class="source-img"/><div class="source-transport"></div><div class="empty source-empty">select a take</div><div class="tag">Source</div></div></div>
-    <div class="monitor"><div class="panel-title">PROGRAM MONITOR</div><div class="screen"><img class="program-img"/><div class="empty program-empty">timeline output</div><div class="tag">Program</div></div></div>
+    <div class="monitor"><div class="panel-title">SOURCE MONITOR</div><div class="screen"><video class="source-video" muted playsinline preload="auto"></video><img class="source-img"/><div class="source-transport"></div><div class="empty source-empty">select a take</div><div class="tag">Source</div></div></div>
+    <div class="monitor"><div class="panel-title">PROGRAM MONITOR</div><div class="screen"><video class="program-video" muted playsinline preload="auto"></video><img class="program-img"/><div class="empty program-empty">timeline output</div><div class="tag">Program</div></div></div>
   `;
   main.append(pool, monitors);
   const sourceTransport = monitors.querySelector(".source-transport");
@@ -2402,6 +3421,7 @@ function installEditor(node, reason = "install") {
     makeButton("|<", () => sourceJump("in")),
     makeButton("<<", () => sourceNudge(-0.25)),
     makeButton("Play", (button) => sourcePlay(button), "gold source-play-btn"),
+    makeButton("Stop", () => stopSourcePlayback()),
     makeButton(">>", () => sourceNudge(0.25)),
     makeButton(">|", () => sourceJump("out")),
   );
@@ -2457,7 +3477,11 @@ function installEditor(node, reason = "install") {
       }
       node.properties = node.properties || {};
       const nextManifest = appendedManifest || incoming;
-      nextManifest.ui_state = nextManifest.ui_state && typeof nextManifest.ui_state === "object" ? nextManifest.ui_state : {};
+      const currentUiState = manifest.ui_state && typeof manifest.ui_state === "object" ? manifest.ui_state : {};
+      const incomingUiState = nextManifest.ui_state && typeof nextManifest.ui_state === "object" ? nextManifest.ui_state : {};
+      nextManifest.ui_state = { ...incomingUiState };
+      if (currentUiState.link_enabled !== undefined) nextManifest.ui_state.link_enabled = Boolean(currentUiState.link_enabled);
+      if (currentUiState.snap_enabled !== undefined) nextManifest.ui_state.snap_enabled = Boolean(currentUiState.snap_enabled);
       nextManifest.ui_state.replace_project_on_inject = false;
       const nextText = JSON.stringify(nextManifest, null, 2);
       node.properties.iamccs_video_editor_manifest = nextText;
@@ -2473,6 +3497,17 @@ function installEditor(node, reason = "install") {
     }
   };
 
+  if (node._iamccsMasterAudioReadyHandler) {
+    document.removeEventListener("iamccs:audio_master_ready", node._iamccsMasterAudioReadyHandler);
+  }
+  node._iamccsMasterAudioReadyHandler = (event) => {
+    const asset = event?.detail?.asset;
+    if (!asset || typeof asset !== "object") return;
+    if (adoptPublishedMasterAudioAsset(asset, false)) {
+      if (status) status.textContent = "AudioBoard master parked in AM. Press MERGE MA to link it to the video timing.";
+    }
+  };
+  document.addEventListener("iamccs:audio_master_ready", node._iamccsMasterAudioReadyHandler);
   renderTimeline();
   requestAnimationFrame(() => {
     try {

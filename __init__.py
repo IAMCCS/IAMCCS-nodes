@@ -171,6 +171,10 @@ from .iamccs_cine_nodes import (
     IAMCCS_CineWorkflowInspector,
 )
 from .iamccs_cine_shotboard_planner_v4 import IAMCCS_CineShotboardPlannerV4
+from .iamccs_cine_shotboard_planner_v5_v2v import (
+    IAMCCS_CineShotboardPlannerV5V2V,
+    IAMCCS_CineShotboardV5V2VRouter,
+)
 from .iamccs_cine_shotboard_v4_backend import (
     IAMCCS_CineShotboardV4Backend,
     IAMCCS_CineShotboardV4Guide,
@@ -188,6 +192,7 @@ from .iamccs_cine_duration_lock import (
     IAMCCS_CineShotboardTailTrimPolicy,
     IAMCCS_CineShotboardFinalFrameTrim,
 )
+from .iamccs_shotboarder_exporter_pro import IAMCCS_ShotboarderAudVidExporterPRO
 from .iamccs_cine_temporal_cut_barrier import IAMCCS_CineTemporalCutBarrier
 
 from .iamccs_ltx2_temporal_overlap_samplers import (
@@ -324,6 +329,7 @@ from .iamccs_cine_audio_dialogue import (
     IAMCCS_CineDialoguePromptKit,
 )
 from .audio.audio_bus_out import IAMCCS_BusOut
+from .iamccs_audioboard_direct_adapter import IAMCCS_AudioBoardDirectShotboardAdapter
 from .audio.audio_board_mixer import IAMCCS_AudioBoardMixer
 from .audio.audio_control_efx import IAMCCS_ControlAudEfx
 from .audio.audio_control_efx_panel import IAMCCS_ControlAudEfxPanel
@@ -524,6 +530,8 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_CineShotboardPlannerProV2": IAMCCS_CineShotboardPlannerProV2,
     "IAMCCS_CineShotboardPlannerV3": IAMCCS_CineShotboardPlannerV3,
     "IAMCCS_CineShotboardPlannerV4": IAMCCS_CineShotboardPlannerV4,
+    "IAMCCS_CineShotboardPlannerV5V2V": IAMCCS_CineShotboardPlannerV5V2V,
+    "IAMCCS_CineShotboardV5V2VRouter": IAMCCS_CineShotboardV5V2VRouter,
     "IAMCCS_CineShotboardV4Backend": IAMCCS_CineShotboardV4Backend,
     "IAMCCS_CineShotboardV4Guide": IAMCCS_CineShotboardV4Guide,
     "IAMCCS_CineShotboardV4CropGuides": IAMCCS_CineShotboardV4CropGuides,
@@ -550,6 +558,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_CineLatentDurationCrop": IAMCCS_CineLatentDurationCrop,
     "IAMCCS_CineShotboardTailTrimPolicy": IAMCCS_CineShotboardTailTrimPolicy,
     "IAMCCS_CineShotboardFinalFrameTrim": IAMCCS_CineShotboardFinalFrameTrim,
+    "IAMCCS_shotboarder_aud+vid_exporter_PRO": IAMCCS_ShotboarderAudVidExporterPRO,
     "IAMCCS_CineTemporalCutBarrier": IAMCCS_CineTemporalCutBarrier,
     "IAMCCS_CinePromptRelaySafeEncode": IAMCCS_CinePromptRelaySafeEncode,
     "IAMCCS_CineRelayOrBypass": IAMCCS_CineRelayOrBypass,
@@ -654,6 +663,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_CineTimelineAudioMixer": IAMCCS_CineTimelineAudioMixer,
     "IAMCCS_AudioBoardArranger": IAMCCS_AudioBoardArranger,
     "IAMCCS_BusOut": IAMCCS_BusOut,
+    "IAMCCS_AudioBoardDirectShotboardAdapter": IAMCCS_AudioBoardDirectShotboardAdapter,
     "IAMCCS_AudioBoardMixer": IAMCCS_AudioBoardMixer,
     "IAMCCS_ControlAudEfx": IAMCCS_ControlAudEfx,
     "IAMCCS_ControlAudEfxPanel": IAMCCS_ControlAudEfxPanel,
@@ -837,6 +847,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_CineShotboardPlannerProV2": "IAMCCS Cine Shotboard Planner Pro V2",
     "IAMCCS_CineShotboardPlannerV3": "IAMCCS Cine Shotboard Planner V3",
     "IAMCCS_CineShotboardPlannerV4": "IAMCCS Cine Shotboard Planner V4",
+    "IAMCCS_CineShotboardPlannerV5V2V": "IAMCCS Cine Shotboard Planner V5 V2V",
+    "IAMCCS_CineShotboardV5V2VRouter": "IAMCCS Cine Shotboard V5 V2V Router",
     "IAMCCS_CineShotboardV4Backend": "IAMCCS Cine Shotboard V4 Backend",
     "IAMCCS_CineShotboardV4Guide": "IAMCCS Cine Shotboard V4 Guide",
     "IAMCCS_CineShotboardV4CropGuides": "IAMCCS Cine Shotboard V4 Crop Guides",
@@ -863,6 +875,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_CineLatentDurationCrop": "IAMCCS Cine Latent Duration Crop",
     "IAMCCS_CineShotboardTailTrimPolicy": "IAMCCS Cine Shotboard Tail Trim Policy",
     "IAMCCS_CineShotboardFinalFrameTrim": "IAMCCS Cine Shotboard Final Frame Trim",
+    "IAMCCS_shotboarder_aud+vid_exporter_PRO": "IAMCCS Shotboarder Aud+Vid Exporter PRO",
     "IAMCCS_CineTemporalCutBarrier": "IAMCCS Cine Temporal Cut Barrier (Experimental)",
     "IAMCCS_CinePromptRelaySafeEncode": "IAMCCS Cine PromptRelay Safe Encode",
     "IAMCCS_CineRelayOrBypass": "IAMCCS Cine Relay Or Bypass",
@@ -1003,6 +1016,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_CineTimelineAudioMixer": "IAMCCS Timeline Audio Mixer",
     "IAMCCS_AudioBoardArranger": "IAMCCS AudioBoard Arranger",
     "IAMCCS_BusOut": "IAMCCS BusOut",
+    "IAMCCS_AudioBoardDirectShotboardAdapter": "IAMCCS AudioBoard Direct -> Shotboard Adapter",
     "IAMCCS_AudioBoardMixer": "IAMCCS AudioBoard Mixer",
     "IAMCCS_ControlAudEfx": "IAMCCS ControlAudEfx",
     "IAMCCS_ControlAudEfxPanel": "IAMCCS ControlAudEfx Panel",
@@ -1259,6 +1273,30 @@ def setup_api_routes() -> None:
                     "remaining_files": remaining_files,
                     "remaining_bytes": remaining_bytes,
                 })
+            except Exception as exc:
+                return web.json_response({"error": str(exc)}, status=500)
+
+        @routes.post("/api/iamccs/cine/video_editor/ensure_preview_video")
+        async def iamccs_video_editor_ensure_preview_video(request):
+            """Create the lightweight browser playback proxy for an existing parked take."""
+            try:
+                from .cine_multigeneration import _parking_root, _safe_slug, ensure_parked_take_preview_video
+
+                try:
+                    payload = await request.json()
+                except Exception:
+                    payload = {}
+                session_key = _safe_slug(payload.get("session_key") or "shotboard_video_editor_v1")
+                parking_path = str(payload.get("parking_tensor_path") or "").strip()
+                if not parking_path:
+                    return web.json_response({"error": "Missing parked take path."}, status=400)
+                session_dir = os.path.abspath(_parking_root(session_key))
+                parking_root = os.path.abspath(os.path.dirname(session_dir))
+                source = os.path.abspath(parking_path)
+                if os.path.commonpath([parking_root, source]) != parking_root:
+                    return web.json_response({"error": "Preview source is outside IAMCCS parking."}, status=400)
+                preview = ensure_parked_take_preview_video(source)
+                return web.json_response({"ok": True, **preview})
             except Exception as exc:
                 return web.json_response({"error": str(exc)}, status=500)
 
@@ -1656,6 +1694,58 @@ def setup_api_routes() -> None:
                         fh.write(base64.b64decode(payload))
                     return True
 
+                def _write_audio_data_url(value, out_path):
+                    header, _, payload = str(value or "").partition(",")
+                    if not header.startswith("data:audio/") or not payload:
+                        return False
+                    with open(out_path, "wb") as fh:
+                        fh.write(base64.b64decode(payload))
+                    return True
+
+                def _collect_audio_paths(payload):
+                    paths = []
+                    seen = set()
+
+                    def add(value):
+                        clean = str(value or "").strip()
+                        if clean and clean not in seen:
+                            seen.add(clean)
+                            paths.append(clean)
+
+                    def visit(value, owner_key=""):
+                        if isinstance(value, list):
+                            for item in value:
+                                visit(item, owner_key)
+                        elif isinstance(value, dict):
+                            # sourceSegment/sourceAudioFile can point to the original
+                            # three-minute source. A package must carry the rendered
+                            # excerpts/chunks and MA asset, never silently expand back
+                            # to that source file.
+                            for key in ("audioFile", "audio_file"):
+                                if owner_key == "sourceSegment":
+                                    continue
+                                add(value.get(key))
+                            for key, item in value.items():
+                                visit(item, key)
+
+                    visit(payload)
+                    return paths
+
+                def _rewrite_audio_paths(payload, path_map):
+                    if isinstance(payload, list):
+                        for item in payload:
+                            _rewrite_audio_paths(item, path_map)
+                        return
+                    if not isinstance(payload, dict):
+                        return
+                    for key in ("audioFile", "sourceAudioFile", "audio_file", "source_audio_file"):
+                        value = str(payload.get(key) or "").strip()
+                        if value in path_map:
+                            payload[f"original_{key}"] = value
+                            payload[key] = path_map[value]
+                    for item in payload.values():
+                        _rewrite_audio_paths(item, path_map)
+
                 data = await request.json()
                 board = data.get("board")
                 if not isinstance(board, dict):
@@ -1666,7 +1756,9 @@ def setup_api_routes() -> None:
                 package_name = _sanitize(data.get("package_name") or data.get("label") or f"cine_shotboard_{int(time.time())}")
                 package_dir = os.path.join(package_root, package_name)
                 images_dir = os.path.join(package_dir, "images")
+                audio_dir = os.path.join(package_dir, "audio")
                 os.makedirs(images_dir, exist_ok=True)
+                os.makedirs(audio_dir, exist_ok=True)
 
                 original_board = copy.deepcopy(board)
                 ordered_paths = _collect_paths(original_board)
@@ -1705,8 +1797,43 @@ def setup_api_routes() -> None:
                         entry["error"] = str(err)
                     manifest_images.append(entry)
 
+                audio_path_map = {}
+                manifest_audio = []
+                allowed_audio_ext = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".aiff", ".aif", ".opus"}
+                for index, original_path in enumerate(_collect_audio_paths(original_board), start=1):
+                    source_path = _resolve_source(original_path, input_dir)
+                    source_name = os.path.basename(source_path or original_path) or f"audio_{index:03d}.wav"
+                    ext = os.path.splitext(source_name)[1].lower()
+                    if ext not in allowed_audio_ext:
+                        ext = ".wav"
+                    clean_stem = _sanitize(os.path.splitext(source_name)[0], f"audio_{index:03d}")[:52]
+                    filename = f"audio_{index:03d}_{clean_stem}{ext}"
+                    target_path = os.path.join(audio_dir, filename)
+                    rel_path = "/".join(["IAMCCS_shotboard_packages", package_name, "audio", filename])
+                    entry = {
+                        "index": index,
+                        "original_path": original_path,
+                        "package_path": rel_path,
+                        "filename": filename,
+                    }
+                    try:
+                        if str(original_path).startswith("data:audio"):
+                            if not _write_audio_data_url(original_path, target_path):
+                                raise ValueError("Unsupported audio data URL")
+                        else:
+                            if not source_path or not os.path.isfile(source_path):
+                                raise FileNotFoundError(f"Audio not found: {original_path}")
+                            shutil.copy2(source_path, target_path)
+                            entry["source_path"] = source_path
+                        entry["bytes"] = os.path.getsize(target_path)
+                        audio_path_map[original_path] = rel_path
+                    except Exception as err:
+                        entry["error"] = str(err)
+                    manifest_audio.append(entry)
+
                 packaged_board = copy.deepcopy(original_board)
                 _rewrite_board_paths(packaged_board, ordered_paths, path_map)
+                _rewrite_audio_paths(packaged_board, audio_path_map)
                 saved_at = time.strftime("%Y-%m-%dT%H:%M:%S%z")
                 packaged_board["metadata"] = {
                     **(packaged_board.get("metadata") or {}),
@@ -1718,6 +1845,8 @@ def setup_api_routes() -> None:
                     "root": package_dir,
                     "images_dir": "images",
                     "images": manifest_images,
+                    "audio_dir": "audio",
+                    "audio": manifest_audio,
                 }
 
                 manifest = {
@@ -1732,6 +1861,9 @@ def setup_api_routes() -> None:
                     "images_dir": "images",
                     "image_count": len(ordered_paths),
                     "images": manifest_images,
+                    "audio_dir": "audio",
+                    "audio_count": len(manifest_audio),
+                    "audio": manifest_audio,
                 }
 
                 with open(os.path.join(package_dir, "board.json"), "w", encoding="utf-8") as fh:
@@ -1740,6 +1872,7 @@ def setup_api_routes() -> None:
                     json.dump(manifest, fh, indent=2, ensure_ascii=False)
 
                 failed = sum(1 for item in manifest_images if item.get("error"))
+                failed_audio = sum(1 for item in manifest_audio if item.get("error"))
                 return web.json_response({
                     "ok": True,
                     "package_name": package_name,
@@ -1749,6 +1882,9 @@ def setup_api_routes() -> None:
                     "image_count": len(ordered_paths),
                     "failed_images": failed,
                     "images": manifest_images,
+                    "audio_count": len(manifest_audio),
+                    "failed_audio": failed_audio,
+                    "audio": manifest_audio,
                 })
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)
@@ -1901,9 +2037,9 @@ def setup_api_routes() -> None:
 
                 def _rewrite_audio_paths(board, path_map, segment_path_map=None):
                     segment_path_map = segment_path_map or {}
-                    for seg in board.get("audioSegments") or []:
+                    def _rewrite_segment(seg):
                         if not isinstance(seg, dict):
-                            continue
+                            return
                         excerpt_meta = seg.get("packageAudioExcerpt") if isinstance(seg.get("packageAudioExcerpt"), dict) else {}
                         if excerpt_meta:
                             excerpt_meta.pop("dataUrl", None)
@@ -1920,12 +2056,31 @@ def setup_api_routes() -> None:
                             if excerpt_meta:
                                 excerpt_meta["package_path"] = rel_value
                                 seg["packageAudioExcerpt"] = excerpt_meta
-                            continue
+                            return
                         for key in ("audioFile", "fileName", "path"):
                             value = str(seg.get(key) or "").strip()
                             if value in path_map:
                                 seg[f"original_{key}"] = value
                                 seg[key] = path_map[value]
+                        for key in ("sourceAudioFile", "source_audio_file"):
+                            value = str(seg.get(key) or "").strip()
+                            if value in path_map:
+                                seg[f"original_{key}"] = value
+                                seg[key] = path_map[value]
+
+                    for seg in board.get("audioSegments") or []:
+                        _rewrite_segment(seg)
+                    multi = board.get("multiGeneration") if isinstance(board.get("multiGeneration"), dict) else {}
+                    for key in ("audioSegmentsAll", "allAudioSegments", "sourceAudioSegmentsAll"):
+                        for seg in multi.get(key) or []:
+                            _rewrite_segment(seg)
+                    for seg in (multi.get("audioByTimeline") or {}).values():
+                        for item in seg if isinstance(seg, list) else []:
+                            _rewrite_segment(item)
+                    for key in ("sourceSegment", "masterAudioAsset", "master_audio_asset", "masterExcerpt"):
+                        _rewrite_segment(multi.get(key))
+                    for key in ("masterAudioAsset", "master_audio_asset", "masterExcerpt"):
+                        _rewrite_segment(board.get(key))
 
                 def _write_audio_data_url(value, out_path):
                     header, _, payload = str(value or "").partition(",")
@@ -2130,6 +2285,85 @@ def setup_api_routes() -> None:
                     "failed_audio": manifest["failed_audio"],
                     "audio": manifest_audio,
                 })
+            except Exception as e:
+                return web.json_response({"error": str(e)}, status=500)
+
+        @routes.post("/api/iamccs/audio/restore_package_assets")
+        async def iamccs_audio_restore_package_assets(request):
+            try:
+                import copy
+                import os
+                import re
+                import shutil
+                import time
+                import folder_paths
+
+                data = await request.json()
+                board = data.get("board") if isinstance(data.get("board"), dict) else {}
+                if not board:
+                    return web.json_response({"error": "Missing AudioBoard object"}, status=400)
+
+                def _sanitize(value, fallback="audioboard_import"):
+                    clean = re.sub(r'[<>:"/\\|?*\x00-\x1F]+', "_", str(value or fallback).strip())
+                    clean = re.sub(r"\s+", "_", clean).strip("._")
+                    return clean[:80] or fallback
+
+                def _resolve(path, input_dir):
+                    clean = str(path or "").strip()
+                    if not clean or clean.startswith("data:"):
+                        return ""
+                    if os.path.isabs(clean):
+                        return os.path.abspath(os.path.expanduser(clean))
+                    return os.path.abspath(os.path.join(input_dir, clean.replace("/", os.sep)))
+
+                candidates = []
+                seen = set()
+
+                def _add(item):
+                    if not isinstance(item, dict):
+                        return
+                    path = str(item.get("audioFile") or item.get("path") or "").strip()
+                    if not path or path in seen:
+                        return
+                    seen.add(path)
+                    candidates.append(path)
+
+                for item in board.get("audioSegments") or []:
+                    _add(item)
+                multi = board.get("multiGeneration") if isinstance(board.get("multiGeneration"), dict) else {}
+                for key in ("audioSegmentsAll", "allAudioSegments", "sourceAudioSegmentsAll"):
+                    for item in multi.get(key) or []:
+                        _add(item)
+                for items in (multi.get("audioByTimeline") or {}).values():
+                    for item in items if isinstance(items, list) else []:
+                        _add(item)
+                for key in ("masterAudioAsset", "master_audio_asset", "masterExcerpt"):
+                    _add(board.get(key))
+                    _add(multi.get(key))
+
+                input_dir = folder_paths.get_input_directory()
+                package_name = _sanitize(data.get("package_name") or board.get("audioBoardPackageName") or board.get("projectName") or f"audioboard_{int(time.time())}")
+                target_dir = os.path.join(input_dir, "IAMCCS_imported_audioboard", package_name)
+                os.makedirs(target_dir, exist_ok=True)
+                mapping = {}
+                restored = []
+                allowed_ext = {".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".aiff", ".aif", ".opus"}
+                for index, original in enumerate(candidates, start=1):
+                    source = _resolve(original, input_dir)
+                    if not source or not os.path.isfile(source):
+                        continue
+                    name = os.path.basename(source)
+                    stem, ext = os.path.splitext(name)
+                    if ext.lower() not in allowed_ext:
+                        ext = ".wav"
+                    filename = f"{index:03d}_{_sanitize(stem, 'audio')[:52]}{ext}"
+                    target = os.path.join(target_dir, filename)
+                    shutil.copy2(source, target)
+                    rel = os.path.relpath(target, input_dir).replace(os.sep, "/")
+                    mapping[original] = rel
+                    restored.append({"original_path": original, "input_path": rel, "bytes": os.path.getsize(target)})
+
+                return web.json_response({"ok": True, "mapping": mapping, "restored": restored})
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)
 

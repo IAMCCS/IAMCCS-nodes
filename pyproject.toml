@@ -1,6 +1,6 @@
 [project]
 name = "iamccs-wan-lora-fixer-stack"
-version = "1.5.0"
+version = "1.5.1"
 description = "IAMCCS nodes for ComfyUI: Shotboard multigen pipeline, Shotboard Editor, AudioBoard, multi-LoRA stack, WAN/LTX tools, AutoLink and Frame Designer."
 license = { text = "MIT" }
 authors = [
