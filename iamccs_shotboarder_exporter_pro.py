@@ -519,10 +519,10 @@ def _as_audio_waveform(audio: Any) -> Tuple[torch.Tensor, int]:
     return waveform.clamp(-1.0, 1.0).contiguous(), sample_rate
 
 
-def _frame_payload(images: Any, profile: Dict[str, Any]) -> Tuple[bytes, str, int, int, int]:
+def _frame_payload_info(images: Any, profile: Dict[str, Any]) -> Tuple[torch.Tensor, str, int, int, int]:
     if not torch.is_tensor(images):
         images = torch.as_tensor(images)
-    images = images.detach().to(device="cpu", dtype=torch.float32)
+    images = images.detach()
     if images.ndim == 5 and images.shape[0] == 1:
         images = images[0]
     if images.ndim != 4:
@@ -542,22 +542,50 @@ def _frame_payload(images: Any, profile: Dict[str, Any]) -> Tuple[bytes, str, in
 
     wants_alpha = bool(profile.get("alpha")) and channels == 4
     keep_channels = 4 if wants_alpha else 3
-    images = images[..., :keep_channels].clamp(0.0, 1.0)
     use_16bit = int(profile.get("input_depth", 8)) >= 16
-    if use_16bit:
-        data = np.rint(images.numpy() * 65535.0).astype(np.uint16)
-        input_pix_fmt = "rgba64le" if keep_channels == 4 else "rgb48le"
-    else:
-        data = np.rint(images.numpy() * 255.0).astype(np.uint8)
-        input_pix_fmt = "rgba" if keep_channels == 4 else "rgb24"
-    return data.tobytes(order="C"), input_pix_fmt, frames, width, height
+    input_pix_fmt = ("rgba64le" if keep_channels == 4 else "rgb48le") if use_16bit else ("rgba" if keep_channels == 4 else "rgb24")
+
+    # Chroma-subsampled delivery codecs require even dimensions. VHS applies
+    # replication padding for the same reason. A one-pixel edge extension is
+    # preferable to failing after an expensive RTX pass.
+    width = width + (width % 2)
+    height = height + (height % 2)
+    return images, input_pix_fmt, frames, width, height
+
+
+def _iter_frame_payload(
+    images: torch.Tensor,
+    profile: Dict[str, Any],
+    width: int,
+    height: int,
+) -> Iterable[bytes]:
+    """Convert one frame at a time, keeping peak host memory bounded."""
+    channels = int(images.shape[-1])
+    wants_alpha = bool(profile.get("alpha")) and channels == 4
+    keep_channels = 4 if wants_alpha else 3
+    use_16bit = int(profile.get("input_depth", 8)) >= 16
+    target_dtype = np.uint16 if use_16bit else np.uint8
+    target_max = 65535.0 if use_16bit else 255.0
+
+    for source_frame in images:
+        frame = source_frame.detach().to(device="cpu", dtype=torch.float32)
+        if channels == 1:
+            frame = frame.repeat(1, 1, 3)
+        elif channels == 2:
+            frame = torch.cat((frame[..., :1], frame[..., :1], frame[..., 1:2]), dim=-1)
+        frame = frame[..., :keep_channels].clamp(0.0, 1.0).numpy()
+        pad_height = int(height) - int(frame.shape[0])
+        pad_width = int(width) - int(frame.shape[1])
+        if pad_height or pad_width:
+            frame = np.pad(frame, ((0, pad_height), (0, pad_width), (0, 0)), mode="edge")
+        yield np.rint(frame * target_max).astype(target_dtype, copy=False).tobytes(order="C")
 
 
 def _rtx_frame_tensor(images: Any) -> torch.Tensor:
-    """Return exporter frames in Comfy IMAGE layout for RTX VFX nodes."""
+    """Return exporter frames in Comfy IMAGE layout without duplicating the batch."""
     if not torch.is_tensor(images):
         images = torch.as_tensor(images)
-    frames = images.detach().to(device="cpu", dtype=torch.float32)
+    frames = images.detach()
     if frames.ndim == 5 and frames.shape[0] == 1:
         frames = frames[0]
     if frames.ndim != 4:
@@ -569,7 +597,10 @@ def _rtx_frame_tensor(images: Any) -> torch.Tensor:
         frames = torch.cat((frames[..., :1], frames[..., :1], frames[..., 1:2]), dim=-1)
     elif channels > 3:
         frames = frames[..., :3]
-    return frames.clamp(0.0, 1.0).contiguous()
+    # Normal IMAGE/RTX output is already float RGB in [0,1]. Do not call
+    # .to(cpu), clamp(), clone(), or contiguous() here: each would allocate a
+    # second full-resolution video batch after FFmpeg has already completed.
+    return frames
 
 
 def _output_path(filename_prefix: str, extension: str, width: int, height: int) -> Path:
@@ -658,7 +689,7 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
                 "video_profile": (list(VIDEO_PROFILES.keys()), {"default": "prores_422_hq_mov"}),
                 "audio_profile": (list(AUDIO_PROFILES.keys()), {"default": "pcm_s16le"}),
                 "audio_sync": (["trim_to_video", "shortest"], {"default": "trim_to_video"}),
-                "frame_rate_override": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 240.0, "step": 0.01}),
+                "frame_rate_override": ("FLOAT", {"default": 24.0, "min": 0.0, "max": 240.0, "step": 0.01}),
                 "video_quality": ("INT", {"default": 18, "min": 0, "max": 51, "step": 1}),
                 "embed_metadata": ("BOOLEAN", {"default": True}),
                 "write_sidecar": ("BOOLEAN", {"default": True}),
@@ -673,7 +704,7 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
                 "rtx_megapixels": ("FLOAT", {"default": 2.0, "min": 0.01, "max": 64.0, "step": 0.01}),
                 "rtx_width": ("INT", {"default": 1920, "min": 64, "max": 8192, "step": 8}),
                 "rtx_height": ("INT", {"default": 1080, "min": 64, "max": 8192, "step": 8}),
-                "rtx_divisible_by": ("STRING", {"default": "1"}),
+                "rtx_divisible_by": ("STRING", {"default": "8"}),
                 "rtx_device": ("INT", {"default": 0, "min": 0, "max": 16, "step": 1}),
                 "rtx_ratio_preset": ("STRING", {"default": "16:9"}),
                 "rtx_resize_method": ("STRING", {"default": "Center Crop (Fill)"}),
@@ -790,7 +821,7 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
             )
         else:
             export_images = source_images
-        frame_bytes, input_pix_fmt, frame_count, width, height = _frame_payload(export_images, profile)
+        export_images, input_pix_fmt, frame_count, width, height = _frame_payload_info(export_images, profile)
         direct_path = None
         direct_asset: Dict[str, Any] = {}
         direct_trim_start = 0.0
@@ -877,9 +908,7 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
         metadata["prompt_present"] = bool(prompt)
 
         with tempfile.TemporaryDirectory(prefix="iamccs_shotboarder_export_") as temp_dir:
-            frames_path = Path(temp_dir) / "frames.raw"
             audio_path = Path(temp_dir) / "audio.f32le"
-            frames_path.write_bytes(frame_bytes)
             if waveform is not None:
                 audio_interleaved = waveform.transpose(0, 1).numpy().astype(np.float32, copy=False)
                 audio_path.write_bytes(audio_interleaved.tobytes(order="C"))
@@ -945,7 +974,7 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
             command = [
                 ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
                 "-f", "rawvideo", "-pix_fmt", input_pix_fmt,
-                "-s:v", f"{width}x{height}", "-r", f"{fps:.09f}", "-i", str(frames_path),
+                "-s:v", f"{width}x{height}", "-r", f"{fps:.09f}", "-i", "pipe:0",
                 *audio_input_format,
                 *(audio_filter_args if source_mode == "master_file_direct" else []),
                 "-map", "0:v:0", *audio_map,
@@ -958,13 +987,40 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
             if str(audio_sync or "trim_to_video") == "shortest":
                 command += ["-shortest"]
             command += [str(output_path)]
-            result = subprocess.run(command, capture_output=True, text=True, stdin=subprocess.DEVNULL)
-            if result.returncode != 0:
+            process = subprocess.Popen(
+                command,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            write_error = None
+            try:
+                from comfy.utils import ProgressBar  # type: ignore
+                progress = ProgressBar(frame_count)
+            except Exception:
+                progress = None
+            try:
+                assert process.stdin is not None
+                for index, frame_data in enumerate(_iter_frame_payload(export_images, profile, width, height), start=1):
+                    process.stdin.write(frame_data)
+                    if progress is not None:
+                        progress.update_absolute(index, frame_count)
+            except (BrokenPipeError, OSError) as exc:
+                write_error = exc
+            finally:
+                if process.stdin is not None:
+                    try:
+                        process.stdin.close()
+                    except OSError:
+                        pass
+            detail = process.stderr.read().decode("utf-8", errors="replace") if process.stderr is not None else ""
+            return_code = process.wait()
+            if return_code != 0 or write_error is not None:
                 try:
                     output_path.unlink(missing_ok=True)
                 except Exception:
                     pass
-                detail = (result.stderr or result.stdout or "FFmpeg failed").strip()
+                detail = (detail or str(write_error or "FFmpeg failed")).strip()
                 raise RuntimeError(f"{NODE_ID}: FFmpeg export failed: {detail[-4000:]}")
 
         metadata["audio_profile_effective"] = effective_audio_profile

@@ -43,7 +43,7 @@ RTX_COMMON_RATIOS = [
     "1:1", "4:5", "5:4", "3:4", "4:3", "2:3", "3:2", "16:9", "9:16",
     "16:10", "10:16", "21:9", "9:21",
 ]
-RTX_DEFAULT_DIVISIBLE_BY = "1"
+RTX_DEFAULT_DIVISIBLE_BY = "8"
 RTX_INSTALL_GUIDE_URL = "https://deno2026.github.io/comfyui-deno-custom-nodes/rtx-vfx-install/"
 _RUNTIME_MARKER_NAME = "DENO_RTX_VFX_runtime_path.txt"
 
