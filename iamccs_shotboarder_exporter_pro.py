@@ -323,6 +323,10 @@ def _editor_master_audio_edl(editor_audio_edl_json: Any, fps: float, target_seco
             "take_index": take_index,
             "start": physical_master_start + trim_start,
             "end": physical_master_start + trim_end,
+            # These are local parked-take frames, matching the Video Editor
+            # renderer's int(round(seconds * fps)) trim contract exactly.
+            "input_frame_start": int(round(trim_start * max(1.0, fps))),
+            "input_frame_end": int(round(trim_end * max(1.0, fps))),
         })
 
     window_duration = sum(max(0.0, item["end"] - item["start"]) for item in windows)
@@ -331,6 +335,103 @@ def _editor_master_audio_edl(editor_audio_edl_json: Any, fps: float, target_seco
     if not windows or abs(window_duration - target) > tolerance:
         return [], "window_duration_mismatch"
     return windows, "ok"
+
+
+def _subtract_covered_window(start: float, end: float, covered: list[Tuple[float, float]]) -> list[Tuple[float, float]]:
+    """Return the part of a master window not already emitted by an earlier take."""
+    remaining: list[Tuple[float, float]] = []
+    cursor = float(start)
+    for covered_start, covered_end in covered:
+        if covered_end <= cursor:
+            continue
+        if covered_start >= end:
+            break
+        if covered_start > cursor:
+            remaining.append((cursor, min(end, covered_start)))
+        cursor = max(cursor, covered_end)
+        if cursor >= end:
+            break
+    if cursor < end:
+        remaining.append((cursor, end))
+    return [(part_start, part_end) for part_start, part_end in remaining if part_end > part_start]
+
+
+def _add_covered_window(covered: list[Tuple[float, float]], start: float, end: float) -> list[Tuple[float, float]]:
+    """Keep source coverage normalized so post/pre-roll overlaps are emitted once."""
+    merged: list[Tuple[float, float]] = []
+    pending_start, pending_end = float(start), float(end)
+    for covered_start, covered_end in sorted([*covered, (pending_start, pending_end)]):
+        if not merged or covered_start > merged[-1][1]:
+            merged.append((covered_start, covered_end))
+        else:
+            previous_start, previous_end = merged[-1]
+            merged[-1] = (previous_start, max(previous_end, covered_end))
+    return merged
+
+
+def _deduplicate_editor_roll_frames(images: Any, windows: list[Dict[str, Any]], fps: float) -> Tuple[Any, list[Dict[str, Any]], bool, str]:
+    """Remove repeated roll frames from the sequential editor-render payload.
+
+    The editor renderer emits parked clips one after another. If T01 exposes
+    post-roll while T02 still begins at its nominal source point, that payload
+    contains the same master interval twice. Keep the first occurrence, trim
+    the duplicate frames from later takes, and retain matching master windows
+    for the exporter audio path.
+    """
+    if not torch.is_tensor(images) or images.ndim < 1:
+        return images, windows, False, "invalid_frame_payload"
+    if not windows:
+        return images, windows, False, "no_editor_windows"
+
+    input_frames = int(images.shape[0])
+    expected_frames = sum(
+        max(0, int(item.get("input_frame_end", 0)) - int(item.get("input_frame_start", 0)))
+        for item in windows
+    )
+    if expected_frames != input_frames:
+        return images, windows, False, "frame_contract_mismatch"
+
+    covered: list[Tuple[float, float]] = []
+    selected_slices: list[Any] = []
+    selected_windows: list[Dict[str, Any]] = []
+    input_cursor = 0
+    duplicate_frames = 0
+    for item in windows:
+        frame_start = int(item.get("input_frame_start", 0))
+        frame_end = int(item.get("input_frame_end", frame_start))
+        item_frames = max(0, frame_end - frame_start)
+        source_start = float(item["start"])
+        source_end = float(item["end"])
+        uncovered = _subtract_covered_window(source_start, source_end, covered)
+        for keep_start, keep_end in uncovered:
+            local_start = int(round((keep_start - source_start) * max(1.0, fps)))
+            local_end = int(round((keep_end - source_start) * max(1.0, fps)))
+            local_start = max(0, min(item_frames, local_start))
+            local_end = max(local_start, min(item_frames, local_end))
+            if local_end <= local_start:
+                continue
+            selected_slices.append(images[input_cursor + local_start: input_cursor + local_end])
+            selected_windows.append({
+                **item,
+                "start": keep_start,
+                "end": keep_end,
+                "input_frame_start": frame_start + local_start,
+                "input_frame_end": frame_start + local_end,
+            })
+        kept_frames = sum(
+            max(0, int(round((keep_end - keep_start) * max(1.0, fps))))
+            for keep_start, keep_end in uncovered
+        )
+        duplicate_frames += max(0, item_frames - kept_frames)
+        covered = _add_covered_window(covered, source_start, source_end)
+        input_cursor += item_frames
+
+    if input_cursor != input_frames or not selected_slices:
+        return images, windows, False, "slice_contract_mismatch"
+    if duplicate_frames <= 0:
+        return images, windows, False, "no_roll_overlap"
+    output = torch.cat(selected_slices, dim=0)
+    return output, selected_windows, True, f"deduplicated_{duplicate_frames}_frames"
 
 
 def _edl_requires_audio_assembly(windows: list[Dict[str, Any]], fps: float, target_seconds: float) -> bool:
@@ -655,6 +756,23 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
         rtx_ratio_preset = _rtx_choice(rtx_ratio_preset, RTX_COMMON_RATIOS, "16:9")
         rtx_resize_method = _rtx_choice(rtx_resize_method, RTX_RESIZE_METHODS, "Center Crop (Fill)")
         source_images = components.images
+        direct_audio_edl: list[Dict[str, Any]] = []
+        direct_audio_edl_status = "not_applicable"
+        roll_visual_dedup_active = False
+        roll_visual_dedup_status = "not_applicable"
+        if source_mode == "master_file_direct":
+            raw_frame_count = int(source_images.shape[0]) if torch.is_tensor(source_images) and source_images.ndim >= 1 else 0
+            direct_audio_edl, direct_audio_edl_status = _editor_master_audio_edl(
+                editor_audio_edl_json,
+                fps,
+                raw_frame_count / max(1.0, fps),
+            )
+            if direct_audio_edl:
+                source_images, direct_audio_edl, roll_visual_dedup_active, roll_visual_dedup_status = _deduplicate_editor_roll_frames(
+                    source_images,
+                    direct_audio_edl,
+                    fps,
+                )
         rtx_active = bool(rtx_enabled)
         if rtx_active:
             export_images = apply_rtx_vfx(
@@ -677,8 +795,6 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
         direct_asset: Dict[str, Any] = {}
         direct_trim_start = 0.0
         direct_trim_end = 0.0
-        direct_audio_edl: list[Dict[str, Any]] = []
-        direct_audio_edl_status = "not_applicable"
         direct_audio_edl_active = False
         effective_audio_profile = audio_key
         effective_audio_lossless = bool(audio_config.get("lossless"))
@@ -690,11 +806,6 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
                     "Connect AudioBoard cine_linx with master_audio_asset or provide master_audio_file."
                 )
             direct_trim_start, direct_trim_end = _master_audio_trim(direct_asset, fps, frame_count / max(1.0, fps))
-            direct_audio_edl, direct_audio_edl_status = _editor_master_audio_edl(
-                editor_audio_edl_json,
-                fps,
-                frame_count / max(1.0, fps),
-            )
             direct_audio_edl_active = bool(direct_audio_edl) and _edl_requires_audio_assembly(
                 direct_audio_edl,
                 fps,
@@ -738,6 +849,8 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
             "master_audio_edl_status": direct_audio_edl_status,
             "master_audio_edl_active": direct_audio_edl_active,
             "master_audio_edl_windows": direct_audio_edl,
+            "roll_visual_dedup_active": roll_visual_dedup_active,
+            "roll_visual_dedup_status": roll_visual_dedup_status,
             "rtx_enabled": rtx_active,
             "rtx_mode": str(rtx_mode or "VSR Medium"),
             "rtx_resize_type": str(rtx_resize_type or "Keep Ratio"),
@@ -870,6 +983,8 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
             "audio_profile_effective": effective_audio_profile,
             "audio_edl_active": direct_audio_edl_active,
             "audio_edl_status": direct_audio_edl_status,
+            "visual_roll_dedup_active": roll_visual_dedup_active,
+            "visual_roll_dedup_status": roll_visual_dedup_status,
             "codec_contract": f"{profile['video_args']} + {audio_config['args']}",
             "video_lossless": bool(profile.get("lossless")),
             "audio_lossless": effective_audio_lossless,

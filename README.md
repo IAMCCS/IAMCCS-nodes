@@ -15,7 +15,7 @@ This release extends the Shotboard multigen editorial workflow:
 
 - Non-destructive pre-roll and post-roll windows for multigen takes, with nominal timeline duration preserved in the editor.
 - Master Audio mode carried from AudioBoard to the Video Editor and rendered through the IAMCCS Shotboarder Aud+Vid Exporter PRO.
-- Exporter audio EDL handling for revealed roll: master audio is rebuilt from the actual pre/post-roll source windows so lip sync remains correct after editorial trim changes.
+- Exporter roll de-duplication: overlapped pre/post-roll material is emitted once, preserving nominal final duration and matching master-audio sync after editorial trim changes.
 - Dedicated professional audio/video exporter with direct master-file handling, encoded preview output and optional RTX processing.
 - Clearer, grouped AudioBoard controls for import, edit, split, MA mode, roll and publish actions.
 

@@ -2886,7 +2886,7 @@ function installEditor(node, reason = "install") {
     const fields = [
       "id", "type", "takeIndex", "timelineId", "startTime", "duration",
       "nominalDuration", "nominalDurationFrames", "trimStart", "trimEnd",
-      "preRoll", "preRollFrames",
+      "preRoll", "preRollFrames", "trackId", "trackIndex",
     ];
     const videoClips = clips
       .filter((clip) => clip && String(clip.type || "").toLowerCase() === "video")
