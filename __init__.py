@@ -386,6 +386,10 @@ from .iamccs_qwen_multigen import (
     IAMCCS_QwenMultiGen,
 )
 
+from .iamccs_krea2_multigen import (
+    IAMCCS_Krea2MultiGen,
+)
+
 from .iamccs_multiline_prompt_splitter import (
     IAMCCS_MultilinePromptSplitter8,
 )
@@ -716,6 +720,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_LoadResizeSegmentFromDir": IAMCCS_LoadResizeSegmentFromDir,
     "IAMCCS_IntValueMonitor": IAMCCS_IntValueMonitor,
     "IAMCCS_QwenMultiGen": IAMCCS_QwenMultiGen,
+    "IAMCCS_Krea2MultiGen": IAMCCS_Krea2MultiGen,
     "IAMCCS_FluxKleinMultiGen": IAMCCS_FluxKleinMultiGen,
     "IAMCCS_FluxKleinRefine": IAMCCS_FluxKleinRefine,
     "IAMCCS_ImageBatch6": IAMCCS_ImageBatch6,
@@ -939,6 +944,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
     "IAMCCS_IntValueMonitor": "INT Value Monitor",
     "IAMCCS_QwenMultiGen": "IAMCCS Qwen Multi-Gen",
+    "IAMCCS_Krea2MultiGen": "IAMCCS Krea 2 Identity Multi-Gen",
     "IAMCCS_FluxKleinMultiGen": "Flux Klein Multi-Gen",
     "IAMCCS_FluxKleinRefine": "Flux Klein Refine (Local NO PAID)",
     "IAMCCS_ImageBatch6": "IAMCCS Image Batch 6",

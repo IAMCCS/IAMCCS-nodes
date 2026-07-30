@@ -3272,6 +3272,7 @@ function renderAudioBoardArranger(node) {
     // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     const isDialogueInjectPlaceholder = (seg) => Boolean(
         seg
+        && !hasMedia(seg)
         && (
             seg.pendingTTS === true
             || String(seg.purpose || "").trim() === "dialogue_pending_tts"

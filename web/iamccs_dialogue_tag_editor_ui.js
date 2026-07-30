@@ -522,6 +522,19 @@ function isCineAudioInjectNode(targetNode) {
   const title = String(targetNode?.title || "").toLowerCase();
   return mode.startsWith("inject") || title.includes("inject") || title.includes("save tts");
 }
+function connectRigInjectToAudioBoard(editorNode, injectInfo) {
+  if (!injectInfo) return 0;
+  const nodes = Array.isArray(app?.graph?._nodes) ? app.graph._nodes : [];
+  const connectedBoards = downstream(editorNode, (candidate) => nodeType(candidate) === "IAMCCS_AudioBoardArranger");
+  const audioBoard = connectedBoards[0] || nodes.find((candidate) => nodeType(candidate) === "IAMCCS_AudioBoardArranger");
+  if (!audioBoard) return 0;
+  const inputIndex = firstSlotIndex(audioBoard.inputs, ["cine_linx"], "IAMCCS_SUPERNODE_LINX");
+  const origin = inputIndex >= 0 && audioBoard.inputs?.[inputIndex]?.link != null
+    ? linkOriginNode(audioBoard.inputs[inputIndex].link)
+    : null;
+  if (origin?.id === injectInfo.id) return 0;
+  return connectBySlotName(injectInfo, ["cine_linx"], audioBoard, ["cine_linx"], "IAMCCS_SUPERNODE_LINX") ? 1 : 0;
+}
 function findExistingCineAudioRigNodes(editorNode) {
   const nodes = Array.isArray(app?.graph?._nodes) ? app.graph._nodes : [];
   const linked = new Set(downstream(editorNode, (candidate) => nodeType(candidate) === "IAMCCS_CineAudioInfo").map((candidate) => candidate.id));
@@ -605,7 +618,7 @@ function repairExistingDialogueRigLinks(editorNode, reason = "repair") {
   const exportInfo = rigNodes.exportInfo;
   if (!exportInfo) return 0;
   const data = parseData(editorNode);
-  let fixed = 0;
+  let fixed = connectRigInjectToAudioBoard(editorNode, rigNodes.injectInfo);
   nodes.forEach((targetNode) => {
     if (nodeType(targetNode) !== "UnifiedTTSSRTNode") return;
     const title = String(targetNode?.title || "").toLowerCase();
@@ -806,14 +819,15 @@ function createCineAudioRig(editorNode, data, statusTarget, selectedType) {
       connectBySlotName(ttsNode, ["audio", "AUDIO"], injectInfo, targetAudioInput(index), "AUDIO");
     });
   } else {
-    if (statusTarget) statusTarget.textContent = "Rig created with CineAudioInfo, but selected node exposes neither AUDIO nor TTS_ENGINE.";
+      if (statusTarget) statusTarget.textContent = "Rig created with CineAudioInfo, but selected node exposes neither AUDIO nor TTS_ENGINE.";
   }
+  const audioBoardLinks = connectRigInjectToAudioBoard(editorNode, injectInfo);
   graph.setDirtyCanvas?.(true, true);
   app.graph?.setDirtyCanvas?.(true, true);
   if (statusTarget) {
     const reuseText = reusableExport || reusableInject ? "Reused existing CineAudioInfo nodes. " : "";
     const removeText = removedOldRigNodes ? "Removed " + removedOldRigNodes + " old TTS rig node" + (removedOldRigNodes === 1 ? ". " : "s. ") : "";
-    statusTarget.textContent = reuseText + removeText + "Created " + (isMono ? "mono" : "A/B") + " rig for " + ttsNodeLabel(selectedType) + ". Emotion routing: " + emotionRoutingLabel(emotionRoutingValue(data)) + ".";
+    statusTarget.textContent = reuseText + removeText + "Created " + (isMono ? "mono" : "A/B") + " rig for " + ttsNodeLabel(selectedType) + ". " + (audioBoardLinks ? "Connected inject CineAudioInfo to AudioBoard. " : "") + "Emotion routing: " + emotionRoutingLabel(emotionRoutingValue(data)) + ".";
   }
   return created.length;
 }

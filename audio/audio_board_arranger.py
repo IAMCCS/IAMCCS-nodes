@@ -281,6 +281,15 @@ class IAMCCS_AudioBoardArranger:
         return sorted(out, key=lambda item: (int(item.get("track", 0)), int(item.get("start", 0))))
 
     @staticmethod
+    def _has_audio_media(segments: List[Dict[str, Any]]) -> bool:
+        """True only for clips that point to an actual audio asset, never planning clips."""
+        return any(
+            bool(str(segment.get("audioFile", "")).strip() or str(segment.get("audioB64", "")).strip())
+            for segment in segments
+            if isinstance(segment, dict)
+        )
+
+    @staticmethod
     def _track_settings_for_count(track_settings: Any, count: int) -> List[Dict[str, Any]]:
         source = track_settings if isinstance(track_settings, list) else []
         out: List[Dict[str, Any]] = []
@@ -425,24 +434,40 @@ class IAMCCS_AudioBoardArranger:
         upstream_resources = _resources(upstream_linx)
         upstream_outputs = _outputs(upstream_linx)
         upstream_payload = _payload(upstream_linx)
-        if not self._segments(data):
-            candidates = [
-                upstream_outputs.get("audio_timeline_json"),
-                upstream_resources.get("cine_audio_timeline_json"),
-                upstream_payload.get("audio_timeline_json"),
-            ]
-            for candidate in candidates:
-                parsed = _safe_json_loads(candidate, {})
-                if isinstance(parsed, dict) and self._segments(parsed):
-                    data = parsed
-                    break
-            if not self._segments(data):
-                tracks = upstream_resources.get("cine_audio_tracks")
-                if isinstance(tracks, dict) and isinstance(tracks.get("segments"), list):
-                    data = copy.deepcopy(data) if isinstance(data, dict) else _safe_json_loads(self.DEFAULT_DATA, {})
-                    data["audioSegments"] = [dict(seg) for seg in tracks.get("segments") if isinstance(seg, dict)]
-                    data["audioTrackCount"] = max(1, _safe_int(tracks.get("track_count", data.get("audioTrackCount", 2)), 2))
-                    data["duration_seconds"] = _safe_float(tracks.get("duration_seconds", data.get("duration_seconds", 0.0)), 0.0)
+        local_segments = self._segments(data)
+        incoming_segments: List[Dict[str, Any]] = []
+        incoming_track_count = 0
+        incoming_duration = 0.0
+        candidates = [
+            upstream_outputs.get("audio_timeline_json"),
+            upstream_resources.get("cine_audio_timeline_json"),
+            upstream_payload.get("audio_timeline_json"),
+        ]
+        for candidate in candidates:
+            parsed = _safe_json_loads(candidate, {})
+            candidate_segments = self._segments(parsed)
+            if isinstance(parsed, dict) and self._has_audio_media(candidate_segments):
+                incoming_segments = candidate_segments
+                incoming_track_count = max(1, _safe_int(parsed.get("audioTrackCount", 1), 1))
+                incoming_duration = _safe_float(parsed.get("duration_seconds", 0.0), 0.0)
+                break
+        if not incoming_segments:
+            tracks = upstream_resources.get("cine_audio_tracks")
+            candidate_segments = self._segments({"audioSegments": tracks.get("segments", [])}) if isinstance(tracks, dict) else []
+            if self._has_audio_media(candidate_segments):
+                incoming_segments = candidate_segments
+                incoming_track_count = max(1, _safe_int(tracks.get("track_count", 1), 1))
+                incoming_duration = _safe_float(tracks.get("duration_seconds", 0.0), 0.0)
+
+        # The editor writes planned, pending-TTS clips before Queue. Once the TTS
+        # inject node has produced WAV files, those real clips must replace the
+        # stale placeholders. Deliberately keep genuinely imported board audio.
+        if incoming_segments and not self._has_audio_media(local_segments):
+            data = copy.deepcopy(data)
+            data["audioSegments"] = incoming_segments
+            data["audioTrackCount"] = incoming_track_count or max(1, _safe_int(data.get("audioTrackCount", 2), 2))
+            if incoming_duration > 0:
+                data["duration_seconds"] = incoming_duration
         raw_source_segments = self._segments(data)
         source_track_count = max(1, _safe_int(data.get("audioTrackCount", 3), 3))
         upstream_tracks = upstream_resources.get("cine_audio_tracks") if isinstance(upstream_resources.get("cine_audio_tracks"), dict) else {}
