@@ -1170,10 +1170,13 @@ function showManualMediaPicker(button, kind, onFile) {
 }
 
 function setNodeSize(node) {
-  node.size = [...NODE_SIZE];
   node.min_size = [...NODE_SIZE];
   node.max_size = [...NODE_SIZE];
   node.resizable = false;
+  const width = Number(node.size?.[0]);
+  const height = Number(node.size?.[1]);
+  if (Math.abs(width - NODE_SIZE[0]) < 0.5 && Math.abs(height - NODE_SIZE[1]) < 0.5) return;
+  node.size = [...NODE_SIZE];
   try { node.setSize?.([...NODE_SIZE]); } catch {}
 }
 
@@ -3448,6 +3451,7 @@ function installEditor(node, reason = "install") {
       clearTimeout(resizeTimer);
       resizeTimer = setTimeout(() => {
         try {
+          setNodeSize(node);
           renderTimeline();
           syncRulerScroll();
         } catch (error) {
@@ -3509,12 +3513,20 @@ function installEditor(node, reason = "install") {
   };
   document.addEventListener("iamccs:audio_master_ready", node._iamccsMasterAudioReadyHandler);
   renderTimeline();
+  const restoreEditorSize = () => {
+    if (!root.isConnected) return;
+    setNodeSize(node);
+    app.graph?.setDirtyCanvas?.(true, true);
+  };
   requestAnimationFrame(() => {
     try {
+      restoreEditorSize();
       renderTimeline();
       syncRulerScroll();
     } catch {}
   });
+  setTimeout(restoreEditorSize, 100);
+  setTimeout(restoreEditorSize, 350);
   console.info("[IAMCCS ShotboardVideoEditorV1 UI] installed", { nodeId: node?.id, reason });
 }
 
