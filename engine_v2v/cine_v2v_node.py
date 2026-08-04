@@ -405,7 +405,7 @@ def _load_ltx_audio_vae_kj_compat(vae_name: str, device_name: str, weight_dtype:
     import folder_paths
     from comfy import model_management
     from comfy.sd import VAE
-    from comfy.utils import load_torch_file
+    from comfy.utils import load_torch_file, state_dict_prefix_replace
 
     _install_ltx_audio_encode_guard()
     dtype = {"bf16": torch.bfloat16, "fp16": torch.float16, "fp32": torch.float32}.get(str(weight_dtype), torch.bfloat16)
@@ -418,9 +418,9 @@ def _load_ltx_audio_vae_kj_compat(vae_name: str, device_name: str, weight_dtype:
     if cached is not None:
         return cached
 
-    # Mirrors ComfyUI-KJNodes VAELoaderKJ.load_vae for the LTX audio VAE path.
-    # Crucially, KJ's AudioVAE branch does not force .to(device, dtype), which
-    # avoids CPU waveform vs CUDA weight mismatches in LTXVAudioVAEEncode.
+    # Mirror the installed ComfyUI-KJNodes VAELoaderKJ implementation. Keeping
+    # the audio model inside comfy.sd.VAE lets ComfyUI's model manager unload it
+    # before the much larger LTXAV transformer is sampled.
     if str(vae_name) == "pixel_space":
         sd = {"pixel_space_vae": torch.tensor(1.0)}
         metadata = None
@@ -428,25 +428,22 @@ def _load_ltx_audio_vae_kj_compat(vae_name: str, device_name: str, weight_dtype:
         vae_path = folder_paths.get_full_path_or_raise("vae", str(vae_name))
         sd, metadata = load_torch_file(vae_path, return_metadata=True)
 
-    if "vocoder.conv_post.weight" in sd or "vocoder.vocoder.conv_post.weight" in sd:
-        from comfy.ldm.lightricks.vae.audio_vae import AudioVAE
-
-        try:
-            vae = AudioVAE(sd, metadata)
-        except TypeError as exc:
-            if "positional arguments" not in str(exc):
-                raise
-            remapped_sd = {}
-            for key, value in sd.items():
-                if key.startswith("audio_vae."):
-                    remapped_sd[f"autoencoder.{key[len('audio_vae.'):]}"] = value
-                else:
-                    remapped_sd[key] = value
-            vae = AudioVAE(metadata=metadata)
-            vae.load_state_dict(remapped_sd, strict=False)
+    is_audio_vae = (
+        "vocoder.conv_post.weight" in sd
+        or "vocoder.vocoder.conv_post.weight" in sd
+        or "vocoder.resblocks.0.convs1.0.weight" in sd
+        or "vocoder.vocoder.resblocks.0.convs1.0.weight" in sd
+    )
+    if is_audio_vae:
+        sd_audio = state_dict_prefix_replace(
+            dict(sd),
+            {"audio_vae.": "autoencoder.", "vocoder.": "vocoder."},
+            filter_keys=True,
+        )
+        vae = VAE(sd=sd_audio, metadata=metadata)
     else:
         vae = VAE(sd=sd, device=device, dtype=dtype, metadata=metadata)
-        vae.throw_exception_if_invalid()
+    vae.throw_exception_if_invalid()
 
     _AUDIO_VAE_CACHE[cache_key] = vae
     return vae
@@ -474,7 +471,14 @@ def _ensure_iamccs_root_path() -> None:
         pass
 
 
-def _load_vhs_video_internal(video_name: str, width: int, height: int, frame_load_cap: int):
+def _load_vhs_video_internal(
+    video_name: str,
+    width: int,
+    height: int,
+    frame_load_cap: int,
+    force_rate: float = 0.0,
+    skip_first_frames: int = 0,
+):
     _ensure_custom_node_path("ComfyUI-VideoHelperSuite")
     try:
         from videohelpersuite.load_video_nodes import LoadVideoPath, LoadVideoUpload
@@ -486,11 +490,13 @@ def _load_vhs_video_internal(video_name: str, width: int, height: int, frame_loa
         raise ValueError("source_video_path is empty")
     kwargs = {
         "video": video_name,
-        "force_rate": 0,
+        # Preserve the source cadence so frame cap, motion and audio all share
+        # one clock. The app computes the cap from the selected source range.
+        "force_rate": float(max(0.0, _safe_float(force_rate, 0.0))),
         "custom_width": int(width),
         "custom_height": int(height),
         "frame_load_cap": int(frame_load_cap),
-        "skip_first_frames": 0,
+        "skip_first_frames": int(max(0, skip_first_frames)),
         "select_every_nth": 1,
         "format": "AnimateDiff",
         "unique_id": "iamccs_v2v_internal_video",
@@ -498,6 +504,27 @@ def _load_vhs_video_internal(video_name: str, width: int, height: int, frame_loa
     is_path = os.path.isabs(video_name) or "/" in video_name or "\\" in video_name
     loader = LoadVideoPath() if is_path else LoadVideoUpload()
     return loader.load_video(**kwargs)
+
+
+def _probe_video_metadata_internal(video_name: str) -> Dict[str, Any]:
+    import av
+    import folder_paths
+
+    candidate = Path(str(video_name or "").strip())
+    if not candidate.is_absolute():
+        candidate = Path(folder_paths.get_input_directory()) / candidate
+    if not candidate.is_file():
+        return {}
+    with av.open(str(candidate)) as container:
+        video = next(iter(container.streams.video), None)
+        audio = next(iter(container.streams.audio), None)
+        rate = (video.average_rate or video.base_rate) if video is not None else None
+        return {
+            "fps": float(rate) if rate else 0.0,
+            "duration": float(container.duration / av.time_base) if container.duration else 0.0,
+            "frame_count": int(video.frames or 0) if video is not None else 0,
+            "audio_sample_rate": int(audio.codec_context.sample_rate or 0) if audio is not None else 0,
+        }
 
 
 def _load_image_internal(image_name: str):
@@ -582,12 +609,14 @@ def _slice_images_internal(images, start_index: int, end_index: int, count: int)
     return selected, int(selected.shape[0])
 
 
-def _audio_segment_internal(audio, fps: float, plan: Dict[str, Any]):
+def _audio_segment_internal(audio, fps: float, plan: Dict[str, Any], source_range: Dict[str, Any]):
     _ensure_iamccs_root_path()
     try:
         from iamccs_audio_extender import IAMCCS_AudioExtender
     except Exception as exc:
         raise RuntimeError(f"IAMCCS_AudioExtender is required for internal V2V audio slicing: {exc!r}") from exc
+    range_start = int(source_range["range_start_index"])
+    range_count = int(source_range["range_count"])
     return IAMCCS_AudioExtender().slice_segment(
         audio,
         float(fps),
@@ -599,12 +628,12 @@ def _audio_segment_internal(audio, fps: float, plan: Dict[str, Any]):
         "soft_clamp",
         segment_index=int(plan["segment_index_out"]),
         segment_duration_s=float(plan["effective_segment_duration_s"]),
-        video_frames=int(plan["current_segment_raw_frames"]),
-        generated_frames=int(plan["current_segment_raw_frames"]),
-        extension_frames=int(plan["current_segment_unique_frames"]),
-        timeline_cursor_frames=int(plan["current_segment_start_frames"]),
-        segment_start_frames=int(plan["current_segment_start_frames"]),
-        effective_unique_frames=int(plan["current_segment_unique_frames"]),
+        video_frames=range_count,
+        generated_frames=range_count,
+        extension_frames=range_count,
+        timeline_cursor_frames=range_start,
+        segment_start_frames=range_start,
+        effective_unique_frames=range_count,
         first_pass_unique_frames=int(plan["unique_segment_frames"]),
     )
 
@@ -649,13 +678,35 @@ def _payload_from_cine_linx(cine_linx: Any) -> Dict[str, Any]:
 
 
 def _load_planner_media(payload: Dict[str, Any], source_images=None, source_audio=None):
-    import torch
-
-    source_video_path = str(payload.get("source_video_path") or "IMG_4145 2.mp4")
-    source_image_path = str(payload.get("source_image_path") or "QWEN2509_FIRST_FRAME_DWPOSE_OPENPOSE_CONTROL_00001_.png")
+    source_video_path = str(payload.get("source_video_path") or "").strip()
+    source_image_path = str(payload.get("source_image_path") or "").strip()
+    if not source_video_path:
+        raise ValueError("source_video_path is required; load it from the Shotboard V2V interface")
+    if not source_image_path:
+        raise ValueError("source_image_path is required; load it from the Shotboard V2V interface")
     width = int(max(64, _safe_int(payload.get("generation_width"), 1280)))
     height = int(max(64, _safe_int(payload.get("generation_height"), 720)))
-    frame_cap = int(max(1, _safe_int(payload.get("frame_load_cap"), 241)))
+    metadata = _probe_video_metadata_internal(source_video_path)
+    backend_mode = str(payload.get("backend_mode") or payload.get("backend_family") or "").strip().lower()
+    requested_fps = _safe_float(payload.get("fps"), 24.0)
+    # SCAIL's reference graphs intentionally resample the driver to their
+    # generation cadence (16 fps by default) before optional x2 interpolation.
+    # Using the source file cadence here doubles the generated frame count and
+    # makes the 32 fps branch play in slow motion.
+    if "scail" in backend_mode:
+        planner_fps = float(max(1.0, requested_fps))
+    else:
+        planner_fps = float(max(1.0, _safe_float(metadata.get("fps"), requested_fps)))
+    trim_start_s = float(max(0.0, _safe_float(payload.get("trim_start_s"), 0.0)))
+    trim_end_s = float(max(trim_start_s, _safe_float(payload.get("trim_end_s"), trim_start_s)))
+    selected_duration_s = trim_end_s - trim_start_s
+    if selected_duration_s <= 0.0:
+        selected_duration_s = float(max(0.01, _safe_float(payload.get("duration_seconds"), 10.0)))
+    skip_frames = int(max(0, round(trim_start_s * planner_fps)))
+    frame_cap = int(max(1, round(selected_duration_s * planner_fps)))
+    source_frame_count = int(max(0, _safe_int(metadata.get("frame_count"), 0)))
+    if source_frame_count:
+        frame_cap = min(frame_cap, max(1, source_frame_count - skip_frames))
     loaded_images = source_images
     loaded_audio = source_audio
     source_video_info = {}
@@ -665,15 +716,13 @@ def _load_planner_media(payload: Dict[str, Any], source_images=None, source_audi
             width,
             height,
             frame_cap,
+            planner_fps,
+            skip_frames,
         )
         if loaded_audio is None:
             loaded_audio = video_audio
     loaded_audio = _normalize_audio_for_ltx(loaded_audio)
-    try:
-        source_image, source_mask = _load_image_internal(source_image_path)
-    except Exception:
-        source_image = loaded_images[:1] if torch.is_tensor(loaded_images) and loaded_images.ndim == 4 else torch.zeros((1, height, width, 3), dtype=torch.float32)
-        source_mask = _fallback_mask_from_image(source_image)
+    source_image, source_mask = _load_image_internal(source_image_path)
     return loaded_images, loaded_audio, source_video_info, source_image, source_mask
 
 
@@ -715,7 +764,7 @@ class IAMCCS_ShotboardPlannerV2V:
                 "generation_height": ("INT", {"default": 720, "min": 64, "max": 8192, "step": 8}),
                 "segment_seconds": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 3600.0, "step": 0.01}),
                 "planning_mode": (["manual_segment_seconds", "explicit_preset_seconds"], {"default": "explicit_preset_seconds"}),
-                "segment_preset": (["5sec", "10sec", "15sec", "20sec", "videoclip", "monologue"], {"default": "5sec"}),
+                "segment_preset": (["5sec", "10sec", "15sec", "20sec", "videoclip", "monologue"], {"default": "10sec"}),
                 "overlap_frames": ("INT", {"default": 9, "min": 0, "max": 4096, "step": 1}),
                 "ltx_round_mode": (["up", "nearest", "down"], {"default": "up"}),
                 "vram_profile": (["normal_vram", "low_vram"], {"default": "normal_vram"}),
@@ -1132,6 +1181,7 @@ class IAMCCS_CineInfoV2V:
                 int(max(64, _safe_int(payload.get("generation_width"), 1280))),
                 int(max(64, _safe_int(payload.get("generation_height"), 720))),
                 int(max(1, _safe_int(payload.get("frame_load_cap"), 241))),
+                fps,
             )
             _debug_audio("extract.video_audio_loaded", video_audio)
             if loaded_audio is None:
@@ -1156,7 +1206,7 @@ class IAMCCS_CineInfoV2V:
             int(source_range["range_end_index"]),
             int(source_range["range_count"]),
         )
-        audio_outputs = _audio_segment_internal(loaded_audio, fps, plan)
+        audio_outputs = _audio_segment_internal(loaded_audio, fps, plan, source_range)
         _debug_audio("extract.current_segment_audio_raw", audio_outputs[1])
         current_segment_audio = _normalize_audio_for_ltx(audio_outputs[1])
         _debug_audio("extract.current_segment_audio_normalized", current_segment_audio)
@@ -1219,7 +1269,7 @@ class IAMCCS_CineInfoV2VBackendRouter:
         background_video=None,
         character_mask=None,
     ):
-        payload = _payload_from_cine_linx(cine_linx)
+        payload = dict(_payload_from_cine_linx(cine_linx))
         mode = str(payload.get("backend_mode") or "ltx_simple")
         media_payload = dict(payload)
         if mode == "pose_transfer":
@@ -1230,6 +1280,9 @@ class IAMCCS_CineInfoV2VBackendRouter:
             if pose_video_path:
                 media_payload["source_video_path"] = pose_video_path
         loaded_images, loaded_audio, source_video_info, source_image, source_mask = _load_planner_media(media_payload, source_images, source_audio)
+        source_fps = float(max(1.0, _safe_float(source_video_info.get("loaded_fps"), source_video_info.get("source_fps", payload.get("fps", 24.0)))))
+        payload["fps"] = source_fps
+        payload["frame_load_cap"] = int(max(1, _safe_int(source_video_info.get("loaded_frame_count"), payload.get("frame_load_cap", 1))))
         result_image = result_image if result_image is not None else source_image
         face_video = face_video if face_video is not None else loaded_images
         pose_video = pose_video if pose_video is not None else loaded_images
@@ -1311,7 +1364,12 @@ class IAMCCS_V2VBusToScail:
         reference_image = _bus_value(media, "source_image")
         pose_video_mask_image = pose_video_mask_image if pose_video_mask_image is not None else _bus_value(media, "pose_video_mask_image", _mask_image_from_image(pose_video, 1.0))
         reference_image_mask_image = reference_image_mask_image if reference_image_mask_image is not None else _bus_value(media, "reference_image_mask_image", _mask_image_from_image(reference_image, 1.0))
-        replacement_mode = str(settings.get("scail_identity_mode") or payload.get("scail_identity_mode") or "single_person") != "disabled"
+        replacement_value = settings.get("replacement_mode", payload.get("replacement_mode"))
+        replacement_mode = (
+            bool(replacement_value)
+            if replacement_value is not None
+            else str(settings.get("scail_identity_mode") or payload.get("scail_identity_mode") or "single_person") != "disabled"
+        )
         report = f"SCAIL bus adapter | profile={control.get('backend_profile')} | replacement={replacement_mode}"
         return (
             float(control.get("fps", 24.0)),
@@ -1462,7 +1520,7 @@ class IAMCCS_V2VBusToLTX:
             int(source_range["range_end_index"]),
             int(source_range["range_count"]),
         )
-        audio_outputs = _audio_segment_internal(loaded_audio, fps, plan)
+        audio_outputs = _audio_segment_internal(loaded_audio, fps, plan, source_range)
         current_segment_audio = _normalize_audio_for_ltx(audio_outputs[1])
         audio_vae = _load_ltx_audio_vae_kj_compat(
             str(payload.get("audio_vae_name", "ltx-2.3-22b-dev_audio_vae.safetensors") or "ltx-2.3-22b-dev_audio_vae.safetensors"),
@@ -1549,7 +1607,12 @@ class IAMCCS_CineInfoV2VScail:
         if reference_image_mask_image is None:
             reference_image_mask_image = _mask_image_from_image(source_image, 1.0)
         settings = payload.get("backend_settings") if isinstance(payload.get("backend_settings"), dict) else {}
-        replacement_mode = str(settings.get("scail_identity_mode") or payload.get("scail_identity_mode") or "single_person") != "disabled"
+        replacement_value = settings.get("replacement_mode", payload.get("replacement_mode"))
+        replacement_mode = (
+            bool(replacement_value)
+            if replacement_value is not None
+            else str(settings.get("scail_identity_mode") or payload.get("scail_identity_mode") or "single_person") != "disabled"
+        )
         report = (
             f"SCAIL CineInfo | profile={payload.get('backend_profile')} | "
             f"mode={payload.get('backend_mode')} | source={payload.get('source_video_path')} | ref={payload.get('source_image_path')}"
@@ -1981,6 +2044,40 @@ class IAMCCS_AudioNormalizeForLTX:
         return (normalized, report)
 
 
+class IAMCCS_LTXReleaseVRAMBeforeSampler:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "latent": ("LATENT",),
+                "guider": ("GUIDER",),
+            },
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("latent",)
+    FUNCTION = "release"
+    CATEGORY = "IAMCCS/V2V"
+
+    def release(self, latent, guider):
+        # Both guide latents and conditioning are complete at this barrier.
+        # Explicitly offload their VAEs/text encoders before the 22B LTXAV
+        # forward pass; current DynamicVRAM does not evict one dynamic model
+        # to make room for another dynamic model automatically.
+        import comfy.model_management as model_management
+
+        device = model_management.get_torch_device()
+        before = int(model_management.get_free_memory(device))
+        model_management.unload_all_models()
+        model_management.soft_empty_cache()
+        after = int(model_management.get_free_memory(device))
+        print(
+            "[IAMCCS_V2V_VRAM_GUARD] released preparatory models before LTX sampler "
+            f"free_vram_mb={before / (1024 ** 2):.1f}->{after / (1024 ** 2):.1f}"
+        )
+        return (latent,)
+
+
 NODE_CLASS_MAPPINGS = {
     "IAMCCS_ShotboardPlannerV2V": IAMCCS_ShotboardPlannerV2V,
     "IAMCCS_CineInfoV2V": IAMCCS_CineInfoV2V,
@@ -1995,6 +2092,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_CineInfoV2VWanAnimate": IAMCCS_CineInfoV2VWanAnimate,
     "IAMCCS_CineInfoV2VPoseTransfer": IAMCCS_CineInfoV2VPoseTransfer,
     "IAMCCS_AudioNormalizeForLTX": IAMCCS_AudioNormalizeForLTX,
+    "IAMCCS_LTXReleaseVRAMBeforeSampler": IAMCCS_LTXReleaseVRAMBeforeSampler,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -2011,6 +2109,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_CineInfoV2VWanAnimate": "IAMCCS CineInfo V2V WanAnimate",
     "IAMCCS_CineInfoV2VPoseTransfer": "IAMCCS CineInfo V2V Pose Transfer",
     "IAMCCS_AudioNormalizeForLTX": "IAMCCS Audio Normalize For LTX",
+    "IAMCCS_LTXReleaseVRAMBeforeSampler": "IAMCCS LTX Release VRAM Before Sampler",
 }
 
 _install_ltx_audio_encode_guard()

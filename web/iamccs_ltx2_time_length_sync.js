@@ -13,6 +13,7 @@ const VALIDATOR_TYPE = "IAMCCS_LTX2_Validator";
 const FRAMERATE_SYNC_TYPE = "IAMCCS_LTX2_FrameRateSync";
 const SEGMENT_PLANNER_TYPE = "IAMCCS_SegmentPlanner";
 const SEGMENT_PLANNER_LINKED_TYPE = "IAMCCS_SegmentPlannerLinked";
+const SEGMENT_PLANNER_FRAMES_LINKED_TYPE = "IAMCCS_SegmentPlannerFramesLinked";
 const SEGMENT_PLANNER_SETTINGS_TYPE = "IAMCCS_SegmentPlannerSettings";
 const SEGMENT_PLANNER_PREVIEW_WIDGET = "iamccs_segmentplanner_live_preview";
 const SEGMENT_PLANNER_DETAILS_WIDGET = "iamccs_segmentplanner_live_details";
@@ -85,6 +86,11 @@ function getLinkedPrimitiveValue(node, inputName) {
     }
 
     return null;
+}
+
+function isLinkedPlannerType(nodeOrType) {
+    const type = typeof nodeOrType === "string" ? nodeOrType : nodeOrType?.type;
+    return type === SEGMENT_PLANNER_LINKED_TYPE || type === SEGMENT_PLANNER_FRAMES_LINKED_TYPE;
 }
 
 function clampNumber(v, min, max) {
@@ -260,13 +266,32 @@ function refreshLinkedPlannerPreviews() {
     try {
         const nodes = app?.graph?._nodes || [];
         for (const node of nodes) {
-            if (node?.type === SEGMENT_PLANNER_LINKED_TYPE) {
+            if (isLinkedPlannerType(node)) {
                 updateSegmentPlannerPreview(node);
             }
         }
     } catch {
         // ignore
     }
+}
+
+function migrateLinkedPlannerWidgetOrder(node) {
+    if (node?.type !== SEGMENT_PLANNER_LINKED_TYPE) return;
+    const roundWidget = getWidget(node, "ltx_round_mode");
+    const indexWidget = getWidget(node, "segment_index");
+    if (!roundWidget || !indexWidget) return;
+
+    const validRoundModes = new Set(["up", "nearest", "down"]);
+    if (validRoundModes.has(String(roundWidget.value))) return;
+
+    // Older graphs were saved before ltx_round_mode was a visible widget.
+    // Their third serialized value is segment_index, so LiteGraph initially
+    // restores that integer into the newly inserted round-mode position.
+    const legacySegmentIndex = Number(roundWidget.value);
+    if (Number.isInteger(legacySegmentIndex) && legacySegmentIndex >= 0) {
+        indexWidget.value = legacySegmentIndex;
+    }
+    roundWidget.value = "up";
 }
 
 function updateSegmentPlannerSettingsReport(node) {
@@ -361,14 +386,17 @@ function updateSegmentPlannerPreview(node) {
     const wOverlap = getWidget(node, "overlap_frames") || getWidget(node, "overlap_frames_in");
     const wRound = getWidget(node, "ltx_round_mode");
     const wIndex = getWidget(node, "segment_index");
-    if (!wSong || !wFps || !wSeg || !wPlanning || !wProfile || !wOverlap || !wRound || !wIndex) return;
+    const framesLinked = node?.type === SEGMENT_PLANNER_FRAMES_LINKED_TYPE;
+    if ((!wSong && !framesLinked) || !wFps || !wSeg || !wPlanning || !wProfile || !wOverlap || !wRound || !wIndex) return;
 
-    const songDuration = clampNumber(wSong.value, 0.01, 36000);
     const fps = clampNumber(wFps.value, 0.001, 240.0);
-    const linkedSegmentDuration = node?.type === SEGMENT_PLANNER_LINKED_TYPE ? getLinkedPrimitiveValue(node, "segment_duration_s") : null;
-    const linkedPlanningMode = node?.type === SEGMENT_PLANNER_LINKED_TYPE ? getLinkedPrimitiveValue(node, "planning_mode_in") : null;
-    const linkedSegmentPreset = node?.type === SEGMENT_PLANNER_LINKED_TYPE ? getLinkedPrimitiveValue(node, "segment_preset_in") : null;
-    const linkedOverlapFrames = node?.type === SEGMENT_PLANNER_LINKED_TYPE ? getLinkedPrimitiveValue(node, "overlap_frames_in") : null;
+    const linkedTotalFrames = framesLinked ? getLinkedPrimitiveValue(node, "total_generation_frames") : null;
+    const requestedTotalFrames = framesLinked ? Math.max(1, Math.trunc(Number(linkedTotalFrames || 1))) : null;
+    const songDuration = framesLinked ? requestedTotalFrames / fps : clampNumber(wSong.value, 0.01, 36000);
+    const linkedSegmentDuration = isLinkedPlannerType(node) ? getLinkedPrimitiveValue(node, "segment_duration_s") : null;
+    const linkedPlanningMode = isLinkedPlannerType(node) ? getLinkedPrimitiveValue(node, "planning_mode_in") : null;
+    const linkedSegmentPreset = isLinkedPlannerType(node) ? getLinkedPrimitiveValue(node, "segment_preset_in") : null;
+    const linkedOverlapFrames = isLinkedPlannerType(node) ? getLinkedPrimitiveValue(node, "overlap_frames_in") : null;
 
     const segmentDuration = clampNumber(linkedSegmentDuration ?? wSeg.value, 0.01, 3600.0);
     const planningMode = String(linkedPlanningMode ?? wPlanning.value || "manual_segment_seconds");
@@ -383,12 +411,12 @@ function updateSegmentPlannerPreview(node) {
     const effectiveSegmentDuration = explicitPresetMode ? rec.segmentSeconds : segmentDuration;
     const effectiveOverlapFrames = inputOverlapFrames;
 
-    if (explicitPresetMode && node?.type !== SEGMENT_PLANNER_LINKED_TYPE && !numbersClose(wSeg.value, effectiveSegmentDuration)) {
+    if (explicitPresetMode && !isLinkedPlannerType(node) && !numbersClose(wSeg.value, effectiveSegmentDuration)) {
         wSeg.value = effectiveSegmentDuration;
     }
     const overlapFrames = clampNumber(wOverlap.value, 0, 4096);
 
-    const totalFrames = Math.max(1, Math.round(songDuration * fps));
+    const totalFrames = requestedTotalFrames ?? Math.max(1, Math.round(songDuration * fps));
     const uniqueFrames = Math.max(1, Math.round(effectiveSegmentDuration * fps));
     const firstRaw = snapLengthToLtx2Rule(uniqueFrames, roundMode);
     const nextRaw = snapLengthToLtx2Rule(uniqueFrames + effectiveOverlapFrames, roundMode);
@@ -589,12 +617,12 @@ app.registerExtension({
         if (!nodeData?.name) return;
         const name = nodeData.name;
 
-        if (name !== TIMEFRAME_TYPE && name !== VALIDATOR_TYPE && name !== SEGMENT_PLANNER_TYPE && name !== SEGMENT_PLANNER_LINKED_TYPE && name !== SEGMENT_PLANNER_SETTINGS_TYPE) return;
+        if (name !== TIMEFRAME_TYPE && name !== VALIDATOR_TYPE && name !== SEGMENT_PLANNER_TYPE && name !== SEGMENT_PLANNER_LINKED_TYPE && name !== SEGMENT_PLANNER_FRAMES_LINKED_TYPE && name !== SEGMENT_PLANNER_SETTINGS_TYPE) return;
 
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {
             const r = onNodeCreated?.apply(this, arguments);
-            if (name === SEGMENT_PLANNER_TYPE || name === SEGMENT_PLANNER_LINKED_TYPE) {
+            if (name === SEGMENT_PLANNER_TYPE || isLinkedPlannerType(name)) {
                 installSegmentPlannerSync(this);
             } else if (name === SEGMENT_PLANNER_SETTINGS_TYPE) {
                 installSegmentPlannerSettingsSync(this);
@@ -608,7 +636,8 @@ app.registerExtension({
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
             const r = onConfigure?.apply(this, arguments);
-            if (name === SEGMENT_PLANNER_TYPE || name === SEGMENT_PLANNER_LINKED_TYPE) {
+            if (name === SEGMENT_PLANNER_TYPE || isLinkedPlannerType(name)) {
+                migrateLinkedPlannerWidgetOrder(this);
                 installSegmentPlannerSync(this);
                 updateSegmentPlannerPreview(this);
             } else if (name === SEGMENT_PLANNER_SETTINGS_TYPE) {

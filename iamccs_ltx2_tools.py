@@ -1088,8 +1088,11 @@ class IAMCCS_SegmentPlannerLinked(IAMCCS_SegmentPlanner):
                 "planning_mode_in": ("STRING", {"default": "manual_segment_seconds", "forceInput": True}),
                 "segment_preset_in": ("STRING", {"default": "10sec", "forceInput": True}),
                 "overlap_frames_in": ("INT", {"default": 9, "min": 0, "max": 4096, "step": 1, "forceInput": True}),
-                "ltx_round_mode_in": ("STRING", {"default": "up", "forceInput": True}),
+                "ltx_round_mode": (["up", "nearest", "down"], {"default": "up"}),
                 "segment_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+            },
+            "optional": {
+                "ltx_round_mode_in": ("STRING", {"default": "", "forceInput": True}),
             }
         }
 
@@ -1106,9 +1109,11 @@ class IAMCCS_SegmentPlannerLinked(IAMCCS_SegmentPlanner):
         planning_mode_in: str,
         segment_preset_in: str,
         overlap_frames_in: int,
-        ltx_round_mode_in: str,
+        ltx_round_mode: str,
         segment_index: int,
+        ltx_round_mode_in: str = "",
     ):
+        effective_round_mode = str(ltx_round_mode_in or ltx_round_mode or "up")
         return self.plan(
             song_duration_s,
             fps,
@@ -1116,7 +1121,61 @@ class IAMCCS_SegmentPlannerLinked(IAMCCS_SegmentPlanner):
             str(planning_mode_in or "manual_segment_seconds"),
             str(segment_preset_in or "10sec"),
             int(overlap_frames_in),
-            str(ltx_round_mode_in or "up"),
+            effective_round_mode,
+            segment_index,
+        )
+
+
+class IAMCCS_SegmentPlannerFramesLinked(IAMCCS_SegmentPlanner):
+    """Segment planner whose authoritative total length is expressed in frames."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "total_generation_frames": ("INT", {"default": 720, "min": 1, "max": 10000000, "step": 1, "forceInput": True}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 0.001, "max": 240.0, "step": 0.01}),
+                "segment_duration_s": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 3600.0, "step": 0.01, "forceInput": True}),
+                "planning_mode_in": ("STRING", {"default": "manual_segment_seconds", "forceInput": True}),
+                "segment_preset_in": ("STRING", {"default": "10sec", "forceInput": True}),
+                "overlap_frames_in": ("INT", {"default": 9, "min": 0, "max": 4096, "step": 1, "forceInput": True}),
+                "ltx_round_mode": (["up", "nearest", "down"], {"default": "up"}),
+                "segment_index": ("INT", {"default": 0, "min": 0, "max": 100000, "step": 1}),
+            },
+            "optional": {
+                "ltx_round_mode_in": ("STRING", {"default": "", "forceInput": True}),
+            },
+        }
+
+    RETURN_TYPES = IAMCCS_SegmentPlanner.RETURN_TYPES
+    RETURN_NAMES = IAMCCS_SegmentPlanner.RETURN_NAMES
+    FUNCTION = "plan_frames_linked"
+    CATEGORY = "IAMCCS/LTX-2"
+
+    def plan_frames_linked(
+        self,
+        total_generation_frames: int,
+        fps: float,
+        segment_duration_s: float,
+        planning_mode_in: str,
+        segment_preset_in: str,
+        overlap_frames_in: int,
+        ltx_round_mode: str,
+        segment_index: int,
+        ltx_round_mode_in: str = "",
+    ):
+        fps_value = max(0.001, float(fps))
+        total_frames = max(1, int(total_generation_frames))
+        total_duration_s = float(total_frames) / fps_value
+        effective_round_mode = str(ltx_round_mode_in or ltx_round_mode or "up")
+        return self.plan(
+            total_duration_s,
+            fps_value,
+            segment_duration_s,
+            str(planning_mode_in or "manual_segment_seconds"),
+            str(segment_preset_in or "10sec"),
+            int(overlap_frames_in),
+            effective_round_mode,
             segment_index,
         )
 

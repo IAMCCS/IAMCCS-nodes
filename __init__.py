@@ -89,6 +89,7 @@ from .iamccs_ltx2_tools import (
     IAMCCS_SegmentPlannerSettings,
     IAMCCS_AudioSegmentAutoPlanner,
     IAMCCS_SegmentPlannerLinked,
+    IAMCCS_SegmentPlannerFramesLinked,
     IAMCCS_SegmentPlanFromPlanner,
     IAMCCS_SourceRangeFromSegmentPlan,
     IAMCCS_TwoSegmentPlanner,
@@ -500,6 +501,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_SegmentPlannerSettings": IAMCCS_SegmentPlannerSettings,
     "IAMCCS_AudioSegmentAutoPlanner": IAMCCS_AudioSegmentAutoPlanner,
     "IAMCCS_SegmentPlannerLinked": IAMCCS_SegmentPlannerLinked,
+    "IAMCCS_SegmentPlannerFramesLinked": IAMCCS_SegmentPlannerFramesLinked,
     "IAMCCS_SegmentPlanFromPlanner": IAMCCS_SegmentPlanFromPlanner,
     "IAMCCS_SourceRangeFromSegmentPlan": IAMCCS_SourceRangeFromSegmentPlan,
     "IAMCCS_TwoSegmentPlanner": IAMCCS_TwoSegmentPlanner,
@@ -818,6 +820,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_SegmentPlannerSettings": "Segment Planner Settings (shared)",
     "IAMCCS_AudioSegmentAutoPlanner": "Audio Segment Auto Planner (audio -> segmenti)",
     "IAMCCS_SegmentPlannerLinked": "Segment Planner Linked (shared inputs)",
+    "IAMCCS_SegmentPlannerFramesLinked": "Segment Planner Linked (total generation frames)",
     "IAMCCS_SegmentPlanFromPlanner": "Segment Plan From Planner (per index)",
     "IAMCCS_SourceRangeFromSegmentPlan": "Source Range From Segment Plan",
     "IAMCCS_TwoSegmentPlanner": "Two Segment Planner (stable 2SEG)",
@@ -1107,6 +1110,16 @@ try:
     NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_ENGINE_V2V_NODE_DISPLAY_NAME_MAPPINGS)
 except Exception as _iamccs_engine_v2v_error:
     print(f"[IAMCCS Engine V2V] optional module not loaded: {_iamccs_engine_v2v_error}")
+
+try:
+    from .v2v_shotboard_free import (
+        NODE_CLASS_MAPPINGS as _IAMCCS_V2V_SHOTBOARD_FREE_NODE_CLASS_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as _IAMCCS_V2V_SHOTBOARD_FREE_NODE_DISPLAY_NAME_MAPPINGS,
+    )
+    NODE_CLASS_MAPPINGS.update(_IAMCCS_V2V_SHOTBOARD_FREE_NODE_CLASS_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_V2V_SHOTBOARD_FREE_NODE_DISPLAY_NAME_MAPPINGS)
+except Exception as _iamccs_v2v_shotboard_free_error:
+    print(f"[IAMCCS V2V Shotboard Free] optional module not loaded: {_iamccs_v2v_shotboard_free_error}")
 
 
 try:

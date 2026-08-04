@@ -24,6 +24,26 @@ def _runtime_node(name):
     return cls()
 
 
+def _run_runtime_node(node, **inputs):
+    function_name = getattr(node, "FUNCTION", None)
+    candidates = [function_name, "execute", "main"]
+    for candidate in candidates:
+        if not isinstance(candidate, str):
+            continue
+        function = getattr(node, candidate, None)
+        if not callable(function):
+            continue
+        output = function(**inputs)
+        result = getattr(output, "result", output)
+        if isinstance(result, (tuple, list)):
+            return result
+        return (result,)
+    raise RuntimeError(
+        f"Installed node '{type(node).__name__}' has no supported execution method. "
+        "Update IAMCCS-nodes and RES4LYF, then restart ComfyUI."
+    )
+
+
 def _split_prompts(text, separator):
     sep = str(separator or "\\n").replace("\\n", "\n")
     if not sep:
@@ -176,7 +196,8 @@ class IAMCCS_Krea2MultiGen:
                 ),
                 "downscale_ratio_spacial": 8,
             }
-            sampled = sampler.main(
+            sampled = _run_runtime_node(
+                sampler,
                 model=patched_model,
                 positive=positive,
                 negative=negative,
