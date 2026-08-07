@@ -2,7 +2,9 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 const NODE_CLASS = "IAMCCS_V2VShotboardFreeScail";
-const VERSION = "1.0.9-easy-scail-ui-truth";
+const VERSION = "1.1.4-easy-scail-autoload";
+const UNIFIED_WORKFLOW_PATH = "workflows/IAMCCS_V2V_SHOTBOARD_EASY/IAMCCS_V2V_SHOTBOARD_EASY_SCAIL2_UNIFIED.json";
+const UNIFIED_WORKFLOW_NAME = "IAMCCS_V2V_SHOTBOARD_EASY_SCAIL2_UNIFIED";
 const runtime = { session: null, eventsBound: false };
 
 const $ = (root, selector) => root?.querySelector?.(selector) || null;
@@ -12,8 +14,13 @@ function nodeClass(node) {
     return String(node?.comfyClass || node?.type || node?.constructor?.type || "");
 }
 
-function graphNodes() {
-    return Array.isArray(app?.graph?._nodes) ? app.graph._nodes : [];
+function graphFor(source = null) {
+    return source?.graph || app?.graph || null;
+}
+
+function graphNodes(source = null) {
+    const graph = graphFor(source);
+    return Array.isArray(graph?._nodes) ? graph._nodes : [];
 }
 
 function widget(node, name) {
@@ -52,10 +59,11 @@ function sameValue(actual, expected) {
 function linkedFrom(target, inputName, sourceType) {
     const input = (target?.inputs || []).find((item) => item?.name === inputName);
     if (input?.link === undefined || input?.link === null) return false;
-    const links = app?.graph?.links || app?.graph?._links;
+    const graph = graphFor(target);
+    const links = graph?.links || graph?._links;
     const link = links?.get?.(input.link) || links?.[input.link];
     const sourceId = link?.origin_id ?? link?.originId;
-    const source = app?.graph?.getNodeById?.(sourceId) || graphNodes().find((item) => item?.id === sourceId);
+    const source = graph?.getNodeById?.(sourceId) || graphNodes(target).find((item) => item?.id === sourceId);
     return nodeClass(source) === sourceType;
 }
 
@@ -87,7 +95,7 @@ function pathDistance(a, b) {
 
 function nodesByType(source, types) {
     const set = new Set(types);
-    return graphNodes()
+    return graphNodes(source)
         .filter((item) => item !== source && set.has(nodeClass(item)))
         .sort((a, b) => pathDistance(source, a) - pathDistance(source, b));
 }
@@ -386,24 +394,53 @@ function commit(session) {
 }
 
 function backendSummary(session) {
-    const types = graphNodes().map(nodeClass);
+    const workflowNodes = graphNodes(session.node);
+    const types = workflowNodes.map(nodeClass);
     const required = ["IAMCCS_ScailExtends", "VHS_LoadVideo", "LoadImage"];
     const missing = required.filter((type) => !types.includes(type));
-    const sam = graphNodes().some((node) => /sam3|sam 3/i.test(`${nodeClass(node)} ${node.title || ""}`));
-    const multi = types.includes("IAMCCS_ScailIdentityTracker") || types.includes("SCAIL2ColoredMask");
-    const backendMode = missing.length ? null : (multi ? "multi_person_identity" : "single_person");
-    const mismatch = backendMode && backendMode !== session.identityMode;
-    const label = backendMode === "multi_person_identity" ? "MULTI" : "SINGLE";
+    const sam = workflowNodes.some((node) => /sam3|sam 3/i.test(`${nodeClass(node)} ${node.title || ""}`));
+    const singleBranch = types.includes("0bc96e40-e8e3-400f-8d64-de94b193a7bd");
+    const multiBranch = types.includes("IAMCCS_ScailIdentityTracker") && types.includes("SCAIL2ColoredMask");
+    const selectorCount = types.filter((type) => type === "IAMCCS_V2VActiveBackendSwitch").length;
+    const unified = singleBranch && multiBranch && selectorCount >= 4;
+    const backendMode = missing.length ? null : (unified ? "unified" : (multiBranch ? "multi_person_identity" : "single_person"));
+    const mismatch = backendMode && backendMode !== "unified" && backendMode !== session.identityMode;
+    const label = session.identityMode === "multi_person_identity" ? "MULTI" : "SINGLE";
     const text = missing.length
         ? `Missing backend: ${missing.join(", ")}`
         : mismatch
             ? `Mode mismatch: loaded backend is SCAIL ${label}. Load the matching Easy workflow before Render.`
-            : `SCAIL ${label} backend ready${sam ? " / SAM preview detected" : ""}`;
+            : unified
+                ? `SCAIL UNIFIED ready / active ${label} / ${selectorCount} lazy selectors${sam ? " / SAM preview detected" : ""}`
+                : `SCAIL ${label} backend ready${sam ? " / SAM preview detected" : ""}`;
     session.backendMissing = missing;
     session.backendIdentityMode = backendMode;
+    session.backendUnified = unified;
     session.backendMismatch = Boolean(mismatch);
     const notice = field(session.root, "v2vfBackendNotice");
     if (notice) notice.textContent = text;
+}
+
+async function loadUnifiedBackend(session, payload) {
+    setProgress(session, "LOADING", 0, 1, "Loading the installed SCAIL-2 unified backend...");
+    const response = await api.fetchApi(`/userdata/${encodeURIComponent(UNIFIED_WORKFLOW_PATH)}`);
+    if (!response.ok) throw new Error(`Unified Easy workflow is not installed (${response.status})`);
+    const workflow = await response.json();
+    if (!workflow || !Array.isArray(workflow.nodes)) throw new Error("Installed unified Easy workflow is invalid");
+    if (typeof app.loadGraphData !== "function") throw new Error("ComfyUI workflow loader API is unavailable");
+
+    await app.loadGraphData(workflow, true, true, UNIFIED_WORKFLOW_NAME);
+    await new Promise((resolve) => window.setTimeout(resolve, 50));
+    const planner = graphNodes().find((item) => nodeClass(item) === NODE_CLASS);
+    if (!planner) throw new Error("Unified Easy workflow loaded without its planner node");
+
+    for (const [name, value] of Object.entries(payload)) write(planner, name, value);
+    openShotboard(planner);
+    const loadedSession = runtime.session;
+    if (!loadedSession || loadedSession.node !== planner) throw new Error("Unable to reopen the unified Easy planner");
+    commit(loadedSession);
+    backendSummary(loadedSession);
+    return loadedSession;
 }
 
 function syncBackend(session, payload) {
@@ -432,7 +469,11 @@ function syncBackend(session, payload) {
         touched += Number(writeAny(target, ["replacement_mode"], !payload.show_reference_background));
     }
     for (const target of nodesByType(session.node, ["BasicScheduler"])) touched += Number(writeAny(target, ["steps"], payload.generation_steps));
-    for (const target of graphNodes()) {
+    for (const target of nodesByType(session.node, ["RTXVideoSuperResolution"])) {
+        const quality = payload.scail_identity_mode === "multi_person_identity" ? "HIGH" : "ULTRA";
+        touched += Number(writeAny(target, ["quality"], quality));
+    }
+    for (const target of graphNodes(session.node)) {
         const title = String(target.title || "").toLowerCase();
         if (title.includes("final output 32 fps")) {
             target.mode = payload.interpolate_to_32fps ? 0 : 4;
@@ -444,7 +485,7 @@ function syncBackend(session, payload) {
         if (payload.lora_name && payload.lora_name !== "auto / graph") touched += Number(writeAny(target, ["lora_name"], payload.lora_name));
         touched += Number(writeAny(target, ["strength_model", "strength"], payload.lora_strength));
     }
-    for (const target of graphNodes().filter((item) => nodeClass(item) === "PrimitiveNode" && String(item.title || "").trim() === "replacement_mode")) {
+    for (const target of graphNodes(session.node).filter((item) => nodeClass(item) === "PrimitiveNode" && String(item.title || "").trim() === "replacement_mode")) {
         const primitive = (target.widgets || []).find((item) => item.type !== "button");
         if (primitive) {
             primitive.value = !payload.show_reference_background;
@@ -453,7 +494,7 @@ function syncBackend(session, payload) {
             touched++;
         }
     }
-    for (const target of graphNodes()) {
+    for (const target of graphNodes(session.node)) {
         const type = nodeClass(target);
         const title = String(target.title || "").toLowerCase();
         if ((type === "CLIPTextEncode" || type === "CLIPTextEncodeFlux") && title.includes("negative")) {
@@ -532,7 +573,29 @@ function auditBackendTruth(session, payload) {
         expectWidget(issues, target, ["replacement_mode"], !payload.show_reference_background, "reference background");
     }
 
-    const promptNodes = graphNodes().filter((target) => ["CLIPTextEncode", "CLIPTextEncodeFlux"].includes(nodeClass(target)));
+    if (session.backendUnified) {
+        const selectors = nodesByType(session.node, ["IAMCCS_V2VActiveBackendSwitch"]);
+        if (selectors.length !== 4) issues.push(`unified backend requires 4 lazy selectors, found ${selectors.length}`);
+        for (const target of selectors) {
+            if (!linkedFrom(target, "cine_linx", NODE_CLASS)) issues.push(`${target.title || "lazy selector"}: planner link missing`);
+            if (!linkedFrom(target, "control_bus", "IAMCCS_CineInfoV2VBackendRouter")) issues.push(`${target.title || "lazy selector"}: control bus link missing`);
+            if (!(target.inputs || []).find((input) => input.name === "scail")?.link) issues.push(`${target.title || "lazy selector"}: Single branch missing`);
+            if (!(target.inputs || []).find((input) => input.name === "scail_multi")?.link) issues.push(`${target.title || "lazy selector"}: Multi branch missing`);
+        }
+        for (const target of scailNodes) {
+            if (!linkedFrom(target, "pose_video_mask", "IAMCCS_V2VActiveBackendSwitch")) issues.push("active pose mask selector link missing");
+            if (!linkedFrom(target, "reference_image_mask", "IAMCCS_V2VActiveBackendSwitch")) issues.push("active reference mask selector link missing");
+            if (!linkedFrom(target, "clip_vision_output", "IAMCCS_V2VActiveBackendSwitch")) issues.push("active CLIP Vision selector link missing");
+        }
+        for (const target of nodesByType(session.node, ["SCAIL2ColoredMask"])) {
+            if (!linkedFrom(target, "replacement_mode", "IAMCCS_V2VBusToScail")) issues.push("Multi background toggle bus link missing");
+        }
+        for (const target of graphNodes(session.node).filter((item) => nodeClass(item) === "0bc96e40-e8e3-400f-8d64-de94b193a7bd")) {
+            if (!linkedFrom(target, "replacement_mode", "IAMCCS_V2VBusToScail")) issues.push("Single background toggle bus link missing");
+        }
+    }
+
+    const promptNodes = graphNodes(session.node).filter((target) => ["CLIPTextEncode", "CLIPTextEncodeFlux"].includes(nodeClass(target)));
     const positive = promptNodes.filter((target) => !String(target.title || "").toLowerCase().includes("negative"));
     const negative = promptNodes.filter((target) => String(target.title || "").toLowerCase().includes("negative"));
     if (!positive.length || positive.some((target) => !linkedFrom(target, "text", "IAMCCS_V2VBusToScail"))) issues.push("positive prompt bus link missing");
@@ -548,8 +611,12 @@ function auditBackendTruth(session, payload) {
         if (payload.lora_name && payload.lora_name !== "auto / graph") expectWidget(issues, target, ["lora_name"], payload.lora_name, "LoRA model");
         expectWidget(issues, target, ["strength_model", "strength"], payload.lora_strength, "LoRA strength");
     }
+    for (const target of nodesByType(session.node, ["RTXVideoSuperResolution"])) {
+        const expectedQuality = payload.scail_identity_mode === "multi_person_identity" ? "HIGH" : "ULTRA";
+        expectWidget(issues, target, ["quality"], expectedQuality, "RTX quality profile");
+    }
 
-    const combines = graphNodes().filter((target) => nodeClass(target) === "VHS_VideoCombine");
+    const combines = graphNodes(session.node).filter((target) => nodeClass(target) === "VHS_VideoCombine");
     for (const target of combines) {
         const title = String(target.title || "").toLowerCase();
         if (title.includes("final output 32 fps")) expectWidget(issues, target, ["frame_rate"], payload.fps * 2, "interpolated output fps");
@@ -558,7 +625,7 @@ function auditBackendTruth(session, payload) {
     if ((session.backendSync?.fpsTargets || 0) < 3) issues.push("not all preview/output FPS targets were mapped");
     if ((session.backendSync?.outputPrefixTargets || 0) < 3) issues.push("not all output prefixes were mapped");
 
-    const finalOutput = graphNodes().find((target) => String(target.title || "").toLowerCase().includes("final output 32 fps"));
+    const finalOutput = graphNodes(session.node).find((target) => String(target.title || "").toLowerCase().includes("final output 32 fps"));
     if (!finalOutput || finalOutput.mode !== (payload.interpolate_to_32fps ? 0 : 4)) issues.push("FILM x2 output toggle mismatch");
     return [...new Set(issues)];
 }
@@ -567,7 +634,7 @@ function renderModelDeck(session) {
     const host = field(session.root, "v2vfModels");
     if (!host) return;
     host.replaceChildren();
-    const candidates = graphNodes().filter((target) => {
+    const candidates = graphNodes(session.node).filter((target) => {
         if (target === session.node) return false;
         const descriptor = `${nodeClass(target)} ${target.title || ""} ${(target.widgets || []).map((item) => item?.name || "").join(" ")}`;
         if (/rvc|voice|hubert|rmvpe|audio model/i.test(descriptor)) return false;
@@ -882,7 +949,7 @@ async function hydrateLatestOutputs(session) {
         const response = await api.fetchApi("/history?max_items=20");
         if (!response.ok) return;
         const history = await response.json();
-        const nodes = new Map(graphNodes().map((node) => [String(node.id), node]));
+        const nodes = new Map(graphNodes(session.node).map((node) => [String(node.id), node]));
         const entries = Object.values(history || {}).sort((a, b) => historyTimestamp(b) - historyTimestamp(a));
         for (const entry of entries) {
             if (entry?.status?.status_str && entry.status.status_str !== "success") continue;
@@ -967,6 +1034,7 @@ function bindEvents() {
     api.addEventListener("execution_start", () => {
         if (runtime.session) {
             runtime.session.queueWasBusy = true;
+            runtime.session.executionFailed = false;
             for (const laneId of ["pose", "mask", "intermediate", "output"]) runtime.session.mediaPriority[laneId] = Number.NEGATIVE_INFINITY;
             setProgress(runtime.session, "STARTING", 0, 1, "ComfyUI accepted the workflow");
         }
@@ -976,6 +1044,7 @@ function bindEvents() {
         if (!session) return;
         const nodeId = String(event?.detail ?? "");
         if (!nodeId || nodeId === "null") {
+            if (session.executionFailed) return;
             setProgress(session, "COMPLETE", 1, 1, "Generation complete");
             if (session.media.output) {
                 selectLane(session, "output");
@@ -983,7 +1052,7 @@ function bindEvents() {
             }
             return;
         }
-        const target = graphNodes().find((item) => String(item.id) === nodeId);
+        const target = graphNodes(session.node).find((item) => String(item.id) === nodeId);
         setProgress(session, "RUNNING", session.progressValue, session.progressMax, `Node ${nodeId} - ${target?.title || nodeClass(target) || "Executing"}`);
     });
     api.addEventListener("progress", (event) => {
@@ -998,14 +1067,20 @@ function bindEvents() {
         const session = runtime.session;
         if (!session) return;
         const detail = event?.detail || {};
-        const target = graphNodes().find((item) => String(item.id) === String(detail.node));
+        const target = graphNodes(session.node).find((item) => String(item.id) === String(detail.node));
         for (const item of itemsFromExecuted(detail)) updateLane(session, classifyOutput(target, item), item, target);
     });
     api.addEventListener("execution_error", (event) => {
-        if (runtime.session) setProgress(runtime.session, "ERROR", 0, 1, String(event?.detail?.exception_message || "ComfyUI execution error"));
+        if (runtime.session) {
+            runtime.session.executionFailed = true;
+            setProgress(runtime.session, "ERROR", 0, 1, String(event?.detail?.exception_message || "ComfyUI execution error"));
+        }
     });
     api.addEventListener("execution_interrupted", () => {
-        if (runtime.session) setProgress(runtime.session, "STOPPED", 0, 1, "Generation interrupted");
+        if (runtime.session) {
+            runtime.session.executionFailed = true;
+            setProgress(runtime.session, "STOPPED", 0, 1, "Generation interrupted");
+        }
     });
 }
 
@@ -1112,9 +1187,13 @@ function openShotboard(node) {
         activeLane: String(read(node, "preview_stage", "source")),
         media: { source: itemFromPath(read(node, "source_video_path", ""), "video"), reference: itemFromPath(read(node, "source_image_path", ""), "image"), pose: null, mask: null, intermediate: null, output: null },
         mediaPriority: { source: 0, reference: 0, pose: Number.NEGATIVE_INFINITY, mask: Number.NEGATIVE_INFINITY, intermediate: Number.NEGATIVE_INFINITY, output: Number.NEGATIVE_INFINITY },
-        progressValue: 0, progressMax: 1,
+        progressValue: 0, progressMax: 1, executionFailed: false,
         close() { if (session.queueTimer) window.clearTimeout(session.queueTimer); root.remove(); if (runtime.session === session) runtime.session = null; document.body.style.overflow = session.oldOverflow; },
         oldOverflow: document.body.style.overflow,
+    };
+    session.modeDrafts = {
+        single_person: { overlap: session.identityMode === "single_person" ? numberValue(root, "v2vfOverlap", 5) : 5 },
+        multi_person_identity: { overlap: session.identityMode === "multi_person_identity" ? numberValue(root, "v2vfOverlap", 13) : 13 },
     };
     runtime.session = session;
     document.body.style.overflow = "hidden";
@@ -1158,10 +1237,16 @@ function openShotboard(node) {
     $$(root, "[data-mode]").forEach((button) => {
         button.classList.toggle("active", button.dataset.mode === session.identityMode);
         button.addEventListener("click", () => {
-            session.identityMode = button.dataset.mode;
+            const nextMode = button.dataset.mode;
+            if (nextMode === session.identityMode) return;
+            session.modeDrafts[session.identityMode] = { overlap: numberValue(root, "v2vfOverlap", session.identityMode === "multi_person_identity" ? 13 : 5) };
+            session.identityMode = nextMode;
+            field(root, "v2vfOverlap").value = String(session.modeDrafts[nextMode]?.overlap ?? (nextMode === "multi_person_identity" ? 13 : 5));
             $$(root, "[data-mode]").forEach((item) => item.classList.toggle("active", item === button));
+            for (const laneId of ["pose", "mask", "intermediate", "output"]) updateLane(session, laneId, null, null, true);
             commit(session);
             backendSummary(session);
+            setProgress(session, "IDLE", 0, 1, `${nextMode === "multi_person_identity" ? "Multi" : "Single"} identity mode selected. Lazy backend ready.`);
         });
     });
     $$(root, ".iamccs-v2vf-lane-select").forEach((button) => button.addEventListener("click", () => selectLane(session, button.dataset.lane)));
@@ -1291,33 +1376,48 @@ function openShotboard(node) {
         commit(session);
     });
     field(root, "v2vfRender").addEventListener("click", async () => {
-        const payload = commit(session);
-        backendSummary(session);
+        let renderSession = session;
+        let payload = commit(renderSession);
+        backendSummary(renderSession);
         if (!payload.source_video_path || !payload.source_image_path) {
-            setProgress(session, "ERROR", 0, 1, "Load both source video and reference image before rendering");
+            setProgress(renderSession, "ERROR", 0, 1, "Load both source video and reference image before rendering");
             return;
         }
-        if (session.backendMissing.length) {
-            setProgress(session, "ERROR", 0, 1, `Current workflow is missing: ${session.backendMissing.join(", ")}`);
+        if (renderSession.backendMissing.length) {
+            try {
+                renderSession = await loadUnifiedBackend(renderSession, payload);
+                payload = commit(renderSession);
+            } catch (error) {
+                setProgress(runtime.session || renderSession, "ERROR", 0, 1, `Backend load failed: ${error.message}`);
+                return;
+            }
+        }
+        if (renderSession.backendMissing.length) {
+            setProgress(renderSession, "ERROR", 0, 1, `Unified workflow is missing: ${renderSession.backendMissing.join(", ")}`);
             return;
         }
-        if (session.backendMismatch) {
-            const label = session.backendIdentityMode === "multi_person_identity" ? "MULTI" : "SINGLE";
-            setProgress(session, "ERROR", 0, 1, `Loaded backend is SCAIL ${label}. Load the matching Easy workflow before Render.`);
+        if (renderSession.backendMismatch) {
+            const label = renderSession.backendIdentityMode === "multi_person_identity" ? "MULTI" : "SINGLE";
+            setProgress(renderSession, "ERROR", 0, 1, `Loaded backend is SCAIL ${label}. Load the matching Easy workflow before Render.`);
             return;
         }
-        const touched = syncBackend(session, payload);
-        const truthIssues = auditBackendTruth(session, payload);
+        if (graphFor(renderSession.node) !== app?.graph) {
+            setProgress(renderSession, "ERROR", 0, 1, "The Easy backend is loaded but its ComfyUI workflow tab is not active. Select IAMCCS_V2V_SHOTBOARD_EASY_SCAIL2_UNIFIED and press Render again.");
+            return;
+        }
+        const touched = syncBackend(renderSession, payload);
+        const truthIssues = auditBackendTruth(renderSession, payload);
         if (truthIssues.length) {
-            setProgress(session, "ERROR", 0, 1, `UI truth check failed: ${truthIssues.join("; ")}`);
+            setProgress(renderSession, "ERROR", 0, 1, `UI truth check failed: ${truthIssues.join("; ")}`);
             return;
         }
-        setProgress(session, "QUEUED", 0, 1, `UI truth verified: ${touched} backend values / prompts ${session.backendSync.positivePromptTargets}+${session.backendSync.negativePromptTargets} / FPS ${session.backendSync.fpsTargets} / outputs ${session.backendSync.outputPrefixTargets}. Queueing workflow...`);
+        renderSession.executionFailed = false;
+        setProgress(renderSession, "QUEUED", 0, 1, `UI truth verified: ${touched} backend values / prompts ${renderSession.backendSync.positivePromptTargets}+${renderSession.backendSync.negativePromptTargets} / FPS ${renderSession.backendSync.fpsTargets} / outputs ${renderSession.backendSync.outputPrefixTargets}. Queueing workflow...`);
         try {
             if (typeof app.queuePrompt !== "function") throw new Error("ComfyUI queue API is unavailable");
             await app.queuePrompt(0, 1);
         } catch (error) {
-            setProgress(session, "ERROR", 0, 1, error.message);
+            setProgress(renderSession, "ERROR", 0, 1, error.message);
         }
     });
     field(root, "v2vfStop").addEventListener("click", async () => {

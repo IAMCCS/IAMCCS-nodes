@@ -503,7 +503,25 @@ def _load_vhs_video_internal(
     }
     is_path = os.path.isabs(video_name) or "/" in video_name or "\\" in video_name
     loader = LoadVideoPath() if is_path else LoadVideoUpload()
-    return loader.load_video(**kwargs)
+    loaded_images, loaded_frame_count, loaded_audio, video_info = loader.load_video(**kwargs)
+
+    # VHS exposes audio through a lazy map. For a valid silent video that map
+    # raises only when a downstream node first reads it, which makes the whole
+    # graph fail after video loading has already succeeded. Replace it here,
+    # before it enters any backend bus, with duration-matched Comfy AUDIO.
+    metadata = _probe_video_metadata_internal(video_name)
+    if metadata.get("has_audio") is False:
+        loaded_fps = max(1.0, _safe_float(video_info.get("loaded_fps"), force_rate or metadata.get("fps") or 24.0))
+        loaded_duration = _safe_float(video_info.get("loaded_duration"), 0.0)
+        if loaded_duration <= 0.0:
+            loaded_duration = max(1, int(loaded_frame_count)) / loaded_fps
+        loaded_audio = _silent_audio_internal(loaded_duration)
+        print(
+            "[IAMCCS_V2V_AUDIO] Source has no audio stream; "
+            f"using {loaded_duration:.3f}s of silence for {int(loaded_frame_count)} frames @ {loaded_fps:.3f} fps"
+        )
+
+    return loaded_images, loaded_frame_count, loaded_audio, video_info
 
 
 def _probe_video_metadata_internal(video_name: str) -> Dict[str, Any]:
@@ -523,8 +541,20 @@ def _probe_video_metadata_internal(video_name: str) -> Dict[str, Any]:
             "fps": float(rate) if rate else 0.0,
             "duration": float(container.duration / av.time_base) if container.duration else 0.0,
             "frame_count": int(video.frames or 0) if video is not None else 0,
+            "has_audio": audio is not None,
             "audio_sample_rate": int(audio.codec_context.sample_rate or 0) if audio is not None else 0,
         }
+
+
+def _silent_audio_internal(duration_s: float, sample_rate: int = 48000):
+    import torch
+
+    sample_rate = max(8000, int(sample_rate))
+    sample_count = max(1, int(round(max(0.0, float(duration_s)) * sample_rate)))
+    return {
+        "waveform": torch.zeros((1, 2, sample_count), dtype=torch.float32),
+        "sample_rate": sample_rate,
+    }
 
 
 def _load_image_internal(image_name: str):

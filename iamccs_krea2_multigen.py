@@ -148,7 +148,8 @@ class IAMCCS_Krea2MultiGen:
         )
 
         patcher = _runtime_node("Krea2EditModelPatch")
-        patched_model = patcher.patch(
+        patched_model = _run_runtime_node(
+            patcher,
             model=model,
             source_latent=source_latent,
             source_latent_b=source_latent_b,
@@ -165,7 +166,8 @@ class IAMCCS_Krea2MultiGen:
         sampler = _runtime_node("ClownsharKSampler_Beta")
         decoder = nodes.VAEDecode()
 
-        negative = encoder.encode(
+        negative = _run_runtime_node(
+            encoder,
             clip=clip, prompt=negative_prompt, image=image, image_b=image_b,
             grounding_px=grounding_px, system_prompt=system_prompt,
         )[0]
@@ -181,12 +183,16 @@ class IAMCCS_Krea2MultiGen:
                 current_seed = int(seed)
             used_seeds.append(current_seed)
 
-            positive = encoder.encode(
+            positive = _run_runtime_node(
+                encoder,
                 clip=clip, prompt=prompt, image=image, image_b=image_b,
                 grounding_px=grounding_px, system_prompt=system_prompt,
             )[0]
-            positive = rebalance.main(
-                positive, rebalance_multiplier, per_layer_weights
+            positive = _run_runtime_node(
+                rebalance,
+                conditioning=positive,
+                multiplier=rebalance_multiplier,
+                per_layer_weights=per_layer_weights,
             )[0]
             latent = {
                 "samples": torch.zeros(

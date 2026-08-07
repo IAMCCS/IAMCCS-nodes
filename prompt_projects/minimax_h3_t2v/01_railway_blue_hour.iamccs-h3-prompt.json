@@ -1,0 +1,20 @@
+{
+  "schema": "iamccs.minimax_h3.prompter_project",
+  "schema_version": 1,
+  "project_name": "Railway Blue Hour",
+  "task_mode": "t2va",
+  "injection_target": "global",
+  "writing_mode": "guided",
+  "merge_policy": "replace",
+  "sections": {
+    "scene": "Before sunrise on a rain-polished railway platform, <Subject 1>, a tired courier in a charcoal coat, waits beside a silver case as an empty train approaches through blue mist.",
+    "shot_list": "0.00-1.50s: hold a medium-wide profile and establish the empty platform. 1.50-3.70s: the train enters and moving reflections cross <Subject 1>. 3.70s-end: <Subject 1> turns toward camera and grips the case.",
+    "acting": "Tension begins in the shoulders, then the eyes react, then one deliberate turn. Preserve natural blinking, breathing and restrained hand movement.",
+    "dialogue": "<Subject 1> (S1): <d>[English] Not this train.</d>",
+    "light_and_image": "Cool predawn ambience, practical sodium lamps, wet reflections, realistic skin texture, restrained contrast and cinematic depth without artificial glow.",
+    "camera": "One slow lateral tracking move at chest height with mild foreground parallax; maintain one lens language and do not cut.",
+    "production_sound": "Distant rail vibration, light rain on the metal roof, one approaching brake squeal, coat movement and close dialogue with platform reflections.",
+    "non_diegetic_music": "A sparse low cello pulse enters only after the train becomes visible, beneath the physical scene sound.",
+    "negatives": "No identity drift, duplicate people, wardrobe change, warped hands, sudden zoom, jump cut, subtitles, text or logo."
+  }
+}

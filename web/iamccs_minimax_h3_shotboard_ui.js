@@ -1,11 +1,15 @@
+// SPDX-FileCopyrightText: 2026 Carmine Cristallo Scalzi (IAMCCS)
+// SPDX-License-Identifier: GPL-3.0-or-later
+
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
-console.info("[IAMCCS V3/V4] Stable Shotboard UI mode active. Multitimeline truth build loaded.");
-const CINE_VERSION = "2026-08-06-v4-settings-overlay";
-const SHOTBOARD_V3_RIGID_WIDTH = 1920;
-const SHOTBOARD_V3_OPEN_HEIGHT = 900;
-const SHOTBOARD_V3_COLLAPSED_HEIGHT = 660; // increased to accommodate global prompt always visible in collapsed mode
+console.info("[IAMCCS MiniMax H3] Dedicated Shotboard V3-parity UI loaded.");
+const CINE_VERSION = "2026-08-07-minimax-h3-fullscreen-toolbar-fit-v8";
+const MINIMAX_CINE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX";
+const SHOTBOARD_V3_RIGID_WIDTH = 2360;
+const SHOTBOARD_V3_OPEN_HEIGHT = 760;
+const SHOTBOARD_V3_COLLAPSED_HEIGHT = 560;
 const SHOTBOARD_NODE_MIN_SIZE = [1500, 760];
 const SHOTBOARD_NODE_DEFAULT_SIZE = [1500, 780];
 const SHOTBOARD_ROW_GRID = "24px 108px 164px 188px 42px 42px minmax(430px,500px) minmax(280px,1fr) 28px";
@@ -157,20 +161,63 @@ function nodeClassName(node) {
     return String(node?.comfyClass || node?.type || node?.constructor?.comfyClass || "");
 }
 
+function enforceMiniMaxSingleCineLinxOutput(node) {
+    if (nodeClassName(node) !== "IAMCCS_MiniMaxH3ShotPlanner") return false;
+
+    node.outputs = Array.isArray(node.outputs) ? node.outputs : [];
+    if (!node.outputs.length) {
+        node.addOutput?.("cine_linx", MINIMAX_CINE_LINX_TYPE);
+    }
+    if (!node.outputs.length) {
+        node.outputs.push({ name: "cine_linx", type: MINIMAX_CINE_LINX_TYPE, links: null, slot_index: 0 });
+    }
+
+    const normalizedName = (output) => String(output?.name || output?.label || "").trim().toLowerCase();
+    let keepIndex = node.outputs.findIndex((output) => normalizedName(output) === "cine_linx");
+    if (keepIndex < 0) keepIndex = 0; // Legacy planner: old shotplan cable becomes the CineLinX cable.
+
+    let changed = node.outputs.length !== 1 || keepIndex !== 0;
+    for (let index = node.outputs.length - 1; index >= 0; index -= 1) {
+        if (index === keepIndex) continue;
+        try {
+            node.removeOutput(index);
+        } catch {
+            node.outputs.splice(index, 1);
+        }
+        if (index < keepIndex) keepIndex -= 1;
+    }
+
+    const output = node.outputs[0];
+    if (!output) return changed;
+    if (output.name !== "cine_linx" || output.type !== MINIMAX_CINE_LINX_TYPE || output.slot_index !== 0) changed = true;
+    output.name = "cine_linx";
+    output.label = "cine_linx";
+    output.localized_name = "cine_linx";
+    output.type = MINIMAX_CINE_LINX_TYPE;
+    output.slot_index = 0;
+
+    for (const linkId of Array.isArray(output.links) ? output.links : []) {
+        const link = node.graph?.links?.[linkId] || app.graph?.links?.[linkId];
+        if (link) link.origin_slot = 0;
+    }
+    if (changed) node.setDirtyCanvas?.(true, true);
+    return changed;
+}
+
 function isShotboardV3Class(klass) {
-    return klass === "IAMCCS_CineShotboardPlannerV3" || isShotboardV4Class(klass);
+    return klass === "IAMCCS_MiniMaxH3ShotPlanner";
 }
 
 function isShotboardV4Class(klass) {
-    return klass === "IAMCCS_CineShotboardPlannerV4" || klass === "IAMCCS_CineShotboardPlannerV5V2V";
+    return false;
 }
 
 function isShotboardV5Class(klass) {
-    return klass === "IAMCCS_CineShotboardPlannerV5V2V";
+    return false;
 }
 
 function isShotboardV4BackendClass(klass) {
-    return klass === "IAMCCS_CineShotboardV4Backend";
+    return false;
 }
 
 function getWidget(node, name) {
@@ -231,6 +278,116 @@ function setWidgetValue(node, name, value) {
     try { node.setDirtyCanvas?.(true, true); app.graph?.setDirtyCanvas?.(true, true); } catch {}
     try { node.graph?.change?.(); app.graph?.change?.(); } catch {}
     return true;
+}
+
+function repairMiniMaxH3WidgetState(node, serialized = null) {
+    if (nodeClassName(node) !== "IAMCCS_MiniMaxH3ShotPlanner") return [];
+    let timeline = {};
+    try {
+        const parsed = JSON.parse(String(getWidget(node, "timeline_data")?.value || "{}"));
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) timeline = parsed;
+    } catch {}
+
+    const contract = timeline.h3_backend_contract && typeof timeline.h3_backend_contract === "object"
+        ? timeline.h3_backend_contract
+        : {};
+    const fixes = [];
+    const assign = (name, value, reason) => {
+        const item = getWidget(node, name);
+        if (!item || Object.is(item.value, value)) return;
+        item.value = value;
+        syncWidgetSerializedValue(node, item, value);
+        if (serialized) syncSerializedWidgetValue(node, serialized, name, value);
+        fixes.push(`${name}:${reason}`);
+    };
+    const fallbackValue = (name, fallback) => {
+        if (timeline[name] !== undefined && timeline[name] !== null) return timeline[name];
+        if (contract[name] !== undefined && contract[name] !== null) return contract[name];
+        return fallback;
+    };
+    const comboValues = (item) => {
+        const raw = item?.options?.values;
+        if (Array.isArray(raw)) return raw;
+        if (typeof raw === "function") {
+            try {
+                const resolved = raw(item, node);
+                return Array.isArray(resolved) ? resolved : [];
+            } catch {}
+        }
+        return [];
+    };
+
+    const comboDefaults = {
+        task_mode: "auto_from_timeline",
+        audio_mode: "h3_native_generated",
+        prompt_mapping: "global_plus_local",
+        upscale_mode: "off",
+        acceleration: "auto_3060",
+        ref_image_size: "match",
+        reference_role_1: "subject_identity",
+        reference_role_2: "subject_identity",
+        reference_role_3: "composition",
+        reference_role_4: "style",
+        reference_video_role: "off",
+        reference_audio_role: "off",
+        sol_conditioning: "exact_kv",
+        spectrum_profile: "conservative_3060",
+        rife_mode: "off",
+        text_encoder_device: "cpu_safe_12gb",
+        performance_profile: "rtx3060_balanced",
+        sampler_name: "res_multistep",
+        scheduler: "simple",
+        turbo_mode: "off",
+        turbo_lora_name: "",
+        turbo_sampler_mode: "audio_fixed",
+        reference_resize_policy: "canvas_crop",
+        reference_resize_filter: "area",
+    };
+    Object.entries(comboDefaults).forEach(([name, defaultValue]) => {
+        const item = getWidget(node, name);
+        if (!item) return;
+        const values = comboValues(item);
+        if (!values.length || values.includes(item.value)) return;
+        const preferred = fallbackValue(name, defaultValue);
+        assign(name, values.includes(preferred) ? preferred : (values.includes(defaultValue) ? defaultValue : values[0]), "invalid-choice");
+    });
+
+    const numberRules = {
+        duration_seconds: [10, 0.01, 36000, false],
+        width: [960, 256, 5760, true],
+        height: [544, 256, 5760, true],
+        frame_rate: [24, 24, 24, true],
+        upscale_width: [1920, 256, 7680, true],
+        upscale_height: [1080, 256, 4320, true],
+        upscale_seed_offset: [10000, 0, Number.MAX_SAFE_INTEGER, true],
+        wan_upscale_denoise: [0.2, 0, 1, false],
+        seed: [42, 0, Number.MAX_SAFE_INTEGER, true],
+        seed_stride: [1, 0, Number.MAX_SAFE_INTEGER, true],
+        steps: [16, 1, 100, true],
+        denoise: [1, 0, 1, false],
+        shift_video: [12, 0.01, 100, false],
+        shift_audio: [3, 0.01, 100, false],
+        turbo_strength: [1, 0, 4, false],
+        reference_resize_megapixels: [0.5, 0.1, 2, false],
+    };
+    Object.entries(numberRules).forEach(([name, [defaultValue, min, max, integer]]) => {
+        const item = getWidget(node, name);
+        if (!item) return;
+        const current = Number(item.value);
+        if (Number.isFinite(current) && current >= min && current <= max && typeof item.value === "number") return;
+        const preferred = Number(fallbackValue(name, defaultValue));
+        let next = Number.isFinite(preferred) && preferred >= min && preferred <= max ? preferred : defaultValue;
+        if (integer) next = Math.round(next);
+        assign(name, next, "invalid-number");
+    });
+
+    if (fixes.length) {
+        node.properties = node.properties || {};
+        node.properties.iamccs_minimax_widget_schema = CINE_VERSION;
+        try { node.setDirtyCanvas?.(true, true); node.graph?.change?.(); } catch {}
+        console.info("[IAMCCS MiniMax H3] repaired stale widget mapping", { nodeId: node.id, fixes });
+    }
+    return fixes;
 }
 
 function syncWidgetSerializedValue(node, widget, value) {
@@ -2601,9 +2758,27 @@ function getBoardReferencePaths(node) {
     return splitReferencePaths(getWidget(source, "image_paths")?.value);
 }
 
+const uploadedShotboardImageInfo = new Map();
+
+async function readShotboardImageInfo(file) {
+    if (!file) return { width: 0, height: 0 };
+    try {
+        const bitmap = await createImageBitmap(file);
+        const info = {
+            width: Math.max(0, Math.round(Number(bitmap.width || 0))),
+            height: Math.max(0, Math.round(Number(bitmap.height || 0))),
+        };
+        bitmap.close?.();
+        return info;
+    } catch {
+        return { width: 0, height: 0 };
+    }
+}
+
 async function uploadShotboardImages(files) {
     const uploaded = [];
     for (const file of files || []) {
+        const imageInfo = await readShotboardImageInfo(file);
         const body = new FormData();
         body.append("image", file);
         body.append("type", "input");
@@ -2614,7 +2789,10 @@ async function uploadShotboardImages(files) {
                 const data = await resp.json();
                 let name = String(data.name || file.name || "").trim();
                 if (data.subfolder) name = `${data.subfolder}/${name}`;
-                if (name) uploaded.push(name);
+                if (name) {
+                    uploaded.push(name);
+                    uploadedShotboardImageInfo.set(name, imageInfo);
+                }
             }
         } catch (err) {
             console.error("[IAMCCS Cine Shotboard] image upload failed", err);
@@ -3954,6 +4132,48 @@ function renderShotboardLite(node) {
         "image_resize_method",
         "image_multiple_of",
         "img_compression",
+        "task_mode",
+        "audio_mode",
+        "prompt_mapping",
+        "upscale_mode",
+        "width",
+        "height",
+        "acceleration",
+        "ref_image_size",
+        "reference_role_1",
+        "reference_role_2",
+        "reference_role_3",
+        "reference_role_4",
+        "reference_video_role",
+        "reference_audio_role",
+        "sol_conditioning",
+        "spectrum_profile",
+        "vram_clean_before_decode",
+        "rife_mode",
+        "upscale_enabled",
+        "upscale_width",
+        "upscale_height",
+        "upscale_prompt",
+        "upscale_sage",
+        "upscale_seed_offset",
+        "wan_upscale_denoise",
+        "text_encoder_device",
+        "performance_profile",
+        "seed",
+        "seed_stride",
+        "steps",
+        "sampler_name",
+        "scheduler",
+        "denoise",
+        "shift_video",
+        "shift_audio",
+        "turbo_mode",
+        "turbo_lora_name",
+        "turbo_strength",
+        "turbo_sampler_mode",
+        "reference_resize_policy",
+        "reference_resize_megapixels",
+        "reference_resize_filter",
     ].forEach((name) => hideWidget(getWidget(node, name)));
 
     let rows = parseJsonWidget(node, defaultLiteRows).map(normalizeLiteRow);
@@ -6653,7 +6873,7 @@ function showRenderError(node, err) {
 function disposeShotboardV3Widget(node) {
     const widget = node?._iamccsCineShotboardV3Widget;
     const root = node?._iamccsCineShotboardV3Root;
-    const settingsOverlay = node?._iamccsShotboardV4SettingsOverlay;
+    const settingsOverlay = node?._iamccsMiniMaxSettingsOverlay;
     try { settingsOverlay?.remove?.(); } catch {}
     try { root?.remove?.(); } catch {}
     try { widget?.element?.remove?.(); } catch {}
@@ -6663,11 +6883,13 @@ function disposeShotboardV3Widget(node) {
     }
     node._iamccsCineShotboardV3Widget = null;
     node._iamccsCineShotboardV3Root = null;
-    node._iamccsShotboardV4SettingsOverlay = null;
+    node._iamccsMiniMaxSettingsOverlay = null;
+    node._iamccsMiniMaxInjectPrompt = null;
 }
 
 function renderShotboardV3(node) {
     if (node._iamccsCineShotboardV3Ready && node._iamccsCineShotboardV3Version === CINE_VERSION) return;
+    repairMiniMaxH3WidgetState(node);
     disposeShotboardV3Widget(node);
     node._iamccsCineShotboardV3Ready = true;
     node._iamccsCineShotboardV3Version = CINE_VERSION;
@@ -6811,7 +7033,59 @@ function renderShotboardV3(node) {
         "guide_policy",
         "min_guide_gap_seconds",
         "max_guides",
+        "task_mode",
+        "audio_mode",
+        "prompt_mapping",
+        "upscale_mode",
+        "width",
+        "height",
+        "acceleration",
+        "ref_image_size",
+        "reference_role_1",
+        "reference_role_2",
+        "reference_role_3",
+        "reference_role_4",
+        "reference_video_role",
+        "reference_audio_role",
+        "sol_conditioning",
+        "spectrum_profile",
+        "vram_clean_before_decode",
+        "rife_mode",
+        "upscale_enabled",
+        "upscale_width",
+        "upscale_height",
+        "upscale_prompt",
+        "upscale_sage",
+        "upscale_seed_offset",
+        "wan_upscale_denoise",
+        "text_encoder_device",
+        "performance_profile",
+        "seed",
+        "control_after_generate",
+        "seed_control_after_generate",
+        "noise_seed_control_after_generate",
+        "seed_stride",
+        "steps",
+        "sampler_name",
+        "scheduler",
+        "denoise",
+        "shift_video",
+        "shift_audio",
+        "turbo_mode",
+        "turbo_lora_name",
+        "turbo_strength",
+        "turbo_sampler_mode",
+        "reference_resize_policy",
+        "reference_resize_megapixels",
+        "reference_resize_filter",
     ];
+    // The MiniMax board renders these controls in its own settings boxes
+    // above the timeline. Keep the underlying Comfy widgets serializable,
+    // but never expose the duplicate native widget rows below the board.
+    v3SettingNames.forEach((name) => hideWidget(getWidget(node, name)));
+    (node.widgets || [])
+        .filter((widget) => /control[ _-]*after[ _-]*generate/i.test(String(widget?.name || widget?.label || "")))
+        .forEach((widget) => hideWidget(widget));
     const clearV3BoardTransientState = () => {
         node.properties = node.properties || {};
         [
@@ -6904,6 +7178,12 @@ function renderShotboardV3(node) {
     const clampGuideStrength = (value, fallback = 0) => {
         const parsed = Number(value);
         return Math.max(0, Math.min(1, Number.isFinite(parsed) ? parsed : Number(fallback) || 0));
+    };
+    const clampH3TimelineFrames = (value) => Math.max(5, Math.min(362, Math.round(Number(value) || 5)));
+    const alignH3TimelineFrames = (value) => {
+        let frames = clampH3TimelineFrames(value);
+        while (frames % 17 !== 5 && frames < 362) frames += 1;
+        return Math.min(362, frames);
     };
     const clampTimelineMeterSeconds = (value = timelineMeterSeconds) => Math.max(0.5, Number(value) || getDuration());
     const timelineViewportWidth = () => Math.max(1, Number(timelineViewport?.clientWidth || 0) || (SHOTBOARD_V3_RIGID_WIDTH - 32));
@@ -7442,6 +7722,9 @@ function renderShotboardV3(node) {
     const clampSegment = (seg) => {
         const total = getTotalFrames();
         seg.length = Math.max(1, Math.round(Number(seg.length || defaultLen())));
+        if (!["audio", "motion", "video"].includes(String(seg.type || "image"))) {
+            seg.length = Math.min(362, seg.length);
+        }
         seg.start = Math.max(0, Math.min(Math.round(Number(seg.start || 0)), Math.max(0, total - 1)));
         if (seg.start + seg.length > total) seg.length = Math.max(1, total - seg.start);
         if (String(seg.type || "image") === "video") {
@@ -8221,19 +8504,67 @@ function renderShotboardV3(node) {
             guide_strength: guideStrength,
             audio_data: audioData,
             duration_seconds: effectiveDurationSeconds,
-            frame_rate: fps,
+            frame_rate: 24,
+            task_mode: String(getWidget(node, "task_mode")?.value || "auto_from_timeline"),
+            continuation_mode: "timeline_keyframe_adjacency",
+            audio_mode: String(getWidget(node, "audio_mode")?.value || "h3_native_generated"),
+            prompt_mapping: String(getWidget(node, "prompt_mapping")?.value || "global_plus_local"),
+            acceleration: String(getWidget(node, "acceleration")?.value || "sage"),
+            ref_image_size: String(getWidget(node, "ref_image_size")?.value || "match"),
+            text_encoder_device: String(getWidget(node, "text_encoder_device")?.value || "cpu_safe_12gb"),
+            reference_roles: [1, 2, 3, 4].map((index) => String(getWidget(node, `reference_role_${index}`)?.value || (index <= 2 ? "subject_identity" : index === 3 ? "composition" : "style"))),
+            reference_video_role: String(getWidget(node, "reference_video_role")?.value || "off"),
+            reference_audio_role: String(getWidget(node, "reference_audio_role")?.value || "off"),
+            sol_conditioning: String(getWidget(node, "sol_conditioning")?.value || "exact_kv"),
+            spectrum_profile: String(getWidget(node, "spectrum_profile")?.value || "conservative_3060"),
+            vram_clean_before_decode: Boolean(getWidget(node, "vram_clean_before_decode")?.value ?? true),
+            rife_mode: String(getWidget(node, "rife_mode")?.value || "off"),
+            upscale_enabled: Boolean(getWidget(node, "upscale_enabled")?.value ?? false),
+            upscale_mode: String(getWidget(node, "upscale_mode")?.value || "off"),
+            upscale_width: Number(getWidget(node, "upscale_width")?.value || 1920),
+            upscale_height: Number(getWidget(node, "upscale_height")?.value || 1080),
+            upscale_prompt: String(getWidget(node, "upscale_prompt")?.value || ""),
+            upscale_sage: Boolean(getWidget(node, "upscale_sage")?.value ?? true),
+            upscale_seed_offset: Number(getWidget(node, "upscale_seed_offset")?.value || 10000),
+            wan_upscale_denoise: Number(getWidget(node, "wan_upscale_denoise")?.value ?? 0.2),
+            width: Number(getWidget(node, "width")?.value || 960),
+            height: Number(getWidget(node, "height")?.value || 544),
+            h3_backend_contract: {
+                fps: 24,
+                temporal_grid: "17k+5",
+                chunk_source: "timeline_segment_trim",
+                maximum_frames_per_box: 362,
+                first_last_keyframes: true,
+                generated_last_becomes_next_first: true,
+                text_relay_conditioning: false,
+                atomic_task_model_conditioning: true,
+                acceleration: String(getWidget(node, "acceleration")?.value || "sage"),
+                ref_image_size: String(getWidget(node, "ref_image_size")?.value || "match"),
+                text_encoder_device: String(getWidget(node, "text_encoder_device")?.value || "cpu_safe_12gb"),
+                vram_clean_before_decode: Boolean(getWidget(node, "vram_clean_before_decode")?.value ?? true),
+                native_bridge_before_post: true,
+                lazy_upscale_enabled: Boolean(getWidget(node, "upscale_enabled")?.value ?? false),
+                post_upscale_only: Boolean(getWidget(node, "upscale_enabled")?.value ?? false)
+                    ? String(getWidget(node, "upscale_mode")?.value || "off")
+                    : "off",
+                upscale_target: [
+                    Number(getWidget(node, "upscale_width")?.value || 1920),
+                    Number(getWidget(node, "upscale_height")?.value || 1080),
+                ],
+                rife_mode: String(getWidget(node, "rife_mode")?.value || "off"),
+            },
             image_paths: refPaths(),
-            image_width: Number(imageWidthWidget?.value || 768),
-            image_height: Number(imageHeightWidget?.value || 432),
+            image_width: Number(getWidget(node, "width")?.value || imageWidthWidget?.value || 960),
+            image_height: Number(getWidget(node, "height")?.value || imageHeightWidget?.value || 544),
             image_resize_method: cineResizeMethodValue(getWidget(node, "image_resize_method")?.value),
             image_multiple_of: Number(getWidget(node, "image_multiple_of")?.value || 32),
             promptrelay_epsilon: Number(getWidget(node, "promptrelay_epsilon")?.value || 0.001),
             img_compression: Number(getWidget(node, "img_compression")?.value || 0),
-            default_force: Number(defaultForceWidget?.value || 0.25),
+            default_force: 1,
             guide_policy: String(getWidget(node, "guide_policy")?.value || "every_checked_row"),
             min_guide_gap_seconds: Number(getWidget(node, "min_guide_gap_seconds")?.value || 0),
             max_guides: Number(getWidget(node, "max_guides")?.value || 50),
-            ltx_round_mode: String(getWidget(node, "ltx_round_mode")?.value || "up_8n_plus_1"),
+            ltx_round_mode: "none",
             audioTrackCount: Math.max(1, Math.round(Number(timeline.audioTrackCount || 1))),
             masterAudioGain: Math.max(0, Math.min(2, Number(timeline.masterAudioGain ?? 1) || 1)),
             masterAudioNormalize: Boolean(timeline.masterAudioNormalize),
@@ -8252,6 +8583,73 @@ function renderShotboardV3(node) {
         node.properties.iamccs_v3_timeline_revision = nextTruthRevision;
         node.properties.iamccs_v3_timeline_updated_at = truthUpdatedAt;
         commitTimelineJson(JSON.stringify(clean, null, 2), Boolean(options.force));
+    };
+
+    // Public bridge used by IAMCCS_Prompter's explicit Inject button.  The
+    // CineLinX backend injection remains available at queue time, while this
+    // bridge makes the change visible immediately in the Shotboard editor.
+    node._iamccsMiniMaxInjectPrompt = ({ prompt = "", target = "global", mergePolicy = "replace" } = {}) => {
+        const incoming = String(prompt || "").trim();
+        if (!incoming) throw new Error("The composed MiniMax prompt is empty");
+        const requested = String(target || "global").toLowerCase();
+        const policy = String(mergePolicy || "replace").toLowerCase() === "append" ? "append" : "replace";
+        const merge = (existing, effectivePolicy = policy) => {
+            const current = String(existing || "").trim();
+            return effectivePolicy === "append" && current ? `${current}\n\n${incoming}` : incoming;
+        };
+
+        if (requested === "global") {
+            const merged = merge(promptArea?.value || promptWidget?.value || "");
+            if (promptArea) promptArea.value = merged;
+            setWidgetValue(node, "global_prompt", merged);
+            node.properties = node.properties || {};
+            node.properties.iamccs_v3_global_prompt_backup = merged;
+            node._iamccsCineShotboardV3LastPromptText = merged;
+            writeTimeline({ force: true });
+            draw();
+            return { actualTarget: "global", mergePolicy: policy };
+        }
+
+        const visual = (timeline.segments || [])
+            .filter((seg) => !seg?.placeholder && !["audio", "motion", "video"].includes(String(seg?.type || "image").toLowerCase()))
+            .sort((a, b) => Number(a.start || 0) - Number(b.start || 0))
+            .slice(0, 3);
+        if (!visual.length) {
+            const merged = merge(promptArea?.value || promptWidget?.value || "");
+            if (promptArea) promptArea.value = merged;
+            setWidgetValue(node, "global_prompt", merged);
+            writeTimeline({ force: true });
+            draw();
+            return { actualTarget: "global (no local slots)", mergePolicy: policy };
+        }
+
+        let selectedIndex = 0;
+        let effectivePolicy = policy;
+        if (requested === "local_auto") {
+            const emptyIndex = visual.findIndex((seg) => !String(seg.prompt ?? seg.local_prompt ?? seg.relay_prompt ?? "").trim());
+            selectedIndex = emptyIndex >= 0 ? emptyIndex : visual.length - 1;
+            if (emptyIndex < 0) effectivePolicy = "append";
+        } else {
+            const match = requested.match(/^local_([123])$/);
+            const wanted = match ? Number(match[1]) - 1 : 0;
+            if (wanted < visual.length) {
+                selectedIndex = wanted;
+            } else {
+                const emptyIndex = visual.findIndex((seg) => !String(seg.prompt ?? seg.local_prompt ?? seg.relay_prompt ?? "").trim());
+                selectedIndex = emptyIndex >= 0 ? emptyIndex : visual.length - 1;
+            }
+        }
+        const selected = visual[selectedIndex];
+        const merged = merge(selected.prompt ?? selected.local_prompt ?? selected.relay_prompt ?? "", effectivePolicy);
+        selected.prompt = merged;
+        selected.local_prompt = merged;
+        selected.relay_prompt = merged;
+        selected.use_prompt = true;
+        selected.relay_manual_off = false;
+        selected.promptrelay_manual_off = false;
+        writeTimeline({ force: true });
+        draw();
+        return { actualTarget: `local_${selectedIndex + 1}`, mergePolicy: effectivePolicy };
     };
 
     const applyExternalTimelineData = (payload = {}) => {
@@ -8394,11 +8792,9 @@ function renderShotboardV3(node) {
     const currentNodeHeight = () => collapsed ? collapsedNodeHeight() : SHOTBOARD_V3_OPEN_HEIGHT;
 
     const head = document.createElement("div");
-    head.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;";
+    head.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;width:100%;min-width:0;overflow:hidden;box-sizing:border-box;";
     const topActions = document.createElement("div");
-    topActions.style.cssText = isShotboardV4
-        ? "display:flex;align-items:center;gap:6px;flex-wrap:nowrap;justify-content:flex-start;flex:1 1 auto;min-width:0;overflow-x:auto;overflow-y:hidden;padding:2px 2px 5px;scrollbar-width:thin;scrollbar-color:#6F7B6C #24282B;"
-        : "display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;flex:1;";
+    topActions.style.cssText = "display:flex;align-items:center;gap:4px;flex-wrap:nowrap;justify-content:space-between;width:100%;max-width:100%;flex:1 1 auto;min-width:0;overflow:hidden;padding:2px;box-sizing:border-box;";
     const v3ButtonColors = {
         normal: { bg: purple.button, hover: purple.buttonHover, border: purple.border, color: purple.text },
         teal: { bg: "linear-gradient(180deg,#2F686A,#22474A)", hover: "linear-gradient(180deg,#397A7D,#29565A)", border: "#77BFC2", color: "#F2FFFB" },
@@ -8442,18 +8838,18 @@ function renderShotboardV3(node) {
             "font-size:11px",
             "font-weight:800",
             "cursor:pointer",
-            isShotboardV4 ? "flex:0 0 auto" : "",
-            isShotboardV4 ? "letter-spacing:.015em" : "",
-            isShotboardV4 ? "box-shadow:inset 0 1px 0 rgba(255,255,255,.15),0 2px 5px rgba(0,0,0,.22)" : "",
-            isShotboardV4 ? "transition:background .14s ease,border-color .14s ease,transform .14s ease,box-shadow .14s ease" : "",
+            "flex:0 0 auto",
+            "letter-spacing:.015em",
+            "box-shadow:inset 0 1px 0 rgba(255,255,255,.15),0 2px 5px rgba(0,0,0,.24)",
+            "transition:background .14s ease,border-color .14s ease,transform .14s ease,box-shadow .14s ease",
         ].join(";");
         btn.onmouseenter = () => {
             btn.style.background = colors.hover;
-            if (isShotboardV4) btn.style.transform = "translateY(-1px)";
+            btn.style.transform = "translateY(-1px)";
         };
         btn.onmouseleave = () => {
             btn.style.background = colors.bg;
-            if (isShotboardV4) btn.style.transform = "translateY(0)";
+            btn.style.transform = "translateY(0)";
         };
         return protectControlDrag(btn);
     };
@@ -9065,7 +9461,7 @@ function renderShotboardV3(node) {
         const activeTake = Math.max(1, Math.min(maxTakes, activeTakeFromMulti(multi)));
         const wrap = document.createElement("div");
         wrap.title = "Switch real Shotboard visual timelines for staged multigeneration.";
-        wrap.style.cssText = `display:flex;align-items:center;gap:4px;height:28px;padding:0 5px;border:1px solid ${purple.border};border-radius:5px;background:${purple.button};`;
+        wrap.style.cssText = `display:flex;align-items:center;gap:3px;height:28px;padding:0 4px;border:1px solid ${purple.border};border-radius:5px;background:${purple.button};flex:1.8 1 244px;min-width:220px;max-width:330px;overflow:hidden;box-sizing:border-box;`;
         const label = document.createElement("span");
         label.textContent = "MULTI";
         label.style.cssText = `color:#fff1ba;font-size:9px;font-weight:950;`;
@@ -9074,7 +9470,7 @@ function renderShotboardV3(node) {
         globalChip.title = "The textarea below is the global prompt for the selected multigeneration timeline.";
         globalChip.style.cssText = `height:18px;padding:0 5px;display:flex;align-items:center;border:1px solid ${purple.borderSoft};border-radius:4px;background:#211b12;color:#ffe7a8;font-size:8px;font-weight:950;letter-spacing:.02em;`;
         const select = document.createElement("select");
-        select.style.cssText = `height:22px;min-width:112px;border:1px solid ${purple.border};border-radius:4px;background:${purple.valueBg};color:${purple.valueText};font-size:10px;font-weight:900;`;
+        select.style.cssText = `height:22px;min-width:72px;flex:1 1 84px;border:1px solid ${purple.border};border-radius:4px;background:${purple.valueBg};color:${purple.valueText};font-size:9px;font-weight:900;`;
         for (let i = 1; i <= maxTakes; i += 1) {
             const id = multiTimelineId(i);
             const option = document.createElement("option");
@@ -9092,7 +9488,7 @@ function renderShotboardV3(node) {
         duplicateNext.type = "button";
         duplicateNext.textContent = "Copy -> Next";
         duplicateNext.title = "Duplicate the current visual timeline, including images, prompts, boxes, rows, duration, FPS and force, into the next T timeline.";
-        duplicateNext.style.cssText = `height:22px;padding:0 7px;border:1px solid #d8a94f;border-radius:4px;background:#d6ad5b;color:#17130d;font-size:9px;font-weight:950;cursor:pointer;`;
+        duplicateNext.style.cssText = `height:22px;min-width:0;flex:0 1 auto;padding:0 5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;border:1px solid #d8a94f;border-radius:4px;background:#d6ad5b;color:#17130d;font-size:8px;font-weight:950;cursor:pointer;`;
         duplicateNext.onclick = (event) => {
             event.preventDefault();
             event.stopPropagation();
@@ -9114,7 +9510,7 @@ function renderShotboardV3(node) {
         draw();
     };
     const logBtn = makeBtn(timeline.verboseLog === false ? "Log: OFF" : "Log: ON", timeline.verboseLog === false ? "slate" : "blue");
-    logBtn.title = "Toggle verbose ComfyUI backend logs for Shotboard V3 values, prompts, motion and image-lock strengths, and audio state.";
+    logBtn.title = "Toggle verbose MiniMax H3 Shotboard logs for timeline, keyframes, prompts, chunks and audio state.";
     markToggleButton(logBtn, timeline.verboseLog !== false);
     bindToolbarToggle(logBtn, () => {
         timeline.verboseLog = timeline.verboseLog === false;
@@ -9124,7 +9520,7 @@ function renderShotboardV3(node) {
         draw();
     });
     const globalOnlyBtn = makeBtn(Boolean(timeline.globalPromptOnly) ? "Global only: ON" : "Global only: OFF", Boolean(timeline.globalPromptOnly) ? "green" : "slate");
-    globalOnlyBtn.title = "When ON, ignore local PromptRelay text/action lanes and use only the global prompt, while keeping image guides.";
+    globalOnlyBtn.title = "When ON, ignore local H3 shot prompts and use only the global prompt, while keeping image keyframes.";
     markToggleButton(globalOnlyBtn, Boolean(timeline.globalPromptOnly));
     bindToolbarToggle(globalOnlyBtn, () => {
         timeline.globalPromptOnly = !Boolean(timeline.globalPromptOnly);
@@ -9196,14 +9592,17 @@ function renderShotboardV3(node) {
             settingsBtn.textContent = open ? "⚙ SETTINGS · OPEN" : "⚙ SETTINGS";
             settingsBtn.setAttribute("aria-pressed", open ? "true" : "false");
             settingsBtn.style.background = open
-                ? "linear-gradient(145deg,#B87732,#76502D 58%,#4A4439)"
-                : "linear-gradient(145deg,#9B6B32,#624A31 58%,#43423B)";
-            settingsBtn.style.borderColor = open ? "#FFE0A3" : "#EAB86E";
+                ? "linear-gradient(145deg,#A86F29,#704727 58%,#443B35)"
+                : "linear-gradient(145deg,#8F5F28,#5C422D 58%,#393633)";
+            settingsBtn.style.borderColor = open ? "#FFE0A3" : "#EDB866";
             settingsBtn.style.boxShadow = open
-                ? "inset 0 1px 0 rgba(255,255,255,.28),0 0 0 2px rgba(234,184,110,.20),0 4px 12px rgba(0,0,0,.32)"
-                : "inset 0 1px 0 rgba(255,255,255,.22),0 0 0 1px rgba(234,184,110,.14),0 3px 9px rgba(0,0,0,.30)";
+                ? "inset 0 1px 0 rgba(255,255,255,.28),0 0 0 2px rgba(237,184,102,.22),0 4px 12px rgba(0,0,0,.34)"
+                : "inset 0 1px 0 rgba(255,255,255,.22),0 0 0 1px rgba(237,184,102,.16),0 3px 9px rgba(0,0,0,.32)";
         }
-        if (open) window.setTimeout(() => settingsOverlay?.focus?.(), 0);
+        if (open) {
+            refreshPerformanceBand();
+            window.setTimeout(() => settingsOverlay?.focus?.(), 0);
+        }
     };
     const multiTimelineControl = makeMultiTimelineControl();
     const addImageBtn = makeBtn("Add Image", "blue");
@@ -9213,63 +9612,93 @@ function renderShotboardV3(node) {
     const addAudioBtn = makeBtn("Add Audio", "olive");
     const addTrackBtn = makeBtn("Add Audio Track", "sand");
     const collapseBtn = makeBtn(collapsed ? "Show Boxes" : "Collapse Boxes", "slate");
-    settingsBtn = isShotboardV4 ? makeBtn("⚙ SETTINGS", "gold") : null;
-    if (settingsBtn) {
-        settingsBtn.title = "Open Shotboard V4 canvas, timing and timeline settings.";
-        settingsBtn.style.height = "32px";
-        settingsBtn.style.padding = "0 17px";
-        settingsBtn.style.borderWidth = "2px";
-        settingsBtn.style.borderColor = "#EAB86E";
-        settingsBtn.style.borderRadius = "7px";
-        settingsBtn.style.background = "linear-gradient(145deg,#9B6B32,#624A31 58%,#43423B)";
-        settingsBtn.style.color = "#FFF7E8";
-        settingsBtn.style.fontWeight = "900";
-        settingsBtn.style.letterSpacing = ".075em";
-        settingsBtn.style.boxShadow = "inset 0 1px 0 rgba(255,255,255,.22),0 0 0 1px rgba(234,184,110,.14),0 3px 9px rgba(0,0,0,.30)";
-        settingsBtn.onmouseenter = () => {
-            settingsBtn.style.background = "linear-gradient(145deg,#B57935,#745332 58%,#504B40)";
-            settingsBtn.style.transform = "translateY(-1px)";
-        };
-        settingsBtn.onmouseleave = () => {
-            settingsBtn.style.background = settingsBtn.getAttribute("aria-pressed") === "true"
-                ? "linear-gradient(145deg,#B87732,#76502D 58%,#4A4439)"
-                : "linear-gradient(145deg,#9B6B32,#624A31 58%,#43423B)";
-            settingsBtn.style.transform = "translateY(0)";
-        };
-        bindToolbarToggle(settingsBtn, () => setSettingsPanelOpen(true));
-    }
+    settingsBtn = makeBtn("⚙ SETTINGS", "gold");
+    settingsBtn.title = "Open the MiniMax H3 settings panel without enlarging the timeline layout.";
+    settingsBtn.style.height = "32px";
+    settingsBtn.style.padding = "0 17px";
+    settingsBtn.style.borderWidth = "2px";
+    settingsBtn.style.borderColor = "#EDB866";
+    settingsBtn.style.borderRadius = "7px";
+    settingsBtn.style.background = "linear-gradient(145deg,#8F5F28,#5C422D 58%,#393633)";
+    settingsBtn.style.color = "#FFF7E8";
+    settingsBtn.style.fontWeight = "900";
+    settingsBtn.style.letterSpacing = ".075em";
+    settingsBtn.style.boxShadow = "inset 0 1px 0 rgba(255,255,255,.22),0 0 0 1px rgba(237,184,102,.16),0 3px 9px rgba(0,0,0,.32)";
+    settingsBtn.onmouseenter = () => {
+        settingsBtn.style.background = "linear-gradient(145deg,#A8702E,#704D30 58%,#49413A)";
+        settingsBtn.style.transform = "translateY(-1px)";
+    };
+    settingsBtn.onmouseleave = () => {
+        settingsBtn.style.background = settingsBtn.getAttribute("aria-pressed") === "true"
+            ? "linear-gradient(145deg,#A86F29,#704727 58%,#443B35)"
+            : "linear-gradient(145deg,#8F5F28,#5C422D 58%,#393633)";
+        settingsBtn.style.transform = "translateY(0)";
+    };
+    settingsBtn.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setSettingsPanelOpen(true);
+    };
     const openEditorBtn = makeBtn("Open Editor", "teal");
     const importBoardBtn = makeBtn("Import Board", "violet");
     const saveBtn = makeBtn("Save Board", "green");
     const savePackageBtn = makeBtn("Save Package", "gold");
     const saveMultiPackageBtn = makeBtn("Save Multi Pkg", "gold");
     const clearBtn = makeBtn("Clear Board", "danger");
-    topActions.append(logBtn, globalOnlyBtn);
-    if (settingsBtn) topActions.append(settingsBtn);
-    topActions.append(multiTimelineControl, promptSizeWrap, timelineMeterWrap, addImageBtn);
+    topActions.append(logBtn, globalOnlyBtn, settingsBtn, multiTimelineControl, promptSizeWrap, timelineMeterWrap, addImageBtn);
     if (addVideoBtn) topActions.append(addVideoBtn);
     topActions.append(addTextBtn);
     if (addIcLoraBtn) topActions.append(addIcLoraBtn);
     topActions.append(addAudioBtn, addTrackBtn, collapseBtn, openEditorBtn, importBoardBtn, saveBtn, savePackageBtn, saveMultiPackageBtn, clearBtn);
+    Array.from(topActions.children)
+        .filter((control) => control?.tagName === "BUTTON")
+        .forEach((control) => {
+            control.title = control.title || control.textContent || "";
+            control.style.flex = "1 1 64px";
+            control.style.minWidth = "0";
+            control.style.maxWidth = "none";
+            control.style.paddingLeft = "5px";
+            control.style.paddingRight = "5px";
+            control.style.textAlign = "center";
+            control.style.whiteSpace = "nowrap";
+            control.style.overflow = "hidden";
+            control.style.textOverflow = "ellipsis";
+            control.style.boxSizing = "border-box";
+            control.style.fontSize = "10px";
+        });
+    promptSizeWrap.style.flex = "0.8 1 98px";
+    promptSizeWrap.style.minWidth = "94px";
+    promptSizeWrap.style.boxSizing = "border-box";
+    timelineMeterWrap.style.flex = "1 1 146px";
+    timelineMeterWrap.style.minWidth = "138px";
+    timelineMeterWrap.style.boxSizing = "border-box";
+    settingsBtn.style.flexGrow = "1.2";
     head.append(topActions);
     root.addEventListener("iamccs:cine-fullscreen", (event) => {
         openEditorBtn.textContent = event.detail?.open ? "Close Editor" : "Open Editor";
     });
 
-    const promptWrap = document.createElement(isShotboardV4 ? "div" : "label");
+    const promptWrap = document.createElement("div");
     promptWrap.style.cssText = `display:block;margin-bottom:8px;padding:8px;border:1px solid ${purple.borderSoft};background:${purple.panel};border-radius:6px;color:${purple.muted};font-size:11px;font-weight:800;`;
     const promptHeader = document.createElement("div");
-    promptHeader.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:5px;min-width:0;";
+    promptHeader.style.cssText = "display:flex;align-items:center;gap:12px;margin-bottom:5px;min-width:0;";
     const promptLabel = document.createElement("div");
     promptLabel.textContent = "Global prompt";
-    promptLabel.style.cssText = isShotboardV4 ? "min-width:0;flex:1;" : "margin-bottom:5px;";
+    promptLabel.style.cssText = "min-width:0;flex:1;";
     const durationQuickSlot = document.createElement("div");
-    durationQuickSlot.title = "Total Shotboard duration. The timeline cannot be shorter than its last media box.";
-    durationQuickSlot.style.cssText = `flex:0 0 auto;display:flex;align-items:center;min-width:190px;min-height:32px;padding:3px 6px;border:1px solid #C88C46;border-radius:7px;background:linear-gradient(145deg,rgba(126,82,37,.58),rgba(58,48,37,.78));box-shadow:inset 0 1px 0 rgba(255,255,255,.12),0 2px 7px rgba(0,0,0,.22);`;
+    durationQuickSlot.title = "Total MiniMax Shotboard duration. Timeline trims remain the authority for each H3 chunk.";
+    durationQuickSlot.style.cssText = `flex:0 0 auto;display:flex;align-items:center;min-width:260px;min-height:32px;padding:3px 7px;border:1px solid #F0B458;border-radius:7px;background:linear-gradient(145deg,rgba(151,92,26,.86),rgba(61,44,31,.94));box-shadow:inset 0 1px 0 rgba(255,255,255,.20),0 0 0 1px rgba(240,180,88,.16),0 3px 10px rgba(0,0,0,.32);`;
+    const durationVisibleBar = document.createElement("div");
+    durationVisibleBar.setAttribute("role", "group");
+    durationVisibleBar.setAttribute("aria-label", "MiniMax H3 timeline duration");
+    durationVisibleBar.style.cssText = `display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 0 8px;padding:6px 8px;border:1px solid rgba(211,154,78,.55);border-radius:7px;background:linear-gradient(90deg,rgba(76,48,24,.70),rgba(40,38,35,.84) 58%,rgba(65,46,28,.72));color:#FFE0A3;box-shadow:inset 0 1px 0 rgba(255,255,255,.08);`;
+    const durationVisibleTitle = document.createElement("div");
+    durationVisibleTitle.innerHTML = `<div style="font:900 10px/1.2 Arial;letter-spacing:.10em;color:#FFD38A">TIMELINE DURATION</div><div style="font:700 8px/1.3 Arial;color:#BFAF98;margin-top:2px">Total visible length; individual H3 chunks still follow the image-box trims.</div>`;
+    durationVisibleBar.append(durationVisibleTitle, durationQuickSlot);
     const promptArea = document.createElement("textarea");
     promptArea.value = String(promptWidget?.value || "");
     promptArea.rows = 3;
-    if (isShotboardV4) promptArea.setAttribute("aria-label", "Global prompt");
+    promptArea.setAttribute("aria-label", "Global prompt");
     promptArea.style.cssText = inputBase() + `background:${purple.valueBg};border-color:${purple.border};color:${purple.valueText};resize:vertical;min-height:64px;font-weight:700;font-size:${promptFontSize(12)};`;
     node._iamccsCineShotboardV3LastPromptText = String(promptArea.value || "");
     promptArea.oninput = () => {
@@ -9280,18 +9709,173 @@ function renderShotboardV3(node) {
     };
     promptArea.onchange = promptArea.oninput;
     promptArea.onblur = promptArea.oninput;
-    if (isShotboardV4) {
-        promptHeader.append(promptLabel, durationQuickSlot);
-        promptWrap.append(promptHeader, promptArea);
-    } else {
-        promptWrap.append(promptLabel, promptArea);
-    }
+    promptHeader.append(promptLabel);
+    promptWrap.append(promptHeader, promptArea);
 
-    const settings = document.createElement("div");
-    settings.style.cssText = isShotboardV4
-        ? "display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin:0;"
-        : "display:grid;grid-template-columns:repeat(10,minmax(86px,1fr));gap:10px;margin-bottom:14px;";
-    const addSetting = (label, name, step, min, target = settings, compact = false) => {
+    const settings = document.createElement("section");
+    settings.style.cssText = `display:flex;flex-direction:column;gap:9px;margin:0;padding:10px;border:1px solid ${purple.border};border-radius:9px;background:linear-gradient(145deg,rgba(17,22,27,.96),rgba(30,25,18,.94));box-shadow:inset 0 1px 0 rgba(255,255,255,.055);`;
+    const settingsHead = document.createElement("div");
+    settingsHead.style.cssText = "display:flex;align-items:center;gap:10px;padding:0 2px 2px;";
+    const settingsIdentity = document.createElement("div");
+    settingsIdentity.innerHTML = `<div style="font:900 12px/1.2 Arial;color:#f2d79b;letter-spacing:.08em">H3 CONTROL DECK</div><div style="font:700 9px/1.35 Arial;color:#8fa3a7;margin-top:3px">One CineLinX cable carries the private H3 plan, conditioning, sampler and delivery controls.</div>`;
+    const contractRail = document.createElement("div");
+    contractRail.style.cssText = "margin-left:auto;display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end;";
+    ["MODEL", "CONDITION", "SAMPLE", "DELIVER"].forEach((label, index) => {
+        const chip = document.createElement("span");
+        chip.textContent = `${index + 1} ${label}`;
+        chip.style.cssText = `padding:4px 7px;border:1px solid ${index === 2 ? "#6da5c4" : purple.borderSoft};border-radius:999px;background:${index === 2 ? "rgba(45,91,117,.42)" : "rgba(255,255,255,.035)"};color:${index === 2 ? "#cdeeff" : purple.muted};font:900 8px Arial;letter-spacing:.06em;`;
+        contractRail.appendChild(chip);
+    });
+    settingsHead.append(settingsIdentity, contractRail);
+    const settingsDeck = document.createElement("div");
+    settingsDeck.style.cssText = "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;align-items:start;";
+    const performanceBand = document.createElement("div");
+    performanceBand.style.cssText = "padding:7px 9px;border:1px solid rgba(111,146,151,.28);border-radius:6px;background:rgba(6,11,14,.42);color:#9db1b4;font:800 9px/1.45 Arial;";
+    settings.append(settingsHead, settingsDeck, performanceBand);
+    settingsOverlay = document.createElement("div");
+    settingsOverlay.tabIndex = -1;
+    settingsOverlay.setAttribute("role", "dialog");
+    settingsOverlay.setAttribute("aria-modal", "true");
+    settingsOverlay.setAttribute("aria-label", "MiniMax H3 Settings");
+    settingsOverlay.setAttribute("aria-hidden", "true");
+    settingsOverlay.style.cssText = [
+        "display:none",
+        "position:fixed",
+        "inset:0",
+        `z-index:${CINE_FULLSCREEN_Z_INDEX + 120}`,
+        "align-items:center",
+        "justify-content:center",
+        "padding:20px",
+        "box-sizing:border-box",
+        "background:rgba(3,6,8,.76)",
+        "backdrop-filter:blur(7px)",
+        "pointer-events:auto",
+    ].join(";");
+    const settingsDialog = document.createElement("section");
+    settingsDialog.style.cssText = [
+        "width:min(1320px,calc(100vw - 40px))",
+        "max-height:calc(100vh - 40px)",
+        "display:flex",
+        "flex-direction:column",
+        "overflow:hidden",
+        `border:1px solid ${purple.border}`,
+        "border-radius:12px",
+        "background:linear-gradient(145deg,#171d21,#201a14)",
+        "box-shadow:0 26px 90px rgba(0,0,0,.64),inset 0 1px 0 rgba(255,255,255,.08)",
+        `color:${purple.text}`,
+        "font:12px Arial,sans-serif",
+    ].join(";");
+    const settingsModalHead = document.createElement("header");
+    settingsModalHead.style.cssText = `display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid ${purple.borderSoft};background:rgba(255,255,255,.035);`;
+    const settingsModalTitle = document.createElement("div");
+    settingsModalTitle.style.cssText = "min-width:0;flex:1;";
+    settingsModalTitle.innerHTML = `<div style="font:900 13px/1.2 Arial;color:#f2d79b;letter-spacing:.08em">MINIMAX H3 SETTINGS</div><div style="font:700 10px/1.35 Arial;color:#9aadb0;margin-top:3px">Generation, canvas, Turbo, acceleration, references and delivery controls.</div>`;
+    const closeSettingsBtn = document.createElement("button");
+    closeSettingsBtn.type = "button";
+    closeSettingsBtn.textContent = "Close";
+    closeSettingsBtn.setAttribute("aria-label", "Close MiniMax H3 Settings");
+    closeSettingsBtn.style.cssText = `height:30px;padding:0 13px;border:1px solid ${purple.border};border-radius:6px;background:${purple.button};color:${purple.text};font-size:10px;font-weight:900;cursor:pointer;`;
+    closeSettingsBtn.onclick = (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setSettingsPanelOpen(false);
+    };
+    settingsModalHead.append(settingsModalTitle, closeSettingsBtn);
+    const settingsModalBody = document.createElement("div");
+    settingsModalBody.style.cssText = "display:flex;flex-direction:column;gap:10px;padding:12px;overflow:auto;scrollbar-gutter:stable;";
+    settingsModalBody.append(settings);
+    settingsDialog.append(settingsModalHead, settingsModalBody);
+    settingsOverlay.appendChild(settingsDialog);
+    settingsOverlay.onclick = (event) => {
+        if (event.target === settingsOverlay) setSettingsPanelOpen(false);
+    };
+    settingsOverlay.onkeydown = (event) => {
+        if (event.key === "Escape") {
+            event.preventDefault();
+            setSettingsPanelOpen(false);
+        }
+    };
+    document.body.appendChild(settingsOverlay);
+    node._iamccsMiniMaxSettingsOverlay = settingsOverlay;
+    function refreshPerformanceBand() {
+        const width = Math.max(256, Number(getWidget(node, "width")?.value || 960));
+        const height = Math.max(256, Number(getWidget(node, "height")?.value || 544));
+        const seconds = Math.max(0.01, Number(getWidget(node, "duration_seconds")?.value || 5.17));
+        const requestedFrames = Math.max(1, Math.round(seconds * 24));
+        const alignedFrames = Math.max(5, Math.min(362, Math.ceil(Math.max(0, requestedFrames - 5) / 17) * 17 + 5));
+        const load = (width * height * alignedFrames) / (960 * 544 * 124);
+        const acceleration = String(getWidget(node, "acceleration")?.value || "auto_3060");
+        const profile = String(getWidget(node, "performance_profile")?.value || "rtx3060_balanced");
+        const risky = profile.startsWith("rtx3060") && load > 1.15;
+        performanceBand.style.borderColor = risky ? "rgba(210,112,87,.65)" : "rgba(111,146,151,.38)";
+        performanceBand.style.color = risky ? "#ffc0ac" : "#a9c8c4";
+        const accelerationLabel = acceleration === "auto_3060" ? "Low VRAM Auto / H3 Sage" : acceleration;
+        performanceBand.textContent = `Low VRAM load preview: ${load.toFixed(2)}x versus 960x544 / 124f | ${width}x${height} / ~${alignedFrames} aligned frames | ${accelerationLabel}${risky ? " | HEAVY: shorten this box or use a smaller canvas, then upscale" : " | within the selected Low VRAM canvas envelope"}`;
+    }
+    const makeSettingsGroup = (kicker, title, description, advanced = false) => {
+        const shell = advanced ? document.createElement("details") : document.createElement("section");
+        shell.style.cssText = `min-width:0;border:1px solid ${purple.borderSoft};border-radius:8px;background:rgba(5,9,12,.34);overflow:hidden;`;
+        if (advanced) {
+            const summary = document.createElement("summary");
+            summary.style.cssText = "cursor:pointer;list-style:none;padding:9px 10px;color:#d8c28e;font:900 10px Arial;letter-spacing:.045em;";
+            summary.textContent = `${kicker} / ${title} â€” advanced`;
+            summary.title = description;
+            shell.appendChild(summary);
+        } else {
+            const heading = document.createElement("div");
+            heading.style.cssText = "padding:8px 10px 7px;border-bottom:1px solid rgba(255,255,255,.055);";
+            heading.innerHTML = `<div style="color:#d8aa54;font:900 8px Arial;letter-spacing:.13em">${kicker}</div><div style="color:#edf1ef;font:900 11px Arial;margin-top:2px">${title}</div><div style="color:#7f9195;font:700 8px/1.35 Arial;margin-top:2px">${description}</div>`;
+            shell.appendChild(heading);
+        }
+        const grid = document.createElement("div");
+        grid.style.cssText = "display:grid;grid-template-columns:repeat(4,minmax(92px,1fr));gap:8px;padding:9px;";
+        shell.appendChild(grid);
+        settingsDeck.appendChild(shell);
+        return grid;
+    };
+    const shotSettings = makeSettingsGroup("01", "SHOT & CANVAS", "Timeline trim is the chunk authority. H3 keeps 24 fps and the 17k+5 frame grid.");
+    let settingsTarget = shotSettings;
+    const settingsControls = new Map();
+    const setDeckValue = (name, value) => {
+        setWidgetValue(node, name, value);
+        const control = settingsControls.get(name);
+        try { control?._iamccsSetValue?.(value); } catch {}
+        if (control && "value" in control) control.value = String(value);
+    };
+    const h3LegalDimension = (value, fallback) => {
+        const numeric = Number(value);
+        const safe = Number.isFinite(numeric) ? numeric : Number(fallback);
+        return Math.max(256, Math.min(5760, Math.ceil(Math.max(256, safe) / 32) * 32));
+    };
+    const setH3Canvas = (rawWidth, rawHeight, notice = "") => {
+        const oldWidth = Number(getWidget(node, "width")?.value || 960);
+        const oldHeight = Number(getWidget(node, "height")?.value || 544);
+        const legalWidth = h3LegalDimension(rawWidth, oldWidth);
+        const legalHeight = h3LegalDimension(rawHeight, oldHeight);
+        setDeckValue("width", legalWidth);
+        setDeckValue("height", legalHeight);
+        setWidgetValue(node, "image_width", legalWidth);
+        setWidgetValue(node, "image_height", legalHeight);
+        if (notice && (legalWidth !== oldWidth || legalHeight !== oldHeight)) {
+            showTimelineNotice(`${notice}: H3 canvas ${legalWidth}x${legalHeight} (32-pixel legal grid).`, "ok");
+        }
+        return { width: legalWidth, height: legalHeight };
+    };
+    const setH3CanvasFromImage = (sourceWidth, sourceHeight) => {
+        const width = Number(sourceWidth);
+        const height = Number(sourceHeight);
+        if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
+        // Fit imported media to H3's practical native envelope before snapping.
+        // This keeps a 1280x720 source at 1280x736, while a 4K image does not
+        // silently turn a Low VRAM project into a 4K native generation.
+        const landscape = width >= height;
+        const maxWidth = landscape ? 1344 : 768;
+        const maxHeight = landscape ? 768 : 1344;
+        const scale = Math.min(1, maxWidth / width, maxHeight / height);
+        setH3Canvas(width * scale, height * scale, "Image resolution adapted");
+    };
+    const addSetting = (label, name, step, min, targetOverride = null, compact = false) => {
+        const target = targetOverride || settingsTarget;
         const wrap = document.createElement("label");
         wrap.style.cssText = compact
             ? "width:100%;display:flex;align-items:center;justify-content:flex-end;gap:7px;color:#FFE0A3;font-size:9px;font-weight:900;text-align:right;letter-spacing:.07em;"
@@ -9299,11 +9883,20 @@ function renderShotboardV3(node) {
         const span = document.createElement("span");
         span.textContent = label;
         const widget = getWidget(node, name);
-        const max = name === "default_force" ? "1" : null;
+        const max = null;
         const ctrl = numberStepperControl(widget?.value ?? "", step, min, max, (value) => {
-            const nextValue = name === "default_force" ? clampGuideStrength(value) : value;
-            if (name === "default_force") applyDefaultForceToLinkedSegments(nextValue);
+            const nextValue = name === "width"
+                ? h3LegalDimension(value, getWidget(node, "width")?.value || 960)
+                : name === "height"
+                    ? h3LegalDimension(value, getWidget(node, "height")?.value || 544)
+                    : value;
             setWidgetValue(node, name, nextValue);
+            if ((name === "width" || name === "height") && Number(nextValue) !== Number(value)) {
+                ctrl?._iamccsSetValue?.(nextValue);
+                showTimelineNotice(`${name === "width" ? "Width" : "Height"} aligned to ${nextValue}px for H3 (multiple of 32).`, "ok");
+            }
+            if (name === "width") setWidgetValue(node, "image_width", nextValue);
+            if (name === "height") setWidgetValue(node, "image_height", nextValue);
             if (name === "duration_seconds") {
                 setDurationSeconds(nextValue, "duration_control");
                 enforceDurationMinimum();
@@ -9312,6 +9905,7 @@ function renderShotboardV3(node) {
                 setFrameRateValue(nextValue, "fps_control");
             }
             writeTimeline();
+            refreshPerformanceBand();
             draw();
         }, name === "duration_seconds" ? { liveInput: false } : {});
         if (name === "duration_seconds") durationValueControl = ctrl;
@@ -9320,16 +9914,27 @@ function renderShotboardV3(node) {
             ctrl.style.minWidth = "128px";
             ctrl.style.gridTemplateColumns = "24px minmax(62px,1fr) 24px";
         }
+        settingsControls.set(name, ctrl);
         wrap.append(span, ctrl);
         target.appendChild(wrap);
         return wrap;
     };
-    if (isShotboardV4) addSetting("DURATION", "duration_seconds", "1", "1", durationQuickSlot, true);
-    else addSetting("Duration", "duration_seconds", "1", "1");
-    addSetting("FPS", "frame_rate", "1", "1");
-    addSetting("Default force", "default_force", "0.01", "0");
-    addSetting("Width", "image_width", "32", "64");
-    addSetting("Height", "image_height", "32", "64");
+    addSetting("DURATION", "duration_seconds", "1", "1", durationQuickSlot, true);
+    const h3FpsWrap = document.createElement("label");
+    h3FpsWrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
+    const h3FpsLabel = document.createElement("span");
+    h3FpsLabel.textContent = "H3 FPS";
+    const h3FpsValue = document.createElement("input");
+    h3FpsValue.value = "24";
+    h3FpsValue.disabled = true;
+    h3FpsValue.title = "MiniMax H3 uses a fixed 24 fps timeline and a 17k+5 temporal grid.";
+    h3FpsValue.style.cssText = inputBase() + `background:${purple.valueBg};border-color:${purple.border};color:${purple.valueText};text-align:center;font-weight:900;opacity:.9;`;
+    h3FpsWrap.append(h3FpsLabel, h3FpsValue);
+    settingsTarget.appendChild(h3FpsWrap);
+    setWidgetValue(node, "frame_rate", 24);
+    addSetting("Width", "width", "32", "256");
+    addSetting("Height", "height", "32", "256");
+    setH3Canvas(getWidget(node, "width")?.value || 960, getWidget(node, "height")?.value || 544);
     const addSelectSetting = (label, name, options) => {
         const wrap = document.createElement("label");
         wrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
@@ -9338,11 +9943,85 @@ function renderShotboardV3(node) {
         const ctrl = makeSelect(String(getWidget(node, name)?.value || options[0]), options, (value) => {
             setWidgetValue(node, name, value);
             writeTimeline();
+            refreshPerformanceBand();
             draw();
         });
         styleValueControls(ctrl);
+        settingsControls.set(name, ctrl);
         wrap.append(span, ctrl);
-        settings.appendChild(wrap);
+        settingsTarget.appendChild(wrap);
+    };
+    const addWidgetChoiceSetting = (label, name, choices, onSelect = null) => {
+        const wrap = document.createElement("label");
+        wrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
+        const span = document.createElement("span");
+        span.textContent = label;
+        const widget = getWidget(node, name);
+        const ctrl = makeChoiceSelect(String(widget?.value || choices[0]?.value || ""), choices, (value) => {
+            setWidgetValue(node, name, value);
+            onSelect?.(value);
+            writeTimeline();
+            refreshPerformanceBand();
+            draw();
+        });
+        styleValueControls(ctrl);
+        settingsControls.set(name, ctrl);
+        wrap.append(span, ctrl);
+        settingsTarget.appendChild(wrap);
+    };
+    const addWidgetTextSetting = (label, name, placeholder = "") => {
+        const wrap = document.createElement("label");
+        wrap.style.cssText = `grid-column:1 / -1;display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:left;`;
+        const span = document.createElement("span");
+        span.textContent = label;
+        const widget = getWidget(node, name);
+        const ctrl = document.createElement("textarea");
+        ctrl.value = String(widget?.value || "");
+        ctrl.placeholder = placeholder;
+        ctrl.rows = 3;
+        ctrl.style.cssText = inputBase() + `min-height:58px;resize:vertical;background:${purple.valueBg};border-color:${purple.border};color:${purple.valueText};font:700 10px/1.4 Arial;text-align:left;padding:7px 8px;`;
+        ctrl.addEventListener("input", () => {
+            setWidgetValue(node, name, ctrl.value);
+            writeTimeline();
+        });
+        settingsControls.set(name, ctrl);
+        ctrl._iamccsSetValue = (value) => { ctrl.value = String(value ?? ""); };
+        wrap.append(span, ctrl);
+        settingsTarget.appendChild(wrap);
+        return wrap;
+    };
+    const addWidgetBoolSetting = (label, name) => {
+        const wrap = document.createElement("label");
+        wrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
+        const span = document.createElement("span");
+        span.textContent = label;
+        const widget = getWidget(node, name);
+        const ctrl = makeChoiceSelect(Boolean(widget?.value) ? "on" : "off", [
+            { value: "on", label: "On" },
+            { value: "off", label: "Off" },
+        ], (value) => {
+            setWidgetValue(node, name, value === "on");
+            writeTimeline();
+            refreshPerformanceBand();
+            draw();
+        });
+        styleValueControls(ctrl);
+        settingsControls.set(name, ctrl);
+        wrap.append(span, ctrl);
+        settingsTarget.appendChild(wrap);
+    };
+    const addStaticH3Setting = (label, value, titleText) => {
+        const wrap = document.createElement("label");
+        wrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
+        const span = document.createElement("span");
+        span.textContent = label;
+        const ctrl = document.createElement("input");
+        ctrl.value = value;
+        ctrl.disabled = true;
+        ctrl.title = titleText;
+        ctrl.style.cssText = inputBase() + `background:${purple.valueBg};border-color:${purple.border};color:${purple.valueText};text-align:center;font-weight:900;opacity:.9;`;
+        wrap.append(span, ctrl);
+        settingsTarget.appendChild(wrap);
     };
     const addTimelineChoiceSetting = (label, value, choices, onChange) => {
         const wrap = document.createElement("label");
@@ -9356,24 +10035,188 @@ function renderShotboardV3(node) {
         });
         styleValueControls(ctrl);
         wrap.append(span, ctrl);
-        settings.appendChild(wrap);
+        settingsTarget.appendChild(wrap);
         return ctrl;
     };
     const addTimelineBoolSetting = (label, active, onChange) => addTimelineChoiceSetting(label, active ? "on" : "off", [
         { value: "on", label: "On" },
         { value: "off", label: "Off" },
     ], (next) => onChange(next === "on"));
-    addSelectSetting("Resize", "image_resize_method", ["crop", "pad", "keep proportion", "stretch"]);
-    addSetting("Multiple", "image_multiple_of", "1", "1");
-    addSetting("Relay softness", "promptrelay_epsilon", "0.0001", "0.0001");
-    const guidePolicyWrap = document.createElement("label");
-    guidePolicyWrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
-    const guidePolicyLabel = document.createElement("span");
-    guidePolicyLabel.textContent = "Guides";
-    const guidePolicy = makeSelect(String(getWidget(node, "guide_policy")?.value || "every_checked_row"), ["every_checked_row", "safe_core_guides", "prompt_only"], (value) => setWidgetValue(node, "guide_policy", value));
-    styleValueControls(guidePolicy);
-    guidePolicyWrap.append(guidePolicyLabel, guidePolicy);
-    settings.appendChild(guidePolicyWrap);
+    addWidgetChoiceSetting("H3 task", "task_mode", [
+        { value: "auto_from_timeline", label: "Auto from images" },
+        { value: "t2va", label: "T2VA" },
+        { value: "i2va", label: "I2VA" },
+        { value: "fl2va", label: "FL2VA / FFLF" },
+        { value: "ref2va", label: "REF2VA" },
+    ]);
+    addStaticH3Setting("Chunk source", "Timeline trim", "Each visual box is exactly one H3 chunk. Drag or trim its length on the meter; the planner never splits it automatically.");
+    addStaticH3Setting("H3 frames", "17k+5 / max 362", "The requested box length is aligned upward to H3's required 17k+5 temporal grid and must remain at or below 362 frames.");
+    addWidgetChoiceSetting("H3 audio", "audio_mode", [
+        { value: "h3_native_generated", label: "Native generated" },
+        { value: "h3_ref2va_audio", label: "Driven audio" },
+        { value: "external_audio_post", label: "External post" },
+    ]);
+    addWidgetChoiceSetting("Prompt source", "prompt_mapping", [
+        { value: "global_plus_local", label: "Global + local" },
+        { value: "local_only", label: "Local only" },
+        { value: "global_only", label: "Global only" },
+    ]);
+
+    settingsTarget = makeSettingsGroup("02", "GENERATION", "Shotboard-owned sampler values. Backend widgets are compatibility fallbacks only.");
+    const applyPerformanceProfile = (profile) => {
+        const presets = {
+            rtx3060_draft: { width: 768, height: 448, steps: 12, acceleration: "auto_3060" },
+            rtx3060_balanced: { width: 960, height: 544, steps: 16, acceleration: "auto_3060" },
+            rtx3060_turbo: { width: 960, height: 544, steps: 8, acceleration: "auto_3060", turbo_mode: "early_8_10", turbo_strength: 1.0, turbo_sampler_mode: "audio_fixed", reference_resize_policy: "canvas_crop", reference_resize_megapixels: 0.5, reference_resize_filter: "area", sampler_name: "res_multistep", scheduler: "simple", shift_video: 12, shift_audio: 3 },
+            h3_native_quality: { width: 1344, height: 768, steps: 20, acceleration: "sage" },
+        };
+        const preset = presets[String(profile)] || null;
+        if (!preset) return;
+        Object.entries(preset).forEach(([name, value]) => setDeckValue(name, value));
+        setDeckValue("image_width", preset.width);
+        setDeckValue("image_height", preset.height);
+        const profileLabels = {
+            rtx3060_draft: "Low VRAM draft",
+            rtx3060_balanced: "Low VRAM balanced",
+            rtx3060_turbo: "Low VRAM Turbo",
+            h3_native_quality: "H3 native quality",
+            custom: "Custom",
+        };
+        showTimelineNotice(`Applied ${profileLabels[String(profile)] || "Low VRAM"} canvas/sampler profile. Timeline trims were not changed.`, "info");
+    };
+    addWidgetChoiceSetting("Hardware profile", "performance_profile", [
+        { value: "rtx3060_draft", label: "Low VRAM draft" },
+        { value: "rtx3060_balanced", label: "Low VRAM balanced" },
+        { value: "rtx3060_turbo", label: "Low VRAM Turbo" },
+        { value: "h3_native_quality", label: "H3 native quality" },
+        { value: "custom", label: "Custom" },
+    ], applyPerformanceProfile);
+    addWidgetChoiceSetting("Acceleration", "acceleration", [
+        { value: "auto_3060", label: "Low VRAM Auto / H3 Sage" },
+        { value: "native", label: "Native" },
+        { value: "h3_sage", label: "H3 Memory-Efficient Sage" },
+        { value: "sage", label: "Sage" },
+        { value: "sage_sol", label: "Sage + Sol / exp." },
+        { value: "spectrum", label: "Spectrum / exp." },
+        { value: "sage_spectrum", label: "Sage + Spectrum" },
+    ]);
+    addSetting("Seed", "seed", "1", "0");
+    addSetting("Seed stride", "seed_stride", "1", "0");
+    addSetting("Steps", "steps", "1", "1");
+    const samplerValues = getWidget(node, "sampler_name")?.options?.values;
+    const schedulerValues = getWidget(node, "scheduler")?.options?.values;
+    addSelectSetting("Sampler", "sampler_name", Array.isArray(samplerValues) && samplerValues.length ? samplerValues : ["res_multistep", "euler"]);
+    addSelectSetting("Scheduler", "scheduler", Array.isArray(schedulerValues) && schedulerValues.length ? schedulerValues : ["simple"]);
+    addSetting("Denoise", "denoise", "0.01", "0");
+    addSetting("Video shift", "shift_video", "0.1", "0.01");
+    addSetting("Audio shift", "shift_audio", "0.1", "0.01");
+
+    settingsTarget = makeSettingsGroup("02B", "TURBO ENGINE", "LoRA, low-step AV sampler and reference preprocessing are resolved atomically before H3 sampling.");
+    const applyTurboMode = (mode) => {
+        if (mode === "early_8_10") setDeckValue("steps", 8);
+        if (mode === "ckpt500_6_8") setDeckValue("steps", 7);
+        if (mode !== "off") {
+            setDeckValue("sampler_name", "res_multistep");
+            setDeckValue("scheduler", "simple");
+            setDeckValue("shift_video", 12);
+            setDeckValue("turbo_sampler_mode", "audio_fixed");
+            setDeckValue("shift_audio", 3);
+            setDeckValue("acceleration", "auto_3060");
+        }
+    };
+    addWidgetChoiceSetting("Turbo mode", "turbo_mode", [
+        { value: "off", label: "Off / Base H3" },
+        { value: "early_8_10", label: "Early / 8-10 steps" },
+        { value: "ckpt500_6_8", label: "CKPT500 / 6-8 steps" },
+    ], applyTurboMode);
+    const turboLoraValues = getWidget(node, "turbo_lora_name")?.options?.values;
+    addSelectSetting("Turbo LoRA", "turbo_lora_name", Array.isArray(turboLoraValues) && turboLoraValues.length ? turboLoraValues : [""]);
+    addSetting("LoRA strength", "turbo_strength", "0.05", "0");
+    addWidgetChoiceSetting("AV sampler", "turbo_sampler_mode", [
+        { value: "audio_fixed", label: "Audio fixed / shift 3" },
+        { value: "res_multistep_stock", label: "Stock RES / shift 4-6" },
+    ], (mode) => {
+        setDeckValue("sampler_name", "res_multistep");
+        setDeckValue("scheduler", "simple");
+        setDeckValue("shift_audio", mode === "audio_fixed" ? 3 : 5);
+    });
+    addWidgetChoiceSetting("Input resize", "reference_resize_policy", [
+        { value: "canvas_crop", label: "Canvas crop / fastest" },
+        { value: "canvas_pad", label: "Canvas pad" },
+        { value: "total_pixels", label: "Total pixels" },
+        { value: "off", label: "Off" },
+    ]);
+    addSetting("Resize MP", "reference_resize_megapixels", "0.05", "0.1");
+    addWidgetChoiceSetting("Resize filter", "reference_resize_filter", [
+        { value: "nearest-exact", label: "Nearest exact / fast" },
+        { value: "bilinear", label: "Bilinear" },
+        { value: "bicubic", label: "Bicubic" },
+        { value: "area", label: "Area" },
+    ]);
+    addStaticH3Setting("Turbo audio", "Separate AV clocks", "Audio-fixed uses Larryvrh's sampler: video shift 12 and audio shift 3. Stock RES keeps the user-selected 4-6 audio shift but can distort audio at very low steps.");
+
+    settingsTarget = makeSettingsGroup("03", "REFERENCES & EXPERIMENTAL", "Reference semantics plus Sol and Spectrum quality/speed trade-offs.", true);
+    addWidgetChoiceSetting("Ref image size", "ref_image_size", [
+        { value: "match", label: "Match canvas" },
+        { value: "max", label: "Max / costly" },
+    ]);
+    addWidgetChoiceSetting("Text encoder", "text_encoder_device", [
+        { value: "cpu_safe_12gb", label: "CPU safe / Low VRAM" },
+        { value: "auto", label: "Auto / high VRAM" },
+    ]);
+    [1, 2, 3, 4].forEach((index) => addWidgetChoiceSetting(`Ref ${index} role`, `reference_role_${index}`, [
+        { value: "subject_identity", label: "Subject" },
+        { value: "keyframe", label: "Keyframe" },
+        { value: "composition", label: "Composition" },
+        { value: "style", label: "Style" },
+        { value: "disabled", label: "Disabled" },
+    ]));
+    addWidgetChoiceSetting("Ref video", "reference_video_role", [
+        { value: "off", label: "Off" },
+        { value: "motion_camera", label: "Motion/camera" },
+        { value: "temporal_structure", label: "Temporal structure" },
+        { value: "video_edit", label: "Video edit" },
+        { value: "continuation", label: "Continuation" },
+    ]);
+    addWidgetChoiceSetting("Ref audio", "reference_audio_role", [
+        { value: "off", label: "Off" },
+        { value: "voice_timbre", label: "Voice timbre" },
+        { value: "rhythm_timing", label: "Rhythm/timing" },
+        { value: "audio_reuse", label: "Audio reuse" },
+        { value: "sound_reference", label: "Sound reference" },
+    ]);
+    addWidgetChoiceSetting("Sol sink", "sol_conditioning", [
+        { value: "exact_kv", label: "Exact KV / faster" },
+        { value: "exact_kv_and_rows", label: "Exact audio rows" },
+    ]);
+    addWidgetChoiceSetting("Spectrum", "spectrum_profile", [
+        { value: "conservative_3060", label: "Low VRAM" },
+        { value: "conservative_quality", label: "Quality / RAM high" },
+        { value: "aggressive", label: "Aggressive" },
+    ]);
+    addSelectSetting("Legacy board resize", "image_resize_method", ["crop", "pad", "keep proportion", "stretch"]);
+
+    settingsTarget = makeSettingsGroup("04", "DELIVERY", "Native last frame is captured before interpolation and upscale for clean chunk continuation.");
+    addWidgetBoolSetting("Clean before VAE", "vram_clean_before_decode");
+    addWidgetChoiceSetting("RIFE", "rife_mode", [
+        { value: "off", label: "Off / 24 fps" },
+        { value: "rife_48fps", label: "RIFE 48 fps" },
+        { value: "rife_60fps", label: "RIFE 60 fps" },
+    ]);
+    addWidgetBoolSetting("Enable upscale", "upscale_enabled");
+    addWidgetChoiceSetting("Post upscale", "upscale_mode", [
+        { value: "off", label: "Off" },
+        { value: "ltx23", label: "LTX 2.3" },
+        { value: "wan22_5b", label: "Wan 2.2 5B" },
+    ]);
+    addSetting("Upscale width", "upscale_width", "8", "256");
+    addSetting("Upscale height", "upscale_height", "8", "256");
+    addWidgetBoolSetting("Upscale Sage", "upscale_sage");
+    addSetting("Upscale seed offset", "upscale_seed_offset", "1", "0");
+    addSetting("Wan denoise", "wan_upscale_denoise", "0.01", "0");
+    addWidgetTextSetting("Upscale prompt (optional)", "upscale_prompt", "Leave empty to reuse the selected H3 global/chunk prompt.");
+    addStaticH3Setting("Upscale models", "Connected lazy branch", "Model and LoRA files are selected in the connected LTX/Wan workflow branch.");
+    refreshPerformanceBand();
 
     if (isShotboardV4) {
         addTimelineChoiceSetting("Units", timelineTimeUnits(), [
@@ -9398,86 +10241,6 @@ function renderShotboardV3(node) {
                 timeline.retakePrompt = timeline.retake_global_prompt;
             }
         });
-    }
-
-    const parityWrap = document.createElement("label");
-    parityWrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
-    const parityLabel = document.createElement("span");
-    parityLabel.textContent = "Mode";
-    const parityMode = makeChoiceSelect(String(timeline.flfrealMode || "iamccs_enhanced"), [
-        { value: "flfreal_parity", label: "FLFreal parity" },
-        { value: "iamccs_enhanced", label: "IAMCCS enhanced" },
-    ], setFlfrealMode);
-    styleValueControls(parityMode);
-    parityWrap.append(parityLabel, parityMode);
-    settings.appendChild(parityWrap);
-
-    if (isShotboardV4) {
-        settingsOverlay = document.createElement("div");
-        settingsOverlay.tabIndex = -1;
-        settingsOverlay.setAttribute("role", "dialog");
-        settingsOverlay.setAttribute("aria-modal", "true");
-        settingsOverlay.setAttribute("aria-label", "Shotboard V4 Settings");
-        settingsOverlay.setAttribute("aria-hidden", "true");
-        settingsOverlay.style.cssText = [
-            "display:none",
-            "position:fixed",
-            "inset:0",
-            `z-index:${CINE_FULLSCREEN_Z_INDEX + 120}`,
-            "align-items:center",
-            "justify-content:center",
-            "padding:20px",
-            "box-sizing:border-box",
-            "background:rgba(3,6,8,.76)",
-            "backdrop-filter:blur(7px)",
-            "pointer-events:auto",
-        ].join(";");
-        const settingsDialog = document.createElement("section");
-        settingsDialog.style.cssText = [
-            "width:min(1240px,calc(100vw - 40px))",
-            "max-height:calc(100vh - 40px)",
-            "display:flex",
-            "flex-direction:column",
-            "overflow:hidden",
-            `border:1px solid ${purple.border}`,
-            "border-radius:12px",
-            "background:linear-gradient(145deg,#252a2b,#24211c)",
-            "box-shadow:0 26px 90px rgba(0,0,0,.64),inset 0 1px 0 rgba(255,255,255,.08)",
-            `color:${purple.text}`,
-            "font:12px Arial,sans-serif",
-        ].join(";");
-        const settingsModalHead = document.createElement("header");
-        settingsModalHead.style.cssText = `display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid ${purple.borderSoft};background:rgba(255,255,255,.035);`;
-        const settingsModalTitle = document.createElement("div");
-        settingsModalTitle.style.cssText = "min-width:0;flex:1;";
-        settingsModalTitle.innerHTML = `<div style="font:900 13px/1.2 Arial;color:#f2d79b;letter-spacing:.08em">SHOTBOARD V4 SETTINGS</div><div style="font:700 10px/1.35 Arial;color:#aeb9b2;margin-top:3px">Canvas, timing, relay and timeline behavior.</div>`;
-        const closeSettingsBtn = document.createElement("button");
-        closeSettingsBtn.type = "button";
-        closeSettingsBtn.textContent = "Close";
-        closeSettingsBtn.setAttribute("aria-label", "Close Shotboard V4 Settings");
-        closeSettingsBtn.style.cssText = `height:30px;padding:0 13px;border:1px solid ${purple.border};border-radius:6px;background:${purple.button};color:${purple.text};font-size:10px;font-weight:900;cursor:pointer;`;
-        closeSettingsBtn.onclick = (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            setSettingsPanelOpen(false);
-        };
-        settingsModalHead.append(settingsModalTitle, closeSettingsBtn);
-        const settingsModalBody = document.createElement("div");
-        settingsModalBody.style.cssText = "padding:14px;overflow:auto;scrollbar-gutter:stable;";
-        settingsModalBody.appendChild(settings);
-        settingsDialog.append(settingsModalHead, settingsModalBody);
-        settingsOverlay.appendChild(settingsDialog);
-        settingsOverlay.onclick = (event) => {
-            if (event.target === settingsOverlay) setSettingsPanelOpen(false);
-        };
-        settingsOverlay.onkeydown = (event) => {
-            if (event.key === "Escape") {
-                event.preventDefault();
-                setSettingsPanelOpen(false);
-            }
-        };
-        document.body.appendChild(settingsOverlay);
-        node._iamccsShotboardV4SettingsOverlay = settingsOverlay;
     }
 
     timelineNotice = document.createElement("div");
@@ -9516,8 +10279,7 @@ function renderShotboardV3(node) {
     boardInput.type = "file";
     boardInput.accept = "application/json,.json";
     boardInput.style.display = "none";
-    if (isShotboardV4) root.append(head, promptWrap, timelineNotice, fileInput, videoInput, audioInput, motionInput, boardInput);
-    else root.append(head, promptWrap, settings, timelineNotice, fileInput, videoInput, audioInput, motionInput, boardInput);
+    root.append(head, durationVisibleBar, promptWrap, timelineNotice, fileInput, videoInput, audioInput, motionInput, boardInput);
 
     const timelineViewport = document.createElement("div");
     timelineViewport.style.cssText = [
@@ -10538,12 +11300,14 @@ function renderShotboardV3(node) {
             const next = items[index + 1];
             if (next) {
                 const nextEnd = Number(next.start || 0) + Number(next.length || 1);
-                const boundary = Math.max(Number(target.start || 0) + minLength, Math.min(oldEnd + dragDelta, nextEnd - minLength));
+                const boundaryMin = Math.max(Number(target.start || 0) + minLength, nextEnd - 362);
+                const boundaryMax = Math.min(nextEnd - minLength, Number(target.start || 0) + 362);
+                const boundary = Math.max(boundaryMin, Math.min(oldEnd + dragDelta, boundaryMax));
                 target.length = Math.round(boundary - Number(target.start || 0));
                 next.start = Math.round(boundary);
                 next.length = Math.max(minLength, Math.round(nextEnd - boundary));
             } else {
-                const maxLength = durationFrames - Number(target.start || 0);
+                const maxLength = Math.min(362, durationFrames - Number(target.start || 0));
                 target.length = Math.max(minLength, Math.min(Number(target.length || 1) + dragDelta, maxLength));
             }
         } else if (edge === "left") {
@@ -10553,13 +11317,15 @@ function renderShotboardV3(node) {
             const prev = items[index - 1];
             if (prev) {
                 const prevStart = Number(prev.start || 0);
-                const boundary = Math.max(prevStart + minLength, Math.min(oldStart + dragDelta, targetEnd - minLength));
+                const boundaryMin = Math.max(prevStart + minLength, targetEnd - 362);
+                const boundaryMax = Math.min(targetEnd - minLength, prevStart + 362);
+                const boundary = Math.max(boundaryMin, Math.min(oldStart + dragDelta, boundaryMax));
                 prev.length = Math.round(boundary - prevStart);
                 target.start = Math.round(boundary);
                 target.length = Math.max(minLength, Math.round(targetEnd - boundary));
             } else {
                 const maxStart = targetEnd - minLength;
-                const nextStart = Math.max(0, Math.min(oldStart + dragDelta, maxStart));
+                const nextStart = Math.max(0, targetEnd - 362, Math.min(oldStart + dragDelta, maxStart));
                 target.start = Math.round(nextStart);
                 target.length = Math.max(minLength, oldLength - (nextStart - oldStart));
             }
@@ -10571,7 +11337,7 @@ function renderShotboardV3(node) {
                 target.length = Math.max(1, Math.min(Math.round(Number(target.length || 1)), videoDuration - target.trimStart));
             }
         }
-        return normalizeTimelineDragPreviewItems(items.map((item) => String(item.type || "") === "video" ? clampSegment(item) : item), durationFrames);
+        return normalizeTimelineDragPreviewItems(items.map((item) => clampSegment(item)), durationFrames);
     }
 
     function audioDragPreview(initItems, targetId, dragDelta, edge, durationFrames) {
@@ -11245,11 +12011,11 @@ function renderShotboardV3(node) {
             };
             menu.appendChild(btn);
         };
-        addChoice("Text Relay Slot", "Create a resizable prompt-only segment for Prompt Relay", () => {
+        addChoice("H3 Prompt Slot", "Create a resizable prompt-only MiniMax H3 segment", () => {
             if (seg) createPlaceholderAfterSegment(seg, "text");
             else createTailTextPlaceholder();
         });
-        addChoice("Image Slot", "Create or fill an image guide slot", () => {
+        addChoice("Image Slot", "Create or fill a MiniMax H3 first/last keyframe slot", () => {
             if (seg) splitImageSlotAfterSegment(seg);
             else openAppendImagePicker(targetId);
         });
@@ -12751,7 +13517,7 @@ function renderShotboardV3(node) {
                 const isStrengthKey = key === "guideStrength" || key === "imageLockStrength";
                 const step = isStrengthKey ? "0.01" : "1";
                 const min = "0";
-                const max = isStrengthKey ? "1" : null;
+                const max = isStrengthKey ? "1" : key === "length" ? "362" : null;
                 const ctrl = numberStepperControl(seg[key] ?? "", step, min, max, (value) => {
                     const target = currentSegment();
                     let shouldRedraw = true;
@@ -12760,7 +13526,9 @@ function renderShotboardV3(node) {
                         timeline.segments = edgeDragPreview(timeline.segments, target.id, nextStart - Number(target.start || 0), "left", getTotalFrames());
                     }
                     else if (key === "length") {
-                        const nextLength = Math.max(1, Math.round(Number(value || 1)));
+                        const requestedLength = Math.max(1, Math.round(Number(value || 1)));
+                        const nextLength = clampH3TimelineFrames(requestedLength);
+                        if (requestedLength > 362) showTimelineNotice("MiniMax H3: ogni box può contenere al massimo 362 frame. Il trimming è stato limitato.", "warn");
                         timeline.segments = edgeDragPreview(timeline.segments, target.id, nextLength - Number(target.length || 1), "right", getTotalFrames());
                     }
                     else if (key === "trimStart") {
@@ -12836,7 +13604,9 @@ function renderShotboardV3(node) {
                     shouldRedraw = true;
                 }
                 else if (key === "length") {
-                    const nextLength = Math.max(1, Math.round(Number(input.value || 1)));
+                    const requestedLength = Math.max(1, Math.round(Number(input.value || 1)));
+                    const nextLength = clampH3TimelineFrames(requestedLength);
+                    if (requestedLength > 362) showTimelineNotice("MiniMax H3: ogni box può contenere al massimo 362 frame. Il trimming è stato limitato.", "warn");
                     timeline.segments = edgeDragPreview(timeline.segments, target.id, nextLength - Number(target.length || 1), "right", getTotalFrames());
                     shouldRedraw = true;
                 }
@@ -13153,6 +13923,7 @@ function renderShotboardV3(node) {
             const fps = getFps();
             const startFrame = Math.max(0, Math.round(Number(seg.start || 0)));
             const lenFrame = Math.max(1, Math.round(Number(seg.length || 1)));
+            const h3Frame = alignH3TimelineFrames(lenFrame);
             const endFrame = startFrame + lenFrame;
             const summary = document.createElement("div");
             summary.style.cssText = [
@@ -13179,14 +13950,14 @@ function renderShotboardV3(node) {
             range.textContent = `${(startFrame / fps).toFixed(2)}s -> ${(endFrame / fps).toFixed(2)}s`;
             range.style.cssText = `color:${purple.text};font-size:10px;font-weight:900;white-space:nowrap;line-height:1;`;
             const meta = document.createElement("div");
-            meta.textContent = `${lenFrame}f / ${(lenFrame / fps).toFixed(2)}s`;
+            meta.textContent = `${lenFrame}f trim -> ${h3Frame}f H3 / ${(h3Frame / fps).toFixed(2)}s`;
             meta.style.cssText = `max-width:100%;color:${purple.muted};font-size:8px;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1;`;
             summary.append(title, range, meta);
             return summary;
         };
         const resizeRelayBridgeSeconds = (seg, seconds) => {
             const fps = getFps();
-            const nextLength = Math.max(1, Math.round(Math.max(0.05, Number(seconds || 0)) * fps));
+            const nextLength = clampH3TimelineFrames(Math.round(Math.max(0.05, Number(seconds || 0)) * fps));
             const oldStart = Math.round(Number(seg.start || 0));
             const oldLength = Math.max(1, Math.round(Number(seg.length || 1)));
             const oldEnd = oldStart + oldLength;
@@ -13229,13 +14000,13 @@ function renderShotboardV3(node) {
             const badge = document.createElement("button");
             badge.type = "button";
             badge.textContent = "R";
-            badge.title = "Select this relay bridge";
+            badge.title = "Select this H3 prompt bridge";
             badge.style.cssText = `align-self:center;justify-self:center;display:flex;align-items:center;justify-content:center;width:28px;height:28px;border:1px solid rgba(143,208,204,.64);border-radius:999px;background:rgba(7,18,20,.82);color:#CFF2EE;font-size:10px;font-weight:900;cursor:pointer;box-shadow:inset 0 1px 0 rgba(255,255,255,.10);`;
             badge.onclick = () => { selectedId = seg.id; draw(); };
             const meta = document.createElement("div");
             meta.style.cssText = "display:flex;flex-direction:column;gap:5px;justify-content:center;min-width:0;";
             const title = document.createElement("div");
-            title.textContent = "Relay Bridge";
+            title.textContent = "H3 Prompt Bridge";
             title.style.cssText = "display:flex;align-items:center;justify-content:center;height:18px;border-radius:999px;border:1px solid rgba(143,208,204,.48);background:rgba(41,132,142,.20);color:#CFF2EE;font-size:8px;font-weight:900;text-transform:uppercase;";
             const range = document.createElement("div");
             range.textContent = `${(startFrame / fps).toFixed(2)}s -> ${(endFrame / fps).toFixed(2)}s`;
@@ -13243,7 +14014,7 @@ function renderShotboardV3(node) {
             const name = document.createElement("input");
             name.type = "text";
             name.value = String(seg.label || "relay_bridge");
-            name.title = "Relay bridge label";
+            name.title = "H3 prompt bridge label";
             name.style.cssText = inputBase() + `height:22px;background:${purple.valueBg};border-color:rgba(143,208,204,.42);color:${purple.valueText};font:${promptFontSize(9)}/1 monospace;font-weight:800;text-align:center;`;
             name.onpointerdown = (event) => event.stopPropagation();
             name.oninput = () => {
@@ -13254,7 +14025,7 @@ function renderShotboardV3(node) {
             meta.append(title, range, name);
             const prompt = document.createElement("textarea");
             prompt.value = String(seg.prompt || "");
-            prompt.placeholder = "PromptRelay text between the previous frame and the next frame...";
+            prompt.placeholder = "MiniMax H3 prompt between the previous keyframe and the next keyframe...";
             prompt.dataset.iamccsV3SegmentId = String(seg.id);
             prompt.dataset.iamccsV3Key = "prompt";
             prompt.style.cssText = `width:100%;height:68px;min-height:68px;box-sizing:border-box;padding:7px 9px;background:${purple.valueBg};border:1px solid rgba(143,208,204,.44);border-radius:5px;color:${purple.valueText};font:${promptFontSize(10)}/1.26 monospace;font-weight:700;outline:none;resize:none;overflow-y:auto;box-shadow:inset 0 1px 0 rgba(255,255,255,.56);`;
@@ -13279,7 +14050,7 @@ function renderShotboardV3(node) {
             const timing = document.createElement("div");
             timing.style.cssText = "display:grid;grid-template-rows:auto auto;gap:7px;align-content:center;min-width:0;";
             const secondsTitle = document.createElement("div");
-            secondsTitle.textContent = "Relay seconds";
+            secondsTitle.textContent = "H3 seconds";
             secondsTitle.style.cssText = `color:${purple.muted};font-size:8px;font-weight:900;text-align:center;text-transform:uppercase;`;
             const seconds = numberStepperControl(lenFrame / fps, "0.1", "0.1", null, (value) => {
                 resizeRelayBridgeSeconds(seg, value);
@@ -13296,7 +14067,7 @@ function renderShotboardV3(node) {
             styleValueControls(seconds);
             const status = document.createElement("div");
             const active = Boolean(seg.use_prompt !== false && String(seg.prompt || "").trim());
-            status.textContent = active ? "PromptRelay ON" : "PromptRelay off";
+            status.textContent = active ? "H3 prompt ON" : "H3 prompt off";
             status.style.cssText = `display:flex;align-items:center;justify-content:center;height:22px;border-radius:5px;border:1px solid ${active ? "rgba(143,208,204,.58)" : purple.borderSoft};background:${active ? "rgba(41,132,142,.18)" : "rgba(0,0,0,.14)"};color:${active ? "#CFF2EE" : purple.muted};font:8px/1 monospace;font-weight:900;text-transform:uppercase;`;
             timing.append(secondsTitle, seconds, status);
             const actions = document.createElement("div");
@@ -13304,7 +14075,7 @@ function renderShotboardV3(node) {
             const remove = document.createElement("button");
             remove.type = "button";
             remove.textContent = "X";
-            remove.title = "Delete this relay bridge";
+            remove.title = "Delete this H3 prompt bridge";
             remove.style.cssText = `height:24px;border:1px solid ${purple.danger};border-radius:4px;background:#6B302A;color:#FFF2E4;font-size:10px;font-weight:900;cursor:pointer;`;
             remove.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
             remove.onclick = (event) => {
@@ -13384,14 +14155,14 @@ function renderShotboardV3(node) {
             const relayWrap = document.createElement("label");
             relayWrap.style.cssText = `display:grid;grid-template-columns:34px minmax(0,1fr);grid-template-rows:auto auto;column-gap:6px;row-gap:4px;align-items:center;color:${purple.muted};font-size:9px;font-weight:800;`;
             const relayLabel = document.createElement("span");
-            relayLabel.textContent = "Relay";
+            relayLabel.textContent = "H3 Prompt";
             relayLabel.style.cssText = "grid-column:1;grid-row:1;text-align:center;align-self:end;";
             const relayToggle = document.createElement("input");
             relayToggle.type = "checkbox";
             relayToggle.checked = Boolean((String(seg.prompt || "").trim() && seg.relay_manual_off !== true && seg.promptrelay_manual_off !== true) || seg.dialogue_pin || seg.image_lock || seg.motion_boost);
             relayToggle.dataset.iamccsV3SegmentId = String(seg.id);
             relayToggle.dataset.iamccsV3Key = "use_prompt";
-            relayToggle.title = "Use this box prompt as a local PromptRelay beat";
+            relayToggle.title = "Use this box prompt as the local MiniMax H3 prompt for this shot/chunk";
             relayToggle.style.cssText = `width:18px;height:18px;accent-color:${purple.accent};cursor:pointer;`;
             relayToggle.style.gridColumn = "1";
             relayToggle.style.gridRow = "2";
@@ -13408,8 +14179,8 @@ function renderShotboardV3(node) {
             };
             const localRelayActive = Boolean((String(seg.prompt || "").trim() && seg.relay_manual_off !== true && seg.promptrelay_manual_off !== true) || seg.dialogue_pin || seg.image_lock || seg.motion_boost);
             const relayStatus = document.createElement("span");
-            relayStatus.textContent = localRelayActive ? "LOCAL" : "OFF";
-            relayStatus.title = "PromptRelay status for this box";
+            relayStatus.textContent = localRelayActive ? "H3 LOCAL" : "OFF";
+            relayStatus.title = "MiniMax H3 per-shot prompt status";
             relayStatus.style.cssText = `display:flex;align-items:center;justify-content:center;min-width:44px;padding:2px 5px;border-radius:999px;border:1px solid ${localRelayActive ? "rgba(143,208,204,.62)" : purple.borderSoft};background:${localRelayActive ? "rgba(41,132,142,.24)" : "rgba(0,0,0,.12)"};color:${localRelayActive ? "#CFF2EE" : purple.muted};font-size:7px;font-weight:900;line-height:1;white-space:nowrap;`;
             relayStatus.style.gridColumn = "2";
             relayStatus.style.gridRow = "1";
@@ -13459,11 +14230,34 @@ function renderShotboardV3(node) {
             leftPane.style.cssText = "display:flex;align-items:center;min-width:0;align-self:center;width:100%;";
             const numericRow = document.createElement("div");
             numericRow.style.cssText = "display:grid;grid-template-columns:minmax(64px,.7fr) minmax(64px,.7fr) minmax(58px,.55fr) minmax(126px,1fr) minmax(128px,1fr);gap:7px;align-items:center;min-width:0;width:100%;";
+            const makeH3KeyframeField = (target) => {
+                const wrap = document.createElement("label");
+                wrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;min-width:0;`;
+                const label = document.createElement("span");
+                label.textContent = "H3 Keyframe";
+                const control = makeChoiceSelect(target.use_guide === false ? "prompt_only" : "keyframe", [
+                    { value: "keyframe", label: "Image keyframe" },
+                    { value: "prompt_only", label: "Prompt only" },
+                ], (value) => {
+                    target.use_guide = value === "keyframe";
+                    target.use_keyframe = target.use_guide;
+                    target.guideStrength = target.use_guide ? 1 : 0;
+                    target.guide_strength = target.guideStrength;
+                    target.force = target.guideStrength;
+                    target.strength = target.guideStrength;
+                    writeTimeline({ force: true });
+                    draw();
+                });
+                control.title = "Image keyframe maps to MiniMax H3 first/last-frame conditioning. Prompt only creates no image anchor.";
+                styleValueControls(control);
+                wrap.append(label, control);
+                return wrap;
+            };
             numericRow.append(
                 makeField(seg, "Frame", "start", "number"),
-                makeField(seg, "Len", "length", "number"),
+                makeField(seg, "Trim Len", "length", "number"),
                 isTimelineVideoSegment(seg) ? makeField(seg, "Trim", "trimStart", "number") : makeField(seg, "Ref", "ref", "number"),
-                makeField(seg, "Guide Strength", "guideStrength", "number"),
+                makeH3KeyframeField(seg),
                 makeSegmentSummary(seg, index, timeline.segments.length)
             );
             leftPane.append(numericRow);
@@ -14113,6 +14907,8 @@ function renderShotboardV3(node) {
 
     function addUploadedImagesToTimeline(uploaded) {
         if (!uploaded.length) return;
+        const firstImageInfo = uploadedShotboardImageInfo.get(String(uploaded[0] || ""));
+        if (firstImageInfo) setH3CanvasFromImage(firstImageInfo.width, firstImageInfo.height);
         const current = getOwnReferencePaths(node);
         const nextPaths = current.concat(uploaded);
         setOwnReferencePaths(node, nextPaths);
@@ -15244,9 +16040,7 @@ function renderShotboardV3(node) {
         draw();
     };
 
-    const shotboardWidgetLabel = nodeClassName(node) === "IAMCCS_CineShotboardPlannerV5V2V"
-        ? "Cine Shotboard V5"
-        : isShotboardV4Class(nodeClassName(node)) ? "Cine Shotboard V4" : "Cine Shotboard V3";
+    const shotboardWidgetLabel = "MiniMax H3 Shotboard";
     const widget = node.addDOMWidget(shotboardWidgetLabel, "iamccs_cine_shotboard_v3", root, { serialize: false });
     node._iamccsCineShotboardV3Widget = widget;
     const v3RigidWidth = SHOTBOARD_V3_RIGID_WIDTH;
@@ -16575,6 +17369,7 @@ function renderShotboardV4BackendControl(node) {
 
 function renderForNode(node) {
     const klass = nodeClassName(node);
+    if (klass !== "IAMCCS_MiniMaxH3ShotPlanner") return;
     try {
         const title = String(node?.title || "");
         if (klass === "IAMCCS_CineShotboardLite") {
@@ -16602,7 +17397,7 @@ function renderForNode(node) {
                 const shots = Array.isArray(data.segments) ? data.segments.filter((seg) => String(seg?.type || "image") !== "audio").length : 0;
                 const audio = Array.isArray(data.audioSegments) ? data.audioSegments.length : 0;
                 return [
-                    isShotboardV4Class(klass) ? "Shotboard V4 mini view" : "Shotboard V3 mini view",
+                    "MiniMax H3 Shotboard mini view",
                     `${duration.toFixed(2)}s / ${Math.round(duration * fps)} frames`,
                     `${shots} visual slots / ${audio} audio clips`,
                     "Zoom in or open editor for full controls",
@@ -16623,7 +17418,7 @@ function renderForNode(node) {
 
 function scheduleRender(node, options = {}) {
     const klass = nodeClassName(node);
-    if (klass !== "IAMCCS_CineLTXSequencer" && klass !== "IAMCCS_CinePromptRelayLatentShapeSync" && klass !== "IAMCCS_CinePromptRelayTimeline" && klass !== "IAMCCS_CineShotboardLite" && klass !== "IAMCCS_CineShotboardTimelinePro" && klass !== "IAMCCS_CineShotboardPlannerPro" && klass !== "IAMCCS_CineShotboardPlannerProV2" && !isShotboardV3Class(klass) && !isShotboardV4BackendClass(klass) && klass !== "IAMCCS_CineShotboardPlannerProLegacy" && klass !== "IAMCCS_CineFLFEngineSimple" && klass !== "IAMCCS_CineInfo" && klass !== "IAMCCS_CinePromptArchitect" && klass !== "IAMCCS_BoardMaker" && klass !== "IAMCCS_CineMusicVideoPlanner") return;
+    if (klass !== "IAMCCS_MiniMaxH3ShotPlanner") return;
     if (Array.isArray(node._iamccsCineRenderTimers)) {
         node._iamccsCineRenderTimers.forEach((timer) => window.clearTimeout(timer));
     }
@@ -16681,24 +17476,43 @@ function wrapQueueFlush(target, methodName, label) {
 }
 
 app.registerExtension({
-    name: "iamccs.cine.timeline.ui",
-    async setup() {
-        wrapQueueFlush(api, "queuePrompt", "api.queuePrompt");
-        wrapQueueFlush(app, "queuePrompt", "app.queuePrompt");
-    },
+    name: "iamccs.minimax.h3.shotboard.ui",
     async beforeRegisterNodeDef(nodeType, nodeData) {
         const name = String(nodeData?.name || nodeData?.class_type || "");
-        if (name !== "IAMCCS_CineLTXSequencer" && name !== "IAMCCS_CinePromptRelayLatentShapeSync" && name !== "IAMCCS_CinePromptRelayTimeline" && name !== "IAMCCS_CineShotboardLite" && name !== "IAMCCS_CineShotboardTimelinePro" && name !== "IAMCCS_CineShotboardPlannerPro" && name !== "IAMCCS_CineShotboardPlannerProV2" && !isShotboardV3Class(name) && !isShotboardV4BackendClass(name) && name !== "IAMCCS_CineShotboardPlannerProLegacy" && name !== "IAMCCS_CineFLFEngineSimple" && name !== "IAMCCS_CineInfo" && name !== "IAMCCS_CinePromptArchitect" && name !== "IAMCCS_BoardMaker" && name !== "IAMCCS_CineMusicVideoPlanner") return;
-        if (nodeType.prototype._iamccsCineTimelineWrapped) return;
-        nodeType.prototype._iamccsCineTimelineWrapped = true;
+        if (name !== "IAMCCS_MiniMaxH3ShotPlanner") return;
+        if (nodeType.prototype._iamccsMiniMaxH3TimelineWrapped) return;
+        nodeType.prototype._iamccsMiniMaxH3TimelineWrapped = true;
         const onNodeCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function (...args) {
             const result = onNodeCreated?.apply(this, args);
+            enforceMiniMaxSingleCineLinxOutput(this);
             scheduleRender(this);
+            return result;
+        };
+        const onConfigure = nodeType.prototype.onConfigure;
+        nodeType.prototype.onConfigure = function (...args) {
+            const result = onConfigure?.apply(this, args);
+            repairMiniMaxH3WidgetState(this, args[0]);
+            enforceMiniMaxSingleCineLinxOutput(this);
+            window.setTimeout(() => {
+                repairMiniMaxH3WidgetState(this, args[0]);
+                enforceMiniMaxSingleCineLinxOutput(this);
+            }, 0);
+            return result;
+        };
+        const onSerialize = nodeType.prototype.onSerialize;
+        nodeType.prototype.onSerialize = function (serialized, ...rest) {
+            repairMiniMaxH3WidgetState(this, serialized);
+            const result = onSerialize?.call(this, serialized, ...rest);
+            repairMiniMaxH3WidgetState(this, serialized);
             return result;
         };
     },
     async nodeCreated(node) {
+        if (nodeClassName(node) !== "IAMCCS_MiniMaxH3ShotPlanner") return;
+        repairMiniMaxH3WidgetState(node);
+        enforceMiniMaxSingleCineLinxOutput(node);
+        window.setTimeout(() => enforceMiniMaxSingleCineLinxOutput(node), 120);
         scheduleRender(node);
     },
 });
@@ -16714,7 +17528,7 @@ document.addEventListener("iamccs:planner_rows_updated", (ev) => {
     const plannerNode = app.graph?.getNodeById(nodeId);
     if (!plannerNode) return;
     const klass = String(plannerNode?.comfyClass || plannerNode?.type || "");
-    if (klass !== "IAMCCS_CineShotboardLite" && klass !== "IAMCCS_CineShotboardPlannerPro" && klass !== "IAMCCS_CineShotboardPlannerProV2" && !isShotboardV3Class(klass) && klass !== "IAMCCS_CineShotboardPlannerProLegacy" && klass !== "IAMCCS_CineShotboardTimelinePro") return;
+    if (klass !== "IAMCCS_MiniMaxH3ShotPlanner") return;
     // Clear render guard so renderShotboardPro rebuilds the table
     plannerNode._iamccsCineShotboardReady = false;
     plannerNode._iamccsCineShotboardVersion = "";

@@ -1,0 +1,20 @@
+{
+  "schema": "iamccs.minimax_h3.prompter_project",
+  "schema_version": 1,
+  "project_name": "Noir Diner Dialogue",
+  "task_mode": "t2va",
+  "injection_target": "global",
+  "writing_mode": "guided",
+  "merge_policy": "replace",
+  "sections": {
+    "scene": "Midnight inside a nearly empty roadside diner. <Subject 1>, a private investigator with a damp wool coat, sits opposite <Subject 2>, an exhausted night waitress, beneath a flickering sign.",
+    "shot_list": "0.00-1.40s: hold both subjects across the booth. 1.40-3.30s: <Subject 2> slides a sealed envelope across the table. 3.30s-end: <Subject 1> stops it with two fingers and looks up.",
+    "acting": "Use quiet micro-performance: guarded eye contact, one controlled breath and precise hand contact with the envelope. Both subjects remain seated.",
+    "dialogue": "<Subject 2> (S2): <d>[English] You were never here.</d> <Subject 1> answers only with a small nod.",
+    "light_and_image": "Green-blue window spill, warm tungsten practicals, rain traces on glass, natural skin exposure and subtle film grain.",
+    "camera": "One slow push across table height, maintaining the two-shot until the final emphasis on <Subject 1>; no reverse angle and no cut.",
+    "production_sound": "Rain against glass, refrigerator hum, distant tire wash, ceramic cup resonance, paper sliding and intimate booth dialogue.",
+    "non_diegetic_music": "No score until the envelope stops; then one almost inaudible brushed-cymbal swell.",
+    "negatives": "No lip-sync drift, no duplicated hands, no changing envelope, no added customers, no neon color shift, no jump cut, no captions."
+  }
+}

@@ -1,0 +1,296 @@
+IAMCCS PROMPTER FOR MINIMAX H3
+User guide, Shotboard injection, direct workflow use, and production tips
+
+Version: August 2026
+
+
+1. WHAT THE NODE DOES
+
+IAMCCS Prompter is a structured writing desk for MiniMax H3. You write the scene as
+small production sections instead of forcing the whole idea into one unstructured text
+box. The node assembles the filled sections in the correct order and produces:
+
+- cine_linx: the project and injection contract used by IAMCCS MiniMax Shotboard.
+- final_prompt: the finished plain-text H3 prompt for a direct native conditioning node.
+- project_json: the portable prompt project.
+- report: a compact validation and assembly report.
+
+The node does not invent the film by itself in Manual or Guided mode. It organizes the
+director's intent. AI Rewrite is optional and rewrites only the fields you already
+filled; you remain responsible for the final edit.
+
+
+2. THE TWO CONNECTION METHODS
+
+METHOD A - WITH IAMCCS MINIMAX SHOTBOARD
+
+Connect:
+
+IAMCCS Prompter: cine_linx  ->  MiniMax H3 Shotboard: cine_linx
+
+Then:
+
+1. Choose T2VA, I2VA, FL2VA, or REF2VA in Prompter.
+2. Fill the visible sections.
+3. Choose Global Prompt, Local Auto, Local Prompt 1, 2, or 3.
+4. Choose Replace or Append.
+5. Press INJECT -> SHOTBOARD.
+6. Read the green confirmation message and visually verify the target text in the
+   Shotboard before queueing.
+
+The button performs a visible editor injection. The cine_linx connection also keeps the
+queue-time contract synchronized.
+
+Target behavior:
+
+- Global Prompt replaces or appends the Shotboard global context.
+- Local Auto examines the first three visual timeline slots, fills the first empty local
+  prompt, and appends to the last available local slot only when all three are occupied.
+- Local Prompt 1, 2, or 3 targets that visual slot. If it does not exist, the Shotboard
+  selects a safe available slot. With no visual slots, it falls back to Global Prompt.
+
+The local numbers refer to the first three chronological visual slots, not arbitrary
+seconds and not audio or motion lanes.
+
+METHOD B - STANDALONE WORKFLOW WITHOUT SHOTBOARD
+
+Connect:
+
+IAMCCS Prompter: final_prompt  ->  MiniMax H3 conditioning node: prompt
+
+The Official Supporters workflows use this direct method. The prompt is already wired,
+so the INJECT button is not required there. Edit the Prompter fields and queue the graph.
+The target selector matters only when a Shotboard is present.
+
+
+3. CHOOSING THE CORRECT H3 MODE
+
+T2VA - TEXT TO VIDEO AND AUDIO
+
+Use no boundary images. Describe the complete audiovisual event. The strongest order is:
+
+Scene -> Timed shot list -> Acting and motion -> Dialogue -> Light and image -> Camera ->
+Production sound -> Non-diegetic music -> Continuity safeguards.
+
+Prefer one developed shot over many unrelated shots. Give actions a chronological order.
+
+I2VA - ONE OPENING IMAGE TO VIDEO AND AUDIO
+
+Use one first image. State that Picture 1 is the complete opening-frame authority, then
+describe only what changes after 0.00 seconds. Lock identity, wardrobe, props, screen
+direction, environment and lighting facts that must survive animation.
+
+Do not repeatedly describe a new opening composition: this fights the supplied image.
+
+FL2VA - FIRST AND LAST FRAME TO VIDEO AND AUDIO
+
+Use two temporal boundary images. Picture 1 is the opening state; Picture 2 is the final
+state. Describe a physically possible bridge between them and reach the final pose and
+framing near the end, not halfway through the shot.
+
+In Shotboard, the exact boundary time comes from the trimmed timeline slots. The first
+image of a chunk is its opening keyframe; the next boundary image is its final keyframe.
+
+REF2VA - FULL REFERENCE VIDEO AND AUDIO
+
+Use separate reference inputs for identity, wardrobe, objects, environments, style,
+motion, camera cadence, voice or sound. The six prompt sections are:
+
+1. subject_definitions
+2. summary
+3. retention_analysis
+4. detailed_description
+5. overall_soundscape
+6. non_diegetic_music
+
+Keep the labels exact: <Subject 1>, <Picture 1>, <Video 1>, and <Audio 1>. Numbering follows
+connection order inside each media category.
+
+
+4. TIMELINE IMAGES VERSUS REFERENCE IMAGES
+
+This distinction is essential.
+
+A timeline image is temporal. Its position or trimmed boundary says when a shot begins,
+ends, or changes. It can become an I2VA opening frame or an FL2VA boundary frame.
+
+A REF2VA image is evidential. It says what a person, prop, costume, place, composition or
+style should look like. It does not automatically belong at a target timestamp.
+
+Do not place a character sheet in the timeline unless you actually want the generated
+video to begin or end as a visible contact sheet. Feed it to a dedicated REF2VA reference
+input and define what to retain in retention_analysis.
+
+
+5. HOW TO WRITE EACH FIELD
+
+Scene / summary
+
+State who, where, when, the dramatic situation, and the intended emotional temperature.
+Use observable details. "A guarded courier waits on a wet platform before sunrise" is
+more useful than "make an epic cinematic scene."
+
+Timed shot list / detailed_description
+
+Write events in order. Use a few readable beats and leave settling time at the end. If a
+ten-second shot contains dialogue, a large camera move, several prop interactions and a
+lighting transformation, simplify it.
+
+Acting and motion
+
+Order body mechanics: eyes react, breath changes, weight shifts, the hand moves, contact
+happens. Small controlled actions usually preserve identity better than simultaneous
+full-body choreography.
+
+Dialogue
+
+Attach every exact line to a stable subject label. Example:
+
+<Subject 1> (S1): <d>[English] Keep the engine running.</d>
+
+Keep dialogue short enough for the chosen chunk. Describe non-verbal reactions outside
+the dialogue tag.
+
+Camera
+
+Choose one main camera idea and define framing, height, direction and speed. State "no
+cut" when continuity matters. Avoid combining a push-in, orbit, crane, zoom and handheld
+move in the same short shot.
+
+Production sound
+
+Write diegetic sound chronologically: ambience, contact effects, movement, dialogue and
+space. Match loudness, perspective and reverberation to camera distance.
+
+Non-diegetic music
+
+Describe only score heard by the audience. Say "None" when no score is wanted. Do not
+duplicate visible performed music here; visible performance belongs in the soundscape.
+
+Continuity safeguards
+
+Use concrete, shot-specific risks: no duplicate performer, no wardrobe change, no early
+arrival at Picture 2, no sudden cut, no text or logo. A huge generic negative list can
+weaken the main instructions.
+
+
+6. MANUAL, GUIDED, AND AI REWRITE
+
+Manual hides field tips and keeps the node as a clean screenplay desk.
+
+Guided keeps the field-specific checklist visible. It is the best starting mode.
+
+AI Rewrite treats each filled field as a rough idea and rewrites those same fields into
+production-ready MiniMax H3 English. Empty fields remain empty. Supported engines include:
+
+- Ollama / local
+- OpenAI-compatible endpoints
+- Google Gemini
+- Anthropic
+
+Recommended procedure:
+
+1. Write the idea yourself in every field that matters.
+2. Select AI Rewrite and the provider.
+3. Rewrite the filled fields.
+4. Read every result, correct unwanted inventions, and check reference labels.
+5. Save the project before injection or queueing.
+
+Ollama is the privacy-friendly local option. Cloud API keys are not saved in the workflow,
+but they are sent to the selected provider for the request. Use a low creativity setting
+for technical continuity and a slightly higher value only for exploratory wording.
+
+
+7. SAVE, LOAD, AND VERSION PROMPT PROJECTS
+
+Save Project downloads an .iamccs-h3-prompt.json file containing the structured fields,
+selected mode, injection target and merge policy. Load Project restores that editable
+state. The saved project is not a rendered video and does not embed reference media.
+
+Use descriptive names such as:
+
+project_sequence_shot_mode_revision
+
+Example:
+
+night_train_seq02_shot04_fl2va_r03
+
+Save a new revision after a major reference change, timing change or rewrite pass.
+
+
+8. GLOBAL OR LOCAL PROMPT?
+
+Use Global Prompt for facts shared by the whole board: subject identity, visual language,
+world rules, lens family, lighting logic, sound perspective and persistent exclusions.
+
+Use Local Prompt for what changes inside one trimmed chunk: the action, performance beat,
+camera move, exact dialogue, sound event and the destination keyframe.
+
+For a long FL2VA chain, a strong division is:
+
+- Global: persistent identity, wardrobe, environment, palette and overall audio language.
+- Local 1: action from keyframe A to B.
+- Local 2: action from keyframe B to C.
+- Local 3: action from keyframe C to D.
+
+The last frame of one chunk should be extracted before interpolation and upscale, then
+used as the next chunk's opening bridge. Post-processing frames are delivery frames, not
+the continuity authority.
+
+
+9. QUICK TROUBLESHOOTING
+
+The prompt does not appear in Shotboard
+
+- Confirm cine_linx is connected from Prompter to MiniMax Shotboard.
+- Press INJECT -> SHOTBOARD and read the status message.
+- Reload ComfyUI once if the Shotboard UI bridge is not ready.
+- Verify that the workflow contains only one intended MiniMax Shotboard or place the
+  Prompter close to the target board.
+
+The standalone workflow says no Shotboard was found
+
+- This is normal if you press Inject in the Official Supporters workflow. The direct
+  final_prompt cable is the active path; simply queue after editing.
+
+Reference identity is weak
+
+- Use a clean, high-information image without a crowded collage.
+- Assign exactly what each Picture contributes in retention_analysis.
+- Start with ref_image_size = match. Try max only after the native graph works and when
+  memory/time allow it.
+- Avoid asking one picture to define identity, a different costume, an unrelated pose and
+  a new location simultaneously.
+
+FL2VA cuts or morphs
+
+- Request one continuous physical path.
+- Reduce incompatible differences between the boundary images.
+- Reach Picture 2 only near the end.
+- Split an impossible transformation into two shorter chunks with an intermediate frame.
+
+Generation is too slow
+
+- Test the native H3 output before LTX, RTX super-resolution or frame interpolation.
+- Reduce native canvas or duration, then upscale the accepted result.
+- Pre-resize oversized reference images and use the Area filter for photographic
+  downscaling.
+- Live TAEH3 preview shows progress; it does not speed up sampling.
+
+
+10. FINAL PRE-FLIGHT CHECK
+
+- Correct H3 mode and matching model family selected.
+- Reference labels match connection order.
+- Timeline keyframes are not confused with REF2VA evidence.
+- Action, camera and dialogue fit the duration.
+- Global information is persistent; local information belongs to its chunk.
+- Dialogue has an explicit speaker.
+- Diegetic sound and score are separated.
+- Final prompt reviewed after any AI rewrite.
+- Project saved before queueing.
+- Native generation approved before expensive post-processing.
+
+
+IAMCCS Prompter and IAMCCS-authored node code are distributed under GPL-3.0-or-later.
+Third-party ComfyUI nodes and model files retain their respective licenses.

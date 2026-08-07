@@ -120,6 +120,11 @@ _VAE_DECODE_MODES = (
     "high_vram",
 )
 
+_LATENT_UPSCALE_MODEL_FALLBACKS = (
+    "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+    "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+)
+
 try:
     import folder_paths  # type: ignore
 
@@ -130,11 +135,11 @@ try:
         if "melband" in str(name).lower() or "roformer" in str(name).lower()
     )
 except Exception:
-    _LATENT_UPSCALE_MODEL_NAMES = (
-        "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
-        "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
-    )
+    _LATENT_UPSCALE_MODEL_NAMES = _LATENT_UPSCALE_MODEL_FALLBACKS
     _MELBAND_MODEL_NAMES = ("MelBandRoformer_fp32.safetensors",)
+
+if not _LATENT_UPSCALE_MODEL_NAMES:
+    _LATENT_UPSCALE_MODEL_NAMES = _LATENT_UPSCALE_MODEL_FALLBACKS
 
 if not _MELBAND_MODEL_NAMES:
     _MELBAND_MODEL_NAMES = ("MelBandRoformer_fp32.safetensors",)
@@ -389,8 +394,19 @@ class _IAMCCS_TaeltxOuterSampleWrapper:
             try:
                 if x0 is not None:
                     now = time.time()
-                    x0_vid = x0
-                    if video_shape is not None:
+                    # Since ComfyUI 49a74228 callbacks receive a NestedTensor
+                    # when sampling combined video/audio latents. Older builds
+                    # still provide the packed tensor, so support both layouts.
+                    if bool(getattr(x0, "is_nested", False)):
+                        nested_tensors = getattr(x0, "tensors", None)
+                        if nested_tensors is None and callable(getattr(x0, "unbind", None)):
+                            nested_tensors = x0.unbind()
+                        if not nested_tensors:
+                            return
+                        x0_vid = nested_tensors[0]
+                    else:
+                        x0_vid = x0
+                    if not bool(getattr(x0, "is_nested", False)) and video_shape is not None:
                         cut = math.prod(video_shape[1:])
                         x0_vid = x0[:, :, :cut].reshape([x0.shape[0]] + list(video_shape)[1:])
                     if num_keyframes > 0 and x0_vid.shape[2] > num_keyframes:

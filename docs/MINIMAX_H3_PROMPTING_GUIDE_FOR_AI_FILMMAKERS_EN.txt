@@ -1,0 +1,660 @@
+MINIMAX H3 PROMPTING FOR AI FILMMAKERS
+Practical T2VA, I2VA, FL2VA, and REF2VA patterns, with audio and continuity tips
+
+Version: August 2026
+
+
+1. WHAT MAKES AN H3 PROMPT DIFFERENT
+
+MiniMax H3 is best treated as an audiovisual timeline generator, not as an image model
+that happens to output several frames. A useful prompt describes what can be seen and
+heard as time advances. It should establish the subject, action, camera, environment,
+sound, and the intended relationship to any supplied image, video, or audio reference.
+
+The most reliable prompts are concrete and chronological. They explain observable
+changes instead of using abstract goals such as "make it cinematic" or "keep it
+consistent." Cinematic adjectives can still be useful, but they should support clear
+instructions about composition, motion, light, editing, dialogue, and sound.
+
+Use the correct task family:
+
+- T2VA: text creates the complete video and audio timeline.
+- I2VA: one image defines the target at the beginning; H3 develops motion from it.
+- FL2VA or FFLF: two images define the first and last states; H3 creates a continuous
+  path between them.
+- L2VA: a last-frame image defines where the generated action must finish.
+- REF2VA: images, video, and audio can define subjects, appearance, motion, editing,
+  voice, sound, or keyframes without necessarily becoming the first frame.
+
+Do not confuse a subject reference with a keyframe. A subject reference says who or
+what should remain recognizable. A picture used as a keyframe also constrains framing,
+pose, environment, and placement at a particular time.
+
+
+2. THE CORE PROMPT DESIGN METHOD
+
+Build the prompt in five passes.
+
+Pass 1 - State the timeline contract
+
+For image-conditioned work, state where each key image belongs on the target timeline.
+In I2VA, the first image belongs at 0.00 seconds. In FL2VA, state that Picture 1 is the
+opening state and Picture 2 is the final state, including the exact final timestamp.
+For a 243-frame output at 24 fps, the visible timeline is 10.125 seconds, normally
+written as 10.13 seconds.
+
+Pass 2 - Describe the shot as observable events
+
+Write what changes, in order. Include actions, reactions, object interactions,
+environmental changes, and the destination state. Avoid repeatedly redescribing the
+starting image. In FL2VA, the intermediate transformation is the main creative task.
+
+Pass 3 - Direct the camera
+
+Name the move, its speed, and its magnitude when those details matter. Useful terms
+include slow push-in, rapid pull-back, left pan, right truck, pedestal down, handheld
+tracking, smooth arc, static locked shot, controlled shake, POV, and roll. Also state
+whether the camera follows the subject or lets the subject move inside a fixed frame.
+
+Pass 4 - Design the sound
+
+Separate three things:
+
+1. Dialogue or narration, attached to the correct speaker.
+2. Diegetic ambience and effects that belong inside the scene.
+3. Non-diegetic music added for the audience.
+
+This prevents dialogue, ambience, and music from competing or being described twice.
+
+Pass 5 - Remove contradictions
+
+Check that the requested action fits the duration, camera instructions do not conflict,
+speaker identities remain stable, and reference roles are not ambiguous. Ten seconds
+usually supports one developed shot, two simple shots, or three very short beats. It is
+rarely enough for several complex actions plus multiple camera changes and long speech.
+
+
+3. MODE-SPECIFIC STRUCTURES
+
+3.1 T2VA
+
+Recommended structure:
+
+integrated_multimodal_description:
+[Shot 1] Subject, setting, action, camera, lighting, and any dialogue.
+[Shot 2] At 00:SS.mmm, describe an explicit cut only if one is really needed.
+
+overall_soundscape:
+Ambient sound, synchronized physical effects, room tone, and non-verbal vocal sounds.
+
+non_diegetic_music:
+Instrumentation, tempo, pulse, energy curve, and ending; or N/A.
+
+T2VA example - 10-second landscape shot
+
+integrated_multimodal_description:
+[Shot 1] At blue hour, a lone bicycle courier in a yellow raincoat waits beneath a
+flickering tram-stop sign on a rain-polished street. The camera begins in a wide static
+composition, then performs a very slow push-in as an empty tram glides behind him. He
+checks the handwritten address on a damp envelope, hears a distant bell, and looks up
+with sudden recognition. Reflections stretch across the road while the push-in settles
+on a medium close-up. He does not speak. Natural wet-night contrast, realistic motion,
+restrained expressions, no cut.
+
+overall_soundscape:
+Steady light rain, soft tire hiss on wet asphalt, tram motor and rail vibration passing
+behind the courier, one distant bicycle bell, subtle coat movement, continuous city room
+tone. No dialogue.
+
+non_diegetic_music:
+Sparse low piano notes and a quiet sustained cello texture, approximately 62 BPM, slowly
+building until the courier looks up, then ending without a dramatic hit.
+
+
+3.2 I2VA
+
+Start by making the time alignment unambiguous: Picture 1 is the complete visual state
+at 0.00 seconds. Then describe how motion grows out of that state. Do not ask the model
+to recreate a different opening composition.
+
+I2VA example
+
+Picture 1 defines the full target frame at 0.00 seconds.
+
+integrated_multimodal_description:
+[Shot 1] Continue naturally from Picture 1. The woman initially remains still while a
+light breeze moves only the loose strands of her hair and the linen curtain behind her.
+She slowly turns toward the open window, lifts the cup with her right hand, and smiles
+at something outside the frame. The camera makes a restrained six-second arc to the
+right, preserving her identity, clothing, window placement, and warm morning light.
+During the final seconds the camera becomes still and she takes one small sip. One
+continuous shot, realistic hand motion, no sudden zoom.
+
+overall_soundscape:
+Quiet apartment room tone, curtain fabric, distant morning traffic, porcelain cup
+touching the saucer, one soft breath.
+
+non_diegetic_music:
+N/A.
+
+
+3.3 FL2VA / FFLF
+
+FL2VA works best as a single continuous shot. First establish Picture 1 at 0.00 seconds
+and Picture 2 at the final target time. Then describe the physical and camera path that
+connects them. The model needs the middle of the action, not another description of the
+two endpoints.
+
+FL2VA example - 243 frames at 24 fps
+
+Picture 1 is the complete opening state at 0.00 seconds. Picture 2 is the complete final
+state at 10.13 seconds.
+
+integrated_multimodal_description:
+[Shot 1] Beginning exactly from Picture 1, the child releases the red paper boat into
+the narrow stream and walks beside it. The camera tracks smoothly at the child's waist
+height, moving forward and slightly left while keeping the boat in the lower foreground.
+Water speed increases gradually; the child takes three quick steps and reaches toward
+the boat without touching it. Between seconds seven and nine the tracking move curves
+around the child, allowing the stone bridge and evening lanterns to enter their final
+positions. Motion decelerates during the last second and resolves exactly into Picture
+2, preserving the child's face, coat, boat color, weather, and direction of travel. One
+continuous shot, no cut, no teleportation, no sudden change of lens.
+
+overall_soundscape:
+Flowing shallow water, small paper splashes, quick footsteps on damp stones, quiet wind
+under the bridge, distant evening birds.
+
+non_diegetic_music:
+Gentle pizzicato strings with a light wooden flute, playful but understated, slowing and
+resolving as the final frame is reached.
+
+FL2VA troubleshooting:
+
+- If the ending arrives too early, reduce the number of actions and describe a gradual
+  transition with a final one-second settling phase.
+- If identity changes, emphasize the invariant identity and clothing once, then simplify
+  the action. Repeating the same identity sentence in every beat usually adds noise.
+- If the model cuts between images, explicitly request one continuous shot and describe
+  a camera path that can physically connect both compositions.
+- If the endpoints are too different to connect, insert an intermediate generated
+  keyframe and run two simpler chunks instead of forcing an impossible transformation.
+
+
+3.4 L2VA
+
+L2VA asks H3 to invent a plausible earlier state and converge on the supplied final
+image. Describe the destination timing and the approach to it. Avoid overconstraining
+the unseen beginning.
+
+L2VA example
+
+Picture 1 defines the complete target frame at 10.13 seconds.
+
+integrated_multimodal_description:
+[Shot 1] A street magician completes a card flourish while the camera performs a slow
+handheld approach through a small audience. Loose cards rotate down through the warm
+stage light. The magician catches the final card, turns it toward the camera, and the
+camera movement progressively stabilizes. During the last two seconds the crowd, hand,
+card, and camera settle naturally into the exact composition of Picture 1. One shot.
+
+overall_soundscape:
+Small crowd reactions, card flicks, fabric movement, distant pedestrian ambience, a
+brief natural cheer as the final card is revealed.
+
+non_diegetic_music:
+N/A.
+
+
+4. FULL-REFERENCE (REF2VA) PROMPTING
+
+Full-reference output is a production specification with six mandatory parts. Write the
+six headings in English and keep this sequence:
+
+subject_definitions
+summary
+retention_analysis
+detailed_description
+overall_soundscape
+non_diegetic_music
+
+English is also the working language inside these sections. Keep another language only
+when it belongs to an exact spoken or sung line inside <d>, or to lettering that must be
+visible in the generated scene. This makes the control language consistent without
+silently translating performance text or signage.
+
+
+4.1 BUILD A REFERENCE REGISTRY BEFORE WRITING THE VIDEO
+
+The labels form a registry shared by all six sections. Once a label has been assigned,
+its meaning must not drift later in the prompt. Numbers follow connection order inside
+each media category, not the order in which the labels happen to be mentioned.
+
+<Subject N>
+
+Use this for visible content that H3 must recognize and reuse: a person, creature,
+vehicle, prop, costume, room, landscape, interface, visual effect, pose, expression, or
+movement signature. The subject is the reusable concept extracted from an asset, not
+the source file itself. One subject can combine evidence from several inputs, and one
+input can define several distinct subjects.
+
+Example:
+
+<Subject 1> is the rescue pilot whose face and orange flight suit come from <Picture 1>,
+while the controlled limp in her walk is guided by <Video 1>.
+
+<Picture N>
+
+Create a standalone picture label only when the image itself controls a concrete target
+frame or shot plan: an opening frame, final frame, intermediate keyframe, composition
+anchor, or storyboard panel. When an image supplies only identity, clothing, setting, or
+style, cite it inside the appropriate Subject definition and do not give the file a
+second independent role.
+
+Example of a genuine frame anchor:
+
+<Picture 2> is the final-frame target for [Shot 2], fixing the subject positions, camera
+height, and arrangement of the rescue lights.
+
+<Video N>
+
+Use this label for a relationship with the source video as a timeline: direct editing,
+continuation after its ending, preservation of its cut pattern, or borrowing its camera
+and temporal design. A character found inside that video is still defined as a Subject.
+The Video label tracks the source sequence; it does not replace the character label.
+
+<Audio N>
+
+Use this for an enabled standalone audio source or an explicitly selected audio track
+from a reference video. It may supply the final signal, a selected passage, a voice,
+lyrics, beat, ambience, effects, or a general sonic character. A video that happens to
+contain sound does not automatically create an Audio label. The audio must have a real
+job in the requested result.
+
+Picture, Video, and Audio counters are independent. For example, <Video 1> and <Audio 2>
+may originate from the same uploaded file. Their unequal numbers do not imply unrelated
+sources. Mention their shared provenance only when the relationship would otherwise be
+unclear.
+
+If an Audio reference controls a visible speaker's voice, bind it to that already
+planned speaker:
+
+<Audio 1> is a vocal-character reference for <Subject 2> (S1), guiding pitch, grain,
+breath spacing, and restrained delivery without supplying the words.
+
+Do not create a fresh speaker number inside an Audio definition. Speaker IDs are based
+on the order of actual vocal events in the target video.
+
+
+4.2 CLASSIFY THE JOB IN THE SUMMARY
+
+The summary begins with one bracketed task declaration. Combine multiple roles inside
+the same brackets with plus signs:
+
+[reference generation]
+[video continuation + keyframe completion]
+[video editing + audio reuse]
+[reference generation + audio reference]
+
+Choose task roles by function rather than by file extension:
+
+- keyframe completion: a picture must become a specific target frame.
+- reference generation: an asset guides identity, environment, style, action, camera,
+  storyboard logic, or sound without being directly copied or edited.
+- video editing: the output is a modified version of an existing source video.
+- video continuation: the output begins after, resumes, or extends a source video.
+- audio reuse: all or part of an existing signal remains directly audible.
+- audio reference: only properties such as voice, cadence, beat, musical language, or
+  sound texture guide newly generated audio.
+
+An input video used only for camera energy is reference generation, not video editing.
+Likewise, an audio file used only for timbre is audio reference, not audio reuse. When a
+source video is genuinely edited and its soundtrack remains, declare both video editing
+and audio reuse. The summary may use only labels already introduced in
+subject_definitions.
+
+
+4.3 WRITE RETENTION ANALYSIS AS A TESTABLE CONTRACT
+
+This section records what the output owes to every registered label. It should not
+retell the plot. Include shot scope or frame role when useful, followed by exactly one
+relationship marker and a concrete explanation.
+
+Visual relationship markers:
+
+- fully_preserved: all defining features or the entire declared role remain intact.
+- partially_preserved: the same content remains identifiable, but declared features are
+  intentionally altered or omitted.
+- attribute_transfer: a selected property is applied to a different identifiable target.
+- weak_reference: only a broad category, atmosphere, composition, or stylistic echo is
+  requested.
+
+Audio relationship markers:
+
+- fully_copy: the complete supplied signal becomes the complete final soundtrack.
+- partially_copy: only a time range or layer is reused, or copied sound is combined with
+  newly generated material.
+- reference: the signal guides specified audible properties without being copied.
+- weak_reference: only a general sonic family or mood is borrowed.
+
+Example entries:
+
+<Subject 1> (appears in [Shot 1] and [Shot 2]): fully_preserved - facial anatomy, age,
+silver pressure suit, and asymmetric haircut remain unchanged.
+<Picture 2> ([Shot 2] final frame): fully_preserved - the final composition, camera
+height, and relative subject placement are matched.
+<Video 1> (camera acceleration): weak_reference - only the rise-and-settle rhythm is
+echoed; its actors, location, palette, and choreography are excluded.
+<Audio 1>: reference - vocal color and measured phrasing guide newly spoken dialogue;
+the source waveform and original words are not carried over.
+
+Judge retention only against the role declared in subject_definitions. New story action
+is not a fidelity loss unless it changes something that the registry promised to keep.
+Do not place (S1), (S2), or other speaker IDs in retention_analysis.
+
+
+4.4 MAKE DETAILED DESCRIPTION A PLAYABLE TIMELINE
+
+For a generation task, a useful detailed_description is often about 350 to 500 English
+words. This is a working range, not a quota. Dialogue must fit the real duration, and a
+simple direct edit may need much less prose. A one-shot clip still needs enough spatial,
+lighting, movement, camera, and sound information to remove ambiguity.
+
+Open with one or two sentences establishing the production language: realism or
+stylization, lens behavior, palette, lighting logic, and editorial tone. Then write the
+actual timeline:
+
+- [Shot 1] has no timestamp.
+- Every later cut starts with [Shot N] At MM:SS.mmm, ...
+- Introduce a label when its referenced property becomes visible or audible.
+- At first appearance, establish the subject's frame position, visible reference traits,
+  state, and action.
+- Cite a Picture naturally when a shot starts from, crosses, or ends on that frame.
+- Cite a Video where editing, continuation, timing, or motion borrowing takes effect.
+- Cite an Audio where its copied or referenced signal becomes active.
+- Describe sound synchronized with a specific event inside the relevant shot.
+
+Do not reduce this field to a plot synopsis or a list of reference mappings. The prose
+must be playable: current composition, subject placement, light, action, state change,
+camera behavior, audible events, and the timing of each reference contribution.
+
+
+4.5 COMPLETE ORIGINAL REF2VA EXAMPLE
+
+The following example uses a new setting and story. Its purpose is to demonstrate label
+scope, task classification, retention, speaker binding, a motion reference, and a final
+frame anchor without reproducing the subject matter of another guide.
+
+subject_definitions:
+<Subject 1> is the marine robotics engineer whose face, short black curls, copper-rimmed
+glasses, teal coveralls, and compact build derive from <Picture 1>.
+<Subject 2> is the damaged yellow survey drone shown in <Picture 3>, including its round
+front camera, two folded manipulator arms, scratched shell, and blinking blue status bar.
+<Picture 2> is the required final frame of [Shot 2], establishing <Subject 1> kneeling
+beside <Subject 2>, the open pressure door behind them, and the green emergency light.
+<Video 1> supplies only the camera's slow descending arc and its final two-second settle.
+<Audio 1> is a voice-character reference for <Subject 1> (S1), guiding a low contralto
+timbre, careful articulation, and quiet tension without copying the original recording.
+
+summary:
+[reference generation + keyframe completion + audio reference] The target is a
+ten-second, two-shot recovery scene in an oceanographic pressure lab. <Subject 1>
+retrieves <Subject 2> after a test-chamber alarm, reaches the composition fixed by
+<Picture 2>, borrows only the camera cadence of <Video 1>, and speaks new dialogue using
+the vocal character referenced from <Audio 1>.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1] and [Shot 2]): fully_preserved - facial structure,
+short curls, copper-rimmed glasses, teal coveralls, body proportions, and apparent age
+remain stable.
+<Subject 2> (appears in [Shot 1] and [Shot 2]): fully_preserved - yellow scratched shell,
+front camera, paired manipulator arms, and blue status bar remain recognizable.
+<Picture 2> ([Shot 2] final frame): fully_preserved - final framing, engineer and drone
+positions, open pressure door, and green emergency-light direction are matched.
+<Video 1> (camera path in [Shot 2]): weak_reference - only its descending arc,
+deceleration, and settling rhythm are echoed; source subjects and scenery are excluded.
+<Audio 1>: reference - contralto timbre, articulation, breath spacing, and contained
+tension guide new speech; neither the waveform nor its original words are copied.
+
+detailed_description:
+The target uses grounded near-future realism, cool steel surfaces, precise practical
+lighting, and restrained camera movement. Condensation and warning lights provide color
+without turning the lab into a glossy science-fiction set.
+[Shot 1] A waist-high locked shot looks across an oceanographic pressure laboratory.
+The circular chamber window occupies the left third of the frame; pipes, wet steel, and
+a narrow drainage grate recede behind it. Red warning lamps pulse once per second.
+<Subject 1>, preserving the short black curls, copper-rimmed glasses, teal coveralls,
+compact proportions, and facial identity derived from <Picture 1>, braces both hands on
+the chamber wheel. She turns it through half a rotation, shoulders tightening against
+the resistance. The seal releases with a compressed metallic sigh. Cold vapor rolls
+around her boots as she opens the heavy door just far enough to enter. Her glasses catch
+one red pulse, but her eyes remain visible. The room alarm stops when the lock clears,
+leaving pump vibration, escaping pressure, and water ticking onto the grate.
+[Shot 2] At 00:04.200, the camera cuts inside the chamber to a medium-wide view. On the
+wet floor, <Subject 2> retains its scratched yellow shell, round front camera, folded
+manipulator arms, and blinking blue status bar from <Picture 3>. <Subject 1> steps into
+frame, lowers into a controlled kneel, and checks the drone without changing its shape.
+The camera adopts only the broad movement language of <Video 1>: it begins slightly
+above shoulder height, descends through a slow clockwise arc, and reduces speed as she
+turns the drone's front camera toward her. Bound to the vocal character of <Audio 1>,
+<Subject 1> (S1) exhales and says, <d>[English] You found the current. Now show me where
+it goes.</d> Her low contralto delivery is deliberate and tense; her lips articulate the
+new line exactly, then close. The drone's blue bar changes from a broken blink to a
+steady glow. During the final two seconds, green emergency light replaces the red pulse,
+the camera becomes completely still, and subject motion decelerates into <Picture 2>:
+the engineer kneeling beside the drone, the pressure door open behind them, and both
+figures occupying the prescribed final positions. No extra cut and no new character.
+
+overall_soundscape:
+Low circulation pumps, periodic alarm pulses during [Shot 1], metal wheel strain,
+pressure release, vapor, water on the drainage grate, coverall movement, a quiet drone
+servo, and newly generated speech from <Subject 1>. The alarm ends before [Shot 2]; no
+source audio from <Audio 1> is directly audible.
+
+non_diegetic_music:
+A sparse five-note pattern on muted glass percussion begins after the chamber opens. A
+single low synthesized tone joins as the drone's status bar stabilizes, then both layers
+resolve softly without a trailer-style impact.
+
+
+5. DIALOGUE, VOICEOVER, LYRICS, AND AUDIO CONTROL
+
+Assign (S1), (S2), and later IDs according to the order of real vocal events in the
+target video. A referenced person keeps both identities when speaking: <Subject 2> (S1)
+identifies the visible subject and the voice source. Reuse the same ID in every later
+spoken or off-screen event from that speaker.
+
+Put exact words inside <d> and identify their original language. Preserve wording and
+language rather than translating or improving the line. If a referenced recording has
+an unintelligible span that must be retained, use [unclear] instead of guessing. Basic
+punctuation should make the performance readable; decorative symbols, emoji, and
+repeated ornamental punctuation should not be treated as spoken content.
+
+Good:
+
+<Subject 1> (S1) looks at the mechanic and says,
+<d>[Italian] Mi avevi detto che il motore avrebbe retto fino all'alba.</d>
+
+Weak:
+
+The man complains that the engine failed.
+
+For voiceover, identify a stable off-screen narrator and state that visible mouths stay
+closed unless lip synchronization is intended. When one sentence crosses an edit, use
+<scenetrans> with a clear continuity instruction. When speech is deliberately cut by an
+edit or by the end of the clip, use <cutoff>. Do not add these tokens to ordinary lines.
+
+Distinguish two kinds of voice use:
+
+- Direct reuse preserves the source words or waveform and must be declared as audio
+  reuse with fully_copy or partially_copy.
+- Voice reference generates a new performance with selected timbre, rhythm, or emotion;
+  the original words must not leak into the new line.
+
+If a sung or spoken phrase exists only inside a soundtrack that is being copied, cite
+the relevant <Audio N> as its source. Do not invent (Sx) unless a concrete visible or
+off-screen person, character, or narrator actually produces that voice in the target.
+
+Visible text follows the same fidelity rule as dialogue. Keep the intended language and
+write the exact sign, interface label, caption, or inscription in double quotes. Do not
+translate it merely because the rest of the control prompt is English.
+
+Keep localized sound synchronized with the visible event that causes it. Put that event
+inside detailed_description. Use overall_soundscape for the continuous environment and
+physical audio bed, not for repeating complete dialogue. Use non_diegetic_music only for
+score that the characters cannot hear. Diegetic music, such as a radio playing inside
+the room, belongs to the scene description and soundscape.
+
+When one reference audio contains both ambience and audience-only music, describe each
+relationship in its proper output section. State whether each layer is copied or merely
+referenced; do not collapse all audio behavior into one vague sentence.
+
+
+6. CAMERA AND EDITING LANGUAGE THAT PRODUCES BETTER RESULTS
+
+Pair broad style with measurable behavior.
+
+Instead of:
+"A cinematic dynamic camera."
+
+Use:
+"A slow push-in from wide to medium over seven seconds, followed by a stable three-second
+hold; no pan and no cut."
+
+Instead of:
+"The camera follows him dramatically."
+
+Use:
+"A shoulder-height handheld tracking shot follows two meters behind him, with restrained
+vertical movement and one small lateral correction as he turns left."
+
+Avoid stacking incompatible moves. A simultaneous static shot, orbit, zoom, and rapid
+tracking instruction gives the model no clear priority. If the move changes, sequence it:
+first track, then arc, then settle.
+
+For cuts, make the transition explicit and timestamp every shot after Shot 1. Do not
+timestamp Shot 1. In FL2VA, prefer no cuts unless the input images and creative goal
+clearly require an edit rather than a continuous transition.
+
+
+7. REFERENCE DISCIPLINE
+
+More references do not automatically create more consistency. Every reference consumes
+attention and can introduce competing composition, lighting, age, wardrobe, or motion
+signals. Start with the minimum set that uniquely defines the goal.
+
+Recommended hierarchy:
+
+1. One strong identity image.
+2. A second picture only if a different angle, costume detail, or final keyframe is
+   genuinely required.
+3. Video only when temporal motion, camera behavior, editing, or continuation is needed.
+4. Audio only when voice, music, ambience, or exact sound reuse is needed.
+
+For constrained hardware, use reference image sizing that matches the target canvas for
+normal work. A maximum-size reference may improve small identity details in some cases,
+but it also creates substantially more reference tokens and increases sampling cost.
+
+
+8. LONG-FORM CONTINUITY WITH CHUNKS
+
+H3 generates one conditioned clip at a time. Its shot syntax describes events inside
+that clip; it is not a separate per-frame prompt-relay system. For a long sequence,
+design several H3 generations and join them through visual and audio continuity.
+
+A robust extension pattern is:
+
+1. Generate chunk A.
+2. Extract a clean final frame before any interpolation or upscale.
+3. Use that frame as Picture 1 at 0.00 seconds for chunk B.
+4. Keep a compact continuity block listing identity, clothing, weather, direction of
+   movement, camera height, lens character, lighting, and unresolved action.
+5. Write a new local action for chunk B instead of copying the complete prompt from A.
+6. Carry room tone or music across the edit with a short audio crossfade.
+7. Inspect the seam before running RIFE or upscale.
+
+For stricter destination control, make chunk B an FL2VA generation: the previous final
+frame becomes its opening frame and a planned storyboard image becomes its final frame.
+The intermediate action remains local to that chunk.
+
+Do not regenerate long dialogue independently in every chunk and expect phase-perfect
+continuity. For a long spoken passage, create or retain a master speech track, divide it
+at linguistic pauses, and use each segment as the corresponding audio condition when
+the chosen REF2VA setup supports it. Preserve the same speaker definition across chunks
+and use short audio crossfades at non-speech boundaries.
+
+
+9. A PRACTICAL 10-SECOND PROMPT CHECKLIST
+
+Before queueing a 243-frame, 24 fps generation, verify:
+
+- The selected mode matches the loaded model and conditioning node.
+- Picture labels match connection order.
+- The first and final timestamps match the actual frame count.
+- The prompt contains one achievable action arc.
+- The camera path is physically continuous.
+- Any cut after Shot 1 has a timestamp.
+- Every speaking subject has one stable speaker identifier.
+- Dialogue words appear once and are exact.
+- Ambience, effects, and music are not duplicated.
+- REF2VA retention roles say exactly what is preserved and what is only borrowed.
+- There are no references or labels that are not connected.
+- Technical output settings such as resolution, frame count, sampler, interpolation,
+  and upscale remain in workflow controls, not in the creative prompt.
+
+
+10. COMMON FAILURE PATTERNS AND REWRITES
+
+Failure: The model ignores the last frame.
+Rewrite: Reduce intermediate events, state the final time precisely, and reserve the
+last second for deceleration and convergence to the target composition.
+
+Failure: Character identity drifts during fast motion.
+Rewrite: Simplify the fastest action, keep the face visible at a workable scale, define
+the invariant identity once, and avoid contradictory face references.
+
+Failure: Camera movement looks random.
+Rewrite: Specify one primary move, direction, duration, magnitude, and ending behavior.
+
+Failure: Audio becomes crowded.
+Rewrite: Shorten dialogue, move ambience and effects to overall_soundscape, and remove
+music unless it serves a clear purpose.
+
+Failure: Reference video overwrites the intended character or location.
+Rewrite: Mark motion and camera cadence as attribute_transfer while making reference
+performer, wardrobe, set, and color weak_reference.
+
+Failure: A ten-second prompt produces rushed storytelling.
+Rewrite: Choose one scene objective, one main action, and one emotional change. Move the
+next event into a second chunk.
+
+
+11. FINAL WORKING PRINCIPLES
+
+1. Prompt a timeline, not a poster.
+2. Give every reference one explicit job.
+3. In FL2VA, describe the path between images.
+4. Prefer one coherent camera move over a list of cinematic terms.
+5. Treat dialogue as exact production text.
+6. Keep ambience, effects, and non-diegetic music separate.
+7. Use timestamps for real cuts, not for every sentence.
+8. Generate the simplest stable base clip before interpolation or upscale.
+9. For long-form work, preserve continuity state between chunks while changing the local
+   action prompt.
+10. Test speed patches with the same prompt and seed because acceleration can change
+    motion trajectories and fine detail.
+
+
+PRIMARY SOURCES
+
+MiniMax H3 official base-video prompt writing guide:
+https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_base_en.md
+
+MiniMax H3 official full-reference prompt writing guide:
+https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md
+
+ComfyUI SolAttn implementation and usage notes:
+https://github.com/kijai/ComfyUI-SolAttn_triton
+
+Spectrum for MiniMax H3 implementation and quality notes:
+https://github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3

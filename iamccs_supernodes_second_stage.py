@@ -5,15 +5,23 @@ from .iamccs_supernodes_linx import SUPERNODE_LINX_TYPE, build_stage_linx_payloa
 
 _log = logging.getLogger("IAMCCS.SuperNodes.SecondStage")
 
+_LATENT_UPSCALE_MODEL_FALLBACKS = (
+    "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
+    "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
+)
+
 try:
     import folder_paths  # type: ignore
 
     _LATENT_UPSCALE_MODEL_NAMES = tuple(folder_paths.get_filename_list("latent_upscale_models"))
 except Exception:
-    _LATENT_UPSCALE_MODEL_NAMES = (
-        "ltx-2.3-spatial-upscaler-x2-1.1.safetensors",
-        "ltx-2.3-spatial-upscaler-x2-1.0.safetensors",
-    )
+    _LATENT_UPSCALE_MODEL_NAMES = ()
+
+# New/clean ComfyUI installations can expose the model category correctly
+# while returning an empty combo. Keep INPUT_TYPES serializable and let the
+# user replace the suggested filename after installing their chosen model.
+if not _LATENT_UPSCALE_MODEL_NAMES:
+    _LATENT_UPSCALE_MODEL_NAMES = _LATENT_UPSCALE_MODEL_FALLBACKS
 
 
 def _count_sigma_steps(sigmas_text):

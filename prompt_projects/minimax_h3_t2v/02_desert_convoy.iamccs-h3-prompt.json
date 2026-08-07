@@ -1,0 +1,20 @@
+{
+  "schema": "iamccs.minimax_h3.prompter_project",
+  "schema_version": 1,
+  "project_name": "Desert Convoy",
+  "task_mode": "t2va",
+  "injection_target": "global",
+  "writing_mode": "guided",
+  "merge_policy": "replace",
+  "sections": {
+    "scene": "Late afternoon on a vast salt desert. <Subject 1>, a mechanic in a faded red scarf, stands beside a stalled solar rover while a distant dust column approaches.",
+    "shot_list": "0.00-1.20s: wide stillness around the rover. 1.20-3.40s: <Subject 1> notices the dust and closes the engine panel. 3.40s-end: the rover powers on as the approaching convoy resolves in the heat haze.",
+    "acting": "A small glance triggers a practical sequence: close the panel, secure the latch, rise and shield the eyes. Keep weight and hand contacts physically grounded.",
+    "dialogue": "<Subject 1> (S1): <d>[English] Right on time.</d>",
+    "light_and_image": "Hard amber side light, pale salt reflections, fine airborne dust, sun-worn fabric and realistic metallic heat shimmer.",
+    "camera": "Begin low beside the rover wheel and perform one measured crane rise into a wider reveal; no cut.",
+    "production_sound": "Dry wind, cooling metal ticks, latch contact, electric motor startup and a distant layered engine rumble.",
+    "non_diegetic_music": "One restrained analog bass note appears with the convoy silhouette, then holds.",
+    "negatives": "No extra vehicles appearing suddenly, no rover deformation, no floating dust indoors, no face drift, no speed ramp, no text or logo."
+  }
+}

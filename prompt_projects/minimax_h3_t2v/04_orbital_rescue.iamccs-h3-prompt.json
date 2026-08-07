@@ -1,0 +1,20 @@
+{
+  "schema": "iamccs.minimax_h3.prompter_project",
+  "schema_version": 1,
+  "project_name": "Orbital Rescue",
+  "task_mode": "t2va",
+  "injection_target": "global",
+  "writing_mode": "guided",
+  "merge_policy": "replace",
+  "sections": {
+    "scene": "In low orbit above a blue planet, <Subject 1>, an astronaut in a practical white EVA suit, is tethered outside a damaged research station while a loose equipment case drifts away.",
+    "shot_list": "0.00-1.30s: establish the astronaut, station hull and drifting case. 1.30-3.40s: <Subject 1> fires one short maneuvering burst and reaches along the tether. 3.40s-end: the glove catches the case handle and rotation settles.",
+    "acting": "Movement is slow and inertial. The torso reacts after each thruster burst, the tether stays under tension and the catch transfers momentum through the arm.",
+    "dialogue": "<Subject 1> (S1): <d>[English] Payload secured.</d>",
+    "light_and_image": "Unfiltered orbital sunlight, deep black space, controlled visor reflections, detailed suit fabric and physically plausible Earth bounce light.",
+    "camera": "One stabilized exterior tracking move parallel to the hull with subtle orbital drift; preserve orientation and never cut.",
+    "production_sound": "Inside-suit breathing, radio compression, short thruster impulses, tether vibration and muted glove contact; exterior space remains silent.",
+    "non_diegetic_music": "A restrained high string harmonic enters during the reach and resolves on the catch.",
+    "negatives": "No gravity-like falling, no flapping cloth, no changing station geometry, no extra limbs, no visor face drift, no lens flare overload, no text."
+  }
+}

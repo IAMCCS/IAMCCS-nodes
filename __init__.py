@@ -172,6 +172,14 @@ from .iamccs_cine_nodes import (
     IAMCCS_CineWorkflowInspector,
 )
 from .iamccs_cine_shotboard_planner_v4 import IAMCCS_CineShotboardPlannerV4
+from .iamccs_minimax_h3_shotboard import (
+    NODE_CLASS_MAPPINGS as IAMCCS_MINIMAX_H3_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as IAMCCS_MINIMAX_H3_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_prompter import (
+    NODE_CLASS_MAPPINGS as IAMCCS_PROMPTER_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as IAMCCS_PROMPTER_NODE_DISPLAY_NAME_MAPPINGS,
+)
 from .iamccs_cine_shotboard_planner_v5_v2v import (
     IAMCCS_CineShotboardPlannerV5V2V,
     IAMCCS_CineShotboardV5V2VRouter,
@@ -777,6 +785,12 @@ NODE_CLASS_MAPPINGS = {
         "IAMCCS_QWEN_VL_FLF_Advanced": IAMCCS_QWEN_VL_FLF_Advanced,
     } if IAMCCS_QWEN_VL_FLF is not None else {}),
 
+    # MiniMax H3 Shotboard (isolated module; no V3/V4 dependency)
+    **IAMCCS_MINIMAX_H3_NODE_CLASS_MAPPINGS,
+
+    # Structured MiniMax H3 prompt authoring (isolated Python + JS files)
+    **IAMCCS_PROMPTER_NODE_CLASS_MAPPINGS,
+
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -1078,6 +1092,11 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **({"IAMCCS_QWEN_VL_FLF":          "QwenVL FLF — First/Last Frame Prompt ??",
         "IAMCCS_QWEN_VL_FLF_Advanced": "QwenVL FLF — First/Last Frame Prompt (Advanced) ??",
     } if IAMCCS_QWEN_VL_FLF is not None else {}),
+
+    # MiniMax H3 Shotboard (isolated module; no V3/V4 dependency)
+    **IAMCCS_MINIMAX_H3_NODE_DISPLAY_NAME_MAPPINGS,
+
+    **IAMCCS_PROMPTER_NODE_DISPLAY_NAME_MAPPINGS,
 
 }
 
