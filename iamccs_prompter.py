@@ -2,10 +2,11 @@
 
 """Structured MiniMax H3 prompt editor and CineLinX injection contract.
 
-The browser editor stores only user-authored project data.  This backend is
-deliberately deterministic: it formats the selected MiniMax prompt structure,
-validates the character budget, and carries an injection request through the
-standard IAMCCS CineLinX socket.  No API key or network service is required.
+The browser editor stores only user-authored project data. The deterministic
+path formats MiniMax prompt sections and carries an injection request through
+CineLinX. The optional assistant is implemented locally in this module and can
+call Ollama or a user-selected compatible provider without wrapping another
+custom-node package.
 """
 
 from __future__ import annotations
@@ -24,8 +25,10 @@ from typing import Any
 SUPERNODE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX"
 CATEGORY = "IAMCCS/MiniMax H3/Prompting"
 PROJECT_SCHEMA = "iamccs.minimax_h3.prompter_project"
-PROJECT_VERSION = 1
+PROJECT_VERSION = 2
 H3_ABSOLUTE_CHAR_LIMIT = 7000
+AI_IMAGE_LIMIT = 4
+AI_IMAGE_MAX_BYTES = 16 * 1024 * 1024
 
 
 MODE_SECTIONS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -121,6 +124,9 @@ def default_project() -> dict[str, Any]:
         "injection_target": "global",
         "writing_mode": "guided",
         "merge_policy": "replace",
+        "ai_direction": "",
+        "ai_scope": "active_field",
+        "ai_visual_roles": {},
         "sections": copy.deepcopy(DEFAULT_SECTIONS),
     }
 
@@ -145,6 +151,10 @@ def _safe_project(value: Any) -> dict[str, Any]:
     sections = source.get("sections")
     if isinstance(sections, dict):
         project["sections"].update({str(key): str(value or "") for key, value in sections.items()})
+    project["ai_direction"] = str(project.get("ai_direction") or "")
+    project["ai_scope"] = str(project.get("ai_scope") or "active_field")
+    visual_roles = project.get("ai_visual_roles")
+    project["ai_visual_roles"] = visual_roles if isinstance(visual_roles, dict) else {}
     project["schema"] = PROJECT_SCHEMA
     project["schema_version"] = PROJECT_VERSION
     return project
@@ -227,24 +237,88 @@ def _merge_text(existing: str, incoming: str, policy: str) -> str:
     return f"{old}\n\n{new}"
 
 
-def _assistant_instruction(task_mode: str, sections: dict[str, str]) -> tuple[str, str]:
+def _normalise_ai_images(value: Any) -> list[dict[str, str]]:
+    images: list[dict[str, str]] = []
+    for item in value if isinstance(value, list) else []:
+        if not isinstance(item, dict) or len(images) >= AI_IMAGE_LIMIT:
+            continue
+        data = str(item.get("data") or "").strip()
+        if data.startswith("data:") and "," in data:
+            header, data = data.split(",", 1)
+            guessed = header[5:].split(";", 1)[0]
+        else:
+            guessed = ""
+        data = re.sub(r"\s+", "", data)
+        if not data:
+            continue
+        estimated_bytes = (len(data) * 3) // 4
+        if estimated_bytes > AI_IMAGE_MAX_BYTES:
+            raise ValueError(f"AI reference image exceeds {AI_IMAGE_MAX_BYTES // (1024 * 1024)} MB")
+        mime_type = str(item.get("mime_type") or guessed or "image/png").strip().lower()
+        if not mime_type.startswith("image/"):
+            mime_type = "image/png"
+        role = str(item.get("role") or "reference").strip().lower()
+        if role not in {"opening", "closing", "identity", "composition", "style", "reference"}:
+            role = "reference"
+        images.append({
+            "data": data,
+            "mime_type": mime_type,
+            "name": str(item.get("name") or f"Picture {len(images) + 1}").strip(),
+            "role": role,
+            "slot": str(item.get("slot") or len(images) + 1),
+        })
+    return images
+
+
+def _assistant_instruction(
+    task_mode: str,
+    sections: dict[str, str],
+    user_direction: str = "",
+    target_keys: Any = None,
+    images: Any = None,
+) -> tuple[str, str]:
     mode = str(task_mode or "t2va").lower()
     if mode not in MODE_SECTIONS:
         mode = "t2va"
     allowed = [key for key, _label in MODE_SECTIONS[mode]]
-    filled = {key: str(sections.get(key, "") or "").strip() for key in allowed}
-    filled = {key: value for key, value in filled.items() if value}
+    rough = {key: str(sections.get(key, "") or "").strip() for key in allowed}
+    filled = {key: value for key, value in rough.items() if value}
+    selected = [str(key) for key in (target_keys if isinstance(target_keys, list) else []) if str(key) in allowed]
+    if not selected:
+        selected = list(filled)
+    if not selected:
+        raise ValueError("Select a MiniMax prompt section or write a rough idea before calling the AI")
+    visuals = _normalise_ai_images(images)
+    mode_rules = {
+        "t2va": "Build the requested event from text. Keep the action chronological, filmable and compatible with one continuous audiovisual clip.",
+        "i2va": "Treat <Picture 1> as the exact opening-frame authority. Animate from it without redesigning identity, wardrobe, composition or screen geography.",
+        "fl2va": "Treat the opening and closing pictures as exact boundary frames. Describe one physically continuous path from the first frame to the last; do not solve the transition with a cut, dissolve or unrelated redesign.",
+        "ref2va": "Use explicit <Picture N>, <Video N>, <Audio N> and <Subject N> references. State what each reference contributes and what must be ignored; preserve the lowercase REF2VA section semantics.",
+    }[mode]
     system = (
-        "You are a professional MiniMax H3 audiovisual prompt editor. Rewrite the user's rough ideas "
-        "into precise, filmable English for MiniMax H3. Return one JSON object only. Its keys must be "
-        f"drawn from {allowed}. Rewrite only keys supplied by the user and do not fill blank sections. "
-        "Preserve intent, identity facts, reference labels, exact dialogue and requested timing. Do not "
-        "invent extra characters, dialogue, brands, camera cuts or story events. Use chronological physical "
-        "action, one coherent camera language, explicit continuity, and separate production sound from "
-        "non-diegetic music. For REF2VA retain the lowercase section semantics and labels such as "
-        "<Picture 1>, <Video 1>, <Audio 1> and <Subject 1>. JSON values must be plain strings."
+        "You are the autonomous IAMCCS MiniMax H3 prompt editor. Improve the user's own direction; do not replace it with a different story. "
+        "Return one JSON object only, with plain-string values and no markdown. Valid keys are "
+        f"{allowed}. Return only the selected keys {selected}; never create a blank or unselected section. "
+        "Write concise production-ready English optimized for MiniMax H3 audiovisual generation. Preserve exact identity facts, reference tags, requested timing, language and quoted dialogue unless the user explicitly asks to change them. "
+        "Use chronological visible action, realistic body mechanics, stable screen geography and one coherent camera language. Prefer one motivated camera move over a list of conflicting moves. "
+        "Separate diegetic ambience, dialogue and contact effects from non-diegetic score. Use <Subject N> consistently and keep dialogue inside <d>[Language] ...</d> with stable speaker labels such as (S1) when those tags are present. "
+        "Do not invent extra characters, products, dialogue, scene changes, cuts, subtitles or logos. Turn negative wishes into concrete continuity safeguards, not vague quality adjectives. "
+        f"Mode rule: {mode_rules} "
+        "When images are attached, analyze only the contribution named by each image role. An opening image governs the first frame; a closing image governs the last frame; identity, composition and style images govern only those named attributes. "
+        "Never mention unavailable media or claim to have seen a detail that is not visible."
     )
-    user = json.dumps({"task_mode": mode, "rough_sections": filled}, ensure_ascii=False, indent=2)
+    if len(system) > 24000:
+        raise RuntimeError("MiniMax assistant system prompt exceeds the 7000-token safety envelope")
+    user = json.dumps({
+        "task_mode": mode,
+        "selected_sections": selected,
+        "user_direction": str(user_direction or "").strip(),
+        "rough_sections": {key: rough[key] for key in selected},
+        "visual_context": [
+            {"slot": item["slot"], "name": item["name"], "role": item["role"]}
+            for item in visuals
+        ],
+    }, ensure_ascii=False, indent=2)
     return system, user
 
 
@@ -273,6 +347,25 @@ def _http_json(url: str, payload: dict[str, Any], headers: dict[str, str], timeo
     return parsed
 
 
+def _http_get_json(url: str, timeout: float = 10.0) -> dict[str, Any]:
+    request = urllib.request.Request(str(url), headers={"Accept": "application/json"}, method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=max(2.0, min(30.0, float(timeout)))) as response:
+            raw = response.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1200]
+        raise RuntimeError(f"Ollama HTTP {exc.code}: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"Ollama connection failed: {exc.reason}") from exc
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("Ollama returned invalid JSON") from exc
+    if not isinstance(parsed, dict):
+        raise RuntimeError("Ollama returned an unsupported response")
+    return parsed
+
+
 def _extract_json_object(text: str) -> dict[str, str]:
     clean = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", str(text or "").strip(), flags=re.I | re.S)
     start = clean.find("{")
@@ -297,12 +390,16 @@ def rewrite_sections_with_ai(
     sections: dict[str, str],
     temperature: float = 0.35,
     timeout: float = 120.0,
+    user_direction: str = "",
+    target_keys: Any = None,
+    images: Any = None,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     provider = str(provider or "ollama").strip().lower()
     model = str(model or "").strip()
     if not model:
         raise ValueError("Select an AI model before rewriting")
-    system, user = _assistant_instruction(task_mode, sections)
+    visual_inputs = _normalise_ai_images(images)
+    system, user = _assistant_instruction(task_mode, sections, user_direction, target_keys, visual_inputs)
     api_key = str(api_key or "").strip()
     if not api_key:
         api_key = {
@@ -320,7 +417,14 @@ def rewrite_sections_with_ai(
                 "model": model,
                 "stream": False,
                 "format": "json",
-                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                "messages": [
+                    {"role": "system", "content": system},
+                    {
+                        "role": "user",
+                        "content": user,
+                        **({"images": [item["data"] for item in visual_inputs]} if visual_inputs else {}),
+                    },
+                ],
                 "options": {"temperature": float(temperature)},
             },
             {},
@@ -331,13 +435,22 @@ def rewrite_sections_with_ai(
         root = str(base_url or "https://api.openai.com/v1").rstrip("/")
         url = root if root.endswith("/chat/completions") else f"{root}/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+        openai_user: Any = user
+        if visual_inputs:
+            openai_user = [{"type": "text", "text": user}] + [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{item['mime_type']};base64,{item['data']}"},
+                }
+                for item in visual_inputs
+            ]
         result = _http_json(
             url,
             {
                 "model": model,
                 "temperature": float(temperature),
                 "response_format": {"type": "json_object"},
-                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": openai_user}],
             },
             headers,
             timeout,
@@ -349,11 +462,16 @@ def rewrite_sections_with_ai(
         encoded_model = urllib.parse.quote(model, safe="-._")
         suffix = f"/models/{encoded_model}:generateContent"
         url = f"{root}{suffix}?key={urllib.parse.quote(api_key)}"
+        gemini_parts: list[dict[str, Any]] = [{"text": user}]
+        gemini_parts.extend(
+            {"inlineData": {"mimeType": item["mime_type"], "data": item["data"]}}
+            for item in visual_inputs
+        )
         result = _http_json(
             url,
             {
                 "systemInstruction": {"parts": [{"text": system}]},
-                "contents": [{"role": "user", "parts": [{"text": user}]}],
+                "contents": [{"role": "user", "parts": gemini_parts}],
                 "generationConfig": {"temperature": float(temperature), "responseMimeType": "application/json"},
             },
             {},
@@ -365,6 +483,19 @@ def rewrite_sections_with_ai(
     elif provider == "anthropic":
         root = str(base_url or "https://api.anthropic.com/v1").rstrip("/")
         url = root if root.endswith("/messages") else f"{root}/messages"
+        anthropic_user: Any = user
+        if visual_inputs:
+            anthropic_user = [
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": item["mime_type"],
+                        "data": item["data"],
+                    },
+                }
+                for item in visual_inputs
+            ] + [{"type": "text", "text": user}]
         result = _http_json(
             url,
             {
@@ -372,7 +503,7 @@ def rewrite_sections_with_ai(
                 "max_tokens": 4096,
                 "temperature": float(temperature),
                 "system": system,
-                "messages": [{"role": "user", "content": user}],
+                "messages": [{"role": "user", "content": anthropic_user}],
             },
             {"x-api-key": api_key, "anthropic-version": "2023-06-01"},
             timeout,
@@ -384,7 +515,11 @@ def rewrite_sections_with_ai(
     rewritten = _extract_json_object(content)
     allowed = {key for key, _label in MODE_SECTIONS.get(str(task_mode).lower(), MODE_SECTIONS["t2va"])}
     supplied = {key for key, value in sections.items() if key in allowed and str(value or "").strip()}
-    filtered = {key: value for key, value in rewritten.items() if key in supplied and value}
+    requested = {str(key) for key in target_keys} if isinstance(target_keys, list) else supplied
+    requested = requested & allowed
+    if not requested:
+        requested = supplied
+    filtered = {key: value for key, value in rewritten.items() if key in requested and value}
     if not filtered:
         raise RuntimeError("The AI did not return any valid filled MiniMax section")
     return filtered, {
@@ -392,6 +527,12 @@ def rewrite_sections_with_ai(
         "model": model,
         "rewritten_sections": sorted(filtered),
         "preserved_blank_sections": sorted(allowed - supplied),
+        "selected_sections": sorted(requested),
+        "visual_references": [
+            {"slot": item["slot"], "name": item["name"], "role": item["role"]}
+            for item in visual_inputs
+        ],
+        "system_prompt_characters": len(system),
     }
 
 
@@ -546,7 +687,7 @@ class IAMCCS_Prompter:
                         "default": "",
                         "multiline": True,
                         "forceInput": True,
-                        "tooltip": "Optional complete draft from H3_Promptor. In Assistant Fill mode it fills only empty structured boxes.",
+                        "tooltip": "Optional structured draft from any text source. In Assistant Fill mode it fills only empty structured boxes.",
                     },
                 ),
             },
@@ -656,6 +797,26 @@ def _register_prompter_routes() -> None:
 
         routes = PromptServer.instance.routes
 
+        @routes.get("/iamccs/prompter/ollama/models")
+        async def iamccs_prompter_ollama_models(request):
+            try:
+                base_url = str(request.query.get("base_url") or "http://127.0.0.1:11434").rstrip("/")
+                payload = await asyncio.to_thread(_http_get_json, f"{base_url}/api/tags", 10.0)
+                models = []
+                for item in payload.get("models") if isinstance(payload.get("models"), list) else []:
+                    if not isinstance(item, dict):
+                        continue
+                    name = str(item.get("name") or item.get("model") or "").strip()
+                    if name:
+                        models.append({
+                            "name": name,
+                            "size": int(item.get("size") or 0),
+                            "modified_at": str(item.get("modified_at") or ""),
+                        })
+                return web.json_response({"ok": True, "models": models})
+            except Exception as exc:
+                return web.json_response({"ok": False, "error": str(exc)}, status=400)
+
         @routes.post("/iamccs/prompter/rewrite")
         async def iamccs_prompter_rewrite(request):
             try:
@@ -673,6 +834,9 @@ def _register_prompter_routes() -> None:
                     {str(key): str(value or "") for key, value in sections.items()},
                     float(payload.get("temperature", 0.35)),
                     float(payload.get("timeout", 120.0)),
+                    str(payload.get("user_direction", "")),
+                    payload.get("target_keys"),
+                    payload.get("images"),
                 )
                 return web.json_response({"ok": True, "sections": rewritten, "report": report})
             except Exception as exc:

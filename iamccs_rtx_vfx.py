@@ -7,6 +7,8 @@ without adding a graph dependency.
 
 from __future__ import annotations
 
+import gc
+import logging
 import math
 import os
 import sys
@@ -15,6 +17,17 @@ from typing import Tuple
 
 import torch
 import torch.nn.functional as F
+
+try:
+    import comfy.model_management as _model_management  # type: ignore
+    from comfy.utils import ProgressBar as _ProgressBar  # type: ignore
+except ImportError:  # Keep the resize helpers importable outside ComfyUI.
+    _model_management = None
+    _ProgressBar = None
+
+
+_LOG = logging.getLogger("IAMCCS.RTXVFX")
+RTX_AUTOMATIC_CHUNK_SIZE = 8
 
 
 RTX_QUALITY_LEVELS = [
@@ -344,6 +357,20 @@ def _safe_cuda_device_index(device: int) -> int:
     return 0 if value < 0 or (count and value >= count) else value
 
 
+def _release_comfy_models_for_rtx() -> None:
+    """Give the native RTX runtime an empty CUDA workspace before it starts."""
+    if _model_management is not None:
+        _model_management.unload_all_models()
+        try:
+            _model_management.cleanup_models()
+        except Exception:
+            pass
+        _model_management.soft_empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+
+
 def apply_rtx_vfx(
     images: torch.Tensor,
     mode: str = "VSR Medium",
@@ -356,6 +383,7 @@ def apply_rtx_vfx(
     device: int = 0,
     ratio_preset: str = "16:9",
     resize_method: str = "Center Crop (Fill)",
+    chunk_size: int = RTX_AUTOMATIC_CHUNK_SIZE,
 ) -> torch.Tensor:
     """Apply Deno RTX Video Super Resolution semantics directly to IMAGE frames."""
     if not torch.cuda.is_available():
@@ -378,13 +406,37 @@ def apply_rtx_vfx(
     target_width, target_height = _target_size(
         int(source_width), int(source_height), mode, resize_type, float(scale), float(megapixels), int(width), int(height), alignment, ratio_preset
     )
+    # RTX accepts float32 RGB frames, but keeping a complete float32 4K batch
+    # on CUDA can consume tens of GiB.  Detach the source before unloading any
+    # previous diffusion stack, then retain completed frames on CPU/float16.
+    source_device = str(images.device)
+    source_dtype = str(images.dtype)
+    source = images[..., :3].detach().to(device="cpu")
+    _release_comfy_models_for_rtx()
+
     VideoSuperRes = _import_video_super_res()
     quality = getattr(VideoSuperRes.QualityLevel, _quality_attr(mode))
     device_index = _safe_cuda_device_index(device)
     cuda_device = torch.device(f"cuda:{device_index}")
-    out_device = images.device
-    out_dtype = images.dtype
-    output = torch.empty((int(batch), int(target_height), int(target_width), 3), device=out_device, dtype=out_dtype)
+    effective_chunk_size = max(1, min(int(chunk_size or RTX_AUTOMATIC_CHUNK_SIZE), int(batch)))
+    output = torch.empty(
+        (int(batch), int(target_height), int(target_width), 3),
+        device="cpu",
+        dtype=torch.float16,
+    )
+    progress = _ProgressBar(int(batch)) if _ProgressBar is not None else None
+    _LOG.info(
+        "IAMCCS Exporter RTX VFX chunked start | %s/%s -> cpu/float16 | "
+        "frames=%d | chunk=%d | %dx%d -> %dx%d",
+        source_device,
+        source_dtype,
+        int(batch),
+        effective_chunk_size,
+        int(source_width),
+        int(source_height),
+        int(target_width),
+        int(target_height),
+    )
 
     with torch.inference_mode():
         try:
@@ -400,12 +452,31 @@ def apply_rtx_vfx(
             effect.output_width = int(target_width)
             effect.output_height = int(target_height)
             effect.load()
-            for index in range(int(batch)):
-                frame = images[index, :, :, :3].to(device=cuda_device, dtype=torch.float32).permute(2, 0, 1).contiguous()
-                if not _same_size_only(mode):
-                    frame = _fit_frame_to_target_aspect(frame, int(target_width), int(target_height), resize_method)
-                result = effect.run(frame)
-                enhanced = torch.from_dlpack(result.image).clone().permute(1, 2, 0).contiguous()
-                output[index].copy_(enhanced.clamp(0.0, 1.0).to(device=out_device, dtype=out_dtype))
-                del frame, enhanced
+            for chunk_start in range(0, int(batch), effective_chunk_size):
+                chunk_end = min(int(batch), chunk_start + effective_chunk_size)
+                rtx_input = source[chunk_start:chunk_end].to(dtype=torch.float32).contiguous()
+                rtx_input = torch.nan_to_num(
+                    rtx_input,
+                    nan=0.0,
+                    posinf=1.0,
+                    neginf=0.0,
+                ).clamp_(0.0, 1.0)
+                for local_index in range(int(rtx_input.shape[0])):
+                    output_index = chunk_start + local_index
+                    frame = rtx_input[local_index].to(device=cuda_device).permute(2, 0, 1).contiguous()
+                    if not _same_size_only(mode):
+                        frame = _fit_frame_to_target_aspect(frame, int(target_width), int(target_height), resize_method)
+                    result = effect.run(frame)
+                    enhanced = torch.from_dlpack(result.image).clone().permute(1, 2, 0).contiguous()
+                    output[output_index].copy_(enhanced.clamp(0.0, 1.0).to(device="cpu", dtype=torch.float16))
+                    del result, frame, enhanced
+                del rtx_input
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
+                if progress is not None:
+                    progress.update_absolute(chunk_end, int(batch))
+                _LOG.info("IAMCCS Exporter RTX VFX progress | %d/%d frames", chunk_end, int(batch))
+    del source
+    gc.collect()
     return output

@@ -223,12 +223,15 @@ function safeProject(raw) {
     try { parsed = JSON.parse(String(raw || "{}")); } catch {}
     return {
         schema: "iamccs.minimax_h3.prompter_project",
-        schema_version: 1,
+        schema_version: 2,
         project_name: String(parsed.project_name || "Untitled H3 Prompt"),
         task_mode: MODE_META[parsed.task_mode] ? parsed.task_mode : "t2va",
         injection_target: ["global", "local_auto", "local_1", "local_2", "local_3"].includes(parsed.injection_target) ? parsed.injection_target : "global",
         writing_mode: ["manual", "guided", "assistant_fill"].includes(parsed.writing_mode) ? parsed.writing_mode : "guided",
         merge_policy: ["replace", "append"].includes(parsed.merge_policy) ? parsed.merge_policy : "replace",
+        ai_direction: String(parsed.ai_direction || ""),
+        ai_scope: String(parsed.ai_scope || "active_field"),
+        ai_visual_roles: parsed.ai_visual_roles && typeof parsed.ai_visual_roles === "object" ? { ...parsed.ai_visual_roles } : {},
         sections: parsed.sections && typeof parsed.sections === "object" ? { ...parsed.sections } : {},
     };
 }
@@ -320,8 +323,11 @@ function mountPrompter(node) {
         .iamccs-pr-ai.show{display:grid}.iamccs-pr-ai-title{color:#9fc9ef;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
         .iamccs-pr-ai-row{display:grid;grid-template-columns:1fr 1fr;gap:6px}.iamccs-pr-ai label{display:grid;gap:3px;color:#8999aa;font-size:9px;font-weight:700}
         .iamccs-pr-ai input,.iamccs-pr-ai select{width:100%;height:29px;border:1px solid #35485b;border-radius:5px;background:#0e151d;color:#e7eef5;padding:0 6px;font-size:10px}
+        .iamccs-pr-ai textarea{width:100%;min-height:66px;resize:vertical;border:1px solid #35485b;border-radius:5px;background:#0e151d;color:#e7eef5;padding:7px;font:10px/1.4 Inter,Segoe UI,sans-serif}
         .iamccs-pr-ai-status{min-height:28px;color:#91a4b5;font-size:9px;line-height:1.35}.iamccs-pr-ai-status.ok{color:#8fd1aa}.iamccs-pr-ai-status.error{color:#ed9c92}
         .iamccs-pr-ai .iamccs-pr-btn{width:100%;border-color:#6094c0;background:#274866;color:#eef7ff}
+        .iamccs-pr-ai-modelrow{display:grid;grid-template-columns:minmax(0,1fr) 30px;gap:5px}.iamccs-pr-ai-modelrow .iamccs-pr-btn{height:29px;padding:0!important}
+        .iamccs-pr-ai-images{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}.iamccs-pr-ai-image{display:grid;grid-template-columns:44px minmax(0,1fr);gap:5px;padding:4px;border:1px solid #304255;border-radius:6px;background:#0c141c;min-width:0}.iamccs-pr-ai-thumb{width:44px;height:44px;object-fit:cover;border-radius:4px;background:#202832}.iamccs-pr-ai-image-meta{display:grid;gap:3px;min-width:0}.iamccs-pr-ai-image-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aebdca;font-size:8px}.iamccs-pr-ai-image select{height:24px!important;font-size:8px!important}.iamccs-pr-ai-file{display:none}
         .iamccs-pr-example-select{height:30px;max-width:146px;border:1px solid #3b4350;border-radius:6px;background:#171b23;color:#e9edf2;padding:0 6px;font:600 10px Inter,Segoe UI,sans-serif}
         .iamccs-pr-inject{width:100%;height:38px!important;margin:0 0 7px;background:linear-gradient(135deg,#d3a447,#8d5c20)!important;border:1px solid #f0ca7d!important;color:#171109!important;font-size:12px!important;font-weight:900!important;letter-spacing:.06em;box-shadow:0 5px 14px #0007}
         .iamccs-pr-inject-status{min-height:30px;margin-bottom:12px;padding:7px;border:1px solid #303944;border-radius:6px;background:#151b22;color:#91a0ae;font-size:9px;line-height:1.35}.iamccs-pr-inject-status.ok{border-color:#3f7957;color:#9fe0b7}.iamccs-pr-inject-status.error{border-color:#824b45;color:#efaaa1}
@@ -407,13 +413,24 @@ function mountPrompter(node) {
     const assistantHint = el("div", "iamccs-pr-hint", "AI Rewrite treats every filled box as your rough idea, then rewrites those same boxes into MiniMax H3-ready English in one request. Blank boxes stay blank and your project remains editable before queueing.");
     left.appendChild(assistantHint);
     const aiPanel = el("div", "iamccs-pr-ai");
-    aiPanel.appendChild(el("div", "iamccs-pr-ai-title", "Assistant engine"));
+    aiPanel.appendChild(el("div", "iamccs-pr-ai-title", "Autonomous MiniMax assistant"));
+    const aiScope = el("select");
+    const aiDirection = el("textarea");
+    aiDirection.placeholder = "Your direction for the AI: what to preserve, emphasize, simplify or change. The rough idea remains in the selected prompt field.";
+    const aiScopeLabel = el("label", "", "Improve target"); aiScopeLabel.appendChild(aiScope);
+    const aiDirectionLabel = el("label", "", "User direction (applies only when AI Rewrite is active)"); aiDirectionLabel.appendChild(aiDirection);
+    aiPanel.append(aiScopeLabel, aiDirectionLabel);
     const aiProvider = el("select");
     aiProvider.innerHTML = `<option value="ollama">Ollama / local</option><option value="openai_compatible">OpenAI-compatible</option><option value="gemini">Google Gemini</option><option value="anthropic">Anthropic</option>`;
     const aiBaseUrl = el("input");
     aiBaseUrl.placeholder = "Provider base URL";
     const aiModel = el("input");
     aiModel.placeholder = "Model name";
+    const aiModelList = el("datalist");
+    aiModelList.id = `iamccs-prompter-models-${node.id || Math.random().toString(16).slice(2)}`;
+    aiModel.setAttribute("list", aiModelList.id);
+    const refreshModelsBtn = button("↻");
+    refreshModelsBtn.title = "Read the models installed in Ollama";
     const aiApiKey = el("input");
     aiApiKey.type = "password";
     aiApiKey.autocomplete = "off";
@@ -426,20 +443,28 @@ function mountPrompter(node) {
     aiTemperature.value = "0.35";
     const aiRow1 = el("div", "iamccs-pr-ai-row");
     const providerLabel = el("label", "", "Provider"); providerLabel.appendChild(aiProvider);
-    const modelLabel = el("label", "", "Model"); modelLabel.appendChild(aiModel);
+    const modelLabel = el("label", "", "Model");
+    const modelRow = el("div", "iamccs-pr-ai-modelrow"); modelRow.append(aiModel, refreshModelsBtn, aiModelList); modelLabel.appendChild(modelRow);
     aiRow1.append(providerLabel, modelLabel);
     const aiRow2 = el("div", "iamccs-pr-ai-row");
     const urlLabel = el("label", "", "Base URL"); urlLabel.appendChild(aiBaseUrl);
     const tempLabel = el("label", "", "Creativity"); tempLabel.appendChild(aiTemperature);
     aiRow2.append(urlLabel, tempLabel);
     const keyLabel = el("label", "", "API key (never saved)"); keyLabel.appendChild(aiApiKey);
-    const rewriteBtn = button("Rewrite filled fields with AI");
-    const aiStatus = el("div", "iamccs-pr-ai-status", "Ollama works locally. Cloud keys are sent only to the selected provider and are not stored in the workflow.");
-    aiPanel.append(aiRow1, aiRow2, keyLabel, rewriteBtn, aiStatus);
+    const aiImageInput = el("input", "iamccs-pr-ai-file");
+    aiImageInput.type = "file";
+    aiImageInput.accept = "image/png,image/jpeg,image/webp";
+    aiImageInput.multiple = true;
+    const addAIImagesBtn = button("Add up to 4 AI image references");
+    const aiImages = el("div", "iamccs-pr-ai-images");
+    const rewriteBtn = button("Improve selected prompt with AI");
+    const aiStatus = el("div", "iamccs-pr-ai-status", "Ollama is local. Choose the field to improve; cloud keys are never stored in the workflow.");
+    aiPanel.append(aiRow1, aiRow2, keyLabel, addAIImagesBtn, aiImageInput, aiImages, rewriteBtn, aiStatus);
     left.appendChild(aiPanel);
 
     const center = el("main", "iamccs-pr-center");
     let activePromptArea = null;
+    let activePromptKey = null;
     const tagDeck = el("section", "iamccs-pr-tagdeck");
     const tagHead = el("div", "iamccs-pr-taghead");
     tagHead.append(el("div", "iamccs-pr-tagtitle", "MINIMAX H3 PROMPT TAGS"));
@@ -523,6 +548,8 @@ function mountPrompter(node) {
     const commit = () => {
         project.project_name = nameInput.value.trim() || "Untitled H3 Prompt";
         project.merge_policy = policy.value;
+        project.ai_direction = aiDirection.value;
+        project.ai_scope = aiScope.value || "active_field";
         setWidget(node, "project_data", JSON.stringify(project));
         setWidget(node, "task_mode", project.task_mode);
         setWidget(node, "injection_target", project.injection_target);
@@ -532,7 +559,7 @@ function mountPrompter(node) {
     };
 
     const aiDefaults = {
-        ollama: { baseUrl: "http://127.0.0.1:11434", model: "qwen3:8b" },
+        ollama: { baseUrl: "http://127.0.0.1:11434", model: "" },
         openai_compatible: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
         gemini: { baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-2.5-flash" },
         anthropic: { baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5" },
@@ -551,14 +578,85 @@ function mountPrompter(node) {
             temperature: Number(aiTemperature.value || 0.35),
         };
     };
-    aiProvider.onchange = () => {
+    const aiVisualFiles = [];
+    const visualRolesForTarget = () => {
+        project.ai_visual_roles = project.ai_visual_roles && typeof project.ai_visual_roles === "object" ? project.ai_visual_roles : {};
+        const key = project.injection_target || "global";
+        project.ai_visual_roles[key] = project.ai_visual_roles[key] && typeof project.ai_visual_roles[key] === "object" ? project.ai_visual_roles[key] : {};
+        return project.ai_visual_roles[key];
+    };
+    const readFileDataUrl = (file) => new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(reader.error || new Error("Unable to read image"));
+        reader.readAsDataURL(file);
+    });
+    const renderAIImages = () => {
+        aiImages.replaceChildren();
+        const roles = visualRolesForTarget();
+        aiVisualFiles.forEach((item, index) => {
+            const slot = String(index + 1);
+            const card = el("div", "iamccs-pr-ai-image");
+            const thumb = el("img", "iamccs-pr-ai-thumb");
+            thumb.src = item.dataUrl;
+            const meta = el("div", "iamccs-pr-ai-image-meta");
+            meta.appendChild(el("div", "iamccs-pr-ai-image-name", `Picture ${slot} · ${item.file.name}`));
+            const role = el("select");
+            ["ignore", "opening", "closing", "identity", "composition", "style", "reference"].forEach((value) => {
+                const option = document.createElement("option"); option.value = value; option.textContent = value; role.appendChild(option);
+            });
+            role.value = String(roles[slot] || (index === 0 ? "opening" : index === 1 ? "closing" : "reference"));
+            role.onchange = () => { visualRolesForTarget()[slot] = role.value; commit(); };
+            meta.appendChild(role);
+            card.append(thumb, meta);
+            aiImages.appendChild(card);
+        });
+    };
+    const loadOllamaModels = async ({ quiet = false } = {}) => {
+        if (aiProvider.value !== "ollama") return [];
+        refreshModelsBtn.disabled = true;
+        if (!quiet) aiStatus.textContent = "Reading installed Ollama models…";
+        try {
+            const response = await api.fetchApi(`/iamccs/prompter/ollama/models?base_url=${encodeURIComponent(aiBaseUrl.value.trim() || "http://127.0.0.1:11434")}`);
+            const data = await response.json();
+            if (!response.ok || !data?.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+            const names = (data.models || []).map((item) => String(item.name || "")).filter(Boolean);
+            aiModelList.replaceChildren(...names.map((name) => {
+                const option = document.createElement("option"); option.value = name; return option;
+            }));
+            if ((!aiModel.value.trim() || !names.includes(aiModel.value.trim())) && names.length) aiModel.value = names[0];
+            persistAI();
+            aiStatus.className = "iamccs-pr-ai-status ok";
+            aiStatus.textContent = names.length ? `${names.length} Ollama model(s) available. Selected: ${aiModel.value}.` : "Ollama is reachable but has no installed models.";
+            return names;
+        } catch (error) {
+            aiStatus.className = "iamccs-pr-ai-status error";
+            aiStatus.textContent = `Ollama unavailable: ${error?.message || error}`;
+            return [];
+        } finally {
+            refreshModelsBtn.disabled = false;
+        }
+    };
+    aiProvider.onchange = async () => {
         const selected = aiDefaults[aiProvider.value] || {};
         aiBaseUrl.value = selected.baseUrl || "";
         aiModel.value = selected.model || "";
         aiApiKey.value = "";
         persistAI();
+        if (aiProvider.value === "ollama") await loadOllamaModels();
     };
     [aiBaseUrl, aiModel, aiTemperature].forEach((control) => control.addEventListener("change", persistAI));
+    refreshModelsBtn.onclick = () => loadOllamaModels();
+    addAIImagesBtn.onclick = () => aiImageInput.click();
+    aiImageInput.onchange = async () => {
+        const files = Array.from(aiImageInput.files || []).filter((file) => /^image\//.test(file.type)).slice(0, 4);
+        aiVisualFiles.splice(0, aiVisualFiles.length);
+        for (const file of files) aiVisualFiles.push({ file, dataUrl: await readFileDataUrl(file) });
+        renderAIImages();
+        aiImageInput.value = "";
+        aiStatus.className = "iamccs-pr-ai-status";
+        aiStatus.textContent = `${aiVisualFiles.length} temporary AI image reference(s). Assign roles for ${project.injection_target}; images are not saved inside the workflow.`;
+    };
 
     const renderPreview = () => {
         const prompt = composePrompt(project);
@@ -576,6 +674,7 @@ function mountPrompter(node) {
     const renderSections = () => {
         center.replaceChildren();
         activePromptArea = null;
+        activePromptKey = null;
         center.appendChild(tagDeck);
         const meta = MODE_META[project.task_mode];
         meta.sections.forEach(([key, label, tip], index) => {
@@ -585,8 +684,10 @@ function mountPrompter(node) {
             const state = el("div", "iamccs-pr-state");
             head.appendChild(state);
             const area = el("textarea", "iamccs-pr-text");
+            area.dataset.sectionKey = key;
             area.addEventListener("focus", () => {
                 activePromptArea = area;
+                activePromptKey = key;
                 tagHint.textContent = `Active field: ${label}`;
             });
             area.value = String(project.sections?.[key] || "");
@@ -611,6 +712,21 @@ function mountPrompter(node) {
         renderPreview();
     };
 
+    const populateAIScope = () => {
+        const previous = String(project.ai_scope || aiScope.value || "active_field");
+        aiScope.replaceChildren();
+        const choices = [
+            ["active_field", "Active prompt field"],
+            ["all_filled", "All filled fields"],
+            ...MODE_META[project.task_mode].sections.map(([key, label]) => [key, `Section · ${label}`]),
+        ];
+        choices.forEach(([value, label]) => {
+            const option = document.createElement("option"); option.value = value; option.textContent = label; aiScope.appendChild(option);
+        });
+        aiScope.value = choices.some(([value]) => value === previous) ? previous : "active_field";
+        project.ai_scope = aiScope.value;
+    };
+
     const renderControls = () => {
         nameInput.value = project.project_name;
         policy.value = project.merge_policy;
@@ -618,8 +734,11 @@ function mountPrompter(node) {
         exampleSelect.title = project.task_mode === "t2va" ? "Choose a cinematic T2V prompt project" : "T2V cinematic projects are available in T2VA mode";
         targetButtons.forEach((item, key) => item.classList.toggle("active", key === project.injection_target));
         writingButtons.forEach((item, key) => item.classList.toggle("active", key === project.writing_mode));
+        populateAIScope();
+        aiDirection.value = String(project.ai_direction || "");
         root.classList.toggle("mode-manual", project.writing_mode === "manual");
         aiPanel.classList.toggle("show", project.writing_mode === "assistant_fill");
+        renderAIImages();
         targetHint.textContent = project.injection_target === "local_auto"
             ? "The MiniMax Shotboard reads its timeline, selects the first empty local slot among 1–3, and appends to Local 3 only when all three already contain text."
             : project.injection_target === "global"
@@ -639,22 +758,46 @@ function mountPrompter(node) {
     };
 
     rewriteBtn.onclick = async () => {
-        const filled = Object.fromEntries(
-            MODE_META[project.task_mode].sections
-                .map(([key]) => [key, String(project.sections?.[key] || "").trim()])
-                .filter(([, value]) => value)
+        const allSections = Object.fromEntries(
+            MODE_META[project.task_mode].sections.map(([key]) => [key, String(project.sections?.[key] || "").trim()])
         );
-        if (!Object.keys(filled).length) {
+        let targetKeys = [];
+        if (aiScope.value === "all_filled") {
+            targetKeys = Object.entries(allSections).filter(([, value]) => value).map(([key]) => key);
+        } else if (aiScope.value === "active_field") {
+            if (activePromptKey) targetKeys = [activePromptKey];
+        } else if (Object.prototype.hasOwnProperty.call(allSections, aiScope.value)) {
+            targetKeys = [aiScope.value];
+        }
+        const direction = aiDirection.value.trim();
+        const hasRoughText = targetKeys.some((key) => String(allSections[key] || "").trim());
+        if (!targetKeys.length) {
             aiStatus.className = "iamccs-pr-ai-status error";
-            aiStatus.textContent = "Write a rough idea in at least one field first.";
+            aiStatus.textContent = aiScope.value === "active_field" ? "Click the prompt field you want the AI to improve first." : "No filled field is available for this target.";
             return;
         }
+        if (!hasRoughText && !direction && !aiVisualFiles.length) {
+            aiStatus.className = "iamccs-pr-ai-status error";
+            aiStatus.textContent = "Write a rough idea in the selected field or in User direction first.";
+            return;
+        }
+        project.ai_direction = direction;
+        project.ai_scope = aiScope.value;
         persistAI();
+        commit();
         rewriteBtn.disabled = true;
         rewriteBtn.textContent = "Rewriting MiniMax fieldsâ€¦";
         aiStatus.className = "iamccs-pr-ai-status";
-        aiStatus.textContent = `Sending ${Object.keys(filled).length} filled section(s) to ${aiProvider.options[aiProvider.selectedIndex]?.text || aiProvider.value}.`;
+        aiStatus.textContent = `Sending ${targetKeys.join(", ")} to ${aiProvider.options[aiProvider.selectedIndex]?.text || aiProvider.value}.`;
         try {
+            const roles = visualRolesForTarget();
+            const imagePayload = aiVisualFiles.map((item, index) => ({
+                slot: index + 1,
+                name: item.file.name,
+                role: String(roles[String(index + 1)] || (index === 0 ? "opening" : index === 1 ? "closing" : "reference")),
+                mime_type: item.file.type || "image/png",
+                data: item.dataUrl,
+            })).filter((item) => item.role !== "ignore");
             const response = await api.fetchApi("/iamccs/prompter/rewrite", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -664,7 +807,10 @@ function mountPrompter(node) {
                     model: aiModel.value.trim(),
                     api_key: aiApiKey.value,
                     task_mode: project.task_mode,
-                    sections: filled,
+                    sections: allSections,
+                    target_keys: targetKeys,
+                    user_direction: direction,
+                    images: imagePayload,
                     temperature: Number(aiTemperature.value || 0.35),
                     timeout: 180,
                 }),
@@ -672,20 +818,21 @@ function mountPrompter(node) {
             const data = await response.json();
             if (!response.ok || !data?.ok) throw new Error(data?.error || `HTTP ${response.status}`);
             Object.entries(data.sections || {}).forEach(([key, value]) => {
-                if (Object.prototype.hasOwnProperty.call(filled, key)) project.sections[key] = String(value || "");
+                if (targetKeys.includes(key)) project.sections[key] = String(value || "");
             });
             renderControls();
             renderSections();
             commit();
             aiStatus.className = "iamccs-pr-ai-status ok";
-            aiStatus.textContent = `Rewritten: ${(data.report?.rewritten_sections || Object.keys(data.sections || {})).join(", ")}. Review the fields, then save or queue.`;
+            const visualCount = Number(data.report?.visual_references?.length || 0);
+            aiStatus.textContent = `Improved: ${(data.report?.rewritten_sections || Object.keys(data.sections || {})).join(", ")}${visualCount ? ` with ${visualCount} visual reference(s)` : ""}. Review, then inject.`;
         } catch (error) {
             aiStatus.className = "iamccs-pr-ai-status error";
             aiStatus.textContent = `Rewrite failed: ${error?.message || error}`;
         } finally {
             aiApiKey.value = "";
             rewriteBtn.disabled = false;
-            rewriteBtn.textContent = "Rewrite filled fields with AI";
+            rewriteBtn.textContent = "Improve selected prompt with AI";
         }
     };
 
@@ -745,6 +892,8 @@ function mountPrompter(node) {
             commit();
         };
     });
+    aiScope.onchange = () => { project.ai_scope = aiScope.value; commit(); };
+    aiDirection.addEventListener("input", () => { project.ai_direction = aiDirection.value; commit(); });
     nameInput.addEventListener("input", commit);
     policy.addEventListener("change", commit);
     exampleBtn.onclick = () => loadExample(project.task_mode);
@@ -810,6 +959,7 @@ function mountPrompter(node) {
     renderControls();
     renderSections();
     commit();
+    if (aiProvider.value === "ollama") setTimeout(() => loadOllamaModels({ quiet: true }), 0);
 }
 
 app.registerExtension({

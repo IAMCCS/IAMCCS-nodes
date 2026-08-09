@@ -5,8 +5,47 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 console.info("[IAMCCS MiniMax H3] Dedicated Shotboard V3-parity UI loaded.");
-const CINE_VERSION = "2026-08-07-minimax-h3-fullscreen-toolbar-fit-v8";
+const CINE_VERSION = "2026-08-08-minimax-h3-native-upscale-2x-sync-v12";
 const MINIMAX_CINE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX";
+const H3_NATIVE_RESOLUTION_PRESETS = Object.freeze([
+    { width: 768, height: 448, label: "H · ≈16:9 · 768×448 · Draft" },
+    { width: 960, height: 544, label: "H · ≈16:9 · 960×544 · Balanced" },
+    { width: 1024, height: 576, label: "H · 16:9 · 1024×576" },
+    { width: 1280, height: 736, label: "H · 720-source legal · 1280×736" },
+    { width: 1344, height: 768, label: "H · ≈16:9 · 1344×768 · H3 quality" },
+    { width: 1024, height: 768, label: "H · 4:3 · 1024×768" },
+    { width: 1152, height: 768, label: "H · 3:2 · 1152×768" },
+    { width: 1216, height: 640, label: "H · DCI ≈1.90 · 1216×640" },
+    { width: 1024, height: 512, label: "SCOPE · 2.00 · 1024×512" },
+    { width: 1120, height: 512, label: "SCOPE · ≈2.20 · 1120×512" },
+    { width: 1152, height: 480, label: "SCOPE · ≈2.39 · 1152×480" },
+    { width: 1536, height: 640, label: "SCOPE · ≈2.39 · 1536×640 · Quality" },
+    { width: 448, height: 768, label: "V · ≈9:16 · 448×768 · Draft" },
+    { width: 544, height: 960, label: "V · ≈9:16 · 544×960 · Balanced" },
+    { width: 576, height: 1024, label: "V · 9:16 · 576×1024" },
+    { width: 768, height: 1344, label: "V · ≈9:16 · 768×1344 · H3 quality" },
+    { width: 768, height: 960, label: "V · 4:5 · 768×960" },
+    { width: 640, height: 960, label: "V · 2:3 · 640×960" },
+    { width: 768, height: 768, label: "H/V · 1:1 · 768×768" },
+]);
+const H3_UPSCALE_RESOLUTION_PRESETS = Object.freeze([
+    { width: 1280, height: 720, label: "H · HD · 1280×720" },
+    { width: 1920, height: 1080, label: "H · FHD · 1920×1080" },
+    { width: 1998, height: 1080, label: "H · DCI Flat 2K · 1998×1080" },
+    { width: 2048, height: 1080, label: "H · DCI 2K · 2048×1080" },
+    { width: 2560, height: 1440, label: "H · QHD · 2560×1440" },
+    { width: 3840, height: 2160, label: "H · UHD · 3840×2160" },
+    { width: 3996, height: 2160, label: "H · DCI Flat 4K · 3996×2160" },
+    { width: 4096, height: 2160, label: "H · DCI 4K · 4096×2160" },
+    { width: 2048, height: 858, label: "SCOPE · DCI 2K 2.39 · 2048×858" },
+    { width: 2560, height: 1080, label: "SCOPE · UW ≈2.37 · 2560×1080" },
+    { width: 3840, height: 1608, label: "SCOPE · UHD ≈2.39 · 3840×1608" },
+    { width: 4096, height: 1716, label: "SCOPE · DCI 4K 2.39 · 4096×1716" },
+    { width: 720, height: 1280, label: "V · HD · 720×1280" },
+    { width: 1080, height: 1920, label: "V · FHD · 1080×1920" },
+    { width: 1440, height: 2560, label: "V · QHD · 1440×2560" },
+    { width: 2160, height: 3840, label: "V · UHD · 2160×3840" },
+]);
 const SHOTBOARD_V3_RIGID_WIDTH = 2360;
 const SHOTBOARD_V3_OPEN_HEIGHT = 760;
 const SHOTBOARD_V3_COLLAPSED_HEIGHT = 560;
@@ -317,12 +356,18 @@ function repairMiniMaxH3WidgetState(node, serialized = null) {
         return [];
     };
 
+    const ltxDetailerWidget = getWidget(node, "ltx_detailer_lora_name");
+    const preferredCrispLtxLora = comboValues(ltxDetailerWidget).find((value) => {
+        const name = String(value || "").toLowerCase();
+        return name.includes("ltx") && name.includes("crisp");
+    }) || "";
+
     const comboDefaults = {
         task_mode: "auto_from_timeline",
         audio_mode: "h3_native_generated",
         prompt_mapping: "global_plus_local",
         upscale_mode: "off",
-        acceleration: "auto_3060",
+        acceleration: "low_vram_auto",
         ref_image_size: "match",
         reference_role_1: "subject_identity",
         reference_role_2: "subject_identity",
@@ -330,11 +375,11 @@ function repairMiniMaxH3WidgetState(node, serialized = null) {
         reference_role_4: "style",
         reference_video_role: "off",
         reference_audio_role: "off",
-        sol_conditioning: "exact_kv",
-        spectrum_profile: "conservative_3060",
+        sol_conditioning: "exact_kv_and_rows",
+        spectrum_profile: "low_vram",
         rife_mode: "off",
-        text_encoder_device: "cpu_safe_12gb",
-        performance_profile: "rtx3060_balanced",
+        text_encoder_device: "auto",
+        performance_profile: "low_vram_balanced",
         sampler_name: "res_multistep",
         scheduler: "simple",
         turbo_mode: "off",
@@ -342,7 +387,13 @@ function repairMiniMaxH3WidgetState(node, serialized = null) {
         turbo_sampler_mode: "audio_fixed",
         reference_resize_policy: "canvas_crop",
         reference_resize_filter: "area",
+        ltx_detailer_lora_name: preferredCrispLtxLora,
+        ltx_4k_quality: "ULTRA",
     };
+    const textEncoderWidget = getWidget(node, "text_encoder_device");
+    if (String(textEncoderWidget?.value || "").toLowerCase() === "cpu_safe_12gb") {
+        assign("text_encoder_device", "auto", "legacy-cpu-mode-migrated-to-gpu-first");
+    }
     Object.entries(comboDefaults).forEach(([name, defaultValue]) => {
         const item = getWidget(node, name);
         if (!item) return;
@@ -351,6 +402,12 @@ function repairMiniMaxH3WidgetState(node, serialized = null) {
         const preferred = fallbackValue(name, defaultValue);
         assign(name, values.includes(preferred) ? preferred : (values.includes(defaultValue) ? defaultValue : values[0]), "invalid-choice");
     });
+    // Existing workflows commonly serialized the old empty value. Populate
+    // Crisp once it is available, while preserving every non-empty LoRA the
+    // user explicitly selected from the complete dropdown.
+    if (!String(ltxDetailerWidget?.value || "").trim() && preferredCrispLtxLora) {
+        assign("ltx_detailer_lora_name", preferredCrispLtxLora, "installed-crisp-default");
+    }
 
     const numberRules = {
         duration_seconds: [10, 0.01, 36000, false],
@@ -369,6 +426,7 @@ function repairMiniMaxH3WidgetState(node, serialized = null) {
         shift_audio: [3, 0.01, 100, false],
         turbo_strength: [1, 0, 4, false],
         reference_resize_megapixels: [0.5, 0.1, 2, false],
+        ltx_detailer_strength: [0.6, 0, 2, false],
     };
     Object.entries(numberRules).forEach(([name, [defaultValue, min, max, integer]]) => {
         const item = getWidget(node, name);
@@ -4174,6 +4232,12 @@ function renderShotboardLite(node) {
         "reference_resize_policy",
         "reference_resize_megapixels",
         "reference_resize_filter",
+        "ltx_detailer_enabled",
+        "ltx_detailer_lora_name",
+        "ltx_detailer_strength",
+        "ltx_4k_enabled",
+        "ltx_4k_quality",
+        "ltx_seam_safe",
     ].forEach((name) => hideWidget(getWidget(node, name)));
 
     let rows = parseJsonWidget(node, defaultLiteRows).map(normalizeLiteRow);
@@ -7078,6 +7142,12 @@ function renderShotboardV3(node) {
         "reference_resize_policy",
         "reference_resize_megapixels",
         "reference_resize_filter",
+        "ltx_detailer_enabled",
+        "ltx_detailer_lora_name",
+        "ltx_detailer_strength",
+        "ltx_4k_enabled",
+        "ltx_4k_quality",
+        "ltx_seam_safe",
     ];
     // The MiniMax board renders these controls in its own settings boxes
     // above the timeline. Keep the underlying Comfy widgets serializable,
@@ -8032,6 +8102,7 @@ function renderShotboardV3(node) {
         const videoPath = isVideo ? videoPathForSegment(seg) : "";
         const singleStrength = isText ? 0 : Math.max(0, Math.min(1, Number(seg.guideStrength ?? seg.guide_strength ?? seg.force ?? seg.strength ?? defaultForceWidget?.value ?? 0.25)));
         return {
+            id: String(seg.id || `${isText ? "text" : "shot"}_${index + 1}`),
             type: isVideo ? "video" : isText ? "text" : "image",
             second: Number((startFrame / fps).toFixed(3)),
             frame: startFrame,
@@ -8287,6 +8358,11 @@ function renderShotboardV3(node) {
             .filter((seg) => String(seg.type || "image") !== "audio" && !seg.placeholder)
             .slice()
             .sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
+        const h3Bridges = buildH3BridgeContract(timeline.segments || []);
+        const h3AnchorMode = h3Bridges.length ? "image_box_centres" : "off";
+        const h3EditMode = h3Bridges.length
+            ? "flf_n_keyframes_n_minus_one_chunks"
+            : (h3I2vHardCutMode(timeline.segments || []) ? "i2v_independent_hard_cuts" : "single_or_text");
         const directorPrompts = [];
         const directorLengths = [];
         let cursor = 0;
@@ -8353,6 +8429,9 @@ function renderShotboardV3(node) {
                 segments: JSON.parse(JSON.stringify(timeline.segments || [])),
                 motionSegments: isShotboardV4 ? JSON.parse(JSON.stringify(timeline.motionSegments || [])) : [],
                 rows: JSON.parse(JSON.stringify(timelineRows)),
+                h3_anchor_mode: h3AnchorMode,
+                h3_edit_mode: h3EditMode,
+                h3_bridges: JSON.parse(JSON.stringify(h3Bridges)),
                 global_prompt: String(promptArea?.value || promptWidget?.value || ""),
                 prompt: String(promptArea?.value || promptWidget?.value || ""),
                 director_local_prompts: effectiveDirectorPrompts.join(" | "),
@@ -8506,17 +8585,20 @@ function renderShotboardV3(node) {
             duration_seconds: effectiveDurationSeconds,
             frame_rate: 24,
             task_mode: String(getWidget(node, "task_mode")?.value || "auto_from_timeline"),
+            h3_anchor_mode: h3AnchorMode,
+            h3_edit_mode: h3EditMode,
+            h3_bridges: h3Bridges,
             continuation_mode: "timeline_keyframe_adjacency",
             audio_mode: String(getWidget(node, "audio_mode")?.value || "h3_native_generated"),
             prompt_mapping: String(getWidget(node, "prompt_mapping")?.value || "global_plus_local"),
-            acceleration: String(getWidget(node, "acceleration")?.value || "sage"),
+            acceleration: String(getWidget(node, "acceleration")?.value || "low_vram_auto"),
             ref_image_size: String(getWidget(node, "ref_image_size")?.value || "match"),
-            text_encoder_device: String(getWidget(node, "text_encoder_device")?.value || "cpu_safe_12gb"),
+            text_encoder_device: "auto",
             reference_roles: [1, 2, 3, 4].map((index) => String(getWidget(node, `reference_role_${index}`)?.value || (index <= 2 ? "subject_identity" : index === 3 ? "composition" : "style"))),
             reference_video_role: String(getWidget(node, "reference_video_role")?.value || "off"),
             reference_audio_role: String(getWidget(node, "reference_audio_role")?.value || "off"),
-            sol_conditioning: String(getWidget(node, "sol_conditioning")?.value || "exact_kv"),
-            spectrum_profile: String(getWidget(node, "spectrum_profile")?.value || "conservative_3060"),
+            sol_conditioning: String(getWidget(node, "sol_conditioning")?.value || "exact_kv_and_rows"),
+            spectrum_profile: String(getWidget(node, "spectrum_profile")?.value || "low_vram"),
             vram_clean_before_decode: Boolean(getWidget(node, "vram_clean_before_decode")?.value ?? true),
             rife_mode: String(getWidget(node, "rife_mode")?.value || "off"),
             upscale_enabled: Boolean(getWidget(node, "upscale_enabled")?.value ?? false),
@@ -8527,6 +8609,12 @@ function renderShotboardV3(node) {
             upscale_sage: Boolean(getWidget(node, "upscale_sage")?.value ?? true),
             upscale_seed_offset: Number(getWidget(node, "upscale_seed_offset")?.value || 10000),
             wan_upscale_denoise: Number(getWidget(node, "wan_upscale_denoise")?.value ?? 0.2),
+            ltx_detailer_enabled: Boolean(getWidget(node, "ltx_detailer_enabled")?.value ?? false),
+            ltx_detailer_lora_name: String(getWidget(node, "ltx_detailer_lora_name")?.value || ""),
+            ltx_detailer_strength: Number(getWidget(node, "ltx_detailer_strength")?.value ?? 0.6),
+            ltx_4k_enabled: Boolean(getWidget(node, "ltx_4k_enabled")?.value ?? false),
+            ltx_4k_quality: String(getWidget(node, "ltx_4k_quality")?.value || "ULTRA"),
+            ltx_seam_safe: Boolean(getWidget(node, "ltx_seam_safe")?.value ?? true),
             width: Number(getWidget(node, "width")?.value || 960),
             height: Number(getWidget(node, "height")?.value || 544),
             h3_backend_contract: {
@@ -8536,11 +8624,15 @@ function renderShotboardV3(node) {
                 maximum_frames_per_box: 362,
                 first_last_keyframes: true,
                 generated_last_becomes_next_first: true,
+                flf_chunk_policy: "n_keyframes_n_minus_one_chunks",
+                flf_prompt_span: "image_box_centre_to_next_image_box_centre",
+                flf_timing_policy: "centre_distances_normalised_to_total_duration",
+                i2v_multi_image_policy: "one_box_one_i2v_chunk_hard_cut",
                 text_relay_conditioning: false,
                 atomic_task_model_conditioning: true,
-                acceleration: String(getWidget(node, "acceleration")?.value || "sage"),
+                acceleration: String(getWidget(node, "acceleration")?.value || "low_vram_auto"),
                 ref_image_size: String(getWidget(node, "ref_image_size")?.value || "match"),
-                text_encoder_device: String(getWidget(node, "text_encoder_device")?.value || "cpu_safe_12gb"),
+                text_encoder_device: "auto",
                 vram_clean_before_decode: Boolean(getWidget(node, "vram_clean_before_decode")?.value ?? true),
                 native_bridge_before_post: true,
                 lazy_upscale_enabled: Boolean(getWidget(node, "upscale_enabled")?.value ?? false),
@@ -8551,6 +8643,12 @@ function renderShotboardV3(node) {
                     Number(getWidget(node, "upscale_width")?.value || 1920),
                     Number(getWidget(node, "upscale_height")?.value || 1080),
                 ],
+                ltx_detailer_enabled: Boolean(getWidget(node, "ltx_detailer_enabled")?.value ?? false),
+                ltx_detailer_lora_name: String(getWidget(node, "ltx_detailer_lora_name")?.value || ""),
+                ltx_detailer_strength: Number(getWidget(node, "ltx_detailer_strength")?.value ?? 0.6),
+                ltx_seam_safe: Boolean(getWidget(node, "ltx_seam_safe")?.value ?? true),
+                ltx_4k_enabled: Boolean(getWidget(node, "ltx_4k_enabled")?.value ?? false),
+                ltx_4k_quality: String(getWidget(node, "ltx_4k_quality")?.value || "ULTRA"),
                 rife_mode: String(getWidget(node, "rife_mode")?.value || "off"),
             },
             image_paths: refPaths(),
@@ -9804,12 +9902,14 @@ function renderShotboardV3(node) {
         const requestedFrames = Math.max(1, Math.round(seconds * 24));
         const alignedFrames = Math.max(5, Math.min(362, Math.ceil(Math.max(0, requestedFrames - 5) / 17) * 17 + 5));
         const load = (width * height * alignedFrames) / (960 * 544 * 124);
-        const acceleration = String(getWidget(node, "acceleration")?.value || "auto_3060");
-        const profile = String(getWidget(node, "performance_profile")?.value || "rtx3060_balanced");
-        const risky = profile.startsWith("rtx3060") && load > 1.15;
+        const acceleration = String(getWidget(node, "acceleration")?.value || "low_vram_auto");
+        const profile = String(getWidget(node, "performance_profile")?.value || "low_vram_balanced");
+        const risky = (profile.startsWith("low_vram") || profile.startsWith("rtx3060")) && load > 1.15;
         performanceBand.style.borderColor = risky ? "rgba(210,112,87,.65)" : "rgba(111,146,151,.38)";
         performanceBand.style.color = risky ? "#ffc0ac" : "#a9c8c4";
-        const accelerationLabel = acceleration === "auto_3060" ? "Low VRAM Auto / H3 Sage" : acceleration;
+        const accelerationLabel = ["low_vram_auto", "auto_3060"].includes(acceleration)
+            ? "Low VRAM Auto / H3 Sage + exact chunks"
+            : acceleration;
         performanceBand.textContent = `Low VRAM load preview: ${load.toFixed(2)}x versus 960x544 / 124f | ${width}x${height} / ~${alignedFrames} aligned frames | ${accelerationLabel}${risky ? " | HEAVY: shorten this box or use a smaller canvas, then upscale" : " | within the selected Low VRAM canvas envelope"}`;
     }
     const makeSettingsGroup = (kicker, title, description, advanced = false) => {
@@ -9836,18 +9936,43 @@ function renderShotboardV3(node) {
     const shotSettings = makeSettingsGroup("01", "SHOT & CANVAS", "Timeline trim is the chunk authority. H3 keeps 24 fps and the 17k+5 frame grid.");
     let settingsTarget = shotSettings;
     const settingsControls = new Map();
+    let nativeResolutionSelect = null;
+    let upscaleResolutionSelect = null;
+    let syncResolutionPresetControls = () => {};
     const setDeckValue = (name, value) => {
         setWidgetValue(node, name, value);
         const control = settingsControls.get(name);
         try { control?._iamccsSetValue?.(value); } catch {}
         if (control && "value" in control) control.value = String(value);
+        if (["width", "height", "upscale_width", "upscale_height"].includes(name)) {
+            syncResolutionPresetControls();
+        }
+    };
+    const syncUpscaleToNative2x = (nativeWidth, nativeHeight, { notice = true } = {}) => {
+        const width = Math.max(256, Math.round(Number(nativeWidth) || 0));
+        const height = Math.max(256, Math.round(Number(nativeHeight) || 0));
+        const targetWidth = Math.min(7680, width * 2);
+        const targetHeight = Math.min(4320, height * 2);
+        setDeckValue("upscale_width", targetWidth);
+        setDeckValue("upscale_height", targetHeight);
+        syncResolutionPresetControls();
+        if (notice) {
+            const exact = targetWidth === width * 2 && targetHeight === height * 2;
+            showTimelineNotice(
+                exact
+                    ? `Upscale synced 2x: ${width}x${height} -> ${targetWidth}x${targetHeight}; aspect ratio and framing preserved.`
+                    : `Upscale synced within delivery limits: ${targetWidth}x${targetHeight}.`,
+                exact ? "ok" : "info",
+            );
+        }
+        return { width: targetWidth, height: targetHeight };
     };
     const h3LegalDimension = (value, fallback) => {
         const numeric = Number(value);
         const safe = Number.isFinite(numeric) ? numeric : Number(fallback);
         return Math.max(256, Math.min(5760, Math.ceil(Math.max(256, safe) / 32) * 32));
     };
-    const setH3Canvas = (rawWidth, rawHeight, notice = "") => {
+    const setH3Canvas = (rawWidth, rawHeight, notice = "", { syncUpscale = true } = {}) => {
         const oldWidth = Number(getWidget(node, "width")?.value || 960);
         const oldHeight = Number(getWidget(node, "height")?.value || 544);
         const legalWidth = h3LegalDimension(rawWidth, oldWidth);
@@ -9856,8 +9981,9 @@ function renderShotboardV3(node) {
         setDeckValue("height", legalHeight);
         setWidgetValue(node, "image_width", legalWidth);
         setWidgetValue(node, "image_height", legalHeight);
+        if (syncUpscale) syncUpscaleToNative2x(legalWidth, legalHeight, { notice: !notice });
         if (notice && (legalWidth !== oldWidth || legalHeight !== oldHeight)) {
-            showTimelineNotice(`${notice}: H3 canvas ${legalWidth}x${legalHeight} (32-pixel legal grid).`, "ok");
+            showTimelineNotice(`${notice}: H3 canvas ${legalWidth}x${legalHeight}; upscale synced to ${legalWidth * 2}x${legalHeight * 2}.`, "ok");
         }
         return { width: legalWidth, height: legalHeight };
     };
@@ -9873,6 +9999,74 @@ function renderShotboardV3(node) {
         const maxHeight = landscape ? 768 : 1344;
         const scale = Math.min(1, maxWidth / width, maxHeight / height);
         setH3Canvas(width * scale, height * scale, "Image resolution adapted");
+    };
+    const resolutionPresetKey = (width, height) => `${Math.round(Number(width) || 0)}x${Math.round(Number(height) || 0)}`;
+    const matchedResolutionPresetKey = (width, height, presets) => {
+        const key = resolutionPresetKey(width, height);
+        return presets.some((preset) => resolutionPresetKey(preset.width, preset.height) === key) ? key : "custom";
+    };
+    const addResolutionPresetSetting = (label, presets, kind) => {
+        const isNative = kind === "native";
+        const widthName = isNative ? "width" : "upscale_width";
+        const heightName = isNative ? "height" : "upscale_height";
+        const wrap = document.createElement("label");
+        wrap.style.cssText = `grid-column:span 2;display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
+        wrap.title = isNative
+            ? "H3 native canvases are aligned to a 32-pixel grid. H = horizontal, V = vertical, SCOPE = cinema-wide. Custom remains available."
+            : "Exact delivery targets for the selected post-upscale route. H = horizontal, V = vertical, SCOPE = cinema-wide. Custom remains available.";
+        const span = document.createElement("span");
+        span.textContent = label;
+        const choices = [
+            { value: "custom", label: "CUSTOM · manual width × height" },
+            ...presets.map((preset) => ({
+                value: resolutionPresetKey(preset.width, preset.height),
+                label: preset.label,
+            })),
+        ];
+        const ctrl = makeChoiceSelect(
+            matchedResolutionPresetKey(getWidget(node, widthName)?.value, getWidget(node, heightName)?.value, presets),
+            choices,
+            (value) => {
+                if (value === "custom") {
+                    showTimelineNotice(`${label}: manual Width / Height controls are active.`, "info");
+                    return;
+                }
+                const preset = presets.find((candidate) => resolutionPresetKey(candidate.width, candidate.height) === value);
+                if (!preset) return;
+                if (isNative) {
+                    setH3Canvas(preset.width, preset.height);
+                } else {
+                    setDeckValue("upscale_width", preset.width);
+                    setDeckValue("upscale_height", preset.height);
+                }
+                syncResolutionPresetControls();
+                showTimelineNotice(`${label}: ${preset.label}.`, "ok");
+                writeTimeline();
+                refreshPerformanceBand();
+                draw();
+            },
+        );
+        styleValueControls(ctrl);
+        settingsControls.set(`__${kind}_resolution_preset`, ctrl);
+        wrap.append(span, ctrl);
+        settingsTarget.appendChild(wrap);
+        return ctrl;
+    };
+    syncResolutionPresetControls = () => {
+        if (nativeResolutionSelect) {
+            nativeResolutionSelect.value = matchedResolutionPresetKey(
+                getWidget(node, "width")?.value,
+                getWidget(node, "height")?.value,
+                H3_NATIVE_RESOLUTION_PRESETS,
+            );
+        }
+        if (upscaleResolutionSelect) {
+            upscaleResolutionSelect.value = matchedResolutionPresetKey(
+                getWidget(node, "upscale_width")?.value,
+                getWidget(node, "upscale_height")?.value,
+                H3_UPSCALE_RESOLUTION_PRESETS,
+            );
+        }
     };
     const addSetting = (label, name, step, min, targetOverride = null, compact = false) => {
         const target = targetOverride || settingsTarget;
@@ -9897,12 +10091,21 @@ function renderShotboardV3(node) {
             }
             if (name === "width") setWidgetValue(node, "image_width", nextValue);
             if (name === "height") setWidgetValue(node, "image_height", nextValue);
+            if (name === "width" || name === "height") {
+                syncUpscaleToNative2x(
+                    name === "width" ? nextValue : getWidget(node, "width")?.value,
+                    name === "height" ? nextValue : getWidget(node, "height")?.value,
+                );
+            }
             if (name === "duration_seconds") {
                 setDurationSeconds(nextValue, "duration_control");
                 enforceDurationMinimum();
             }
             if (name === "frame_rate") {
                 setFrameRateValue(nextValue, "fps_control");
+            }
+            if (["width", "height", "upscale_width", "upscale_height"].includes(name)) {
+                syncResolutionPresetControls();
             }
             writeTimeline();
             refreshPerformanceBand();
@@ -9932,9 +10135,15 @@ function renderShotboardV3(node) {
     h3FpsWrap.append(h3FpsLabel, h3FpsValue);
     settingsTarget.appendChild(h3FpsWrap);
     setWidgetValue(node, "frame_rate", 24);
+    nativeResolutionSelect = addResolutionPresetSetting("Native format", H3_NATIVE_RESOLUTION_PRESETS, "native");
     addSetting("Width", "width", "32", "256");
     addSetting("Height", "height", "32", "256");
-    setH3Canvas(getWidget(node, "width")?.value || 960, getWidget(node, "height")?.value || 544);
+    setH3Canvas(
+        getWidget(node, "width")?.value || 960,
+        getWidget(node, "height")?.value || 544,
+        "",
+        { syncUpscale: false },
+    );
     const addSelectSetting = (label, name, options) => {
         const wrap = document.createElement("label");
         wrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
@@ -10049,7 +10258,7 @@ function renderShotboardV3(node) {
         { value: "fl2va", label: "FL2VA / FFLF" },
         { value: "ref2va", label: "REF2VA" },
     ]);
-    addStaticH3Setting("Chunk source", "Timeline trim", "Each visual box is exactly one H3 chunk. Drag or trim its length on the meter; the planner never splits it automatically.");
+    addStaticH3Setting("Chunk source", "Mode-aware timeline", "FL2VA/Auto with two or more images uses N keyframes -> N-1 centre-to-centre prompt bridges. I2VA keeps every image box as an independent hard-cut shot.");
     addStaticH3Setting("H3 frames", "17k+5 / max 362", "The requested box length is aligned upward to H3's required 17k+5 temporal grid and must remain at or below 362 frames.");
     addWidgetChoiceSetting("H3 audio", "audio_mode", [
         { value: "h3_native_generated", label: "Native generated" },
@@ -10065,17 +10274,24 @@ function renderShotboardV3(node) {
     settingsTarget = makeSettingsGroup("02", "GENERATION", "Shotboard-owned sampler values. Backend widgets are compatibility fallbacks only.");
     const applyPerformanceProfile = (profile) => {
         const presets = {
-            rtx3060_draft: { width: 768, height: 448, steps: 12, acceleration: "auto_3060" },
-            rtx3060_balanced: { width: 960, height: 544, steps: 16, acceleration: "auto_3060" },
-            rtx3060_turbo: { width: 960, height: 544, steps: 8, acceleration: "auto_3060", turbo_mode: "early_8_10", turbo_strength: 1.0, turbo_sampler_mode: "audio_fixed", reference_resize_policy: "canvas_crop", reference_resize_megapixels: 0.5, reference_resize_filter: "area", sampler_name: "res_multistep", scheduler: "simple", shift_video: 12, shift_audio: 3 },
-            h3_native_quality: { width: 1344, height: 768, steps: 20, acceleration: "sage" },
+            low_vram_draft: { width: 768, height: 448, steps: 12, acceleration: "low_vram_auto" },
+            low_vram_balanced: { width: 960, height: 544, steps: 16, acceleration: "low_vram_auto" },
+            low_vram_turbo: { width: 960, height: 544, steps: 8, acceleration: "low_vram_auto", turbo_mode: "early_8_10", turbo_strength: 1.0, turbo_sampler_mode: "audio_fixed", reference_resize_policy: "canvas_crop", reference_resize_megapixels: 0.5, reference_resize_filter: "area", sampler_name: "res_multistep", scheduler: "simple", shift_video: 12, shift_audio: 3 },
+            rtx3060_draft: { width: 768, height: 448, steps: 12, acceleration: "low_vram_auto" },
+            rtx3060_balanced: { width: 960, height: 544, steps: 16, acceleration: "low_vram_auto" },
+            rtx3060_turbo: { width: 960, height: 544, steps: 8, acceleration: "low_vram_auto", turbo_mode: "early_8_10", turbo_strength: 1.0, turbo_sampler_mode: "audio_fixed", reference_resize_policy: "canvas_crop", reference_resize_megapixels: 0.5, reference_resize_filter: "area", sampler_name: "res_multistep", scheduler: "simple", shift_video: 12, shift_audio: 3 },
+            h3_native_quality: { width: 1344, height: 768, steps: 20, acceleration: "h3_sage" },
         };
         const preset = presets[String(profile)] || null;
         if (!preset) return;
         Object.entries(preset).forEach(([name, value]) => setDeckValue(name, value));
         setDeckValue("image_width", preset.width);
         setDeckValue("image_height", preset.height);
+        syncUpscaleToNative2x(preset.width, preset.height, { notice: false });
         const profileLabels = {
+            low_vram_draft: "Low VRAM draft",
+            low_vram_balanced: "Low VRAM balanced",
+            low_vram_turbo: "Low VRAM Turbo",
             rtx3060_draft: "Low VRAM draft",
             rtx3060_balanced: "Low VRAM balanced",
             rtx3060_turbo: "Low VRAM Turbo",
@@ -10085,20 +10301,22 @@ function renderShotboardV3(node) {
         showTimelineNotice(`Applied ${profileLabels[String(profile)] || "Low VRAM"} canvas/sampler profile. Timeline trims were not changed.`, "info");
     };
     addWidgetChoiceSetting("Hardware profile", "performance_profile", [
-        { value: "rtx3060_draft", label: "Low VRAM draft" },
-        { value: "rtx3060_balanced", label: "Low VRAM balanced" },
-        { value: "rtx3060_turbo", label: "Low VRAM Turbo" },
+        { value: "low_vram_draft", label: "Low VRAM draft" },
+        { value: "low_vram_balanced", label: "Low VRAM balanced" },
+        { value: "low_vram_turbo", label: "Low VRAM Turbo" },
         { value: "h3_native_quality", label: "H3 native quality" },
         { value: "custom", label: "Custom" },
     ], applyPerformanceProfile);
     addWidgetChoiceSetting("Acceleration", "acceleration", [
-        { value: "auto_3060", label: "Low VRAM Auto / H3 Sage" },
+        { value: "low_vram_auto", label: "Low VRAM Auto / H3 Sage + exact chunks" },
         { value: "native", label: "Native" },
-        { value: "h3_sage", label: "H3 Memory-Efficient Sage" },
-        { value: "sage", label: "Sage" },
-        { value: "sage_sol", label: "Sage + Sol / exp." },
+        { value: "h3_sage", label: "H3 Sage + exact chunks" },
+        { value: "sol_low_vram", label: "Sol + exact Low VRAM / exp." },
+        { value: "sol_adaptive_safe", label: "Sol + Adaptive Safe / exp." },
+        { value: "sol_adaptive_balanced", label: "Sol + Adaptive Balanced / exp." },
+        { value: "adaptive_safe", label: "Adaptive Safe / exp." },
         { value: "spectrum", label: "Spectrum / exp." },
-        { value: "sage_spectrum", label: "Sage + Spectrum" },
+        { value: "sage_spectrum", label: "H3 Sage + Spectrum / exp." },
     ]);
     addSetting("Seed", "seed", "1", "0");
     addSetting("Seed stride", "seed_stride", "1", "0");
@@ -10121,7 +10339,7 @@ function renderShotboardV3(node) {
             setDeckValue("shift_video", 12);
             setDeckValue("turbo_sampler_mode", "audio_fixed");
             setDeckValue("shift_audio", 3);
-            setDeckValue("acceleration", "auto_3060");
+            setDeckValue("acceleration", "low_vram_auto");
         }
     };
     addWidgetChoiceSetting("Turbo mode", "turbo_mode", [
@@ -10155,14 +10373,13 @@ function renderShotboardV3(node) {
     ]);
     addStaticH3Setting("Turbo audio", "Separate AV clocks", "Audio-fixed uses Larryvrh's sampler: video shift 12 and audio shift 3. Stock RES keeps the user-selected 4-6 audio shift but can distort audio at very low steps.");
 
-    settingsTarget = makeSettingsGroup("03", "REFERENCES & EXPERIMENTAL", "Reference semantics plus Sol and Spectrum quality/speed trade-offs.", true);
+    settingsTarget = makeSettingsGroup("03", "REFERENCES & EXPERIMENTAL", "Reference semantics plus Sol, Adaptive Cache and Spectrum quality/speed trade-offs.", true);
     addWidgetChoiceSetting("Ref image size", "ref_image_size", [
         { value: "match", label: "Match canvas" },
         { value: "max", label: "Max / costly" },
     ]);
     addWidgetChoiceSetting("Text encoder", "text_encoder_device", [
-        { value: "cpu_safe_12gb", label: "CPU safe / Low VRAM" },
-        { value: "auto", label: "Auto / high VRAM" },
+        { value: "auto", label: "Auto / GPU-first, CPU only after OOM" },
     ]);
     [1, 2, 3, 4].forEach((index) => addWidgetChoiceSetting(`Ref ${index} role`, `reference_role_${index}`, [
         { value: "subject_identity", label: "Subject" },
@@ -10186,12 +10403,12 @@ function renderShotboardV3(node) {
         { value: "sound_reference", label: "Sound reference" },
     ]);
     addWidgetChoiceSetting("Sol sink", "sol_conditioning", [
-        { value: "exact_kv", label: "Exact KV / faster" },
         { value: "exact_kv_and_rows", label: "Exact audio rows" },
+        { value: "exact_kv", label: "Exact KV / faster" },
     ]);
     addWidgetChoiceSetting("Spectrum", "spectrum_profile", [
-        { value: "conservative_3060", label: "Low VRAM" },
-        { value: "conservative_quality", label: "Quality / RAM high" },
+        { value: "low_vram", label: "Low VRAM / degree 1" },
+        { value: "quality", label: "Quality / RAM high" },
         { value: "aggressive", label: "Aggressive" },
     ]);
     addSelectSetting("Legacy board resize", "image_resize_method", ["crop", "pad", "keep proportion", "stretch"]);
@@ -10209,13 +10426,40 @@ function renderShotboardV3(node) {
         { value: "ltx23", label: "LTX 2.3" },
         { value: "wan22_5b", label: "Wan 2.2 5B" },
     ]);
+    upscaleResolutionSelect = addResolutionPresetSetting("Upscale delivery", H3_UPSCALE_RESOLUTION_PRESETS, "upscale");
     addSetting("Upscale width", "upscale_width", "8", "256");
     addSetting("Upscale height", "upscale_height", "8", "256");
+    syncResolutionPresetControls();
     addWidgetBoolSetting("Upscale Sage", "upscale_sage");
     addSetting("Upscale seed offset", "upscale_seed_offset", "1", "0");
     addSetting("Wan denoise", "wan_upscale_denoise", "0.01", "0");
     addWidgetTextSetting("Upscale prompt (optional)", "upscale_prompt", "Leave empty to reuse the selected H3 global/chunk prompt.");
-    addStaticH3Setting("Upscale models", "Connected lazy branch", "Model and LoRA files are selected in the connected LTX/Wan workflow branch.");
+    addWidgetBoolSetting("LTX seam-safe VAE", "ltx_seam_safe");
+    addWidgetBoolSetting("LTX finishing LoRA", "ltx_detailer_enabled");
+    const ltxDetailerValues = getWidget(node, "ltx_detailer_lora_name")?.options?.values;
+    addSelectSetting("LTX LoRA — Crisp preset / click to change", "ltx_detailer_lora_name", Array.isArray(ltxDetailerValues) && ltxDetailerValues.length ? ltxDetailerValues : [""]);
+    addSetting("LTX LoRA strength", "ltx_detailer_strength", "0.05", "0");
+    addWidgetBoolSetting("RTX VSR final 4K", "ltx_4k_enabled");
+    settingsControls.get("ltx_4k_enabled")?.addEventListener("change", (event) => {
+        const enabled4K = String(event?.target?.value || "off") === "on";
+        if (!enabled4K) {
+            if (Number(getWidget(node, "upscale_width")?.value || 0) >= 3000) setDeckValue("upscale_width", 1920);
+            if (Number(getWidget(node, "upscale_height")?.value || 0) >= 1600) setDeckValue("upscale_height", 1080);
+            syncSettingsFromWidgets();
+            return;
+        }
+        setDeckValue("upscale_enabled", true);
+        setDeckValue("upscale_mode", "ltx23");
+        setDeckValue("upscale_width", 3840);
+        setDeckValue("upscale_height", 2160);
+    });
+    addWidgetChoiceSetting("RTX VSR quality", "ltx_4k_quality", [
+        { value: "ULTRA", label: "Ultra" },
+        { value: "HIGH", label: "High" },
+        { value: "MEDIUM", label: "Medium" },
+        { value: "LOW", label: "Low" },
+    ]);
+    addStaticH3Setting("LTX delivery path", "Seam-safe / exact size", "A legal multiple-of-32 canvas is used inside LTX, then the result is resized to the exact requested dimensions. Optional 4K runs NVIDIA RTX VSR 2x only after the LTX stage. Crisp/enhance LoRAs work as finishing LoRAs; the official IC Detailer needs an IC-guided latent pipeline for its full effect.");
     refreshPerformanceBand();
 
     if (isShotboardV4) {
@@ -11132,6 +11376,68 @@ function renderShotboardV3(node) {
     function isTimelineImageSegment(seg) {
         return String(seg?.type || "image") === "image" && !seg?.placeholder;
     }
+    function isTimelineImageSlot(seg) {
+        return String(seg?.type || "image") === "image";
+    }
+    const h3TaskModeValue = () => String(getWidget(node, "task_mode")?.value || "auto_from_timeline").trim().toLowerCase();
+    const h3ImageSlots = (items = timeline.segments || []) => (items || [])
+        .filter(isTimelineImageSlot)
+        .slice()
+        .sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
+    const h3ImageAnchors = (items = timeline.segments || []) => (items || [])
+        .filter(isTimelineImageSegment)
+        .slice()
+        .sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
+    const h3FlfAnchorMode = (items = timeline.segments || []) => {
+        const mode = h3TaskModeValue();
+        const count = h3ImageAnchors(items).length;
+        return count >= 2 && (["flf", "fflf", "fl2va"].includes(mode) || ["auto", "auto_from_timeline"].includes(mode));
+    };
+    const h3FlfLayoutMode = (items = timeline.segments || []) => {
+        const mode = h3TaskModeValue();
+        const slots = h3ImageSlots(items);
+        if (slots.length < 2) return false;
+        if (["flf", "fflf", "fl2va"].includes(mode)) return true;
+        if (!["auto", "auto_from_timeline"].includes(mode)) return false;
+        // In Auto, show the future FLF bridge immediately after the user adds
+        // an empty image slot. The backend contract still waits for two real
+        // images, so a placeholder can never become conditioning by mistake.
+        return h3ImageAnchors(items).length >= 1;
+    };
+    const h3NewImageSlotIsFlf = () => {
+        const mode = h3TaskModeValue();
+        if (["flf", "fflf", "fl2va"].includes(mode)) return true;
+        return ["auto", "auto_from_timeline"].includes(mode) && h3ImageSlots(timeline.segments || []).length >= 1;
+    };
+    const h3I2vHardCutMode = (items = timeline.segments || []) => {
+        const mode = h3TaskModeValue();
+        return h3ImageAnchors(items).length > 1 && ["i2v", "i2va"].includes(mode);
+    };
+    const buildH3BridgeContract = (items = timeline.segments || []) => {
+        const anchors = h3ImageAnchors(items);
+        if (!h3FlfAnchorMode(anchors)) return [];
+        return anchors.slice(0, -1).map((from, index) => {
+            const to = anchors[index + 1];
+            const startFrame = Math.max(0, Number(from.start || 0) + Number(from.length || 1) / 2);
+            const endFrame = Math.max(startFrame + 1, Number(to.start || 0) + Number(to.length || 1) / 2);
+            const prompt = String(from.prompt ?? from.local_prompt ?? from.relay_prompt ?? "");
+            return {
+                id: `h3_bridge_${String(from.id || index + 1)}_${String(to.id || index + 2)}`,
+                label: `FLF ${index + 1} -> ${index + 2}`,
+                from_segment_id: String(from.id || ""),
+                to_segment_id: String(to.id || ""),
+                from_ref: Math.max(1, Math.round(Number(from.ref || index + 1))),
+                to_ref: Math.max(1, Math.round(Number(to.ref || index + 2))),
+                visual_start_frame: Number(startFrame.toFixed(3)),
+                visual_end_frame: Number(endFrame.toFixed(3)),
+                visual_length_frames: Number((endFrame - startFrame).toFixed(3)),
+                prompt,
+                local_prompt: prompt,
+                enabled: Boolean(prompt.trim() && from.relay_manual_off !== true && from.promptrelay_manual_off !== true),
+                timing_policy: "image_box_centres_normalised_to_timeline",
+            };
+        });
+    };
     function isActionBridgeRelaySegment(seg) {
         return String(seg?.type || "") === "text" && Boolean(seg?.actionBridgeSourceId);
     }
@@ -11571,6 +11877,7 @@ function renderShotboardV3(node) {
         } else {
             ensureDurationForFrames(Math.round(Number(source.start || 0) + Number(source.length || 1)) + slotLength);
         }
+        const flfSlot = h3NewImageSlotIsFlf();
         const slot = {
             id: newId("slot"),
             type: "image",
@@ -11581,8 +11888,8 @@ function renderShotboardV3(node) {
             label: "empty_slot",
             prompt: "",
             note: "",
-            camera: "cut to",
-            transition: "hard_cut",
+            camera: flfSlot ? "continuous dolly-in" : "cut to",
+            transition: flfSlot ? "continuous_motion" : "hard_cut",
             guideStrength: Number(defaultForceWidget?.value || 0.25),
             imageLockStrength: Number(defaultForceWidget?.value || 0.25),
             defaultForceSource: Number(defaultForceWidget?.value || 0.25),
@@ -11908,6 +12215,7 @@ function renderShotboardV3(node) {
                 ensureDurationForFrames(endOfSegments(sorted) + 1);
             }
             const splitStart = Math.round(Number(source.start || 0) + Number(source.length || 1));
+            const flfSlot = kind === "image" && h3NewImageSlotIsFlf();
             const placeholder = kind === "text" ? textRelaySegment(splitStart, splitLen) : {
                 id: newId("slot"),
                 type: "image",
@@ -11918,8 +12226,8 @@ function renderShotboardV3(node) {
                 label: "empty_slot",
                 prompt: "",
                 note: "",
-                camera: "continuous dolly-in",
-                transition: "continuous_motion",
+                camera: flfSlot ? "continuous dolly-in" : "cut to",
+                transition: flfSlot ? "continuous_motion" : "hard_cut",
                 guideStrength: Number(defaultForceWidget?.value || 0.25),
                 imageLockStrength: Number(defaultForceWidget?.value || 0.25),
                 defaultForceSource: Number(defaultForceWidget?.value || 0.25),
@@ -11936,6 +12244,7 @@ function renderShotboardV3(node) {
         }
         const length = defaultLen();
         ensureDurationForFrames(Math.round(start) + length);
+        const flfSlot = kind === "image" && h3NewImageSlotIsFlf();
         const placeholder = kind === "text" ? textRelaySegment(start, length) : {
             id: newId("slot"),
             type: "image",
@@ -11946,8 +12255,8 @@ function renderShotboardV3(node) {
             label: "empty_slot",
             prompt: "",
             note: "",
-            camera: "continuous dolly-in",
-            transition: "continuous_motion",
+            camera: flfSlot ? "continuous dolly-in" : "cut to",
+            transition: flfSlot ? "continuous_motion" : "hard_cut",
             guideStrength: Number(defaultForceWidget?.value || 0.25),
             imageLockStrength: Number(defaultForceWidget?.value || 0.25),
             defaultForceSource: Number(defaultForceWidget?.value || 0.25),
@@ -12795,7 +13104,8 @@ function renderShotboardV3(node) {
             );
             block.appendChild(rail);
         }
-        if (!isAudio) {
+        const promptOwnedByFlfBridge = !isAudio && isTimelineImageSlot(seg) && h3FlfLayoutMode(activeVisualSegments());
+        if (!isAudio && !promptOwnedByFlfBridge) {
             const caption = document.createElement("textarea");
             caption.value = String(seg.prompt || "");
             caption.placeholder = "Action in this segment...";
@@ -12855,6 +13165,20 @@ function renderShotboardV3(node) {
             };
             protectControlDrag(caption);
             block.appendChild(caption);
+        }
+        else if (promptOwnedByFlfBridge) {
+            const anchors = h3ImageSlots(activeVisualSegments());
+            const anchorIndex = anchors.findIndex((item) => String(item.id || "") === String(seg.id || ""));
+            const role = document.createElement("div");
+            const pending = Boolean(seg.placeholder || !segmentReferencePath(seg));
+            role.textContent = pending
+                ? (anchorIndex === anchors.length - 1 ? "FINAL FLF KEYFRAME — ADD IMAGE" : `FLF KEYFRAME ${anchorIndex + 1} — ADD IMAGE`)
+                : (anchorIndex === anchors.length - 1 ? "FINAL FLF KEYFRAME" : `FLF KEYFRAME ${anchorIndex + 1}`);
+            role.title = anchorIndex === anchors.length - 1
+                ? "This image closes the previous FLF bridge. It does not create an extra chunk."
+                : "The editable local prompt is displayed between this image centre and the next image centre.";
+            role.style.cssText = `position:absolute;left:${innerLeft}px;right:${innerRight}px;top:${promptTop}px;height:${promptHeight}px;display:flex;align-items:center;justify-content:center;box-sizing:border-box;border:1px dashed rgba(223,164,81,.38);border-radius:5px;background:rgba(22,18,14,.28);color:rgba(244,229,196,.56);font:9px/1.2 monospace;font-weight:900;letter-spacing:.06em;text-align:center;pointer-events:none;`;
+            block.appendChild(role);
         }
         const label = document.createElement("div");
         label.style.cssText = `position:absolute;left:${innerLeft}px;top:${truthRailHeight + 4}px;right:${topRightSafe}px;color:#fff;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px #000;`;
@@ -13393,6 +13717,87 @@ function renderShotboardV3(node) {
             block.append(type, prompt);
             actionTrack.appendChild(block);
         });
+    }
+
+    function drawH3PromptModeOverlays(segments) {
+        const total = Math.max(1, getTotalFrames());
+        const fps = getFps();
+        const anchors = h3ImageAnchors(segments);
+        if (h3FlfLayoutMode(segments)) {
+            const layoutAnchors = h3ImageSlots(segments);
+            layoutAnchors.slice(0, -1).forEach((from, index) => {
+                const to = layoutAnchors[index + 1];
+                const fromCenter = Math.max(0, Number(from.start || 0) + Number(from.length || 1) / 2);
+                const toCenter = Math.max(fromCenter + 1, Number(to.start || 0) + Number(to.length || 1) / 2);
+                const bridge = document.createElement("div");
+                bridge.className = "iamccs-h3-flf-centre-prompt-bridge";
+                bridge.style.cssText = [
+                    "position:absolute",
+                    `left:${(fromCenter / total) * 100}%`,
+                    `width:${Math.max(1, ((toCenter - fromCenter) / total) * 100)}%`,
+                    "min-width:0",
+                    "top:154px",
+                    `height:${74 + timelineExtraH}px`,
+                    "box-sizing:border-box",
+                    "padding:19px 6px 5px",
+                    "border:1px solid rgba(223,164,81,.86)",
+                    "border-radius:7px",
+                    "background:linear-gradient(90deg,rgba(58,43,25,.96),rgba(18,48,50,.96))",
+                    "box-shadow:0 6px 18px rgba(0,0,0,.52),inset 0 1px 0 rgba(255,255,255,.13)",
+                    "z-index:72",
+                    "overflow:visible",
+                ].join(";");
+                bridge.title = `FLF chunk ${index + 1}: ${String(from.label || `keyframe ${index + 1}`)} -> ${String(to.label || `keyframe ${index + 2}`)}. The visual span follows the two image-box centres.`;
+                const header = document.createElement("div");
+                header.textContent = `FLF ${index + 1} -> ${index + 2}  |  CENTRE TO CENTRE  |  ${((toCenter - fromCenter) / fps).toFixed(2)}s WEIGHT`;
+                header.style.cssText = "position:absolute;left:6px;right:6px;top:4px;height:12px;color:#F4D49E;font:8px/1 monospace;font-weight:950;letter-spacing:.025em;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none;";
+                const prompt = document.createElement("textarea");
+                prompt.value = String(from.prompt ?? from.local_prompt ?? from.relay_prompt ?? "");
+                prompt.placeholder = `Local MiniMax prompt for FLF ${index + 1} -> ${index + 2}`;
+                prompt.spellcheck = false;
+                prompt.dataset.iamccsV3SegmentId = String(from.id || "");
+                prompt.dataset.iamccsV3Key = "prompt";
+                prompt.style.cssText = `width:100%;height:100%;box-sizing:border-box;padding:6px 8px;border:1px solid rgba(118,181,177,.62);border-radius:5px;background:#F4EFE6;color:#111;font:${promptFontSize(10)}/1.25 monospace;font-weight:750;resize:none;overflow:auto;outline:none;pointer-events:auto;`;
+                prompt.onpointerdown = (event) => event.stopPropagation();
+                prompt.onclick = (event) => event.stopPropagation();
+                prompt.ondblclick = (event) => event.stopPropagation();
+                prompt.oninput = () => {
+                    markPromptFieldEdited(prompt);
+                    from.prompt = prompt.value;
+                    from.local_prompt = prompt.value;
+                    from.relay_prompt = prompt.value;
+                    from.use_prompt = Boolean(String(prompt.value || "").trim());
+                    if (from.use_prompt) {
+                        from.relay_manual_off = false;
+                        from.promptrelay_manual_off = false;
+                    }
+                    syncSegmentTextPeers(from.id, "prompt", prompt.value, prompt);
+                    syncSegmentRelayPeers(from.id, Boolean(from.use_prompt), null);
+                    writeTimeline({ force: true });
+                };
+                prompt.onchange = flushTimelineWrite;
+                prompt.onblur = flushTimelineWrite;
+                protectControlDrag(prompt);
+                bridge.append(header, prompt);
+                imageTrack.appendChild(bridge);
+            });
+            return;
+        }
+        if (h3I2vHardCutMode(anchors)) {
+            anchors.slice(1).forEach((current, index) => {
+                const previous = anchors[index];
+                const previousEnd = Number(previous.start || 0) + Number(previous.length || 1);
+                const currentStart = Number(current.start || 0);
+                const frame = Math.max(0, Math.min(total, Math.abs(currentStart - previousEnd) <= 1 ? currentStart : (previousEnd + currentStart) / 2));
+                const marker = document.createElement("div");
+                marker.className = "iamccs-h3-i2v-hard-cut-marker";
+                marker.innerHTML = "<span>HARD CUT</span>";
+                marker.style.cssText = `position:absolute;left:${(frame / total) * 100}%;top:145px;bottom:8px;width:2px;transform:translateX(-1px);background:#E56B5D;box-shadow:0 0 0 1px rgba(0,0,0,.65),0 0 10px rgba(229,107,93,.55);z-index:74;pointer-events:none;`;
+                const label = marker.querySelector("span");
+                if (label) label.style.cssText = "position:absolute;left:50%;top:2px;transform:translate(-50%,-100%);padding:2px 5px;border:1px solid rgba(255,178,166,.85);border-radius:4px;background:#52251F;color:#FFE9E3;font:8px/1 monospace;font-weight:950;white-space:nowrap;";
+                imageTrack.appendChild(marker);
+            });
+        }
     }
 
     function drawStepTransitionBridges(segments) {
@@ -14844,6 +15249,7 @@ function renderShotboardV3(node) {
         }
         visualSegments.forEach((seg) => imageTrack.appendChild(makeBlock(seg, false)));
         if (!visualSegments.length) imageTrack.appendChild(makeImagePlaceholderBlock());
+        drawH3PromptModeOverlays(visualSegments);
         drawVisualEdgeHandles(visualSegments);
         drawIcLoraTrack(motionSegmentsForDraw);
         audioSegmentsForDraw.forEach((seg) => audioTracks.appendChild(makeBlock(seg, true)));

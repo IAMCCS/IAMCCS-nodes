@@ -23,6 +23,7 @@ import torch
 import torch.nn.functional as F
 from PIL import Image, ImageOps
 
+import comfy.utils
 import folder_paths
 
 
@@ -80,6 +81,36 @@ def _chunk(cine_linx: dict[str, Any], segment_index: int) -> dict[str, Any]:
 
 def _task_family(task: str) -> str:
     return "ref2va" if str(task or "").lower().startswith("ref2va") else "fl2va"
+
+
+def _cine_info_h3(cine_linx: Any) -> tuple[dict[str, Any], dict[str, Any]]:
+    if not isinstance(cine_linx, dict):
+        return {}, {}
+    resources = cine_linx.get("resources") if isinstance(cine_linx.get("resources"), dict) else {}
+    config = resources.get("iamccs_minimax_h3_cine_info")
+    return (config if isinstance(config, dict) else {}), resources
+
+
+def _effective_task(cine_linx: Any, chunk: dict[str, Any]) -> str:
+    config, _ = _cine_info_h3(cine_linx)
+    override = str(config.get("task_override", "from_shotboard") or "from_shotboard").lower()
+    if override in {"t2va", "i2va", "fl2va", "ref2va"}:
+        return override
+    return str(chunk.get("task_mode", "t2va") or "t2va").lower()
+
+
+def _effective_shotplan(cine_linx: Any, shotplan: dict[str, Any]) -> dict[str, Any]:
+    config, _ = _cine_info_h3(cine_linx)
+    if not config:
+        return shotplan
+    result = dict(shotplan)
+    for key in ("reference_roles", "reference_video_role", "reference_audio_role", "ref_image_size"):
+        if key in config:
+            result[key] = config[key]
+    if isinstance(config.get("reference_resize"), dict):
+        result["reference_resize"] = dict(config["reference_resize"])
+    result["reference_source"] = str(config.get("reference_source", "cine_info_h3_only"))
+    return result
 
 
 def _resolve_image_path(value: str) -> Path | None:
@@ -206,6 +237,12 @@ def _audio_slice(audio: dict[str, Any] | None, start_seconds: float, duration_se
 
 def _unique_plan_image_paths(shotplan: dict[str, Any]) -> list[str]:
     result: list[str] = []
+    for path in shotplan.get("reference_image_paths", []):
+        clean = str(path or "").strip()
+        if clean and clean not in result:
+            result.append(clean)
+        if len(result) >= 4:
+            return result
     for slot in shotplan.get("slots", []):
         if not isinstance(slot, dict):
             continue
@@ -243,40 +280,173 @@ def _reference_header(items: list[dict[str, str]], prompt: str) -> str:
 
 
 def _place_text_encoder(clip, shotplan: dict[str, Any]):
-    """Retarget the very large Qwen3-VL encoder before it is evaluated.
+    """Keep Qwen3-VL on ComfyUI's automatic GPU-first placement.
 
-    The Q2 GGUF file is compact on disk, but individual layers are expanded
-    while ComfyUI encodes the prompt.  Loading the complete encoder on a
-    A 12 GiB Low VRAM configuration leaves no room for those temporary tensors and fails before
-    H3 sampling starts.  ComfyUI's native retargeter clones the CLIP wrapper
-    and pins both load and offload devices to CPU without mutating the loader.
+    ``cpu_safe_12gb`` is retained only as a legacy workflow value.  It no
+    longer pins the encoder to CPU because doing so turns prompt encoding into
+    the dominant runtime cost.  A CPU clone is created only by the OOM retry
+    path below, after a real CUDA allocation failure.
     """
-    mode = str(shotplan.get("text_encoder_device", "cpu_safe_12gb") or "cpu_safe_12gb").lower()
-    if mode == "auto":
-        return clip, "auto"
-    if mode != "cpu_safe_12gb":
+    mode = str(shotplan.get("text_encoder_device", "auto") or "auto").lower()
+    if mode not in {"auto", "cpu_safe_12gb"}:
         raise ValueError(f"Unsupported MiniMax H3 text encoder device mode: {mode}")
+    if mode == "cpu_safe_12gb":
+        return clip, "auto(gpu-first; migrated legacy cpu_safe_12gb)"
+    return clip, "auto(gpu-first)"
+
+
+def _text_encoder_dynamic_reserve_mb(clip) -> int:
+    """Leave activation headroom when the 32B multimodal encoder uses a small GPU.
+
+    ComfyUI's generic CLIP loader has no MiniMax-H3-specific activation estimate.
+    With a 12 GB card it can therefore stage the complete ~9.6 GB Qwen3-VL GGUF,
+    leaving too little room for the vision tower and two FL2VA image streams.  A
+    temporary memory estimate makes CoreModelPatcher keep only part of the
+    weights resident while the remaining layers stream from CPU.  This is still
+    GPU-first execution; it is not the much slower all-CPU fallback.
+    """
+    patcher = getattr(clip, "patcher", None)
+    device = getattr(patcher, "load_device", None)
+    if getattr(device, "type", str(device)) != "cuda" or not torch.cuda.is_available():
+        return 0
+    try:
+        total_gib = torch.cuda.get_device_properties(device).total_memory / (1024 ** 3)
+    except Exception:
+        return 0
+    if total_gib <= 13.0:
+        return 3584
+    if total_gib <= 17.0:
+        return 2560
+    return 0
+
+
+def _install_text_encoder_memory_estimate(clip, reserve_mb: int):
+    """Temporarily add/raise CLIP's activation estimate; return a restore callback."""
+    stage = getattr(clip, "cond_stage_model", None)
+    if stage is None or reserve_mb <= 0:
+        return lambda: None
+
+    instance_dict = getattr(stage, "__dict__", {})
+    had_instance_value = "memory_estimation_function" in instance_dict
+    previous_instance_value = instance_dict.get("memory_estimation_function")
+    previous = getattr(stage, "memory_estimation_function", None)
+    reserve_bytes = int(reserve_mb) * 1024 * 1024
+
+    def estimate(tokens, device=None):
+        base = 0
+        if callable(previous):
+            try:
+                base = int(previous(tokens, device=device))
+            except TypeError:
+                base = int(previous(tokens))
+        return max(base, reserve_bytes)
+
+    stage.memory_estimation_function = estimate
+
+    def restore():
+        if had_instance_value:
+            stage.memory_estimation_function = previous_instance_value
+        else:
+            try:
+                delattr(stage, "memory_estimation_function")
+            except AttributeError:
+                pass
+
+    return restore
+
+
+def _is_cuda_oom(exc: BaseException) -> bool:
+    oom_type = getattr(torch, "OutOfMemoryError", None)
+    if oom_type is not None and isinstance(exc, oom_type):
+        return True
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "cuda out of memory",
+            "cuda error: out of memory",
+            "cudamalloc",
+            "cuda memory allocation",
+        )
+    )
+
+
+def _clear_conditioning_cuda_after_oom() -> str:
+    """Release the failed GPU attempt before the one allowed CPU retry."""
+    notes: list[str] = []
+    try:
+        import comfy.model_management as mm
+
+        mm.unload_all_models()
+        notes.append("unload_all_models")
+        try:
+            mm.cleanup_models()
+            notes.append("cleanup_models")
+        except Exception as exc:
+            notes.append(f"cleanup warning: {exc}")
+        mm.soft_empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        notes.append("empty CUDA cache")
+    except Exception as exc:
+        notes.append(f"cleanup warning: {exc}")
+    gc.collect()
+    return ", ".join(notes)
+
+
+def _run_h3_conditioning_with_cpu_fallback(clip, shotplan: dict[str, Any], execute_fn):
+    """Encode GPU-first with activation headroom; retry on CPU only after CUDA OOM."""
+    active_clip, placement_report = _place_text_encoder(clip, shotplan)
+    reserve_mb = _text_encoder_dynamic_reserve_mb(active_clip)
+    restore_estimate = _install_text_encoder_memory_estimate(active_clip, reserve_mb)
+    if reserve_mb:
+        placement_report += f"+dynamic_reserve={reserve_mb}MB"
+        LOG.info(
+            "MiniMax H3 low-VRAM text encode reserve active: %d MB kept for Qwen3-VL activations; weights remain GPU-first with dynamic offload",
+            reserve_mb,
+        )
+    try:
+        try:
+            return execute_fn(active_clip), placement_report
+        finally:
+            restore_estimate()
+    except Exception as exc:
+        if not _is_cuda_oom(exc):
+            raise
+
+        oom_exc = exc
+        cleanup_report = _clear_conditioning_cuda_after_oom()
+        LOG.warning(
+            "MiniMax H3 text conditioning exhausted CUDA memory; retrying once on CPU after %s",
+            cleanup_report,
+        )
 
     from comfy_extras.nodes_multigpu import SelectCLIPDeviceNode
 
-    safe_clip = SelectCLIPDeviceNode.execute(clip=clip, device="cpu")[0]
-    load_device = getattr(getattr(safe_clip, "patcher", None), "load_device", None)
+    cpu_clip = SelectCLIPDeviceNode.execute(clip=clip, device="cpu")[0]
+    load_device = getattr(getattr(cpu_clip, "patcher", None), "load_device", None)
     if getattr(load_device, "type", str(load_device)) != "cpu":
         raise RuntimeError(
-            "MiniMax H3 CPU-safe mode could not place Qwen3-VL on CPU. "
-            "Update ComfyUI or insert Select CLIP Device=cpu before conditioning."
-        )
-    return safe_clip, "cpu_safe_12gb(cpu)"
-
-
-def _apply_sage(model):
-    sage_cls = _node_class("PathchSageAttentionKJ")
-    return sage_cls().patch(model=model, sage_attention="auto", allow_compile=False)[0]
+            "MiniMax H3 could not activate its CPU fallback after a CUDA OOM. "
+            "Update ComfyUI and retry."
+        ) from oom_exc
+    return execute_fn(cpu_clip), f"auto->cpu_fallback(cuda_oom; {cleanup_report})"
 
 
 def _apply_h3_memory_efficient_sage(model):
     sage_cls = _node_class("MiniMaxH3MemoryEfficientSageAttentionPatch")
     return sage_cls.execute(model=model)[0]
+
+
+def _apply_h3_low_vram_exact(model):
+    attention_cls = _node_class("MiniMaxLowVRAMAttention")
+    patched = attention_cls.execute(model=model, head_chunks=4)[0]
+    feed_forward_cls = _node_class("MiniMaxChunkFeedForward")
+    return feed_forward_cls.execute(model=patched, chunks=2, seq_threshold=4096)[0]
+
+
+def _apply_h3_sage_low_vram(model):
+    return _apply_h3_low_vram_exact(_apply_h3_memory_efficient_sage(model))
 
 
 def _apply_sol(model, conditioning_mode: str):
@@ -298,27 +468,33 @@ def _apply_sol(model, conditioning_mode: str):
     )[0]
 
 
+def _apply_adaptive_cache(model, preset: str):
+    cache_cls = _node_class("MiniMaxH3AdaptiveCache")
+    return cache_cls().patch(model=model, preset=preset, cache_device="auto")[0]
+
+
 def _apply_spectrum(model, profile: str):
     spectrum_cls = _node_class("SpectrumApplyMiniMaxH3")
-    profile = str(profile or "conservative_3060").lower()
+    profile = str(profile or "low_vram").lower()
     aggressive = profile == "aggressive"
-    quality = profile == "conservative_quality"
-    # max_history=5 is the minimum valid history for degree=4 and is the only
-    # practical default for a 1280x736 / 243-frame single branch on 32 GiB RAM.
-    max_history = 8 if quality else 5
+    quality = profile in {"conservative_quality", "quality"}
+    degree = 4 if quality else 1
+    warmup_steps = 5 if quality else 1
+    max_history = 8 if quality else 2
     return spectrum_cls().apply(
         model=model,
         enabled=True,
         blend_weight=0.75 if aggressive else 0.50,
-        degree=4,
+        degree=degree,
         ridge_lambda=0.10,
         window_size=2.0,
         flex_window=3.0 if aggressive else 0.75,
-        warmup_steps=5,
+        warmup_steps=warmup_steps,
         tail_actual_steps=1,
         max_history=max_history,
         debug=False,
         history_storage="system_ram",
+        bootstrap_first_forecast=not quality,
     )[0]
 
 
@@ -391,30 +567,36 @@ def _turbo_sampler(shotplan: dict[str, Any]):
 
 def _accelerate(model, shotplan: dict[str, Any]):
     mode = str(shotplan.get("acceleration", "native") or "native").lower()
-    if mode == "auto_3060":
+    if mode in {"auto_3060", "low_vram_auto"}:
         try:
-            return _apply_h3_memory_efficient_sage(model), "Low VRAM Auto -> H3 Memory-Efficient Sage"
+            return _apply_h3_sage_low_vram(model), "Low VRAM Auto -> H3 Sage + exact attention/FFN chunks"
         except Exception as h3_exc:
             try:
-                return _apply_sage(model), f"Low VRAM Auto -> generic Sage (H3 patch unavailable: {h3_exc})"
-            except Exception as generic_exc:
-                return model, f"Low VRAM Auto -> native (H3 Sage: {h3_exc}; generic Sage: {generic_exc})"
+                return _apply_h3_memory_efficient_sage(model), f"Low VRAM Auto -> H3 Sage (exact chunks unavailable: {h3_exc})"
+            except Exception as sage_exc:
+                return model, f"Low VRAM Auto -> native (H3 stack: {h3_exc}; H3 Sage: {sage_exc})"
     if mode == "native":
         return model, "native"
-    if mode == "sage":
-        return _apply_sage(model), "SageAttention(auto)"
-    if mode == "h3_sage":
-        return _apply_h3_memory_efficient_sage(model), "MiniMax H3 Memory-Efficient Sage"
-    if mode == "sage_sol":
-        patched = _apply_sage(model)
+    if mode in {"sage", "h3_sage"}:
+        return _apply_h3_sage_low_vram(model), "MiniMax H3 Sage + exact attention/FFN chunks"
+    if mode in {"sage_sol", "sol_low_vram"}:
+        patched = _apply_h3_low_vram_exact(model)
         patched = _apply_sol(patched, str(shotplan.get("sol_conditioning", "exact_kv")))
-        return patched, f"Sage+Sol({shotplan.get('sol_conditioning', 'exact_kv')})"
+        return patched, f"Sol({shotplan.get('sol_conditioning', 'exact_kv')}) + exact Low VRAM chunks"
+    if mode in {"adaptive_safe", "sol_adaptive_safe", "sol_adaptive_balanced"}:
+        patched = _apply_h3_low_vram_exact(model)
+        if mode.startswith("sol_"):
+            patched = _apply_sol(patched, str(shotplan.get("sol_conditioning", "exact_kv_and_rows")))
+        preset = "balanced" if mode.endswith("balanced") else "safe"
+        patched = _apply_adaptive_cache(patched, preset)
+        prefix = "Sol + " if mode.startswith("sol_") else ""
+        return patched, f"{prefix}Adaptive Cache {preset} + exact Low VRAM chunks"
     if mode == "spectrum":
-        profile = str(shotplan.get("spectrum_profile", "conservative_3060"))
+        profile = str(shotplan.get("spectrum_profile", "low_vram"))
         return _apply_spectrum(model, profile), f"Spectrum({profile},system_ram)"
     if mode == "sage_spectrum":
-        profile = str(shotplan.get("spectrum_profile", "conservative_3060"))
-        sage_model = _apply_sage(model)
+        profile = str(shotplan.get("spectrum_profile", "low_vram"))
+        sage_model = _apply_h3_sage_low_vram(model)
         return _apply_spectrum(sage_model, profile), f"SageAttention + Spectrum({profile},system_ram)"
     raise ValueError(f"Unknown MiniMax H3 acceleration mode: {mode}")
 
@@ -437,16 +619,13 @@ def _clean_vram_before_decode() -> str:
         return f"cleanup warning: {exc}"
 
 
-def _release_cpu_conditioning_models(shotplan: dict[str, Any]) -> str:
-    """Drop CPU Qwen/VAE pages after conditioning, before H3 is loaded.
+def _release_conditioning_models(shotplan: dict[str, Any]) -> str:
+    """Strict barrier after conditioning and immediately before H3 sampling.
 
-    The conditioning tensors are already materialized at this point. Keeping
-    the 9.6 GiB Qwen encoder resident would leave too little system RAM for a
-    Q4 H3 model and Spectrum history on a 32 GiB workstation.
+    Positive conditioning and the AV latent are already materialized when the
+    generation node runs.  Qwen3-VL (and any conditioning-time VAE residency)
+    can therefore be unloaded before the H3 model is requested.
     """
-    mode = str(shotplan.get("text_encoder_device", "cpu_safe_12gb") or "cpu_safe_12gb").lower()
-    if mode != "cpu_safe_12gb":
-        return "conditioning models kept"
     try:
         import comfy.model_management as mm
 
@@ -456,6 +635,8 @@ def _release_cpu_conditioning_models(shotplan: dict[str, Any]) -> str:
         except Exception:
             pass
         mm.soft_empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     except Exception as exc:
         LOG.warning("MiniMax H3 pre-sampler conditioning cleanup warning: %s", exc)
         return f"conditioning cleanup warning: {exc}"
@@ -466,10 +647,14 @@ def _release_cpu_conditioning_models(shotplan: dict[str, Any]) -> str:
 
             handle = ctypes.windll.kernel32.GetCurrentProcess()
             ctypes.windll.psapi.EmptyWorkingSet(handle)
-            return "CPU text encoder/VAE unloaded; Windows working set trimmed"
+            report = "conditioning models unloaded; CUDA cache cleared; Windows working set trimmed"
+            LOG.info("MiniMax H3 pre-sampler barrier: %s", report)
+            return report
         except Exception as exc:
             LOG.warning("MiniMax H3 working-set trim warning: %s", exc)
-    return "CPU text encoder/VAE unloaded"
+    report = "conditioning models unloaded; CUDA cache cleared"
+    LOG.info("MiniMax H3 pre-sampler barrier: %s", report)
+    return report
 
 
 class IAMCCS_MiniMaxH3AtomicModelRouter:
@@ -495,7 +680,8 @@ class IAMCCS_MiniMaxH3AtomicModelRouter:
 
     @staticmethod
     def _input_name(cine_linx, segment_index):
-        task = str(_chunk(cine_linx, segment_index).get("task_mode", "t2va"))
+        chunk = _chunk(cine_linx, segment_index)
+        task = _effective_task(cine_linx, chunk)
         return "ref2va_model" if _task_family(task) == "ref2va" else "fl2va_model"
 
     def check_lazy_status(self, cine_linx, segment_index, fl2va_model=None, ref2va_model=None, **kwargs):
@@ -508,7 +694,7 @@ class IAMCCS_MiniMaxH3AtomicModelRouter:
 
     def select(self, cine_linx, segment_index, fl2va_model=None, ref2va_model=None):
         chunk = _chunk(cine_linx, segment_index)
-        task = str(chunk.get("task_mode", "t2va"))
+        task = _effective_task(cine_linx, chunk)
         family = _task_family(task)
         model = ref2va_model if family == "ref2va" else fl2va_model
         if model is None:
@@ -582,10 +768,9 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
     ):
         from comfy_extras.nodes_minimax_h3 import MiniMaxH3ImageToVideo, MiniMaxH3ReferenceToVideo
 
-        shotplan = _resolve_shotplan(cine_linx)
+        shotplan = _effective_shotplan(cine_linx, _resolve_shotplan(cine_linx))
         chunk = _chunk(shotplan, segment_index)
-        clip, text_encoder_report = _place_text_encoder(clip, shotplan)
-        task = str(chunk.get("task_mode", "t2va")).lower()
+        task = _effective_task(cine_linx, chunk)
         width = int(shotplan.get("width", 960))
         height = int(shotplan.get("height", 544))
         frames = int(chunk.get("frame_count", 124))
@@ -595,7 +780,19 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
         planned_last = _load_image(str(chunk.get("last_image", "")))
         first = first_frame_override[:1] if torch.is_tensor(first_frame_override) else planned_first
         last = last_frame_override[:1] if torch.is_tensor(last_frame_override) else planned_last
-        external_images = [ref_image_1, ref_image_2, ref_image_3, ref_image_4]
+        h3_info, h3_resources = _cine_info_h3(cine_linx)
+        socket_images = [ref_image_1, ref_image_2, ref_image_3, ref_image_4]
+        resource_images = [h3_resources.get(f"iamccs_minimax_h3_ref_image_{index}") for index in range(1, 5)]
+        external_images = [
+            socket if torch.is_tensor(socket) else resource
+            for socket, resource in zip(socket_images, resource_images)
+        ]
+        if not torch.is_tensor(ref_video):
+            ref_video = h3_resources.get("iamccs_minimax_h3_ref_video")
+        if not isinstance(ref_video_audio, dict):
+            ref_video_audio = h3_resources.get("iamccs_minimax_h3_ref_video_audio")
+        if not isinstance(ref_audio, dict):
+            ref_audio = h3_resources.get("iamccs_minimax_h3_ref_audio")
 
         if first is None and bool(chunk.get("uses_bridge_first_frame")) and torch.is_tensor(bridge_frame):
             first = bridge_frame[:1]
@@ -621,27 +818,39 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
 
         manifest: list[dict[str, str]] = []
         if task == "t2va":
-            result = MiniMaxH3ImageToVideo.execute(
-                clip=clip, vae=video_vae, prompt=prompt,
-                width=width, height=height, length=frames,
-                first_frame=None, last_frame=None,
+            result, text_encoder_report = _run_h3_conditioning_with_cpu_fallback(
+                clip,
+                shotplan,
+                lambda active_clip: MiniMaxH3ImageToVideo.execute(
+                    clip=active_clip, vae=video_vae, prompt=prompt,
+                    width=width, height=height, length=frames,
+                    first_frame=None, last_frame=None,
+                ),
             )
         elif task == "i2va":
             if first is None:
                 raise ValueError("I2VA requires one opening image in the Shotboard or ref_image_1")
-            result = MiniMaxH3ImageToVideo.execute(
-                clip=clip, vae=video_vae, prompt=prompt,
-                width=width, height=height, length=frames,
-                first_frame=first, last_frame=None,
+            result, text_encoder_report = _run_h3_conditioning_with_cpu_fallback(
+                clip,
+                shotplan,
+                lambda active_clip: MiniMaxH3ImageToVideo.execute(
+                    clip=active_clip, vae=video_vae, prompt=prompt,
+                    width=width, height=height, length=frames,
+                    first_frame=first, last_frame=None,
+                ),
             )
             manifest.append({"label": "<Picture 1>", "role": "opening_keyframe"})
         elif task == "fl2va":
             if first is None or last is None:
                 raise ValueError("FL2VA requires both opening and final images; connect ref_image_1/ref_image_2 or place two adjacent Shotboard keyframes")
-            result = MiniMaxH3ImageToVideo.execute(
-                clip=clip, vae=video_vae, prompt=prompt,
-                width=width, height=height, length=frames,
-                first_frame=first, last_frame=last,
+            result, text_encoder_report = _run_h3_conditioning_with_cpu_fallback(
+                clip,
+                shotplan,
+                lambda active_clip: MiniMaxH3ImageToVideo.execute(
+                    clip=active_clip, vae=video_vae, prompt=prompt,
+                    width=width, height=height, length=frames,
+                    first_frame=first, last_frame=last,
+                ),
             )
             manifest.extend([
                 {"label": "<Picture 1>", "role": "opening_keyframe"},
@@ -649,7 +858,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             ])
         elif task.startswith("ref2va"):
             roles = _reference_roles(shotplan)
-            plan_paths = _unique_plan_image_paths(shotplan)
+            plan_paths = [] if str(h3_info.get("reference_source", "")) == "cine_info_h3_only" else _unique_plan_image_paths(shotplan)
             refs: dict[str, torch.Tensor] = {}
             for index in range(4):
                 role = roles[index]
@@ -699,29 +908,39 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             if not refs and not ref_videos and not ref_audios:
                 raise ValueError("REF2VA requires at least one enabled image, video, or audio reference")
             prompt = _reference_header(manifest, prompt)
-            result = MiniMaxH3ReferenceToVideo.execute(
-                clip=clip,
-                vae=video_vae,
-                audio_vae=audio_vae,
-                prompt=prompt,
-                width=width,
-                height=height,
-                length=frames,
-                ref_image_size=str(shotplan.get("ref_image_size", "match")),
-                ref_images=refs or None,
-                ref_videos=ref_videos,
-                ref_video_audios=ref_video_audios,
-                ref_audios=ref_audios,
+            result, text_encoder_report = _run_h3_conditioning_with_cpu_fallback(
+                clip,
+                shotplan,
+                lambda active_clip: MiniMaxH3ReferenceToVideo.execute(
+                    clip=active_clip,
+                    vae=video_vae,
+                    audio_vae=audio_vae,
+                    prompt=prompt,
+                    width=width,
+                    height=height,
+                    length=frames,
+                    ref_image_size=str(shotplan.get("ref_image_size", "match")),
+                    ref_images=refs or None,
+                    ref_videos=ref_videos,
+                    ref_video_audios=ref_video_audios,
+                    ref_audios=ref_audios,
+                ),
             )
         else:
             raise ValueError(f"Unsupported atomic H3 task: {task}")
 
         positive, latent = result[0], result[1]
+        LOG.info(
+            "MiniMax H3 conditioning complete | task=%s | text_encoder=%s | pre-sampler unload barrier is next",
+            task,
+            text_encoder_report,
+        )
         report = (
             f"Atomic H3 conditioning | segment={int(segment_index) + 1}/{len(shotplan['chunks'])} | "
             f"task={task} | frames={frames} | first={'yes' if first is not None else 'no'} | "
             f"last={'yes' if last is not None else 'no'} | refs={len(manifest)} | "
             f"ref_size={shotplan.get('ref_image_size', 'match')} | "
+            f"ref_source={shotplan.get('reference_source', 'backend_sockets_or_legacy_timeline')} | "
             f"pre_resize={';'.join(resize_reports) if resize_reports else 'none'} | "
             f"text_encoder={text_encoder_report}"
         )
@@ -818,7 +1037,7 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
         shift_audio = float(sampling.get("shift_audio", shift_audio))
         sampling_source = str(sampling.get("source", "backend_legacy_fallback"))
         actual_seed = (int(seed) + int(chunk_index) * int(seed_stride)) & 0xFFFFFFFFFFFFFFFF
-        conditioning_cleanup = _release_cpu_conditioning_models(shotplan)
+        conditioning_cleanup = _release_conditioning_models(shotplan)
 
         turbo = _turbo_settings(shotplan)
         turbo_requested = str(turbo.get("mode", "off") or "off").lower() != "off" and bool(turbo.get("enabled", True))
@@ -1003,6 +1222,360 @@ class IAMCCS_MiniMaxH3SequentialLTXLoaderV2:
         return model, clip, video_vae, audio_vae, report
 
 
+def _materialize_conditioning_on_cpu(value):
+    if torch.is_tensor(value):
+        return value.detach().to(device="cpu", copy=True)
+    if isinstance(value, dict):
+        return {key: _materialize_conditioning_on_cpu(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_materialize_conditioning_on_cpu(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_materialize_conditioning_on_cpu(item) for item in value)
+    return value
+
+
+def _release_ltx_text_stage() -> str:
+    import comfy.model_management as model_management
+
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+    model_management.unload_all_models()
+    try:
+        model_management.cleanup_models()
+    except Exception:
+        pass
+    model_management.soft_empty_cache()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    gc.collect()
+    if os.name == "nt":
+        try:
+            import ctypes
+
+            handle = ctypes.windll.kernel32.GetCurrentProcess()
+            ctypes.windll.psapi.EmptyWorkingSet(handle)
+            return "unload_all_models + cleanup_models + CUDA cache + Windows working-set trim"
+        except Exception as exc:
+            LOG.warning("LTX text-stage working-set trim warning: %s", exc)
+    return "unload_all_models + cleanup_models + CUDA cache"
+
+
+class IAMCCS_MiniMaxH3LTXConditioningStageV3:
+    """Materialize LTX text conditioning, then destroy Gemma and projection."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        input_spec = IAMCCS_MiniMaxH3SequentialLTXLoaderV2._input_spec
+        return {
+            "required": {
+                "trigger_frames": ("IMAGE",),
+                "positive_text": ("STRING", {"default": "high quality 4k", "multiline": True}),
+                "negative_text": (
+                    "STRING",
+                    {
+                        "default": "pc game, console game, video game, cartoon, childish, ugly",
+                        "multiline": True,
+                    },
+                ),
+                "text_encoder_name": input_spec(
+                    "DualCLIPLoader", "clip_name1", "gemma_3_12B_it_fp8_e4m3fn.safetensors"
+                ),
+                "text_projection_name": input_spec(
+                    "DualCLIPLoader", "clip_name2", "ltx-2.3_text_projection_bf16.safetensors"
+                ),
+                "text_encoder_device": (["default", "cpu"], {"default": "default"}),
+            }
+        }
+
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING", "STRING")
+    RETURN_NAMES = ("positive", "negative", "report")
+    FUNCTION = "encode_and_release"
+    CATEGORY = CATEGORY
+
+    def encode_and_release(
+        self,
+        trigger_frames,
+        positive_text,
+        negative_text,
+        text_encoder_name,
+        text_projection_name,
+        text_encoder_device="default",
+    ):
+        if not torch.is_tensor(trigger_frames) or trigger_frames.ndim != 4 or trigger_frames.shape[0] < 1:
+            raise ValueError("LTX conditioning stage requires decoded native H3 frames")
+
+        _release_ltx_text_stage()
+        LOG.info(
+            "LTX phase A start | native_frames=%d | Gemma/projection only | device=%s",
+            int(trigger_frames.shape[0]),
+            text_encoder_device,
+        )
+        clip = _node_class("DualCLIPLoader")().load_clip(
+            text_encoder_name,
+            text_projection_name,
+            "ltxv",
+            text_encoder_device,
+        )[0]
+        encoder = _node_class("CLIPTextEncode")()
+        try:
+            positive = encoder.encode(clip=clip, text=str(positive_text or ""))[0]
+            negative = encoder.encode(clip=clip, text=str(negative_text or ""))[0]
+            positive = _materialize_conditioning_on_cpu(positive)
+            negative = _materialize_conditioning_on_cpu(negative)
+        finally:
+            del encoder, clip
+            cleanup_report = _release_ltx_text_stage()
+
+        report = (
+            f"LTX phase A complete | conditioning=materialized on CPU | "
+            f"Gemma/projection destroyed=yes | {cleanup_report}"
+        )
+        LOG.info(report)
+        return positive, negative, report
+
+
+class IAMCCS_MiniMaxH3LTXDenoiseStackLoaderV3:
+    """Load LTXAV, VAEs and latent upsampler after Phase A has released text models."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        input_spec = IAMCCS_MiniMaxH3SequentialLTXLoaderV2._input_spec
+        upscale_models = folder_paths.get_filename_list("latent_upscale_models")
+        upscale_meta = {}
+        preferred_upscaler = "ltx-2.3-spatial-upscaler-x2-1.1.safetensors"
+        if preferred_upscaler in upscale_models:
+            upscale_meta["default"] = preferred_upscaler
+        upscale_spec = (upscale_models, upscale_meta) if upscale_meta else (upscale_models,)
+        return {
+            "required": {
+                "conditioning_ready": ("CONDITIONING",),
+                "trigger_frames": ("IMAGE",),
+                "unet_name": input_spec(
+                    "UnetLoaderGGUFAdvanced", "unet_name", "ltx-2.3-22b-dev-Q4_K_S.gguf"
+                ),
+                "video_vae_name": input_spec(
+                    "VAELoaderKJ", "vae_name", "ltx-2.3-22b-dev_video_vae.safetensors"
+                ),
+                "audio_vae_name": input_spec(
+                    "VAELoaderKJ", "vae_name", "ltx-2.3-22b-dev_audio_vae.safetensors"
+                ),
+                "upscale_model_name": upscale_spec,
+            }
+        }
+
+    RETURN_TYPES = ("MODEL", "VAE", "VAE", "LATENT_UPSCALE_MODEL", "STRING")
+    RETURN_NAMES = ("model", "video_vae", "audio_vae", "upscale_model", "report")
+    FUNCTION = "load_after_conditioning"
+    CATEGORY = CATEGORY
+
+    def load_after_conditioning(
+        self,
+        conditioning_ready,
+        trigger_frames,
+        unet_name,
+        video_vae_name,
+        audio_vae_name,
+        upscale_model_name,
+        video_vae_device="main_device",
+        video_vae_dtype="bf16",
+        audio_vae_device="cpu",
+        audio_vae_dtype="bf16",
+    ):
+        if not isinstance(conditioning_ready, list) or not conditioning_ready:
+            raise ValueError("LTX denoise stage requires materialized conditioning from Phase A")
+        if not torch.is_tensor(trigger_frames) or trigger_frames.ndim != 4 or trigger_frames.shape[0] < 1:
+            raise ValueError("LTX denoise stage requires decoded native H3 frames")
+
+        cleanup_report = _release_ltx_text_stage()
+        LOG.info("LTX phase B start | Gemma/projection absent | loading denoise stack")
+        model = _node_class("UnetLoaderGGUFAdvanced")().load_unet(
+            unet_name,
+            dequant_dtype="default",
+            patch_dtype="default",
+            patch_on_device=False,
+        )[0]
+        vae_loader = _node_class("VAELoaderKJ")()
+        video_vae = vae_loader.load_vae(video_vae_name, video_vae_device, video_vae_dtype)[0]
+        audio_vae = vae_loader.load_vae(audio_vae_name, audio_vae_device, audio_vae_dtype)[0]
+        upscale_model = _node_class("LatentUpscaleModelLoader").execute(upscale_model_name)[0]
+        report = (
+            f"LTX phase B ready | text models absent=yes | unet={unet_name} | "
+            f"video_vae={video_vae_name} | audio_vae={audio_vae_name} | "
+            f"upscaler={upscale_model_name} | pre_load_cleanup={cleanup_report}"
+        )
+        LOG.info(report)
+        return model, video_vae, audio_vae, upscale_model, report
+
+
+class IAMCCS_MiniMaxH3OptionalLTXDetailerLoRA:
+    """Apply one user-selected LTX finishing LoRA without hardcoded filenames."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "enabled": ("BOOLEAN", {"default": False}),
+                "lora_name": ("STRING", {"default": ""}),
+                "strength": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 2.0, "step": 0.05}),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL", "STRING")
+    RETURN_NAMES = ("model", "report")
+    FUNCTION = "apply"
+    CATEGORY = CATEGORY
+
+    def apply(self, model, enabled=False, lora_name="", strength=0.6):
+        name = str(lora_name or "").strip()
+        strength = min(2.0, max(0.0, float(strength or 0.0)))
+        if not bool(enabled) or not name or strength == 0.0:
+            return model, "LTX detailer LoRA off"
+        try:
+            path = folder_paths.get_full_path("loras", name)
+        except Exception:
+            path = None
+        if not path:
+            LOG.warning("Optional LTX detailer LoRA is unavailable: %s", name)
+            return model, f"LTX detailer unavailable ({name}); base LTX path retained"
+
+        import nodes as comfy_nodes
+
+        patched = comfy_nodes.LoraLoaderModelOnly().load_lora_model_only(
+            model=model,
+            lora_name=name,
+            strength_model=strength,
+        )[0]
+        compatibility_note = ""
+        if "ic-lora-detailer" in name.lower():
+            compatibility_note = (
+                " | compatibility load only: the official IC Detailer reaches its full effect "
+                "with the LTX IC conditioning/guiding-latent workflow"
+            )
+            LOG.warning(
+                "LTX IC Detailer %s was loaded as a model-only finishing LoRA; "
+                "use the dedicated IC-guided LTX pipeline for its full behavior",
+                name,
+            )
+        return patched, f"LTX detailer LoRA {name}@{strength:.2f}{compatibility_note}"
+
+
+class IAMCCS_MiniMaxH3RTX4KPost:
+    """Optional final RTX VSR pass, requested lazily by the delivery router."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "cine_linx": (SUPERNODE_LINX_TYPE,),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("images_4k", "report")
+    FUNCTION = "upscale"
+    CATEGORY = CATEGORY
+
+    def upscale(self, images, cine_linx):
+        if not torch.is_tensor(images) or images.ndim != 4 or images.shape[0] < 1:
+            raise ValueError("RTX 4K post expects an IMAGE frame batch")
+        shotplan = _resolve_shotplan(cine_linx)
+        settings = shotplan.get("upscale_settings") if isinstance(shotplan.get("upscale_settings"), dict) else {}
+        if not bool(settings.get("ltx_4k_enabled", False)):
+            return images, "RTX VSR 4K off"
+
+        quality = str(settings.get("ltx_4k_quality", "ULTRA") or "ULTRA").upper()
+        if quality not in {"ULTRA", "HIGH", "MEDIUM", "LOW"}:
+            quality = "ULTRA"
+        target_width = max(256, int(settings.get("target_width", 3840) or 3840))
+        target_height = max(256, int(settings.get("target_height", 2160) or 2160))
+        source_height = int(images.shape[1])
+        source_width = int(images.shape[2])
+        scale = max(target_width / max(1, source_width), target_height / max(1, source_height))
+        if not 1.0 <= scale <= 4.0:
+            raise ValueError(
+                f"RTX VSR scale {scale:.3f} is outside the installed node's 1x-4x range "
+                f"({source_width}x{source_height} -> {target_width}x{target_height})"
+            )
+
+        # NVIDIA Video Effects accepts RGB float32 frames only.  Never convert
+        # the full video at once: a 241-frame 1080p input plus its 4K float32
+        # output can exceed 28 GiB before LTX caches are counted.  Feed small
+        # batches to NvVFX and retain the completed 4K video as CPU float16.
+        source_device = str(images.device)
+        source_dtype = str(images.dtype)
+        if int(images.shape[-1]) < 3:
+            raise ValueError(
+                f"RTX 4K post expects at least three RGB channels, got shape {tuple(images.shape)}"
+            )
+
+        import comfy.model_management as model_management
+
+        model_management.unload_all_models()
+        try:
+            model_management.cleanup_models()
+        except Exception:
+            pass
+        model_management.soft_empty_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
+        source = images[..., :3].detach().to(device="cpu")
+        frame_count = int(source.shape[0])
+        chunk_size = min(8, frame_count)
+        upscaled = torch.empty(
+            (frame_count, target_height, target_width, 3),
+            device="cpu",
+            dtype=torch.float16,
+        )
+        LOG.info(
+            "MiniMax H3 RTX VSR chunked start | %s/%s -> cpu/float16 4K | frames=%d | chunk=%d",
+            source_device,
+            source_dtype,
+            frame_count,
+            chunk_size,
+        )
+        rtx_cls = _node_class("RTXVideoSuperResolution")
+        progress = comfy.utils.ProgressBar(frame_count)
+        for start in range(0, frame_count, chunk_size):
+            end = min(frame_count, start + chunk_size)
+            rtx_input = source[start:end].to(dtype=torch.float32).contiguous()
+            rtx_input = torch.nan_to_num(
+                rtx_input,
+                nan=0.0,
+                posinf=1.0,
+                neginf=0.0,
+            ).clamp_(0.0, 1.0)
+            chunk_output = rtx_cls.execute(
+                images=rtx_input,
+                scale=float(scale),
+                quality=quality,
+            )[0]
+            if int(chunk_output.shape[2]) != target_width or int(chunk_output.shape[1]) != target_height:
+                chunk_output = F.interpolate(
+                    chunk_output.permute(0, 3, 1, 2),
+                    size=(target_height, target_width),
+                    mode="bicubic",
+                    align_corners=False,
+                    antialias=True,
+                ).permute(0, 2, 3, 1).clamp(0.0, 1.0)
+            upscaled[start:end].copy_(chunk_output.to(device="cpu", dtype=torch.float16))
+            del rtx_input, chunk_output
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            progress.update_absolute(end, frame_count)
+            LOG.info("MiniMax H3 RTX VSR progress | %d/%d frames", end, frame_count)
+        del source
+        gc.collect()
+        return (
+            upscaled,
+            f"RTX VSR {quality} | {source_width}x{source_height} -> {target_width}x{target_height} | "
+            f"scale={scale:.3f} | chunk={chunk_size} | output=cpu/float16",
+        )
+
+
 class IAMCCS_MiniMaxH3PostUpscaleControlV2:
     """Resolve the selected post-upscale branch from the Shotboard CineLinX.
 
@@ -1021,18 +1594,33 @@ class IAMCCS_MiniMaxH3PostUpscaleControlV2:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "STRING", "INT", "INT", "FLOAT", "INT", "BOOLEAN", "FLOAT", "STRING", "STRING")
+    RETURN_TYPES = (
+        "IMAGE", "STRING", "INT", "INT", "FLOAT", "INT", "BOOLEAN", "FLOAT", "STRING", "STRING",
+        "BOOLEAN", "STRING", "FLOAT", "BOOLEAN", "STRING", "BOOLEAN",
+        "INT", "INT", "INT", "INT", "INT",
+    )
     RETURN_NAMES = (
         "native_frames",
         "upscale_prompt",
-        "target_width",
-        "target_height",
+        "stage_target_width",
+        "stage_target_height",
         "duration_seconds",
         "upscale_seed",
         "sage_enabled",
         "wan_denoise",
         "selected_mode",
         "report",
+        "ltx_detailer_enabled",
+        "ltx_detailer_lora_name",
+        "ltx_detailer_strength",
+        "ltx_4k_enabled",
+        "ltx_4k_quality",
+        "ltx_seam_safe",
+        "ltx_encode_temporal_size",
+        "ltx_encode_temporal_overlap",
+        "ltx_decode_temporal_size",
+        "ltx_decode_temporal_overlap",
+        "ltx_decode_spatial_overlap",
     )
     FUNCTION = "prepare"
     CATEGORY = CATEGORY
@@ -1057,8 +1645,11 @@ class IAMCCS_MiniMaxH3PostUpscaleControlV2:
 
         native_width = int(shotplan.get("width", int(native_frames.shape[2])) or int(native_frames.shape[2]))
         native_height = int(shotplan.get("height", int(native_frames.shape[1])) or int(native_frames.shape[1]))
-        target_width = max(256, int(settings.get("target_width", native_width * 2) or native_width * 2))
-        target_height = max(256, int(settings.get("target_height", native_height * 2) or native_height * 2))
+        delivery_target_width = max(256, int(settings.get("target_width", native_width * 2) or native_width * 2))
+        delivery_target_height = max(256, int(settings.get("target_height", native_height * 2) or native_height * 2))
+        ltx_4k_enabled = bool(settings.get("ltx_4k_enabled", False)) and selected_mode == "ltx23"
+        stage_target_width = max(256, int(round(delivery_target_width / 2.0))) if ltx_4k_enabled else delivery_target_width
+        stage_target_height = max(256, int(round(delivery_target_height / 2.0))) if ltx_4k_enabled else delivery_target_height
         prompt = str(settings.get("prompt") or chunk.get("prompt") or shotplan.get("global_prompt") or "high quality cinematic video").strip()
         duration_seconds = float(
             chunk.get("duration_seconds")
@@ -1071,23 +1662,49 @@ class IAMCCS_MiniMaxH3PostUpscaleControlV2:
         upscale_seed = (base_seed + index * seed_stride + seed_offset) & 0xFFFFFFFFFFFFFFFF
         sage_enabled = bool(settings.get("sage", True))
         wan_denoise = min(1.0, max(0.0, float(settings.get("wan_denoise", 0.2) or 0.0)))
+        ltx_detailer_enabled = bool(settings.get("ltx_detailer_enabled", False))
+        ltx_detailer_lora_name = str(settings.get("ltx_detailer_lora_name", "") or "").strip()
+        ltx_detailer_strength = min(2.0, max(0.0, float(settings.get("ltx_detailer_strength", 0.6) or 0.0)))
+        ltx_4k_quality = str(settings.get("ltx_4k_quality", "ULTRA") or "ULTRA").upper()
+        if ltx_4k_quality not in {"ULTRA", "HIGH", "MEDIUM", "LOW"}:
+            ltx_4k_quality = "ULTRA"
+        ltx_seam_safe = bool(settings.get("ltx_seam_safe", True))
+        encode_temporal_size = int(settings.get("ltx_vae_encode_temporal_size", 500 if ltx_seam_safe else 64))
+        encode_temporal_overlap = int(settings.get("ltx_vae_encode_temporal_overlap", 4 if ltx_seam_safe else 8))
+        decode_temporal_size = int(settings.get("ltx_vae_decode_temporal_size", 64 if ltx_seam_safe else 16))
+        decode_temporal_overlap = int(settings.get("ltx_vae_decode_temporal_overlap", 4 if ltx_seam_safe else 1))
+        decode_spatial_overlap = int(settings.get("ltx_vae_decode_spatial_overlap", 4 if ltx_seam_safe else 1))
         report = (
             f"H3 post-upscale control | selected={selected_mode} | chunk={index + 1}/{max(1, len(chunks))} | "
-            f"native={native_width}x{native_height} -> target={target_width}x{target_height} | "
+            f"native={native_width}x{native_height} -> LTX stage={stage_target_width}x{stage_target_height} "
+            f"-> delivery={delivery_target_width}x{delivery_target_height} | "
             f"duration={duration_seconds:.3f}s | seed={upscale_seed} | sage={'on' if sage_enabled else 'off'} | "
+            f"detailer={'on' if ltx_detailer_enabled else 'off'}:{ltx_detailer_lora_name or 'none'}@{ltx_detailer_strength:.2f} | "
+            f"seam_safe={'on' if ltx_seam_safe else 'off'} | rtx_4k={'on' if ltx_4k_enabled else 'off'}:{ltx_4k_quality} | "
             f"wan_denoise={wan_denoise:.2f} | lazy=yes"
         )
         return (
             native_frames,
             prompt,
-            target_width,
-            target_height,
+            stage_target_width,
+            stage_target_height,
             duration_seconds,
             upscale_seed,
             sage_enabled,
             wan_denoise,
             selected_mode,
             report,
+            ltx_detailer_enabled,
+            ltx_detailer_lora_name,
+            ltx_detailer_strength,
+            ltx_4k_enabled,
+            ltx_4k_quality,
+            ltx_seam_safe,
+            encode_temporal_size,
+            encode_temporal_overlap,
+            decode_temporal_size,
+            decode_temporal_overlap,
+            decode_spatial_overlap,
         )
 
 
@@ -1105,6 +1722,7 @@ class IAMCCS_MiniMaxH3DeliveryRouterV2:
             },
             "optional": {
                 "ltx23_upscaled_frames": ("IMAGE", {"lazy": True}),
+                "ltx23_4k_frames": ("IMAGE", {"lazy": True}),
                 "wan22_upscaled_frames": ("IMAGE", {"lazy": True}),
             },
         }
@@ -1121,6 +1739,9 @@ class IAMCCS_MiniMaxH3DeliveryRouterV2:
             return None
         mode = str(shotplan.get("upscale_mode", "off") or "off").lower()
         if mode == "ltx23":
+            settings = shotplan.get("upscale_settings") if isinstance(shotplan.get("upscale_settings"), dict) else {}
+            if bool(settings.get("ltx_4k_enabled", False)):
+                return "ltx23_4k_frames"
             return "ltx23_upscaled_frames"
         if mode == "wan22_5b":
             return "wan22_upscaled_frames"
@@ -1133,11 +1754,14 @@ class IAMCCS_MiniMaxH3DeliveryRouterV2:
         native_audio,
         bridge_last_frame,
         ltx23_upscaled_frames=None,
+        ltx23_4k_frames=None,
         wan22_upscaled_frames=None,
         **kwargs,
     ):
         selected = self._selected_upscale_input(cine_linx)
         if selected == "ltx23_upscaled_frames" and ltx23_upscaled_frames is None:
+            return [selected]
+        if selected == "ltx23_4k_frames" and ltx23_4k_frames is None:
             return [selected]
         if selected == "wan22_upscaled_frames" and wan22_upscaled_frames is None:
             return [selected]
@@ -1185,6 +1809,7 @@ class IAMCCS_MiniMaxH3DeliveryRouterV2:
         native_audio,
         bridge_last_frame,
         ltx23_upscaled_frames=None,
+        ltx23_4k_frames=None,
         wan22_upscaled_frames=None,
     ):
         shotplan = _resolve_shotplan(cine_linx)
@@ -1194,6 +1819,11 @@ class IAMCCS_MiniMaxH3DeliveryRouterV2:
                 raise ValueError("Shotboard enabled LTX 2.3 upscale, but the lazy LTX output is not connected")
             delivery = ltx23_upscaled_frames
             upscale_report = "LTX 2.3"
+        elif selected == "ltx23_4k_frames":
+            if not torch.is_tensor(ltx23_4k_frames):
+                raise ValueError("Shotboard enabled RTX VSR 4K after LTX, but the lazy 4K output is not connected")
+            delivery = ltx23_4k_frames
+            upscale_report = "LTX 2.3 + RTX VSR 4K"
         elif selected == "wan22_upscaled_frames":
             if not torch.is_tensor(wan22_upscaled_frames):
                 raise ValueError("Shotboard enabled Wan 2.2 5B upscale, but the lazy Wan output is not connected")
@@ -1230,6 +1860,10 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_MiniMaxH3AtomicConditioningBackend": IAMCCS_MiniMaxH3AtomicConditioningBackend,
     "IAMCCS_MiniMaxH3GenerationBackendV2": IAMCCS_MiniMaxH3GenerationBackendV2,
     "IAMCCS_MiniMaxH3SequentialLTXLoaderV2": IAMCCS_MiniMaxH3SequentialLTXLoaderV2,
+    "IAMCCS_MiniMaxH3LTXConditioningStageV3": IAMCCS_MiniMaxH3LTXConditioningStageV3,
+    "IAMCCS_MiniMaxH3LTXDenoiseStackLoaderV3": IAMCCS_MiniMaxH3LTXDenoiseStackLoaderV3,
+    "IAMCCS_MiniMaxH3OptionalLTXDetailerLoRA": IAMCCS_MiniMaxH3OptionalLTXDetailerLoRA,
+    "IAMCCS_MiniMaxH3RTX4KPost": IAMCCS_MiniMaxH3RTX4KPost,
     "IAMCCS_MiniMaxH3PostUpscaleControlV2": IAMCCS_MiniMaxH3PostUpscaleControlV2,
     "IAMCCS_MiniMaxH3DeliveryRouterV2": IAMCCS_MiniMaxH3DeliveryRouterV2,
 }
@@ -1240,6 +1874,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_MiniMaxH3AtomicConditioningBackend": "MiniMax H3 Atomic Shotboard Conditioning",
     "IAMCCS_MiniMaxH3GenerationBackendV2": "MiniMax H3 Generation V2 (Acceleration + Clean Decode)",
     "IAMCCS_MiniMaxH3SequentialLTXLoaderV2": "MiniMax H3 -> LTX Sequential Loader V2",
+    "IAMCCS_MiniMaxH3LTXConditioningStageV3": "MiniMax H3 -> LTX Phase A - Gemma Conditioning + Destroy",
+    "IAMCCS_MiniMaxH3LTXDenoiseStackLoaderV3": "MiniMax H3 -> LTX Phase B - Denoise Stack After Barrier",
+    "IAMCCS_MiniMaxH3OptionalLTXDetailerLoRA": "MiniMax H3 Optional LTX Detailer LoRA",
+    "IAMCCS_MiniMaxH3RTX4KPost": "MiniMax H3 RTX VSR 4K Post",
     "IAMCCS_MiniMaxH3PostUpscaleControlV2": "MiniMax H3 Post-Upscale Control V2 (LTX / Wan)",
     "IAMCCS_MiniMaxH3DeliveryRouterV2": "MiniMax H3 Delivery V2 (Lazy Upscale + RIFE)",
 }

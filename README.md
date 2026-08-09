@@ -47,6 +47,7 @@ audio preprocessing, VAE decode, and video combine nodes. Before sharing or
 testing a SuperNode workflow, check the dedicated requirements document:
 
 - [IAMCCS SuperNodes Requirements](SUPERNODES_REQUIREMENTS.md)
+- [MiniMax H3 Shotboard Workflow Requirements](docs/MINIMAX_H3_WORKFLOW_REQUIREMENTS.md)
 - [AudioBoard + BusOut Guide](AUDIOBOARD_BUSOUT_GUIDE.md)
 
 ## 🆕 Added new LTX-2.3 nodes for v2v, au+img2vid (instructions: patreon.com/IAMCCS)

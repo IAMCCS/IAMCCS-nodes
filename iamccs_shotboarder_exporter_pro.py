@@ -893,6 +893,7 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
             "rtx_device": int(rtx_device or 0),
             "rtx_ratio_preset": str(rtx_ratio_preset or "16:9"),
             "rtx_resize_method": str(rtx_resize_method or "Center Crop (Fill)"),
+            "rtx_memory_mode": "automatic_chunk_8_cpu_float16" if rtx_active else "off",
         }
         if isinstance(cine_linx, dict):
             metadata["cine_linx_type"] = str(cine_linx.get("type", ""))
@@ -1041,6 +1042,7 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
             "audio_edl_status": direct_audio_edl_status,
             "visual_roll_dedup_active": roll_visual_dedup_active,
             "visual_roll_dedup_status": roll_visual_dedup_status,
+            "rtx_memory_mode": "automatic_chunk_8_cpu_float16" if rtx_active else "off",
             "codec_contract": f"{profile['video_args']} + {audio_config['args']}",
             "video_lossless": bool(profile.get("lossless")),
             "audio_lossless": effective_audio_lossless,

@@ -408,16 +408,19 @@ def _encode_images(images: torch.Tensor, audio: dict[str, Any] | None, fps: floa
         raise RuntimeError("ffmpeg non trovato: impossibile salvare i segmenti MiniMax H3")
     if not torch.is_tensor(images) or images.ndim != 4 or images.shape[0] < 1:
         raise ValueError("images deve essere un batch IMAGE [T,H,W,C]")
+    if int(images.shape[-1]) < 3:
+        raise ValueError(f"images deve avere almeno tre canali RGB, shape ricevuta: {tuple(images.shape)}")
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="minimax_h3_segment_") as temp:
         temp_path = Path(temp)
-        for index, frame in enumerate(images):
-            _save_frame(temp_path / f"frame_{index:05d}.png", frame)
         wav_path = temp_path / "audio.wav"
         has_audio = _write_wav(audio, wav_path)
+        height = int(images.shape[1])
+        width = int(images.shape[2])
         command = [
-            ffmpeg, "-nostdin", "-n", "-framerate", f"{float(fps):.6f}",
-            "-i", str(temp_path / "frame_%05d.png"),
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "-video_size", f"{width}x{height}",
+            "-framerate", f"{float(fps):.6f}", "-i", "pipe:0",
         ]
         if has_audio:
             command += ["-i", str(wav_path)]
@@ -425,9 +428,42 @@ def _encode_images(images: torch.Tensor, audio: dict[str, Any] | None, fps: floa
         if has_audio:
             command += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-shortest"]
         command += ["-movflags", "+faststart", str(output)]
-        result = subprocess.run(command, capture_output=True, text=True, stdin=subprocess.DEVNULL)
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg segment encode failed: {result.stderr.strip() or result.stdout.strip()}")
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            if process.stdin is None:
+                raise RuntimeError("ffmpeg raw-video stdin non disponibile")
+            total_frames = int(images.shape[0])
+            for index, frame in enumerate(images):
+                rgb = (
+                    frame[..., :3]
+                    .detach()
+                    .to(device="cpu", dtype=torch.float32)
+                    .nan_to_num(nan=0.0, posinf=1.0, neginf=0.0)
+                    .clamp_(0.0, 1.0)
+                    .mul_(255.0)
+                    .round_()
+                    .to(dtype=torch.uint8)
+                    .contiguous()
+                    .numpy()
+                )
+                process.stdin.write(rgb.tobytes())
+                if index == 0 or (index + 1) % 24 == 0 or index + 1 == total_frames:
+                    LOG.info("MiniMax H3 streaming video encode | %d/%d frames", index + 1, total_frames)
+            process.stdin.close()
+            error_bytes = process.stderr.read() if process.stderr is not None else b""
+            return_code = process.wait()
+        except Exception:
+            process.kill()
+            process.wait()
+            raise
+        if return_code != 0:
+            error = error_bytes.decode("utf-8", errors="replace").strip()
+            raise RuntimeError(f"ffmpeg segment encode failed: {error or f'exit {return_code}'}")
 
 
 def _concat_videos(paths: list[Path], output: Path) -> None:
@@ -475,7 +511,7 @@ def _next_numbered_render_id(output_folder: Path, base_name: str, requested_rend
     escaped_base = re.escape(_safe_name(base_name, "segment"))
     escaped_root = re.escape(root)
     pattern = re.compile(
-        rf"^{escaped_base}_{escaped_root}(?:_(\d{{4,}}))?_(?:full|seg_\d{{4,}})\.mp4$",
+        rf"^{escaped_base}_{escaped_root}(?:_(\d{{4,}}))?_(?:native_)?(?:full|seg_\d{{4,}})\.mp4$",
         re.IGNORECASE,
     )
     used_numbers: set[int] = set()
@@ -495,9 +531,12 @@ def _next_numbered_render_id(output_folder: Path, base_name: str, requested_rend
     next_number = max(used_numbers, default=0) + 1
     while True:
         candidate = f"{root}_{next_number:04d}"
-        segment_collision = any(output_folder.glob(f"{_safe_name(base_name, 'segment')}_{candidate}_seg_*.mp4"))
-        final_collision = (output_folder / f"{_safe_name(base_name, 'segment')}_{candidate}_full.mp4").exists()
-        if not segment_collision and not final_collision:
+        safe_base = _safe_name(base_name, "segment")
+        segment_collision = any(output_folder.glob(f"{safe_base}_{candidate}_seg_*.mp4"))
+        native_segment_collision = any(output_folder.glob(f"{safe_base}_{candidate}_native_seg_*.mp4"))
+        final_collision = (output_folder / f"{safe_base}_{candidate}_full.mp4").exists()
+        native_final_collision = (output_folder / f"{safe_base}_{candidate}_native_full.mp4").exists()
+        if not segment_collision and not native_segment_collision and not final_collision and not native_final_collision:
             return candidate
         next_number += 1
 
@@ -567,7 +606,7 @@ class IAMCCS_MiniMaxH3GGUFLoader:
                 "spectrum_debug": ("BOOLEAN", {"default": False}),
             },
             "optional": {
-                "text_encoder_device": (["cpu_safe_12gb", "auto"], {"default": "cpu_safe_12gb"}),
+                "text_encoder_device": (["auto", "cpu_safe_12gb"], {"default": "auto"}),
             },
         }
 
@@ -586,7 +625,7 @@ class IAMCCS_MiniMaxH3GGUFLoader:
         acceleration,
         spectrum_history,
         spectrum_debug,
-        text_encoder_device="cpu_safe_12gb",
+        text_encoder_device="auto",
     ):
         if str(unet_name).startswith("NO_") or str(clip_name).startswith("NO_"):
             raise FileNotFoundError("GGUF H3 UNET/CLIP non disponibili. Attendi la fine dei download e riavvia ComfyUI.")
@@ -602,15 +641,10 @@ class IAMCCS_MiniMaxH3GGUFLoader:
         )[0]
         clip_cls = _node_class("CLIPLoaderGGUF")
         clip = clip_cls().load_clip(clip_name, type="minimax")[0]
-        if str(text_encoder_device) == "cpu_safe_12gb":
-            # Qwen3-VL 32B Q2 is ~8 GiB before temporary dequant buffers.
-            # Running it on a 12 GiB GPU fails before H3 sampling begins.
-            # Use ComfyUI's native device retargeter instead of mutating the
-            # GGUF patcher internals so future model-management changes remain
-            # compatible.
-            from comfy_extras.nodes_multigpu import SelectCLIPDeviceNode
-
-            clip = SelectCLIPDeviceNode.execute(clip=clip, device="cpu")[0]
+        requested_text_encoder_device = str(text_encoder_device or "auto").lower()
+        text_encoder_device = "auto"
+        if requested_text_encoder_device == "cpu_safe_12gb":
+            text_encoder_device = "auto(gpu-first; migrated legacy cpu_safe_12gb)"
         vae_cls = _node_class("VAELoader")
         video_vae = vae_cls().load_vae(video_vae_name)[0]
         audio_vae = vae_cls().load_vae(audio_vae_name)[0]
@@ -660,9 +694,27 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             name for name in folder_paths.get_filename_list("loras")
             if "minimax" in name.lower() and "h3" in name.lower() and "turbo" in name.lower()
         ]
+        # The LTX finishing slot intentionally exposes the complete ComfyUI
+        # LoRA registry. Some useful LTX LoRAs (including community Crisp
+        # variants) do not carry reliable "ltx/detail/enhance" tokens in the
+        # filename or parent folder. Runtime compatibility remains the user's
+        # choice; keeping the historical field name preserves old workflows.
+        installed_ltx_detailer_loras = list(folder_paths.get_filename_list("loras"))
+        crisp_ltx_loras = sorted(
+            (
+                name for name in installed_ltx_detailer_loras
+                if "ltx" in name.lower() and "crisp" in name.lower()
+            ),
+            key=lambda name: (
+                0 if Path(name).name.lower() == "ltx2.3_crisp_enhance.safetensors" else 1,
+                name.lower(),
+            ),
+        )
+        preferred_ltx_detailer_lora = crisp_ltx_loras[0] if crisp_ltx_loras else ""
         # Only expose files that really exist. The web migration converts old
         # saved missing filenames to the empty/Base-H3 choice before validation.
         turbo_loras = list(dict.fromkeys(("", *installed_turbo_loras)))
+        ltx_detailer_loras = list(dict.fromkeys(("", *installed_ltx_detailer_loras)))
         if "res_multistep" in samplers:
             samplers.remove("res_multistep")
             samplers.insert(0, "res_multistep")
@@ -700,7 +752,11 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "img_compression": ("INT", {"default": 0, "min": 0, "max": 100, "step": 1}),
                 # H3-native backend controls.  The dedicated Shotboard UI
                 # renders these above the timeline and hides the raw widgets.
-                "acceleration": (["auto_3060", "native", "h3_sage", "sage", "sage_sol", "spectrum", "sage_spectrum"], {"default": "auto_3060"}),
+                "acceleration": ([
+                    "low_vram_auto", "native", "h3_sage", "sol_low_vram", "sol_adaptive_safe",
+                    "sol_adaptive_balanced", "adaptive_safe", "spectrum", "sage_spectrum",
+                    "auto_3060", "sage", "sage_sol",
+                ], {"default": "low_vram_auto"}),
                 "ref_image_size": (["match", "max"], {"default": "match"}),
                 "reference_role_1": (["subject_identity", "keyframe", "composition", "style", "disabled"], {"default": "subject_identity"}),
                 "reference_role_2": (["subject_identity", "keyframe", "composition", "style", "disabled"], {"default": "subject_identity"}),
@@ -708,8 +764,8 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "reference_role_4": (["subject_identity", "keyframe", "composition", "style", "disabled"], {"default": "style"}),
                 "reference_video_role": (["off", "motion_camera", "temporal_structure", "video_edit", "continuation"], {"default": "off"}),
                 "reference_audio_role": (["off", "voice_timbre", "rhythm_timing", "audio_reuse", "sound_reference"], {"default": "off"}),
-                "sol_conditioning": (["exact_kv", "exact_kv_and_rows"], {"default": "exact_kv"}),
-                "spectrum_profile": (["conservative_3060", "conservative_quality", "aggressive"], {"default": "conservative_3060"}),
+                "sol_conditioning": (["exact_kv_and_rows", "exact_kv"], {"default": "exact_kv_and_rows"}),
+                "spectrum_profile": (["low_vram", "quality", "aggressive", "conservative_3060", "conservative_quality"], {"default": "low_vram"}),
                 "vram_clean_before_decode": ("BOOLEAN", {"default": True}),
                 "rife_mode": (["off", "rife_48fps", "rife_60fps"], {"default": "off"}),
                 "upscale_enabled": ("BOOLEAN", {"default": False}),
@@ -723,14 +779,16 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "upscale_sage": ("BOOLEAN", {"default": True}),
                 "upscale_seed_offset": ("INT", {"default": 10000, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "step": 1}),
                 "wan_upscale_denoise": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01}),
-                # Qwen3-VL 32B GGUF temporarily expands quantized tensors while
-                # encoding.  A 12 GiB GPU cannot hold the full encoder plus its
-                # dequantization buffers, so the atomic backend defaults to CPU.
-                "text_encoder_device": (["cpu_safe_12gb", "auto"], {"default": "cpu_safe_12gb"}),
+                # ComfyUI automatic placement is GPU-first. The atomic backend
+                # retries on CPU only after a genuine CUDA out-of-memory error.
+                "text_encoder_device": (["auto", "cpu_safe_12gb"], {"default": "auto"}),
                 # These values are intentionally owned by the Shotboard.  The
                 # generation node keeps legacy widgets only as a compatibility
                 # fallback for shotplans created before schema v3.
-                "performance_profile": (["rtx3060_draft", "rtx3060_balanced", "rtx3060_turbo", "h3_native_quality", "custom"], {"default": "rtx3060_balanced"}),
+                "performance_profile": ([
+                    "low_vram_draft", "low_vram_balanced", "low_vram_turbo", "h3_native_quality", "custom",
+                    "rtx3060_draft", "rtx3060_balanced", "rtx3060_turbo",
+                ], {"default": "low_vram_balanced"}),
                 "seed": ("INT", {"default": 42, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
                 "seed_stride": ("INT", {"default": 1, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "step": 1}),
                 "steps": ("INT", {"default": 16, "min": 1, "max": 100, "step": 1}),
@@ -751,6 +809,18 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "reference_resize_policy": (["canvas_crop", "canvas_pad", "total_pixels", "off"], {"default": "canvas_crop"}),
                 "reference_resize_megapixels": ("FLOAT", {"default": 0.5, "min": 0.1, "max": 2.0, "step": 0.05}),
                 "reference_resize_filter": (["area", "bilinear", "bicubic", "nearest-exact"], {"default": "area"}),
+                # Optional LTX finishing controls. All installed LoRAs remain
+                # selectable; an installed LTX Crisp variant is preselected.
+                # The enable switch still owns whether the LoRA is applied.
+                "ltx_detailer_enabled": ("BOOLEAN", {"default": False}),
+                "ltx_detailer_lora_name": (
+                    ltx_detailer_loras,
+                    {"default": preferred_ltx_detailer_lora},
+                ),
+                "ltx_detailer_strength": ("FLOAT", {"default": 0.6, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "ltx_4k_enabled": ("BOOLEAN", {"default": False}),
+                "ltx_4k_quality": (["ULTRA", "HIGH", "MEDIUM", "LOW"], {"default": "ULTRA"}),
+                "ltx_seam_safe": ("BOOLEAN", {"default": True}),
             },
             "optional": {
                 "cine_linx": (
@@ -791,7 +861,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         image_resize_method="crop",
         image_multiple_of=32,
         img_compression=0,
-        acceleration="auto_3060",
+        acceleration="low_vram_auto",
         ref_image_size="match",
         reference_role_1="subject_identity",
         reference_role_2="subject_identity",
@@ -799,8 +869,8 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         reference_role_4="style",
         reference_video_role="off",
         reference_audio_role="off",
-        sol_conditioning="exact_kv",
-        spectrum_profile="conservative_3060",
+        sol_conditioning="exact_kv_and_rows",
+        spectrum_profile="low_vram",
         vram_clean_before_decode=True,
         rife_mode="off",
         upscale_enabled=False,
@@ -810,8 +880,8 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         upscale_sage=True,
         upscale_seed_offset=10000,
         wan_upscale_denoise=0.2,
-        text_encoder_device="cpu_safe_12gb",
-        performance_profile="rtx3060_balanced",
+        text_encoder_device="auto",
+        performance_profile="low_vram_balanced",
         seed=42,
         seed_stride=1,
         steps=16,
@@ -827,6 +897,12 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         reference_resize_policy="canvas_crop",
         reference_resize_megapixels=0.5,
         reference_resize_filter="area",
+        ltx_detailer_enabled=False,
+        ltx_detailer_lora_name="",
+        ltx_detailer_strength=0.6,
+        ltx_4k_enabled=False,
+        ltx_4k_quality="ULTRA",
+        ltx_seam_safe=True,
         cine_linx=None,
     ):
         global_prompt, timeline_data, prompter_injection = apply_prompter_to_minimax(
@@ -839,6 +915,14 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         image_width = _h3_legal_dimension(image_width, width)
         image_height = _h3_legal_dimension(image_height, height)
         reference_resize_megapixels = _finite_float(reference_resize_megapixels, 0.5, 0.1, 2.0)
+        selected_ltx_detailer = str(ltx_detailer_lora_name or "").strip()
+        ltx_detailer_requested = bool(ltx_detailer_enabled)
+        ltx_detailer_available = _model_file_available("loras", selected_ltx_detailer)
+        effective_ltx_detailer = ltx_detailer_requested and ltx_detailer_available
+        effective_ltx_4k = bool(ltx_4k_enabled) and bool(upscale_enabled) and str(upscale_mode) == "ltx23"
+        ltx_4k_quality = str(ltx_4k_quality or "ULTRA").upper()
+        if ltx_4k_quality not in {"ULTRA", "HIGH", "MEDIUM", "LOW"}:
+            ltx_4k_quality = "ULTRA"
 
         requested_turbo_mode = str(turbo_mode or "off")
         selected_turbo_lora = str(turbo_lora_name or "").strip()
@@ -912,17 +996,39 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "sage": bool(upscale_sage),
             "seed_offset": int(upscale_seed_offset),
             "wan_denoise": float(wan_upscale_denoise),
+            "ltx_detailer_requested": ltx_detailer_requested,
+            "ltx_detailer_enabled": effective_ltx_detailer,
+            "ltx_detailer_available": ltx_detailer_available,
+            "ltx_detailer_lora_name": selected_ltx_detailer,
+            "ltx_detailer_strength": float(ltx_detailer_strength),
+            "ltx_4k_enabled": effective_ltx_4k,
+            "ltx_4k_quality": ltx_4k_quality,
+            "ltx_seam_safe": bool(ltx_seam_safe),
+            "ltx_vae_encode_temporal_size": 500 if bool(ltx_seam_safe) else 64,
+            "ltx_vae_encode_temporal_overlap": 4 if bool(ltx_seam_safe) else 8,
+            "ltx_vae_decode_temporal_size": 64 if bool(ltx_seam_safe) else 16,
+            "ltx_vae_decode_temporal_overlap": 4 if bool(ltx_seam_safe) else 1,
+            "ltx_vae_decode_spatial_overlap": 4 if bool(ltx_seam_safe) else 1,
             "source": "shotboard",
         }
         chunk_frames = [int(chunk.get("frame_count", 0) or 0) for chunk in plan.get("chunks", [])]
         max_chunk_frames = max(chunk_frames, default=0)
         native_load = (float(width) * float(height) * max(1, max_chunk_frames)) / (960.0 * 544.0 * 124.0)
         warnings: list[str] = []
-        if str(performance_profile).startswith("rtx3060") and max_chunk_frames > 124:
+        if ltx_detailer_requested and not ltx_detailer_available:
+            warnings.append(f"Optional LTX detailer unavailable ({selected_ltx_detailer or 'no LoRA selected'}); continuing without it")
+        if bool(ltx_4k_enabled) and not effective_ltx_4k:
+            warnings.append("RTX VSR 4K is available only when LTX 2.3 upscale is enabled")
+        if effective_ltx_4k:
+            warnings.append("4K delivery uses LTX at half delivery resolution, then NVIDIA RTX VSR 2x; expect high system-RAM usage")
+        if str(text_encoder_device).lower() == "cpu_safe_12gb":
+            warnings.append("Legacy CPU-safe text encoder setting migrated to GPU-first auto with CPU fallback only after CUDA OOM")
+        low_vram_profile = str(performance_profile).startswith(("low_vram", "rtx3060"))
+        if low_vram_profile and max_chunk_frames > 124:
             warnings.append("Low VRAM: trim this timeline box to 124 frames or less; use a following box for continuation")
-        if str(performance_profile).startswith("rtx3060") and int(width) * int(height) > 960 * 544:
+        if low_vram_profile and int(width) * int(height) > 960 * 544:
             warnings.append("Low VRAM: generate at 960x544 or below, then upscale for a 1280-class delivery")
-        if str(acceleration) == "sage_sol":
+        if str(acceleration) in {"sage_sol", "sol_low_vram", "sol_adaptive_safe", "sol_adaptive_balanced"}:
             warnings.append("Sol-Attn is experimental, has a slower first compile, and is not validated for every Low VRAM configuration")
         if str(acceleration) in {"spectrum", "sage_spectrum"} and effective_steps < 14:
             warnings.append("Spectrum saves few transformer calls below 14 steps because warmup and final native steps remain mandatory")
@@ -936,6 +1042,8 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             warnings.append("Early/non-ckpt500 Turbo is normally used at 8-10 steps")
         if effective_turbo_mode == "ckpt500_6_8" and not 6 <= effective_steps <= 8:
             warnings.append("Turbo ckpt500 is normally used at 6-8 steps")
+        if str(acceleration) in {"adaptive_safe", "sol_adaptive_safe", "sol_adaptive_balanced"}:
+            warnings.append("Adaptive Cache is approximate; use Safe for faces, hands, dialogue and lip sync")
         if turbo_enabled and str(acceleration) in {"spectrum", "sage_spectrum"}:
             warnings.append("Spectrum has little room to forecast at Turbo step counts; Sage-only is the Low VRAM default")
         if turbo_enabled and str(turbo_sampler_mode) == "res_multistep_stock" and int(steps) < 10:
@@ -951,7 +1059,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "conditioning": ["width", "height", "timeline trim", "prompt mapping", "references", "audio mode"],
             "sampling": ["seed", "steps", "sampler", "scheduler", "denoise", "H3 shifts", "acceleration", "Turbo LoRA", "Turbo audio sampler"],
             "reference_preprocess": ["resize policy", "target megapixels", "filter", "multiple of 32"],
-            "delivery": ["VRAM clean", "RIFE", "upscale enabled", "upscale mode", "upscale target", "upscale prompt", "upscale seed"],
+            "delivery": ["VRAM clean", "RIFE", "upscale enabled", "upscale mode", "upscale target", "upscale prompt", "upscale seed", "LTX seam-safe VAE", "LTX detailer LoRA", "optional RTX VSR 4K"],
             "transport": "one IAMCCS_SUPERNODE_LINX cable; the private H3 plan stays inside CineLinX",
         }
         injection_summary = str(prompter_injection.get("actual_target", "none")) if prompter_injection.get("applied") else "none"
@@ -963,9 +1071,11 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             f"load={native_load:.2f}x | sampler={effective_steps}x{sampler_name}+{scheduler} | acceleration={acceleration} | "
             f"turbo={effective_turbo_mode}:{selected_turbo_lora or 'none'}@{float(turbo_strength):.2f}/{turbo_sampler_mode} | "
             f"ref_resize={reference_resize_policy}:{reference_resize_megapixels:.2f}MP/{reference_resize_filter} | "
-            f"ref_size={ref_image_size} | text_encoder={text_encoder_device} | "
+            f"ref_size={ref_image_size} | text_encoder={plan.get('text_encoder_device', 'auto')} | "
             f"RIFE={rife_mode} | upscale={'on' if upscale_enabled else 'off'}:{plan['upscale_mode']} "
             f"->{int(upscale_width)}x{int(upscale_height)} sage={'on' if upscale_sage else 'off'} "
+            f"ltx_detailer={'on' if effective_ltx_detailer else 'off'}:{selected_ltx_detailer or 'none'}@{float(ltx_detailer_strength):.2f} "
+            f"ltx_seam_safe={'on' if ltx_seam_safe else 'off'} ltx_4k={'on' if effective_ltx_4k else 'off'}:{ltx_4k_quality} "
             f"wan_denoise={float(wan_upscale_denoise):.2f} | "
             f"prompter={injection_summary} | warnings={'; '.join(warnings) if warnings else 'none'}"
         )
@@ -1398,6 +1508,133 @@ class IAMCCS_MiniMaxH3BridgeLoad:
         raise FileNotFoundError(f"MiniMax H3 bridge non trovato: {bridge_path}")
 
 
+class IAMCCS_MiniMaxH3NativeCheckpointSave:
+    """Persist the native H3 result before any optional upscale branch.
+
+    The node is deliberately a pass-through dependency.  Downstream LTX, Wan,
+    or RTX processing cannot begin until the native segment has been encoded,
+    so an upscale failure never discards the expensive H3 render.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "audio": ("AUDIO",),
+                "current_segment": ("INT", {"forceInput": True}),
+                "total_segments": ("INT", {"forceInput": True}),
+                "fps": ("INT", {"forceInput": True}),
+                "trim_head_frames": ("INT", {"forceInput": True}),
+            },
+            "optional": {
+                "filename_prefix": ("STRING", {"default": "IAMCCS/MiniMaxH3/segment"}),
+                "merge_segments": ("BOOLEAN", {"default": True}),
+                "keep_segments": ("BOOLEAN", {"default": True}),
+                "render_id": ("STRING", {"default": "minimax_h3_render"}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "AUDIO", "STRING", "STRING")
+    RETURN_NAMES = ("native_frames", "native_audio", "resolved_render_id", "report")
+    FUNCTION = "checkpoint"
+    OUTPUT_NODE = True
+    CATEGORY = CATEGORY
+
+    @classmethod
+    def IS_CHANGED(cls, *args, **kwargs):
+        # Saving is intentional on every queued render, even when ComfyUI can
+        # reuse the surrounding graph cache.
+        return float("nan")
+
+    def checkpoint(
+        self,
+        images,
+        audio,
+        current_segment,
+        total_segments,
+        fps,
+        trim_head_frames,
+        filename_prefix="IAMCCS/MiniMaxH3/segment",
+        merge_segments=True,
+        keep_segments=True,
+        render_id="minimax_h3_render",
+    ):
+        if not torch.is_tensor(images) or images.ndim != 4 or int(images.shape[0]) < 1:
+            raise ValueError("MiniMax H3 native checkpoint expects a non-empty IMAGE frame batch")
+        if not isinstance(audio, dict):
+            raise ValueError("MiniMax H3 native checkpoint expects the H3 AUDIO output")
+
+        current_segment = int(current_segment)
+        total_segments = int(total_segments)
+        fps = max(1, int(fps))
+        if current_segment < 0 or total_segments < 1 or current_segment >= total_segments:
+            raise ValueError(f"Native checkpoint segment index is invalid: {current_segment + 1}/{total_segments}")
+
+        output_folder, base_name = _output_location(filename_prefix)
+        requested_render_id = _safe_name(str(render_id or "").strip(), "minimax_h3_render")
+        active_render_id = (
+            _next_numbered_render_id(output_folder, base_name, requested_render_id)
+            if current_segment == 0
+            else requested_render_id
+        )
+
+        trim_count = max(0, int(trim_head_frames or 0))
+        images_to_save = images
+        audio_to_save = audio
+        if trim_count and int(images.shape[0]) > trim_count:
+            images_to_save = images[trim_count:, ...]
+            audio_to_save = _trim_audio_frames(audio, trim_count, fps)
+
+        segment_name = f"{base_name}_{active_render_id}_native_seg_{current_segment + 1:04d}.mp4"
+        segment_path = output_folder / segment_name
+        _require_new_output_path(segment_path)
+        _encode_images(images_to_save, audio_to_save, fps, segment_path)
+
+        messages = [f"Native checkpoint saved: {segment_name}"]
+        preview_path = segment_path
+        if current_segment + 1 >= total_segments and bool(merge_segments):
+            segment_paths = [
+                output_folder / f"{base_name}_{active_render_id}_native_seg_{index + 1:04d}.mp4"
+                for index in range(total_segments)
+            ]
+            final_name = f"{base_name}_{active_render_id}_native_full.mp4"
+            final_path = output_folder / final_name
+            _require_new_output_path(final_path)
+            _concat_videos(segment_paths, final_path)
+            preview_path = final_path
+            messages.append(f"Native full video saved: {final_name}")
+            if not bool(keep_segments):
+                for path in segment_paths:
+                    path.unlink(missing_ok=True)
+
+        LOG.info(
+            "MiniMax H3 native checkpoint complete | render=%s | segment=%d/%d | fps=%d",
+            active_render_id,
+            current_segment + 1,
+            total_segments,
+            fps,
+        )
+        subfolder = os.path.relpath(
+            preview_path.parent,
+            folder_paths.get_output_directory(),
+        ).replace("\\", "/")
+        preview = {
+            "filename": preview_path.name,
+            "subfolder": "" if subfolder == "." else subfolder,
+            "type": "output",
+        }
+        report = " | ".join(messages)
+        return {
+            "ui": {
+                "text": messages,
+                "images": [preview],
+                "animated": (True,),
+            },
+            "result": (images, audio, active_render_id, report),
+        }
+
+
 class IAMCCS_MiniMaxH3SegmentQueueLoop:
     @classmethod
     def INPUT_TYPES(cls):
@@ -1418,6 +1655,7 @@ class IAMCCS_MiniMaxH3SegmentQueueLoop:
                 "keep_segments": ("BOOLEAN", {"default": True}),
                 "render_id": ("STRING", {"default": "minimax_h3_render"}),
                 "segment_base_name": ("STRING", {"default": ""}),
+                "resolved_render_id": ("STRING", {"forceInput": True}),
             },
             "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -1442,6 +1680,7 @@ class IAMCCS_MiniMaxH3SegmentQueueLoop:
         keep_segments=True,
         render_id="minimax_h3_render",
         segment_base_name="",
+        resolved_render_id="",
         prompt=None,
         unique_id=None,
         extra_pnginfo=None,
@@ -1464,11 +1703,15 @@ class IAMCCS_MiniMaxH3SegmentQueueLoop:
         )
         output_folder, resolved_base_name = _output_location(filename_prefix)
         active_base_name = _safe_name(str(segment_base_name or "").strip(), resolved_base_name)
-        active_render_id = (
-            _next_numbered_render_id(output_folder, active_base_name, requested_render_id)
-            if current_segment == 0
-            else requested_render_id
-        )
+        locked_render_id = str(resolved_render_id or "").strip()
+        if locked_render_id:
+            active_render_id = _safe_name(locked_render_id, requested_render_id)
+        else:
+            active_render_id = (
+                _next_numbered_render_id(output_folder, active_base_name, requested_render_id)
+                if current_segment == 0
+                else requested_render_id
+            )
         if current_segment == 0:
             LOG.info("MiniMax H3 nuovo render numerato: %s", active_render_id)
         segment_name = f"{active_base_name}_{active_render_id}_seg_{current_segment + 1:04d}.mp4"
@@ -1708,6 +1951,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_MiniMaxH3Backend": IAMCCS_MiniMaxH3Backend,
     "IAMCCS_MiniMaxH3RenderBackend": IAMCCS_MiniMaxH3RenderBackend,
     "IAMCCS_MiniMaxH3BridgeLoad": IAMCCS_MiniMaxH3BridgeLoad,
+    "IAMCCS_MiniMaxH3NativeCheckpointSave": IAMCCS_MiniMaxH3NativeCheckpointSave,
     "IAMCCS_MiniMaxH3SegmentQueueLoop": IAMCCS_MiniMaxH3SegmentQueueLoop,
     "IAMCCS_MiniMaxH3AudioConcat": IAMCCS_MiniMaxH3AudioConcat,
     "IAMCCS_MiniMaxH3AudioPolicy": IAMCCS_MiniMaxH3AudioPolicy,
@@ -1724,6 +1968,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_MiniMaxH3Backend": "MiniMax H3 Shotboard Backend",
     "IAMCCS_MiniMaxH3RenderBackend": "MiniMax H3 Render Backend (Sampler + AV Decode)",
     "IAMCCS_MiniMaxH3BridgeLoad": "MiniMax H3 Last-Frame Bridge",
+    "IAMCCS_MiniMaxH3NativeCheckpointSave": "MiniMax H3 Native Checkpoint Save",
     "IAMCCS_MiniMaxH3SegmentQueueLoop": "MiniMax H3 Segment Queue + Concat",
     "IAMCCS_MiniMaxH3AudioConcat": "MiniMax H3 Audio Chunk Concat",
     "IAMCCS_MiniMaxH3AudioPolicy": "MiniMax H3 Audio Policy",
@@ -1738,6 +1983,12 @@ from .iamccs_minimax_h3_atomic_backend import (
     NODE_CLASS_MAPPINGS as _ATOMIC_NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as _ATOMIC_NODE_DISPLAY_NAME_MAPPINGS,
 )
+from .iamccs_minimax_h3_cine_info import (
+    NODE_CLASS_MAPPINGS as _CINE_INFO_H3_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _CINE_INFO_H3_NODE_DISPLAY_NAME_MAPPINGS,
+)
 
 NODE_CLASS_MAPPINGS.update(_ATOMIC_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_ATOMIC_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_CINE_INFO_H3_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_CINE_INFO_H3_NODE_DISPLAY_NAME_MAPPINGS)

@@ -1,5 +1,8 @@
 # IAMCCS SuperNodes Requirements
 
+> MiniMax H3 Shotboard, Turbo, LTX/Wan finishing, RIFE and RTX VSR have their
+> own dependency matrix: [MiniMax H3 Shotboard Workflow Requirements](docs/MINIMAX_H3_WORKFLOW_REQUIREMENTS.md).
+
 The IAMCCS SuperNodes are workflow wrappers. They do not replace the underlying
 ComfyUI, LTXV, audio, VAE, stitching, and helper nodes; they orchestrate them.
 If one dependency is missing or outdated, the SuperNode may load in the graph but

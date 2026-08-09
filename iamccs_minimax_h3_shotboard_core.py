@@ -267,6 +267,118 @@ def _normalise_slots(timeline: dict[str, Any], duration_seconds: float, fallback
     ]
 
 
+def _timeline_h3_bridges(timeline: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return the dedicated MiniMax bridge contract, when the UI supplied it."""
+    for key in ("h3_bridges", "h3Bridges"):
+        value = timeline.get(key)
+        if isinstance(value, list):
+            return [dict(item) for item in value if isinstance(item, dict)]
+    nested = timeline.get("timeline")
+    if isinstance(nested, dict):
+        return _timeline_h3_bridges(nested)
+    return []
+
+
+def _normalise_flf_bridge_slots(
+    timeline: dict[str, Any],
+    slots: list[dict[str, Any]],
+    duration_seconds: float,
+) -> list[dict[str, Any]]:
+    """Convert N image anchors into N-1 MiniMax first/last-frame chunks.
+
+    The Shotboard renders the local prompt from the centre of one image box to
+    the centre of the next.  Those centre distances determine the *relative*
+    duration of the FLF chunks, while the first and last centres are normalised
+    to the full requested timeline duration.  Consequently two image anchors
+    on a ten-second board still produce one ten-second FLF chunk; with three or
+    more anchors, resizing or moving a box changes the proportional timing of
+    the adjacent chunks without losing the requested total duration.
+    """
+    anchors = [slot for slot in slots if _text(slot.get("image"))]
+    if len(anchors) < 2:
+        return slots
+
+    ui_bridges = _timeline_h3_bridges(timeline)
+    bridge_by_pair: dict[tuple[str, str], dict[str, Any]] = {}
+    for bridge in ui_bridges:
+        pair = (
+            _text(_first_value(bridge, ("from_segment_id", "fromSegmentId", "from_id"))),
+            _text(_first_value(bridge, ("to_segment_id", "toSegmentId", "to_id"))),
+        )
+        if pair[0] and pair[1]:
+            bridge_by_pair[pair] = bridge
+
+    centres = [
+        float(slot["start_seconds"]) + float(slot["requested_frame_count"]) / H3_FPS / 2.0
+        for slot in anchors
+    ]
+    gaps = [max(1.0 / H3_FPS, centres[index + 1] - centres[index]) for index in range(len(centres) - 1)]
+    gap_total = sum(gaps) or float(len(gaps))
+    requested_total = max(H3_MIN_FRAMES, int(round(max(0.01, _float(duration_seconds, 10.0)) * H3_FPS)))
+    if requested_total > H3_MAX_TRAINED_FRAMES * len(gaps):
+        raise ValueError(
+            f"La timeline FLF richiede {requested_total} frame ma {len(gaps)} ponti H3 possono contenerne "
+            f"al massimo {H3_MAX_TRAINED_FRAMES * len(gaps)}. Aggiungi keyframe o riduci la durata."
+        )
+
+    raw_lengths = [requested_total * gap / gap_total for gap in gaps]
+    requested_lengths = [max(H3_MIN_FRAMES, int(math.floor(value))) for value in raw_lengths]
+    remainder = requested_total - sum(requested_lengths)
+    order = sorted(
+        range(len(raw_lengths)),
+        key=lambda index: raw_lengths[index] - math.floor(raw_lengths[index]),
+        reverse=remainder > 0,
+    )
+    step = 1 if remainder > 0 else -1
+    for offset in range(abs(remainder)):
+        index = order[offset % len(order)]
+        if step < 0 and requested_lengths[index] <= H3_MIN_FRAMES:
+            continue
+        requested_lengths[index] += step
+
+    bridge_slots: list[dict[str, Any]] = []
+    cursor = 0.0
+    for index, (first, last) in enumerate(zip(anchors, anchors[1:])):
+        requested_frames = requested_lengths[index]
+        if requested_frames > H3_MAX_TRAINED_FRAMES:
+            raise ValueError(
+                f"Il ponte FLF '{first['label']} -> {last['label']}' richiede {requested_frames} frame: "
+                f"avvicina i centri dei box o aggiungi un keyframe (massimo {H3_MAX_TRAINED_FRAMES})."
+            )
+        frame_count = align_h3_frames(requested_frames)
+        if frame_count > H3_MAX_TRAINED_FRAMES:
+            raise ValueError(
+                f"Il ponte FLF '{first['label']} -> {last['label']}' diventa {frame_count} frame dopo "
+                f"l'allineamento H3 17k+5: riduci leggermente la durata relativa del ponte."
+            )
+        ui_bridge = bridge_by_pair.get((_text(first.get("id")), _text(last.get("id"))), {})
+        local_prompt = _text(_first_value(ui_bridge, ("prompt", "local_prompt", "relay_prompt"))) or _text(first.get("prompt"))
+        audio_prompt = _text(_first_value(ui_bridge, ("audio_prompt", "sound_prompt"))) or _text(first.get("audio_prompt"))
+        bridge_slots.append(
+            {
+                "id": _text(ui_bridge.get("id")) or f"flf_bridge_{index + 1}",
+                "label": _text(ui_bridge.get("label")) or f"{first['label']} -> {last['label']}",
+                "type": "image",
+                "start_seconds": cursor,
+                "requested_frame_count": requested_frames,
+                "frame_count": frame_count,
+                "duration_seconds": frame_count / H3_FPS,
+                "image": _text(first.get("image")),
+                "explicit_last_image": _text(last.get("image")),
+                "prompt": local_prompt,
+                "audio_prompt": audio_prompt,
+                "transition": "start" if index == 0 else "h3_keyframe_chain",
+                "use_keyframe": True,
+                "from_anchor_id": _text(first.get("id")),
+                "to_anchor_id": _text(last.get("id")),
+                "visual_start_frame": int(round(centres[index] * H3_FPS)),
+                "visual_end_frame": int(round(centres[index + 1] * H3_FPS)),
+            }
+        )
+        cursor += frame_count / H3_FPS
+    return bridge_slots
+
+
 def _compose_prompt(
     *,
     global_prompt: str,
@@ -341,12 +453,12 @@ def build_shotplan(
     height: int = 768,
     acceleration: str = "native",
     ref_image_size: str = "match",
-    text_encoder_device: str = "cpu_safe_12gb",
+    text_encoder_device: str = "auto",
     reference_roles: list[str] | tuple[str, ...] | None = None,
     reference_video_role: str = "off",
     reference_audio_role: str = "off",
-    sol_conditioning: str = "exact_kv",
-    spectrum_profile: str = "conservative_3060",
+    sol_conditioning: str = "exact_kv_and_rows",
+    spectrum_profile: str = "low_vram",
     vram_clean_before_decode: bool = True,
     rife_mode: str = "off",
     upscale_enabled: bool = False,
@@ -382,19 +494,26 @@ def build_shotplan(
         raise ValueError("aspect ratio H3 deve essere compreso tra 2:5 e 5:2")
 
     acceleration = _text(acceleration).lower() or "native"
-    if acceleration not in {"auto_3060", "native", "h3_sage", "sage", "sage_sol", "spectrum", "sage_spectrum"}:
+    if acceleration not in {
+        "auto_3060", "low_vram_auto", "native", "h3_sage", "sage", "sage_sol", "sol_low_vram",
+        "adaptive_safe", "sol_adaptive_safe", "sol_adaptive_balanced", "spectrum", "sage_spectrum",
+    }:
         raise ValueError(f"accelerazione H3 non valida: {acceleration}")
     ref_image_size = _text(ref_image_size).lower() or "match"
     if ref_image_size not in {"match", "max"}:
         raise ValueError(f"ref_image_size H3 non valido: {ref_image_size}")
-    text_encoder_device = _text(text_encoder_device).lower() or "cpu_safe_12gb"
+    text_encoder_device = _text(text_encoder_device).lower() or "auto"
     if text_encoder_device not in {"cpu_safe_12gb", "auto"}:
         raise ValueError(f"device text encoder H3 non valido: {text_encoder_device}")
-    sol_conditioning = _text(sol_conditioning).lower() or "exact_kv"
+    # Old boards remain loadable, but CPU is now an OOM-only fallback handled
+    # by the atomic conditioning backend rather than a forced placement mode.
+    if text_encoder_device == "cpu_safe_12gb":
+        text_encoder_device = "auto"
+    sol_conditioning = _text(sol_conditioning).lower() or "exact_kv_and_rows"
     if sol_conditioning not in {"exact_kv", "exact_kv_and_rows"}:
         raise ValueError(f"Sol-Attn conditioning non valido: {sol_conditioning}")
-    spectrum_profile = _text(spectrum_profile).lower() or "conservative_3060"
-    if spectrum_profile not in {"conservative_3060", "conservative_quality", "aggressive"}:
+    spectrum_profile = _text(spectrum_profile).lower() or "low_vram"
+    if spectrum_profile not in {"conservative_3060", "low_vram", "conservative_quality", "quality", "aggressive"}:
         raise ValueError(f"profilo Spectrum non valido: {spectrum_profile}")
     rife_mode = _text(rife_mode).lower() or "off"
     if rife_mode not in {"off", "rife_48fps", "rife_60fps"}:
@@ -413,6 +532,20 @@ def build_shotplan(
 
     fallback_duration = min(H3_MAX_TRAINED_FRAMES / H3_FPS, max(H3_MIN_FRAMES / H3_FPS, 10.0))
     slots = _normalise_slots(timeline, duration_seconds, fallback_duration)
+    requested_task_mode = _text(task_mode).lower() or "auto_from_timeline"
+    auto_task_mode = requested_task_mode in {"auto", "auto_from_timeline"}
+    explicit_flf_mode = requested_task_mode in {"flf", "fflf", "fl2va"}
+    explicit_i2v_mode = requested_task_mode in {"i2v", "i2va"}
+    image_slots = [slot for slot in slots if _text(slot.get("image"))]
+    legacy_explicit_last = len(image_slots) == 1 and bool(_text(image_slots[0].get("explicit_last_image")))
+    flf_anchor_mode = bool(
+        (explicit_flf_mode and len(image_slots) >= 2)
+        or (auto_task_mode and len(image_slots) >= 2)
+    )
+    if flf_anchor_mode:
+        timeline_duration = _float(timeline.get("duration_seconds"), duration_seconds)
+        slots = _normalise_flf_bridge_slots(timeline, slots, timeline_duration)
+    i2v_hard_cut_mode = bool(explicit_i2v_mode and len(image_slots) > 1)
 
     chunks: list[dict[str, Any]] = []
     prompt_map: list[dict[str, Any]] = []
@@ -420,9 +553,9 @@ def build_shotplan(
 
     for slot_index, slot in enumerate(slots):
         frame_count = int(slot["frame_count"])
-        hard_cut_start = slot_index > 0 and slot["transition"] == "hard_cut"
+        hard_cut_start = slot_index > 0 and (slot["transition"] == "hard_cut" or i2v_hard_cut_mode)
         next_slot = slots[slot_index + 1] if slot_index + 1 < len(slots) else None
-        next_is_cut = bool(next_slot and next_slot["transition"] == "hard_cut")
+        next_is_cut = bool(next_slot and (next_slot["transition"] == "hard_cut" or i2v_hard_cut_mode))
         next_anchor = ""
         if next_slot and not next_is_cut:
             next_anchor = _text(next_slot.get("image"))
@@ -491,23 +624,25 @@ def build_shotplan(
         )
         unique_frames_total += frame_count - overlap
 
-    image_count = sum(1 for slot in slots if slot.get("image"))
+    reference_image_paths = _timeline_image_paths(timeline)[:4]
+    image_count = len(reference_image_paths) or sum(1 for slot in slots if slot.get("image"))
     return {
         "schema": "iamccs.minimax_h3.shotplan",
-        "schema_version": 5,
+        "schema_version": 6,
         "source_timeline_schema": _text(timeline.get("schema")),
         "fps": H3_FPS,
         "width": resolved_width,
         "height": resolved_height,
         "task_mode": task_mode,
         "generation_mode": task_mode,
-        "continuation_mode": "timeline_keyframe_adjacency",
+        "continuation_mode": "flf_image_center_bridges" if flf_anchor_mode else ("i2v_hard_cuts" if i2v_hard_cut_mode else "timeline_keyframe_adjacency"),
         "audio_mode": audio_mode,
         "prompt_mapping": prompt_mapping,
         "acceleration": acceleration,
         "ref_image_size": ref_image_size,
         "text_encoder_device": text_encoder_device,
         "reference_roles": roles,
+        "reference_image_paths": reference_image_paths,
         "reference_video_role": _text(reference_video_role).lower() or "off",
         "reference_audio_role": _text(reference_audio_role).lower() or "off",
         "sol_conditioning": sol_conditioning,
@@ -516,7 +651,10 @@ def build_shotplan(
         "rife_mode": rife_mode,
         "upscale_enabled": bool(_bool(upscale_enabled, False)),
         "upscale_mode": active_upscale_mode,
-        "chunk_policy": "one_timeline_box_one_h3_chunk",
+        "chunk_policy": "n_keyframes_n_minus_one_flf_bridges" if flf_anchor_mode else ("one_i2v_box_one_hard_cut_chunk" if i2v_hard_cut_mode else "one_timeline_box_one_h3_chunk"),
+        "flf_anchor_mode": flf_anchor_mode,
+        "i2v_hard_cut_mode": i2v_hard_cut_mode,
+        "legacy_explicit_last": legacy_explicit_last,
         "chunk_max_frames": H3_MAX_TRAINED_FRAMES,
         "global_prompt": _text(global_prompt),
         "slots": slots,
