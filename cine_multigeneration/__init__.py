@@ -4110,6 +4110,85 @@ class IAMCCS_ShotboardVideoEditorV1:
         }
 
 
+def _apply_goya_suite_clip_edit(images: torch.Tensor, clip: Dict[str, Any]) -> torch.Tensor:
+    """Bake GOYA Production Suite clip-local transform and image FX into BHWC frames."""
+    if not torch.is_tensor(images) or images.ndim != 4 or int(images.shape[0]) <= 0:
+        return images
+    suite_edit = clip.get("suite_edit") if isinstance(clip.get("suite_edit"), dict) else {}
+    transform = suite_edit.get("transform") if isinstance(suite_edit.get("transform"), dict) else clip.get("transform") if isinstance(clip.get("transform"), dict) else {}
+    video_fx = suite_edit.get("video_fx") if isinstance(suite_edit.get("video_fx"), dict) else clip.get("videoFx") if isinstance(clip.get("videoFx"), dict) else {}
+    if not transform and not video_fx:
+        return images
+    source_dtype = images.dtype
+    work = images.permute(0, 3, 1, 2).float()
+    if bool(suite_edit.get("reverse") or clip.get("reverse")):
+        work = torch.flip(work, dims=[0])
+    speed = max(0.01, _safe_float(suite_edit.get("speed"), _safe_float(clip.get("playbackRate"), 1.0)))
+    if abs(speed - 1.0) > 1e-6 and int(work.shape[0]) > 1:
+        target_frames = max(1, int(round(int(work.shape[0]) / speed)))
+        indices = torch.linspace(0, int(work.shape[0]) - 1, target_frames, device=work.device).round().long()
+        work = work.index_select(0, indices)
+    batch = int(work.shape[0])
+    scale_x = _safe_float(transform.get("scaleX"), 1.0)
+    scale_y = _safe_float(transform.get("scaleY"), 1.0)
+    scale_x = scale_x if abs(scale_x) >= 0.001 else 0.001
+    scale_y = scale_y if abs(scale_y) >= 0.001 else 0.001
+    rotation = math.radians(_safe_float(transform.get("rotation"), 0.0))
+    translate_x = 2.0 * _safe_float(transform.get("x"), 0.0)
+    translate_y = 2.0 * _safe_float(transform.get("y"), 0.0)
+    if abs(scale_x - 1.0) > 1e-6 or abs(scale_y - 1.0) > 1e-6 or abs(rotation) > 1e-6 or abs(translate_x) > 1e-6 or abs(translate_y) > 1e-6:
+        cosine = math.cos(rotation)
+        sine = math.sin(rotation)
+        theta = torch.tensor([
+            [cosine / scale_x, sine / scale_x, -(cosine * translate_x + sine * translate_y) / scale_x],
+            [-sine / scale_y, cosine / scale_y, (sine * translate_x - cosine * translate_y) / scale_y],
+        ], device=work.device, dtype=work.dtype).unsqueeze(0).repeat(batch, 1, 1)
+        grid = torch.nn.functional.affine_grid(theta, work.shape, align_corners=False)
+        work = torch.nn.functional.grid_sample(work, grid, mode="bilinear", padding_mode="zeros", align_corners=False)
+    exposure = _safe_float(video_fx.get("exposure"), 0.0)
+    brightness = max(0.0, _safe_float(video_fx.get("brightness"), 1.0))
+    work = work * (2.0 ** exposure) * brightness
+    contrast = max(0.0, _safe_float(video_fx.get("contrast"), 1.0))
+    if abs(contrast - 1.0) > 1e-6:
+        mean = work.mean(dim=(2, 3), keepdim=True)
+        work = (work - mean) * contrast + mean
+    luminance = work[:, 0:1] * 0.2126 + work[:, 1:2] * 0.7152 + work[:, 2:3] * 0.0722
+    saturation = max(0.0, _safe_float(video_fx.get("saturation"), 1.0))
+    work = luminance + (work - luminance) * saturation
+    grayscale = min(1.0, max(0.0, _safe_float(video_fx.get("grayscale"), 0.0)))
+    if grayscale > 0:
+        work = work * (1.0 - grayscale) + luminance.repeat(1, 3, 1, 1) * grayscale
+    temperature = min(1.0, max(-1.0, _safe_float(video_fx.get("temperature"), 0.0)))
+    tint = min(1.0, max(-1.0, _safe_float(video_fx.get("tint"), 0.0)))
+    if temperature or tint:
+        work[:, 0:1] += temperature * 0.12 + tint * 0.035
+        work[:, 1:2] -= tint * 0.07
+        work[:, 2:3] -= temperature * 0.12 + tint * 0.035
+    sepia = min(1.0, max(0.0, _safe_float(video_fx.get("sepia"), 0.0)))
+    if sepia > 0:
+        matrix = torch.tensor([[0.393, 0.769, 0.189], [0.349, 0.686, 0.168], [0.272, 0.534, 0.131]], device=work.device, dtype=work.dtype)
+        sepia_frames = torch.einsum("ij,bjhw->bihw", matrix, work)
+        work = work * (1.0 - sepia) + sepia_frames * sepia
+    invert = min(1.0, max(0.0, _safe_float(video_fx.get("invert"), 0.0)))
+    if invert > 0:
+        work = work * (1.0 - invert) + (1.0 - work) * invert
+    blur = max(0.0, _safe_float(video_fx.get("blur"), 0.0))
+    if blur >= 0.5:
+        kernel = min(31, max(3, int(round(blur)) * 2 + 1))
+        work = torch.nn.functional.avg_pool2d(work, kernel_size=kernel, stride=1, padding=kernel // 2)
+    vignette = min(1.0, max(0.0, _safe_float(video_fx.get("vignette"), 0.0)))
+    if vignette > 0:
+        height, width = int(work.shape[2]), int(work.shape[3])
+        yy = torch.linspace(-1.0, 1.0, height, device=work.device, dtype=work.dtype).view(1, 1, height, 1)
+        xx = torch.linspace(-1.0, 1.0, width, device=work.device, dtype=work.dtype).view(1, 1, 1, width)
+        radius = torch.sqrt(xx * xx + yy * yy).clamp(0.0, 1.4142)
+        mask = (1.0 - vignette * torch.clamp((radius - 0.35) / 1.0642, 0.0, 1.0)).clamp(0.0, 1.0)
+        work *= mask
+    opacity = min(1.0, max(0.0, _safe_float(video_fx.get("opacity"), _safe_float(suite_edit.get("opacity"), 1.0))))
+    work *= opacity
+    return work.clamp(0.0, 1.0).permute(0, 2, 3, 1).to(dtype=source_dtype).contiguous()
+
+
 class IAMCCS_ShotboardVideoEditorRenderV1:
     """Render a manifest-based editor assembly back to a Comfy VIDEO."""
 
@@ -4202,6 +4281,7 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
                 trim_start,
                 trim_end,
             )
+            images = _apply_goya_suite_clip_edit(images, clip)
             comps.append(Types.VideoComponents(images=images, audio=audio, frame_rate=comp.frame_rate))
         first = comps[0]
         first_shape = tuple(first.images.shape[1:3])
@@ -4278,6 +4358,8 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
             "tail_trim_frames_per_clip": int(effective_tail_trim),
             "tail_trim_source": "render_widget" if max(0, _safe_int(tail_trim_frames_per_clip, 0)) > 0 else "editor_manifest",
             "has_audio": audio is not None,
+            "goya_suite_effect_clips": sum(1 for clip in clips if isinstance(clip.get("suite_edit"), dict) or isinstance(clip.get("videoFx"), dict) or isinstance(clip.get("transform"), dict)),
+            "goya_suite_effects_baked": True,
             "legacy_widget_migration": legacy_widget_migration,
         })
         return video, frames, report

@@ -2,7 +2,19 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 console.info("[IAMCCS V3/V4] Stable Shotboard UI mode active. Multitimeline truth build loaded.");
-const CINE_VERSION = "2026-08-06-v4-settings-overlay";
+const CINE_VERSION = "2026-08-09-shotboard-v4-inout-filmstrip-v13";
+const RETAKE_PROMPT_PLACEHOLDER = "Describe only what must change inside the selected interval; continuity outside the range is protected.";
+
+function normalizeRetakePromptOverride(value) {
+    const text = String(value ?? "").trim();
+    if (!text) return "";
+    // Older V4 builds could accidentally promote this instructional placeholder
+    // into timeline data.  It is UI guidance, never executable conditioning.
+    const normalized = text.replace(/\s+/g, " ").toLowerCase();
+    if (normalized === RETAKE_PROMPT_PLACEHOLDER.toLowerCase()) return "";
+    return text;
+}
+
 const SHOTBOARD_V3_RIGID_WIDTH = 1920;
 const SHOTBOARD_V3_OPEN_HEIGHT = 900;
 const SHOTBOARD_V3_COLLAPSED_HEIGHT = 660; // increased to accommodate global prompt always visible in collapsed mode
@@ -7032,6 +7044,9 @@ function renderShotboardV3(node) {
                 const audioInputEnabled = Boolean(data.audioInputEnabled ?? data.audio_input_enabled ?? data.use_custom_audio ?? data.useCustomAudio ?? false);
                 const sourceVoiceLock = Boolean(data.sourceVoiceLock ?? data.source_voice_lock ?? data.voiceLock ?? data.voice_lock ?? false);
                 const videoToVideoEnabled = Boolean(data.videoToVideoEnabled ?? data.video_to_video_enabled ?? motionSegments.length);
+                const retakePromptOverride = normalizeRetakePromptOverride(
+                    data.retake_global_prompt ?? data.retakePrompt ?? data.retake_prompt ?? ""
+                );
                 return {
                     schema: data.schema || "iamccs.cine.filmmaker_timeline",
                     schema_version: Number(data.schema_version || 1),
@@ -7068,9 +7083,16 @@ function renderShotboardV3(node) {
                     retakeVideo: data.retakeVideo && typeof data.retakeVideo === "object" ? data.retakeVideo : null,
                     retakeStart: Math.max(0, Math.round(Number(data.retakeStart ?? data.retake_start ?? 0) || 0)),
                     retakeLength: Math.max(0, Math.round(Number(data.retakeLength ?? data.retake_length ?? 0) || 0)),
+                    retakeEnd: Math.max(0, Math.round(Number(data.retakeEnd ?? data.retake_end ?? ((Number(data.retakeStart ?? data.retake_start ?? 0) || 0) + (Number(data.retakeLength ?? data.retake_length ?? 0) || 0))) || 0)),
                     retakeStrength: Math.max(0, Math.min(1, Number(data.retakeStrength ?? data.retake_strength ?? 1) || 1)),
-                    retakePrompt: String(data.retakePrompt ?? data.retake_prompt ?? data.retake_global_prompt ?? ""),
-                    retake_global_prompt: String(data.retake_global_prompt ?? data.retakePrompt ?? data.retake_prompt ?? ""),
+                    retakeRegenerateVideo: data.retakeRegenerateVideo !== undefined ? Boolean(data.retakeRegenerateVideo) : data.retake_regenerate_video !== undefined ? Boolean(data.retake_regenerate_video) : true,
+                    retakeRegenerateAudio: data.retakeRegenerateAudio !== undefined ? Boolean(data.retakeRegenerateAudio) : data.retake_regenerate_audio !== undefined ? Boolean(data.retake_regenerate_audio) : false,
+                    retakeMaskInitValueVideo: Math.max(0, Math.min(1, Number(data.retakeMaskInitValueVideo ?? data.retake_mask_init_value_video ?? 0) || 0)),
+                    retakeMaskInitValueAudio: Math.max(0, Math.min(1, Number(data.retakeMaskInitValueAudio ?? data.retake_mask_init_value_audio ?? 0) || 0)),
+                    retakeSlopeLength: Math.max(1, Math.min(100, Math.round(Number(data.retakeSlopeLength ?? data.retake_slope_length ?? 3) || 3))),
+                    retakeBoundaryMode: String(data.retakeBoundaryMode ?? data.retake_boundary_mode ?? "soft_ramp"),
+                    retakePrompt: retakePromptOverride,
+                    retake_global_prompt: retakePromptOverride,
                     normalStartFrame: Math.max(0, Math.round(Number(data.normalStartFrame ?? data.normal_start_frame ?? 0) || 0)),
                     normalDurationFrames: Math.max(0, Math.round(Number(data.normalDurationFrames ?? data.normal_duration_frames ?? data.duration_frames ?? 0) || 0)),
                     promptBlocks: Array.isArray(data.promptBlocks) ? data.promptBlocks : Array.isArray(data.prompt_blocks) ? data.prompt_blocks : [],
@@ -7096,7 +7118,7 @@ function renderShotboardV3(node) {
                 };
             }
         } catch {}
-        return { schema: "iamccs.cine.filmmaker_timeline", schema_version: 1, segments: [], rows: [], motionSegments: [], motionClips: [], motionTrackEnabled: isShotboardV4, useCustomMotion: false, use_custom_motion: false, overrideAudio: false, override_audio: false, inpaintAudio: false, inpaint_audio: false, audioInputEnabled: false, audio_input_enabled: false, sourceVoiceLock: false, source_voice_lock: false, videoToVideoEnabled: isShotboardV4, video_to_video_enabled: isShotboardV4, magnetEnabled: true, magnet_enabled: true, timeUnits: "seconds", time_units: "seconds", display_mode: "seconds", displayMode: "seconds", clipEditMode: "timeline_trim_split_extend", clip_edit_mode: "timeline_trim_split_extend", continuationMode: "source_video", continuation_mode: "source_video", guideFramePolicy: "prompt_behavior_guide_geography", guide_frame_policy: "prompt_behavior_guide_geography", retakeMode: false, retakeVideo: null, retakeStart: 0, retakeLength: 0, retakeStrength: 1, retakePrompt: "", retake_global_prompt: "", normalStartFrame: 0, normalDurationFrames: 0, promptBlocks: [], sourceAudioSegments: [], audioSegments: [], audioTrackCount: 1, duration_seconds: null, frame_rate: null, ic_lora_name: "None", icLoraName: "None", ic_lora_strength: 1, icLoraStrength: 1, backend_settings: { ic_lora_name: "None", ic_lora_strength: 1, backend_widgets_are_fallback: true }, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
+        return { schema: "iamccs.cine.filmmaker_timeline", schema_version: 1, segments: [], rows: [], motionSegments: [], motionClips: [], motionTrackEnabled: isShotboardV4, useCustomMotion: false, use_custom_motion: false, overrideAudio: false, override_audio: false, inpaintAudio: false, inpaint_audio: false, audioInputEnabled: false, audio_input_enabled: false, sourceVoiceLock: false, source_voice_lock: false, videoToVideoEnabled: isShotboardV4, video_to_video_enabled: isShotboardV4, magnetEnabled: true, magnet_enabled: true, timeUnits: "seconds", time_units: "seconds", display_mode: "seconds", displayMode: "seconds", clipEditMode: "timeline_trim_split_extend", clip_edit_mode: "timeline_trim_split_extend", continuationMode: "source_video", continuation_mode: "source_video", guideFramePolicy: "prompt_behavior_guide_geography", guide_frame_policy: "prompt_behavior_guide_geography", retakeMode: false, retakeVideo: null, retakeStart: 0, retakeLength: 0, retakeEnd: 0, retakeStrength: 1, retakeRegenerateVideo: true, retakeRegenerateAudio: false, retakeMaskInitValueVideo: 0, retakeMaskInitValueAudio: 0, retakeSlopeLength: 3, retakeBoundaryMode: "soft_ramp", retakePrompt: "", retake_global_prompt: "", normalStartFrame: 0, normalDurationFrames: 0, promptBlocks: [], sourceAudioSegments: [], audioSegments: [], audioTrackCount: 1, duration_seconds: null, frame_rate: null, ic_lora_name: "None", icLoraName: "None", ic_lora_strength: 1, icLoraStrength: 1, backend_settings: { ic_lora_name: "None", ic_lora_strength: 1, backend_widgets_are_fallback: true }, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
     }
 
     let timeline = readTimeline();
@@ -7451,6 +7473,12 @@ function renderShotboardV3(node) {
             seg.trimStart = Math.max(0, Math.min(videoDuration - 1, Math.round(Number(seg.trimStart || seg.trim_start || 0))));
             seg.trim_start = seg.trimStart;
             seg.length = Math.max(1, Math.min(seg.length, videoDuration - seg.trimStart, Math.max(1, total - seg.start)));
+            if (isShotboardV4) {
+                seg.inPoint = seg.trimStart;
+                seg.in_point = seg.trimStart;
+                seg.outPoint = seg.trimStart + seg.length;
+                seg.out_point = seg.outPoint;
+            }
             seg.videoFile = String(seg.videoFile || seg.video_file || seg.imageFile || seg.image_file || seg.path || "").trim();
             seg.video_file = seg.videoFile;
             seg.imageFile = seg.videoFile;
@@ -7932,9 +7960,9 @@ function renderShotboardV3(node) {
     const selectedMainVideoSegmentForRetake = () => {
         const videos = (timeline.segments || []).filter((seg) => isMainVideoSegmentForRetake(seg));
         if (!videos.length) return null;
-        const selectedId = String(timeline.selectedSegmentId || timeline.selected_segment_id || "");
-        if (selectedId) {
-            const selected = videos.find((seg) => String(seg?.id || "") === selectedId);
+        const selectedVideoId = String(selectedId || timeline.selectedSegmentId || timeline.selected_segment_id || "");
+        if (selectedVideoId) {
+            const selected = videos.find((seg) => String(seg?.id || "") === selectedVideoId);
             if (selected) return selected;
         }
         return videos.slice().sort((a, b) => Number(a.start || 0) - Number(b.start || 0))[0] || null;
@@ -7950,16 +7978,35 @@ function renderShotboardV3(node) {
         const videoPath = videoPathForRetakeSegment(selectedVideo);
         const videoLength = Math.max(1, Math.round(Number(selectedVideo?.length || timeline.retakeLength || getTotalFrames() || Math.round(getDuration() * fps) || 1)));
         const videoStart = Math.max(0, Math.round(Number(selectedVideo?.start || 0)));
+        const videoEnd = Math.max(videoStart + 1, videoStart + videoLength);
         const trimStart = Math.max(0, Math.round(Number(selectedVideo?.trimStart || selectedVideo?.trim_start || 0)));
         timeline.retakeStart = Math.max(0, Math.round(Number(timeline.retakeStart ?? videoStart ?? 0)));
         if (!Number.isFinite(Number(timeline.retakeStart))) timeline.retakeStart = videoStart;
-        timeline.retakeLength = Math.max(1, Math.round(Number(timeline.retakeLength || videoLength)));
+        timeline.retakeStart = Math.max(videoStart, Math.min(videoEnd - 1, timeline.retakeStart));
+        const explicitEnd = Number(timeline.retakeEnd);
+        const requestedEnd = Math.round(
+            Number.isFinite(explicitEnd) && explicitEnd > timeline.retakeStart
+                ? explicitEnd
+                : timeline.retakeStart + Number(timeline.retakeLength || videoLength)
+        );
+        timeline.retakeEnd = Math.max(timeline.retakeStart + 1, Math.min(videoEnd, requestedEnd));
+        timeline.retakeLength = Math.max(1, timeline.retakeEnd - timeline.retakeStart);
         timeline.retakeStrength = Math.max(0, Math.min(1, Number(timeline.retakeStrength ?? selectedVideo?.retakeStrength ?? selectedVideo?.guideStrength ?? selectedVideo?.strength ?? 1) || 1));
+        timeline.retakeRegenerateVideo = timeline.retakeRegenerateVideo !== false;
+        timeline.retakeRegenerateAudio = Boolean(timeline.retakeRegenerateAudio);
+        timeline.retakeMaskInitValueVideo = Math.max(0, Math.min(1, Number(timeline.retakeMaskInitValueVideo ?? 0) || 0));
+        timeline.retakeMaskInitValueAudio = Math.max(0, Math.min(1, Number(timeline.retakeMaskInitValueAudio ?? 0) || 0));
+        timeline.retakeSlopeLength = Math.max(1, Math.min(100, Math.round(Number(timeline.retakeSlopeLength ?? 3) || 3)));
+        timeline.retakeBoundaryMode = ["hard", "soft_ramp"].includes(String(timeline.retakeBoundaryMode || "soft_ramp")) ? String(timeline.retakeBoundaryMode || "soft_ramp") : "soft_ramp";
         timeline.normalStartFrame = Math.max(0, Math.round(Number(timeline.normalStartFrame ?? 0) || 0));
         timeline.normalDurationFrames = Math.max(1, Math.round(Number(timeline.normalDurationFrames || getTotalFrames() || videoLength)));
-        const retakePrompt = String(timeline.retake_global_prompt || timeline.retakePrompt || promptArea?.value || promptWidget?.value || timeline.global_prompt || "").trim();
-        timeline.retake_global_prompt = retakePrompt;
-        timeline.retakePrompt = retakePrompt;
+        // Retake prompt is an optional override.  Keep it blank by default;
+        // the backend inherits global_prompt when no explicit override exists.
+        const retakePromptOverride = normalizeRetakePromptOverride(
+            timeline.retake_global_prompt ?? timeline.retakePrompt ?? ""
+        );
+        timeline.retake_global_prompt = retakePromptOverride;
+        timeline.retakePrompt = retakePromptOverride;
         if (videoPath) {
             const previous = timeline.retakeVideo && typeof timeline.retakeVideo === "object" ? timeline.retakeVideo : {};
             timeline.retakeVideo = {
@@ -8183,11 +8230,25 @@ function renderShotboardV3(node) {
             retake_start: isShotboardV4 ? Math.max(0, Math.round(Number(timeline.retakeStart || 0))) : undefined,
             retakeLength: isShotboardV4 ? Math.max(0, Math.round(Number(timeline.retakeLength || 0))) : undefined,
             retake_length: isShotboardV4 ? Math.max(0, Math.round(Number(timeline.retakeLength || 0))) : undefined,
+            retakeEnd: isShotboardV4 ? Math.max(0, Math.round(Number(timeline.retakeEnd || (Number(timeline.retakeStart || 0) + Number(timeline.retakeLength || 0))))) : undefined,
+            retake_end: isShotboardV4 ? Math.max(0, Math.round(Number(timeline.retakeEnd || (Number(timeline.retakeStart || 0) + Number(timeline.retakeLength || 0))))) : undefined,
             retakeStrength: isShotboardV4 ? Math.max(0, Math.min(1, Number(timeline.retakeStrength ?? 1) || 1)) : undefined,
             retake_strength: isShotboardV4 ? Math.max(0, Math.min(1, Number(timeline.retakeStrength ?? 1) || 1)) : undefined,
-            retakePrompt: isShotboardV4 ? String(timeline.retakePrompt || timeline.retake_global_prompt || "") : undefined,
-            retake_prompt: isShotboardV4 ? String(timeline.retakePrompt || timeline.retake_global_prompt || "") : undefined,
-            retake_global_prompt: isShotboardV4 ? String(timeline.retake_global_prompt || timeline.retakePrompt || "") : undefined,
+            retakeRegenerateVideo: isShotboardV4 ? timeline.retakeRegenerateVideo !== false : undefined,
+            retake_regenerate_video: isShotboardV4 ? timeline.retakeRegenerateVideo !== false : undefined,
+            retakeRegenerateAudio: isShotboardV4 ? Boolean(timeline.retakeRegenerateAudio) : undefined,
+            retake_regenerate_audio: isShotboardV4 ? Boolean(timeline.retakeRegenerateAudio) : undefined,
+            retakeMaskInitValueVideo: isShotboardV4 ? Math.max(0, Math.min(1, Number(timeline.retakeMaskInitValueVideo ?? 0) || 0)) : undefined,
+            retake_mask_init_value_video: isShotboardV4 ? Math.max(0, Math.min(1, Number(timeline.retakeMaskInitValueVideo ?? 0) || 0)) : undefined,
+            retakeMaskInitValueAudio: isShotboardV4 ? Math.max(0, Math.min(1, Number(timeline.retakeMaskInitValueAudio ?? 0) || 0)) : undefined,
+            retake_mask_init_value_audio: isShotboardV4 ? Math.max(0, Math.min(1, Number(timeline.retakeMaskInitValueAudio ?? 0) || 0)) : undefined,
+            retakeSlopeLength: isShotboardV4 ? Math.max(1, Math.min(100, Math.round(Number(timeline.retakeSlopeLength ?? 3) || 3))) : undefined,
+            retake_slope_length: isShotboardV4 ? Math.max(1, Math.min(100, Math.round(Number(timeline.retakeSlopeLength ?? 3) || 3))) : undefined,
+            retakeBoundaryMode: isShotboardV4 ? String(timeline.retakeBoundaryMode || "soft_ramp") : undefined,
+            retake_boundary_mode: isShotboardV4 ? String(timeline.retakeBoundaryMode || "soft_ramp") : undefined,
+            retakePrompt: isShotboardV4 ? normalizeRetakePromptOverride(timeline.retake_global_prompt ?? timeline.retakePrompt ?? "") : undefined,
+            retake_prompt: isShotboardV4 ? normalizeRetakePromptOverride(timeline.retake_global_prompt ?? timeline.retakePrompt ?? "") : undefined,
+            retake_global_prompt: isShotboardV4 ? normalizeRetakePromptOverride(timeline.retake_global_prompt ?? timeline.retakePrompt ?? "") : undefined,
             normalStartFrame: isShotboardV4 ? Math.max(0, Math.round(Number(timeline.normalStartFrame || 0))) : undefined,
             normal_start_frame: isShotboardV4 ? Math.max(0, Math.round(Number(timeline.normalStartFrame || 0))) : undefined,
             normalDurationFrames: isShotboardV4 ? Math.max(1, Math.round(Number(timeline.normalDurationFrames || durationFrames || 1))) : undefined,
@@ -8329,8 +8390,12 @@ function renderShotboardV3(node) {
             retakeStart: Math.max(0, Math.round(Number(source.retakeStart ?? source.retake_start ?? timeline.retakeStart ?? 0) || 0)),
             retakeLength: Math.max(0, Math.round(Number(source.retakeLength ?? source.retake_length ?? timeline.retakeLength ?? 0) || 0)),
             retakeStrength: Math.max(0, Math.min(1, Number(source.retakeStrength ?? source.retake_strength ?? timeline.retakeStrength ?? 1) || 1)),
-            retakePrompt: String(source.retakePrompt ?? source.retake_prompt ?? source.retake_global_prompt ?? timeline.retakePrompt ?? timeline.retake_global_prompt ?? ""),
-            retake_global_prompt: String(source.retake_global_prompt ?? source.retakePrompt ?? source.retake_prompt ?? timeline.retake_global_prompt ?? timeline.retakePrompt ?? ""),
+            retakePrompt: normalizeRetakePromptOverride(
+                source.retake_global_prompt ?? source.retakePrompt ?? source.retake_prompt ?? timeline.retake_global_prompt ?? timeline.retakePrompt ?? ""
+            ),
+            retake_global_prompt: normalizeRetakePromptOverride(
+                source.retake_global_prompt ?? source.retakePrompt ?? source.retake_prompt ?? timeline.retake_global_prompt ?? timeline.retakePrompt ?? ""
+            ),
             normalStartFrame: Math.max(0, Math.round(Number(source.normalStartFrame ?? source.normal_start_frame ?? timeline.normalStartFrame ?? 0) || 0)),
             normalDurationFrames: Math.max(0, Math.round(Number(source.normalDurationFrames ?? source.normal_duration_frames ?? source.duration_frames ?? timeline.normalDurationFrames ?? 0) || 0)),
             promptBlocks: Array.isArray(source.promptBlocks) ? source.promptBlocks : Array.isArray(source.prompt_blocks) ? source.prompt_blocks : (timeline.promptBlocks || []),
@@ -8382,16 +8447,23 @@ function renderShotboardV3(node) {
         timeline.retakeStart = Math.max(0, Math.round(Number(timeline.retakeStart || timeline.retake_start || 0) || 0));
         timeline.retakeLength = Math.max(0, Math.round(Number(timeline.retakeLength || timeline.retake_length || 0) || 0));
         timeline.retakeStrength = Math.max(0, Math.min(1, Number(timeline.retakeStrength ?? timeline.retake_strength ?? 1) || 1));
-        timeline.retakePrompt = String(timeline.retakePrompt ?? timeline.retake_prompt ?? timeline.retake_global_prompt ?? "");
-        timeline.retake_global_prompt = String(timeline.retake_global_prompt ?? timeline.retakePrompt ?? "");
+        const loadedRetakePromptOverride = normalizeRetakePromptOverride(
+            timeline.retake_global_prompt ?? timeline.retakePrompt ?? timeline.retake_prompt ?? ""
+        );
+        timeline.retakePrompt = loadedRetakePromptOverride;
+        timeline.retake_global_prompt = loadedRetakePromptOverride;
         timeline.normalStartFrame = Math.max(0, Math.round(Number(timeline.normalStartFrame || timeline.normal_start_frame || 0) || 0));
         timeline.normalDurationFrames = Math.max(0, Math.round(Number(timeline.normalDurationFrames || timeline.normal_duration_frames || 0) || 0));
     }
     const collapsedNodeHeight = () => {
         const tracks = Math.max(1, Math.round(Number(timeline.audioTrackCount || 1)));
-        return Math.max(SHOTBOARD_V3_COLLAPSED_HEIGHT, 450 + tracks * 90 + (isShotboardV4 ? 118 : 0));
+        const retakeExtra = isShotboardV4 && String(timeline.clipEditMode || timeline.clip_edit_mode || "") === "retake_range" ? 58 : 0;
+        return Math.max(SHOTBOARD_V3_COLLAPSED_HEIGHT, 450 + tracks * 90 + (isShotboardV4 ? 118 : 0) + retakeExtra);
     };
-    const currentNodeHeight = () => collapsed ? collapsedNodeHeight() : SHOTBOARD_V3_OPEN_HEIGHT;
+    const currentNodeHeight = () => {
+        const retakeExtra = isShotboardV4 && String(timeline.clipEditMode || timeline.clip_edit_mode || "") === "retake_range" ? 58 : 0;
+        return collapsed ? collapsedNodeHeight() : SHOTBOARD_V3_OPEN_HEIGHT + retakeExtra;
+    };
 
     const head = document.createElement("div");
     head.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;";
@@ -9188,6 +9260,8 @@ function renderShotboardV3(node) {
     timelineMeterWrap.append(timelineMeterButton("-", -1), timelineMeterReadout, timelineMeterButton("+", 1), timelineMeterButton("Fit", 0));
     let settingsOverlay = null;
     let settingsBtn = null;
+    let retakeRangeOverlay = null;
+    let refreshRetakePanel = () => {};
     const setSettingsPanelOpen = (open) => {
         if (!settingsOverlay) return;
         settingsOverlay.style.display = open ? "flex" : "none";
@@ -9394,10 +9468,204 @@ function renderShotboardV3(node) {
             timeline.clip_edit_mode = next;
             timeline.retakeMode = next === "retake_range";
             if (timeline.retakeMode) {
-                timeline.retake_global_prompt = String(timeline.retake_global_prompt || timeline.retakePrompt || promptArea?.value || promptWidget?.value || "");
-                timeline.retakePrompt = timeline.retake_global_prompt;
+                const currentOverride = normalizeRetakePromptOverride(
+                    timeline.retake_global_prompt ?? timeline.retakePrompt ?? ""
+                );
+                timeline.retake_global_prompt = currentOverride;
+                timeline.retakePrompt = currentOverride;
             }
+            refreshRetakePanel();
         });
+
+        const retakePanel = document.createElement("section");
+        retakePanel.style.cssText = `grid-column:1 / -1;display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));gap:10px;padding:12px;border:1px solid #D29045;border-radius:9px;background:linear-gradient(145deg,rgba(93,58,28,.58),rgba(26,34,33,.94));box-shadow:inset 0 1px 0 rgba(255,255,255,.10);`;
+        const retakeHead = document.createElement("div");
+        retakeHead.style.cssText = "grid-column:1 / -1;display:flex;align-items:center;justify-content:space-between;gap:12px;";
+        const retakeTitle = document.createElement("div");
+        retakeTitle.innerHTML = `<div style="font:900 12px/1.2 Arial;color:#FFE0A3;letter-spacing:.09em">RETAKE RANGE · PHASE 2 + TEMPORAL MASK</div><div style="font:700 10px/1.35 Arial;color:#BFC9C2;margin-top:3px">IN is the first included frame; OUT is the last included frame. Use the playhead buttons or the orange I/O handles on the timeline.</div>`;
+        const retakeSummary = document.createElement("div");
+        retakeSummary.style.cssText = "flex:0 0 auto;padding:7px 10px;border:1px solid rgba(255,224,163,.48);border-radius:6px;background:#171A19;color:#FFE8B8;font:900 10px/1.2 monospace;";
+        retakeHead.append(retakeTitle, retakeSummary);
+        retakePanel.appendChild(retakeHead);
+
+        const makeRetakeField = (label, min, max, step, value, onChange) => {
+            const wrap = document.createElement("label");
+            wrap.style.cssText = `display:flex;flex-direction:column;gap:5px;color:${purple.muted};font-size:10px;font-weight:900;`;
+            const name = document.createElement("span");
+            name.textContent = label;
+            const input = document.createElement("input");
+            input.type = "number";
+            input.min = String(min);
+            input.max = String(max);
+            input.step = String(step);
+            input.value = String(value);
+            input.style.cssText = inputBase() + `height:31px;background:${purple.valueBg};color:${purple.valueText};font-weight:900;`;
+            input.onchange = () => onChange(Number(input.value));
+            wrap.append(name, input);
+            retakePanel.appendChild(wrap);
+            return input;
+        };
+        const retakeInInput = makeRetakeField("IN frame", 0, getTotalFrames(), 1, timeline.retakeStart || 0, (value) => {
+            timeline.retakeStart = Math.max(0, Math.round(Number(value) || 0));
+            timeline.retakeEnd = Math.max(timeline.retakeStart + 1, Number(timeline.retakeEnd || timeline.retakeStart + 1));
+            timeline.retakeLength = timeline.retakeEnd - timeline.retakeStart;
+            writeTimeline(); refreshRetakePanel(); draw();
+        });
+        const retakeOutInput = makeRetakeField("OUT frame (last included)", 0, Math.max(0, getTotalFrames() - 1), 1, Math.max(0, Number(timeline.retakeEnd || getTotalFrames()) - 1), (value) => {
+            timeline.retakeEnd = Math.max(Number(timeline.retakeStart || 0) + 1, Math.round(Number(value) || 0) + 1);
+            timeline.retakeLength = timeline.retakeEnd - Number(timeline.retakeStart || 0);
+            writeTimeline(); refreshRetakePanel(); draw();
+        });
+        const retakeStrengthInput = makeRetakeField("Denoise / strength", 0, 1, 0.01, timeline.retakeStrength ?? 1, (value) => {
+            timeline.retakeStrength = Math.max(0, Math.min(1, Number(value) || 0));
+            writeTimeline(); refreshRetakePanel();
+        });
+        const retakeSlopeInput = makeRetakeField("Boundary slope (latent frames)", 1, 100, 1, timeline.retakeSlopeLength ?? 3, (value) => {
+            timeline.retakeSlopeLength = Math.max(1, Math.min(100, Math.round(Number(value) || 3)));
+            writeTimeline(); refreshRetakePanel();
+        });
+        const retakeVideoInitInput = makeRetakeField("Outside mask · video", 0, 1, 0.01, timeline.retakeMaskInitValueVideo ?? 0, (value) => {
+            timeline.retakeMaskInitValueVideo = Math.max(0, Math.min(1, Number(value) || 0));
+            writeTimeline(); refreshRetakePanel();
+        });
+        const retakeAudioInitInput = makeRetakeField("Outside mask · audio", 0, 1, 0.01, timeline.retakeMaskInitValueAudio ?? 0, (value) => {
+            timeline.retakeMaskInitValueAudio = Math.max(0, Math.min(1, Number(value) || 0));
+            writeTimeline(); refreshRetakePanel();
+        });
+
+        const retakeInRange = document.createElement("input");
+        const retakeOutRange = document.createElement("input");
+        for (const slider of [retakeInRange, retakeOutRange]) {
+            slider.type = "range";
+            slider.min = "0";
+            slider.max = String(Math.max(0, getTotalFrames() - 1));
+            slider.step = "1";
+            slider.style.cssText = "grid-column:1 / -1;width:100%;accent-color:#D79041;";
+            retakePanel.appendChild(slider);
+        }
+        retakeInRange.title = "Drag the retake IN boundary";
+        retakeOutRange.title = "Drag the last included retake frame (OUT)";
+        retakeInRange.oninput = () => {
+            timeline.retakeStart = Math.min(Number(retakeOutRange.value), Math.max(0, Number(retakeInRange.value)));
+            timeline.retakeEnd = Math.max(timeline.retakeStart + 1, Number(retakeOutRange.value) + 1);
+            timeline.retakeLength = Math.max(1, timeline.retakeEnd - timeline.retakeStart);
+            refreshRetakePanel();
+        };
+        retakeOutRange.oninput = () => {
+            timeline.retakeEnd = Math.max(Number(retakeInRange.value) + 1, Number(retakeOutRange.value) + 1);
+            timeline.retakeLength = Math.max(1, timeline.retakeEnd - Number(retakeInRange.value));
+            refreshRetakePanel();
+        };
+        retakeInRange.onchange = () => { writeTimeline(); draw(); };
+        retakeOutRange.onchange = () => { writeTimeline(); draw(); };
+
+        const makeRetakeAction = (text, title, onClick, accent = false) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.textContent = text;
+            button.title = title;
+            button.style.cssText = `height:32px;border:1px solid ${accent ? "#FFE0A3" : purple.border};border-radius:6px;background:${accent ? "linear-gradient(145deg,#B87531,#76502C)" : purple.button};color:${purple.text};font-size:10px;font-weight:900;cursor:pointer;`;
+            button.onclick = (event) => { event.preventDefault(); event.stopPropagation(); onClick(); };
+            retakePanel.appendChild(button);
+            return button;
+        };
+        makeRetakeAction("SET IN ← PLAYHEAD", "Use the current timeline playhead as the inclusive first frame", () => {
+            timeline.retakeStart = Math.max(0, Math.min(getTotalFrames() - 1, Math.round(playFrame)));
+            timeline.retakeEnd = Math.max(timeline.retakeStart + 1, Number(timeline.retakeEnd || getTotalFrames()));
+            timeline.retakeLength = timeline.retakeEnd - timeline.retakeStart;
+            writeTimeline(); refreshRetakePanel(); draw();
+        }, true);
+        makeRetakeAction("SET OUT ← PLAYHEAD", "Use the current timeline playhead as the last included frame", () => {
+            timeline.retakeEnd = Math.max(Number(timeline.retakeStart || 0) + 1, Math.min(getTotalFrames(), Math.round(playFrame) + 1));
+            timeline.retakeLength = timeline.retakeEnd - Number(timeline.retakeStart || 0);
+            writeTimeline(); refreshRetakePanel(); draw();
+        }, true);
+        makeRetakeAction("SELECT CLIP", "Reset IN/OUT to the selected video clip", () => {
+            const selected = selectedMainVideoSegmentForRetake();
+            const start = Math.max(0, Math.round(Number(selected?.start || 0)));
+            const length = Math.max(1, Math.round(Number(selected?.length || getTotalFrames())));
+            timeline.retakeStart = start;
+            timeline.retakeEnd = Math.min(getTotalFrames(), start + length);
+            timeline.retakeLength = Math.max(1, timeline.retakeEnd - timeline.retakeStart);
+            writeTimeline(); refreshRetakePanel(); draw();
+        });
+        makeRetakeAction("FULL TIMELINE", "Retake the complete source-video interval", () => {
+            timeline.retakeStart = 0;
+            timeline.retakeEnd = getTotalFrames();
+            timeline.retakeLength = getTotalFrames();
+            writeTimeline(); refreshRetakePanel(); draw();
+        });
+
+        const addRetakeChoice = (label, value, choices, onChange) => {
+            const wrap = document.createElement("label");
+            wrap.style.cssText = `display:flex;flex-direction:column;gap:5px;color:${purple.muted};font-size:10px;font-weight:900;`;
+            const span = document.createElement("span");
+            span.textContent = label;
+            const ctrl = makeChoiceSelect(String(value), choices, (next) => { onChange(next); writeTimeline(); refreshRetakePanel(); draw(); });
+            styleValueControls(ctrl);
+            wrap.append(span, ctrl);
+            retakePanel.appendChild(wrap);
+            return ctrl;
+        };
+        const retakeVideoChoice = addRetakeChoice("Regenerate video", timeline.retakeRegenerateVideo === false ? "off" : "on", [{ value: "on", label: "On" }, { value: "off", label: "Off / protect" }], (next) => { timeline.retakeRegenerateVideo = next === "on"; });
+        const retakeAudioChoice = addRetakeChoice("Regenerate audio", timeline.retakeRegenerateAudio ? "on" : "off", [{ value: "off", label: "Off / preserve" }, { value: "on", label: "On" }], (next) => { timeline.retakeRegenerateAudio = next === "on"; });
+        const retakeBoundaryChoice = addRetakeChoice("Range boundary", timeline.retakeBoundaryMode || "soft_ramp", [{ value: "soft_ramp", label: "Soft latent ramp" }, { value: "hard", label: "Hard boundary" }], (next) => { timeline.retakeBoundaryMode = next; });
+        const retakeUnits = document.createElement("div");
+        retakeUnits.style.cssText = `display:flex;align-items:end;color:${purple.muted};font:800 10px/1.35 Arial;`;
+        retakeUnits.textContent = "IN and OUT are both included. The backend keeps the same safe exclusive end internally.";
+        retakePanel.appendChild(retakeUnits);
+
+        const retakePromptWrap = document.createElement("label");
+        retakePromptWrap.style.cssText = `grid-column:1 / -1;display:flex;flex-direction:column;gap:5px;color:${purple.muted};font-size:10px;font-weight:900;`;
+        const retakePromptLabel = document.createElement("span");
+        retakePromptLabel.textContent = "Retake prompt override";
+        const retakePromptArea = document.createElement("textarea");
+        retakePromptArea.rows = 3;
+        retakePromptArea.value = normalizeRetakePromptOverride(timeline.retake_global_prompt ?? timeline.retakePrompt ?? "");
+        retakePromptArea.placeholder = RETAKE_PROMPT_PLACEHOLDER;
+        retakePromptArea.style.cssText = inputBase() + `background:${purple.valueBg};color:${purple.valueText};resize:vertical;min-height:64px;font-weight:700;`;
+        retakePromptArea.oninput = () => {
+            const explicitOverride = normalizeRetakePromptOverride(retakePromptArea.value);
+            timeline.retake_global_prompt = explicitOverride;
+            timeline.retakePrompt = explicitOverride;
+        };
+        retakePromptArea.onchange = () => { retakePromptArea.oninput(); writeTimeline(); };
+        retakePromptWrap.append(retakePromptLabel, retakePromptArea);
+        retakePanel.appendChild(retakePromptWrap);
+        settings.appendChild(retakePanel);
+
+        refreshRetakePanel = () => {
+            const total = Math.max(1, getTotalFrames());
+            const start = Math.max(0, Math.min(total - 1, Math.round(Number(timeline.retakeStart || 0))));
+            const rawEnd = Number(timeline.retakeEnd || (start + Number(timeline.retakeLength || total)));
+            const end = Math.max(start + 1, Math.min(total, Math.round(rawEnd || total)));
+            timeline.retakeStart = start;
+            timeline.retakeEnd = end;
+            timeline.retakeLength = end - start;
+            retakeInInput.max = String(Math.max(0, total - 1));
+            retakeOutInput.max = String(Math.max(0, total - 1));
+            retakeInInput.value = String(start);
+            retakeOutInput.value = String(end - 1);
+            retakeStrengthInput.value = String(Math.max(0, Math.min(1, Number(timeline.retakeStrength ?? 1))));
+            retakeSlopeInput.value = String(Math.max(1, Math.min(100, Math.round(Number(timeline.retakeSlopeLength ?? 3)))));
+            retakeVideoInitInput.value = String(Math.max(0, Math.min(1, Number(timeline.retakeMaskInitValueVideo ?? 0))));
+            retakeAudioInitInput.value = String(Math.max(0, Math.min(1, Number(timeline.retakeMaskInitValueAudio ?? 0))));
+            retakeInRange.max = String(Math.max(0, total - 1));
+            retakeOutRange.max = String(Math.max(0, total - 1));
+            retakeInRange.value = String(start);
+            retakeOutRange.value = String(end - 1);
+            const fps = Math.max(1, getFps());
+            retakeSummary.textContent = `IN F${start} (${(start / fps).toFixed(2)}s)  →  OUT F${end - 1} (${((end - 1) / fps).toFixed(2)}s)  ·  ${end - start}f`;
+            retakePanel.style.opacity = timeline.retakeMode ? "1" : ".55";
+            retakePanel.style.boxShadow = timeline.retakeMode ? "inset 0 1px 0 rgba(255,255,255,.12),0 0 0 2px rgba(210,144,69,.12)" : "inset 0 1px 0 rgba(255,255,255,.06)";
+            if (retakeVideoChoice) retakeVideoChoice.value = timeline.retakeRegenerateVideo === false ? "off" : "on";
+            if (retakeAudioChoice) retakeAudioChoice.value = timeline.retakeRegenerateAudio ? "on" : "off";
+            if (retakeBoundaryChoice) retakeBoundaryChoice.value = String(timeline.retakeBoundaryMode || "soft_ramp");
+            if (retakePromptArea !== document.activeElement) {
+                retakePromptArea.value = normalizeRetakePromptOverride(timeline.retake_global_prompt ?? timeline.retakePrompt ?? "");
+            }
+        };
+        refreshRetakePanel();
     }
 
     const parityWrap = document.createElement("label");
@@ -9542,6 +9810,11 @@ function renderShotboardV3(node) {
     const timelineBox = document.createElement("div");
     timelineBox.title = isShotboardV4 ? "Double click the main visual lane to add media; scrub the header or playbar to preview video." : "Double click in the image timeline to import a reference at that frame.";
     timelineBox.style.cssText = `position:relative;height:344px;border:1px solid ${purple.border};background:${isShotboardV4 ? "linear-gradient(126deg,rgba(43,92,61,.13) 0 1px,transparent 1px 48px),linear-gradient(26deg,transparent 0 68%,rgba(205,98,31,.12) 69%,transparent 72%),linear-gradient(180deg,#303435,#25292A)" : "#242220"};overflow:hidden;border-radius:0 0 6px 6px;margin-bottom:6px;box-shadow:${isShotboardV4 ? "inset 0 0 0 1px rgba(47,114,78,.11),inset 0 1px 0 rgba(255,255,255,.07)" : "inset 0 0 0 1px rgba(216,155,69,.08)"};touch-action:none;`;
+    if (isShotboardV4) {
+        retakeRangeOverlay = document.createElement("div");
+        retakeRangeOverlay.title = "Active V4 retake interval";
+        retakeRangeOverlay.style.cssText = "display:none;position:absolute;top:0;bottom:0;left:0;width:0;z-index:24;pointer-events:none;background:linear-gradient(180deg,rgba(224,142,54,.18),rgba(224,142,54,.07));border-left:2px solid #F0A147;border-right:2px solid #F0A147;box-shadow:inset 0 0 22px rgba(224,142,54,.11),0 0 12px rgba(224,142,54,.18);box-sizing:border-box;";
+    }
     const imageTrack = document.createElement("div");
     // imageTrack fills full width; endEdge marker overlays the last 4px so there is no dark gap at the right — By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     imageTrack.style.cssText = `position:absolute;left:0;right:0;top:0;height:254px;border-bottom:1px solid ${purple.borderSoft};background:${isShotboardV4 ? "linear-gradient(112deg,rgba(35,86,58,.16) 0 1px,transparent 1px 42px),linear-gradient(25deg,transparent 0 58%,rgba(205,101,33,.12) 59%,transparent 61%),linear-gradient(180deg,rgba(68,72,72,.58),rgba(36,40,40,.30))" : "linear-gradient(180deg,rgba(85,184,178,.14),rgba(36,34,32,.16))"};`;
@@ -9553,6 +9826,7 @@ function renderShotboardV3(node) {
     // audioTracks also fills full width matching imageTrack — By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     audioTracks.style.cssText = "position:absolute;left:0;right:0;top:254px;bottom:0;";
     timelineBox.append(imageTrack, icLoraTrack, audioTracks);
+    if (retakeRangeOverlay) timelineBox.appendChild(retakeRangeOverlay);
     // Timeline start/end edge markers — visible boundaries showing where the timeline begins and ends
     // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     const timelineStartEdge = document.createElement("div");
@@ -9678,6 +9952,209 @@ function renderShotboardV3(node) {
     let playheadScrubState = null;
     let drawRaf = 0;
     let transitionAppliedStamp = 0;
+
+    // V4 quick retake controls. The user-facing OUT value is inclusive while
+    // the serialized backend contract remains [retakeStart, retakeEnd).
+    const retakeQuickBar = document.createElement("div");
+    retakeQuickBar.className = "iamccs-v4-retake-quickbar";
+    retakeQuickBar.style.cssText = [
+        "display:none",
+        "grid-template-columns:auto minmax(118px,150px) minmax(118px,150px) auto auto auto auto minmax(220px,1fr)",
+        "gap:8px",
+        "align-items:end",
+        "margin:0 0 7px 0",
+        "padding:9px 10px",
+        "border:1px solid rgba(225,137,54,.76)",
+        "border-radius:7px",
+        "background:linear-gradient(90deg,rgba(70,39,18,.92),rgba(42,47,44,.96) 46%,rgba(26,52,40,.94))",
+        "box-shadow:inset 0 1px 0 rgba(255,255,255,.10),0 5px 15px rgba(0,0,0,.24)",
+        "box-sizing:border-box",
+        "width:100%",
+        "min-width:0",
+    ].join(";");
+    const retakeQuickBadge = document.createElement("div");
+    retakeQuickBadge.innerHTML = "<b>RETAKE RANGE</b><span>Drag I / O on the timeline</span>";
+    retakeQuickBadge.style.cssText = "display:flex;flex-direction:column;gap:4px;align-self:center;color:#FFE1B4;font:9px/1 monospace;font-weight:900;white-space:nowrap;text-transform:uppercase;";
+    retakeQuickBadge.querySelector("b").style.cssText = "font-size:11px;letter-spacing:.04em;";
+    retakeQuickBadge.querySelector("span").style.cssText = "color:#D8C6AE;font-size:8px;letter-spacing:0;text-transform:none;";
+    const makeRetakeQuickInput = (labelText) => {
+        const wrap = document.createElement("label");
+        wrap.style.cssText = "display:flex;flex-direction:column;gap:4px;color:#E2D5C3;font:9px/1 monospace;font-weight:900;text-align:center;min-width:0;";
+        const label = document.createElement("span");
+        label.textContent = labelText;
+        const input = document.createElement("input");
+        input.type = "number";
+        input.min = "0";
+        input.step = "1";
+        input.style.cssText = inputBase() + "height:31px;background:#F5EFE5;border-color:#D98332;color:#171B17;font-weight:950;text-align:center;";
+        input.onpointerdown = (event) => event.stopPropagation();
+        protectControlDrag(input);
+        wrap.append(label, input);
+        return { wrap, input, label };
+    };
+    const retakeQuickIn = makeRetakeQuickInput("IN - first frame");
+    const retakeQuickOut = makeRetakeQuickInput("OUT - last frame");
+    const makeRetakeQuickButton = (label, title) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = label;
+        button.title = title;
+        button.style.cssText = "height:31px;border:1px solid rgba(225,137,54,.72);border-radius:5px;background:linear-gradient(180deg,#555A57,#343A37);color:#FFF0D8;font:9px/1 monospace;font-weight:950;cursor:pointer;padding:0 10px;white-space:nowrap;";
+        button.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
+        return protectControlDrag(button);
+    };
+    const retakeQuickSetIn = makeRetakeQuickButton("SET IN", "Set IN at the current playhead");
+    const retakeQuickSetOut = makeRetakeQuickButton("SET OUT", "Set OUT at the current playhead");
+    const retakeQuickUseClip = makeRetakeQuickButton("USE CLIP", "Use the selected video clip");
+    const retakeQuickFull = makeRetakeQuickButton("FULL", "Use the complete visible timeline");
+    const retakeQuickStatus = document.createElement("div");
+    retakeQuickStatus.style.cssText = "display:flex;align-items:center;min-height:31px;padding:0 10px;border:1px solid rgba(132,173,143,.44);border-radius:5px;background:rgba(4,15,11,.34);color:#DFF2E4;font:9px/1.25 monospace;font-weight:900;white-space:normal;min-width:0;";
+
+    const retakeQuickActive = () => isShotboardV4 && String(timeline.clipEditMode || timeline.clip_edit_mode || "") === "retake_range";
+    const retakeQuickFrames = () => {
+        const total = Math.max(1, getTotalFrames());
+        const selectedVideo = selectedMainVideoSegmentForRetake();
+        const fallbackStart = Math.max(0, Math.min(total - 1, Math.round(Number(selectedVideo?.start || 0))));
+        const fallbackLength = Math.max(1, Math.min(total - fallbackStart, Math.round(Number(selectedVideo?.length || total))));
+        const start = Math.max(0, Math.min(total - 1, Math.round(Number(timeline.retakeStart ?? fallbackStart) || 0)));
+        const rawEnd = Number(timeline.retakeEnd || (start + Number(timeline.retakeLength || fallbackLength)));
+        const end = Math.max(start + 1, Math.min(total, Math.round(rawEnd || start + fallbackLength)));
+        return { start, end, out: end - 1, length: end - start, total };
+    };
+    const refreshRetakeQuickBar = () => {
+        const active = retakeQuickActive();
+        retakeQuickBar.style.display = active ? "grid" : "none";
+        if (!active) return;
+        const { start, out, length, total } = retakeQuickFrames();
+        const fps = Math.max(1, getFps());
+        retakeQuickIn.input.max = String(total - 1);
+        retakeQuickOut.input.max = String(total - 1);
+        if (document.activeElement !== retakeQuickIn.input) retakeQuickIn.input.value = String(start);
+        if (document.activeElement !== retakeQuickOut.input) retakeQuickOut.input.value = String(out);
+        retakeQuickIn.label.textContent = `IN - F${start} - ${(start / fps).toFixed(2)}s`;
+        retakeQuickOut.label.textContent = `OUT - F${out} - ${(out / fps).toFixed(2)}s`;
+        const selectedVideo = selectedMainVideoSegmentForRetake();
+        const source = selectedVideo ? String(selectedVideo.fileName || selectedVideo.name || videoPathForRetakeSegment(selectedVideo)).split(/[\\/]/).pop() : "no video selected";
+        retakeQuickStatus.textContent = `${source} - ${length} frame${length === 1 ? "" : "s"} - ${(length / fps).toFixed(2)}s - amber range will be regenerated`;
+    };
+    const setRetakeQuickRange = (startValue, outValue, options = {}) => {
+        const total = Math.max(1, getTotalFrames());
+        let start = Math.max(0, Math.min(total - 1, Math.round(Number(startValue || 0))));
+        let out = Math.max(0, Math.min(total - 1, Math.round(Number(outValue || 0))));
+        if (out < start) {
+            if (options.moving === "in") start = out;
+            else out = start;
+        }
+        timeline.retakeMode = true;
+        timeline.retakeStart = start;
+        timeline.retake_start = start;
+        timeline.retakeEnd = out + 1;
+        timeline.retake_end = out + 1;
+        timeline.retakeLength = out - start + 1;
+        timeline.retake_length = timeline.retakeLength;
+        refreshRetakeQuickBar();
+        refreshRetakePanel();
+        if (options.commit !== false) {
+            writeTimeline({ force: true });
+            draw();
+        }
+    };
+    const commitRetakeQuickInputs = (moving) => {
+        const current = retakeQuickFrames();
+        setRetakeQuickRange(
+            Math.round(Number(retakeQuickIn.input.value || current.start)),
+            Math.round(Number(retakeQuickOut.input.value || current.out)),
+            { moving },
+        );
+    };
+    retakeQuickIn.input.onchange = () => commitRetakeQuickInputs("in");
+    retakeQuickOut.input.onchange = () => commitRetakeQuickInputs("out");
+    retakeQuickIn.input.onkeydown = (event) => { if (event.key === "Enter") commitRetakeQuickInputs("in"); };
+    retakeQuickOut.input.onkeydown = (event) => { if (event.key === "Enter") commitRetakeQuickInputs("out"); };
+    retakeQuickSetIn.onclick = () => {
+        const current = retakeQuickFrames();
+        const next = Math.max(0, Math.min(current.total - 1, Math.round(Number(playFrame || 0))));
+        setRetakeQuickRange(next, Math.max(next, current.out), { moving: "in" });
+    };
+    retakeQuickSetOut.onclick = () => {
+        const current = retakeQuickFrames();
+        const next = Math.max(0, Math.min(current.total - 1, Math.round(Number(playFrame || 0))));
+        setRetakeQuickRange(Math.min(current.start, next), next, { moving: "out" });
+    };
+    retakeQuickUseClip.onclick = () => {
+        const selectedVideo = selectedMainVideoSegmentForRetake();
+        if (!selectedVideo) {
+            showTimelineNotice("Retake: select a video clip first, then click USE CLIP.", "warn");
+            return;
+        }
+        const start = Math.max(0, Math.round(Number(selectedVideo.start || 0)));
+        setRetakeQuickRange(start, start + Math.max(1, Math.round(Number(selectedVideo.length || 1))) - 1);
+    };
+    retakeQuickFull.onclick = () => setRetakeQuickRange(0, Math.max(0, getTotalFrames() - 1));
+    retakeQuickBar.append(
+        retakeQuickBadge,
+        retakeQuickIn.wrap,
+        retakeQuickOut.wrap,
+        retakeQuickSetIn,
+        retakeQuickSetOut,
+        retakeQuickUseClip,
+        retakeQuickFull,
+        retakeQuickStatus,
+    );
+
+    const startRetakeHandleDrag = (event, edge) => {
+        event.preventDefault();
+        event.stopPropagation();
+        stopPlayback();
+        const update = (moveEvent) => {
+            moveEvent.preventDefault();
+            const rect = imageTrack.getBoundingClientRect();
+            const ratio = Math.max(0, Math.min(1, (Number(moveEvent.clientX || 0) - Number(rect.left || 0)) / Math.max(1, Number(rect.width || 1))));
+            const frame = Math.max(0, Math.min(getTotalFrames() - 1, Math.round(ratio * Math.max(0, getTotalFrames() - 1))));
+            const current = retakeQuickFrames();
+            if (edge === "in") setRetakeQuickRange(frame, Math.max(frame, current.out), { moving: "in", commit: false });
+            else setRetakeQuickRange(Math.min(current.start, frame), frame, { moving: "out", commit: false });
+            scheduleDraw();
+        };
+        const finish = () => {
+            window.removeEventListener("pointermove", update, true);
+            window.removeEventListener("pointerup", finish, true);
+            window.removeEventListener("pointercancel", finish, true);
+            writeTimeline({ force: true });
+            draw();
+        };
+        window.addEventListener("pointermove", update, { passive: false, capture: true });
+        window.addEventListener("pointerup", finish, { passive: false, capture: true });
+        window.addEventListener("pointercancel", finish, { passive: false, capture: true });
+    };
+    const drawRetakeHandleLayer = () => {
+        timelineBox.querySelectorAll(".iamccs-v4-retake-handle-layer").forEach((item) => item.remove());
+        if (!retakeQuickActive()) return;
+        const { start, end, out, total } = retakeQuickFrames();
+        const leftPct = (start / total) * 100;
+        const rightPct = (end / total) * 100;
+        const addLayer = (style) => {
+            const item = document.createElement("div");
+            item.className = "iamccs-v4-retake-handle-layer";
+            item.style.cssText = style;
+            timelineBox.appendChild(item);
+            return item;
+        };
+        if (leftPct > 0) addLayer(`position:absolute;left:0;top:0;bottom:0;width:${leftPct}%;background:rgba(2,5,4,.43);pointer-events:none;z-index:38;`);
+        if (rightPct < 100) addLayer(`position:absolute;left:${rightPct}%;right:0;top:0;bottom:0;background:rgba(2,5,4,.43);pointer-events:none;z-index:38;`);
+        const makeMarker = (edge, pct, label) => {
+            const marker = addLayer(`position:absolute;left:calc(${pct}% - 8px);top:0;bottom:0;width:16px;border:1px solid rgba(255,232,196,.94);border-radius:4px;background:linear-gradient(180deg,#F4B363,#C56824);cursor:ew-resize;pointer-events:auto;z-index:67;box-shadow:0 0 0 1px rgba(0,0,0,.78),0 4px 13px rgba(0,0,0,.50);touch-action:none;`);
+            marker.title = edge === "in" ? "IN: drag the first regenerated frame" : "OUT: drag the last regenerated frame";
+            const badge = document.createElement("b");
+            badge.textContent = label;
+            badge.style.cssText = "position:absolute;left:50%;top:5px;transform:translateX(-50%);display:flex;align-items:center;justify-content:center;width:24px;height:19px;border-radius:4px;background:#171B17;color:#FFE2B9;font:10px/1 monospace;font-weight:950;box-shadow:0 2px 6px rgba(0,0,0,.46);pointer-events:none;";
+            marker.appendChild(badge);
+            marker.onpointerdown = (markerEvent) => startRetakeHandleDrag(markerEvent, edge);
+        };
+        makeMarker("in", leftPct, "I");
+        makeMarker("out", rightPct, "O");
+        if (retakeRangeOverlay) retakeRangeOverlay.title = `Retake F${start} through F${out}`;
+    };
     protectControlDrag(scrub);
     playbar.append(scrubStyle, playBtn, loopBtn, timeReadout, audioPlaybarControls, scrub);
     timelineCanvas.append(frameRuler, ruler, timelineBox);
@@ -9716,7 +10193,7 @@ function renderShotboardV3(node) {
         writeTimeline({ force: true });
     });
     timelineResizeHandle.addEventListener("pointercancel", () => { _tlResizeDragStartY = null; });
-    root.append(timelineViewport, timelineResizeHandle, playbar);
+    root.append(timelineViewport, timelineResizeHandle, retakeQuickBar, playbar);
 
     const inspector = document.createElement("div");
     inspector.style.cssText = `display:${collapsed ? "none" : "block"};width:100%;min-width:0;box-sizing:border-box;`;
@@ -11349,6 +11826,14 @@ function renderShotboardV3(node) {
         const url = videoUrlForSegment(seg);
         return path && url ? `${path}|${url}` : "";
     };
+    const videoThumbnailKeyForSegment = (seg) => {
+        const mediaKey = videoMediaKeyForSegment(seg);
+        if (!mediaKey || !isShotboardV4) return mediaKey;
+        const fps = Math.max(1, Math.round(Number(getFps() || 24)));
+        const trimStart = Math.max(0, Math.round(Number(seg?.trimStart || seg?.trim_start || 0)));
+        const visibleLength = Math.max(1, Math.round(Number(seg?.length || 1)));
+        return `${mediaKey}|visible:${trimStart}:${visibleLength}:${fps}`;
+    };
     const videoDisplayName = (seg) => {
         const raw = String(seg?.fileName || seg?.name || videoPathForSegment(seg) || "video").trim();
         return raw.split(/[\\/]/).pop() || raw || "video";
@@ -11370,7 +11855,7 @@ function renderShotboardV3(node) {
         const sourceFrame = trimStart + localFrame;
         return Math.max(0, sourceFrame / Math.max(1, fps));
     };
-    const assignVideoThumbnailsToSegments = (mediaKey, thumbs) => {
+    const assignVideoThumbnailsToSegments = (thumbnailKey, thumbs) => {
         const items = [
             ...(Array.isArray(timeline.segments) ? timeline.segments : []),
             ...(Array.isArray(timeline.motionSegments) ? timeline.motionSegments : []),
@@ -11378,20 +11863,23 @@ function renderShotboardV3(node) {
             ...(Array.isArray(previewMotionSegments) ? previewMotionSegments : []),
         ];
         for (const item of items) {
-            if (videoMediaKeyForSegment(item) === mediaKey) {
+            if (videoThumbnailKeyForSegment(item) === thumbnailKey) {
                 item._iamccsVideoThumbnails = thumbs;
+                item._iamccsVideoThumbnailKey = thumbnailKey;
                 item._iamccsVideoThumbsPending = false;
             }
         }
     };
     const videoThumbnailsForSegment = (seg) => {
-        const mediaKey = videoMediaKeyForSegment(seg);
-        if (!mediaKey) return [];
-        if (videoThumbnailCache.has(mediaKey)) {
-            const cached = videoThumbnailCache.get(mediaKey);
+        const thumbnailKey = videoThumbnailKeyForSegment(seg);
+        if (!thumbnailKey) return [];
+        if (videoThumbnailCache.has(thumbnailKey)) {
+            const cached = videoThumbnailCache.get(thumbnailKey);
             return Array.isArray(cached) ? cached : [];
         }
-        if (Array.isArray(seg?._iamccsVideoThumbnails) && seg._iamccsVideoThumbnails.length) return seg._iamccsVideoThumbnails;
+        if (String(seg?._iamccsVideoThumbnailKey || "") === thumbnailKey && Array.isArray(seg?._iamccsVideoThumbnails) && seg._iamccsVideoThumbnails.length) {
+            return seg._iamccsVideoThumbnails;
+        }
         return [];
     };
     const nearestVideoThumbnailForSegment = (seg, targetSeconds) => {
@@ -11436,19 +11924,22 @@ function renderShotboardV3(node) {
     };
     const ensureVideoThumbnails = (seg, video = null) => {
         if (!seg || (!isTimelineVideoSegment(seg) && !segmentHasMotionMedia(seg))) return;
-        const mediaKey = videoMediaKeyForSegment(seg);
+        if (isShotboardV4 && dragState?.targetId === seg?.id) return;
+        const thumbnailKey = videoThumbnailKeyForSegment(seg);
         const url = videoUrlForSegment(seg);
-        if (!mediaKey || !url) return;
-        if (videoThumbnailCache.has(mediaKey)) {
-            const cached = videoThumbnailCache.get(mediaKey);
+        if (!thumbnailKey || !url) return;
+        if (videoThumbnailCache.has(thumbnailKey)) {
+            const cached = videoThumbnailCache.get(thumbnailKey);
             seg._iamccsVideoThumbnails = Array.isArray(cached) ? cached : [];
+            seg._iamccsVideoThumbnailKey = thumbnailKey;
             return;
         }
-        if (videoThumbnailPromiseCache.has(mediaKey)) {
+        if (videoThumbnailPromiseCache.has(thumbnailKey)) {
             seg._iamccsVideoThumbsPending = true;
-            videoThumbnailPromiseCache.get(mediaKey).then((thumbs) => {
+            videoThumbnailPromiseCache.get(thumbnailKey).then((thumbs) => {
                 if (Array.isArray(thumbs)) {
                     seg._iamccsVideoThumbnails = thumbs;
+                    seg._iamccsVideoThumbnailKey = thumbnailKey;
                     seg._iamccsVideoThumbsPending = false;
                     scheduleDraw();
                 }
@@ -11483,7 +11974,19 @@ function renderShotboardV3(node) {
                 });
                 const duration = Number(bgVideo.duration || 0);
                 if (!Number.isFinite(duration) || duration <= 0 || !bgVideo.videoWidth || !bgVideo.videoHeight) return thumbs;
-                const frameCount = Math.max(6, Math.min(24, Math.ceil(duration * 1.15)));
+                const fps = Math.max(1, Number(getFps() || 24));
+                const trimStartFrames = Math.max(0, Math.round(Number(seg?.trimStart || seg?.trim_start || 0)));
+                const visibleLengthFrames = Math.max(1, Math.round(Number(seg?.length || 1)));
+                const visibleStart = isShotboardV4
+                    ? Math.max(0, Math.min(Math.max(0, duration - 0.001), trimStartFrames / fps))
+                    : 0;
+                const visibleEnd = isShotboardV4
+                    ? Math.max(visibleStart, Math.min(Math.max(0, duration - 0.001), (trimStartFrames + Math.max(0, visibleLengthFrames - 1)) / fps))
+                    : Math.max(0, duration - 0.001);
+                const visibleSpan = Math.max(0, visibleEnd - visibleStart);
+                const frameCount = isShotboardV4
+                    ? Math.max(6, Math.min(32, Math.ceil(Math.max(1 / fps, visibleSpan) * 2.4)))
+                    : Math.max(6, Math.min(24, Math.ceil(duration * 1.15)));
                 const maxH = 128;
                 const scale = Math.min(1, maxH / Math.max(1, Number(bgVideo.videoHeight || maxH)));
                 const canvas = document.createElement("canvas");
@@ -11493,7 +11996,7 @@ function renderShotboardV3(node) {
                 if (!ctx) return thumbs;
                 for (let i = 0; i < frameCount; i += 1) {
                     const ratio = frameCount <= 1 ? 0 : i / Math.max(1, frameCount - 1);
-                    const time = Math.min(Math.max(0, duration - 0.001), Math.max(0, ratio * duration));
+                    const time = Math.min(Math.max(0, duration - 0.001), Math.max(0, visibleStart + ratio * visibleSpan));
                     bgVideo.currentTime = time;
                     await new Promise((resolve) => {
                         let done = false;
@@ -11515,8 +12018,8 @@ function renderShotboardV3(node) {
                             img.src = src;
                         });
                         thumbs.push({ time, img });
-                        videoThumbnailCache.set(mediaKey, thumbs.slice());
-                        assignVideoThumbnailsToSegments(mediaKey, thumbs.slice());
+                        videoThumbnailCache.set(thumbnailKey, thumbs.slice());
+                        assignVideoThumbnailsToSegments(thumbnailKey, thumbs.slice());
                         video?._iamccsFilmstripPaint?.();
                     } catch {}
                 }
@@ -11533,15 +12036,15 @@ function renderShotboardV3(node) {
                 } catch {}
             }
         })();
-        videoThumbnailPromiseCache.set(mediaKey, promise);
+        videoThumbnailPromiseCache.set(thumbnailKey, promise);
         promise.then((thumbs) => {
             const cleanThumbs = Array.isArray(thumbs) ? thumbs : [];
-            videoThumbnailCache.set(mediaKey, cleanThumbs);
-            assignVideoThumbnailsToSegments(mediaKey, cleanThumbs);
+            videoThumbnailCache.set(thumbnailKey, cleanThumbs);
+            assignVideoThumbnailsToSegments(thumbnailKey, cleanThumbs);
         }).catch(() => {
-            assignVideoThumbnailsToSegments(mediaKey, []);
+            assignVideoThumbnailsToSegments(thumbnailKey, []);
         }).finally(() => {
-            videoThumbnailPromiseCache.delete(mediaKey);
+            videoThumbnailPromiseCache.delete(thumbnailKey);
             scheduleDraw();
         });
     };
@@ -11679,22 +12182,62 @@ function renderShotboardV3(node) {
         const targetSeconds = videoTargetSeconds(seg);
         const liveReady = Boolean(video && video.readyState >= 2 && Number(video.videoWidth || 0) > 0 && Number(video.videoHeight || 0) > 0);
         const liveClose = liveReady && !video.seeking && Math.abs(Number(video.currentTime || 0) - targetSeconds) <= 0.20;
-        const fallbackThumb = nearestVideoThumbnailForSegment(seg, targetSeconds);
-        const drawSource = liveClose ? video : fallbackThumb || (liveReady ? video : null);
-        if (drawSource) {
+        if (isShotboardV4) {
+            const fps = Math.max(1, Number(getFps() || 24));
+            const trimStart = Math.max(0, Math.round(Number(seg?.trimStart || seg?.trim_start || 0)));
+            const visibleLength = Math.max(1, Math.round(Number(seg?.length || 1)));
+            const sourceTimeForRatio = (ratio) => (
+                trimStart + Math.max(0, Math.min(visibleLength - 1, ratio * Math.max(0, visibleLength - 1)))
+            ) / fps;
+            const thumbs = videoThumbnailsForSegment(seg);
+            let paintedTiles = 0;
             for (let x = 0; x < cssW + tileW; x += tileW) {
+                const centerRatio = Math.max(0, Math.min(1, (x + tileW * 0.5) / Math.max(1, cssW)));
+                const tileSeconds = sourceTimeForRatio(centerRatio);
+                const thumb = nearestVideoThumbnailForSegment(seg, tileSeconds);
+                const useLiveFrame = liveClose && Math.abs(tileSeconds - targetSeconds) <= Math.max(0.2, visibleLength / fps / Math.max(2, Math.ceil(cssW / tileW)));
+                const drawSource = useLiveFrame ? video : thumb;
+                if (!drawSource) continue;
                 try {
                     ctx.drawImage(drawSource, Math.round(x), 0, tileW, cssH);
+                    paintedTiles += 1;
+                    if (tileW >= 58 && cssH >= 48) {
+                        const sourceFrame = Math.max(0, Math.round(tileSeconds * fps));
+                        ctx.fillStyle = "rgba(0,0,0,.68)";
+                        ctx.fillRect(Math.round(x) + 4, cssH - 18, Math.min(tileW - 8, 54), 14);
+                        ctx.fillStyle = "rgba(225,244,255,.92)";
+                        ctx.font = "900 8px monospace";
+                        ctx.textAlign = "left";
+                        ctx.textBaseline = "middle";
+                        ctx.fillText(`F${sourceFrame}`, Math.round(x) + 8, cssH - 11);
+                    }
                 } catch {}
             }
+            if (!paintedTiles) {
+                ctx.fillStyle = "rgba(118,184,232,.12)";
+                for (let x = 0; x < cssW + tileW; x += tileW) ctx.fillRect(Math.round(x), 0, Math.max(1, tileW - bandW), cssH);
+                ctx.fillStyle = "rgba(215,240,255,.72)";
+                ctx.font = "900 10px monospace";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText(thumbs.length ? "BUILDING FILMSTRIP" : "LOADING VIDEO FRAMES", cssW / 2, cssH / 2);
+            }
         } else {
-            ctx.fillStyle = "rgba(118,184,232,.12)";
-            for (let x = 0; x < cssW + tileW; x += tileW) ctx.fillRect(Math.round(x), 0, Math.max(1, tileW - bandW), cssH);
-            ctx.fillStyle = "rgba(215,240,255,.72)";
-            ctx.font = "900 10px monospace";
-            ctx.textAlign = "center";
-            ctx.textBaseline = "middle";
-            ctx.fillText("LOADING VIDEO", cssW / 2, cssH / 2);
+            const fallbackThumb = nearestVideoThumbnailForSegment(seg, targetSeconds);
+            const drawSource = liveClose ? video : fallbackThumb || (liveReady ? video : null);
+            if (drawSource) {
+                for (let x = 0; x < cssW + tileW; x += tileW) {
+                    try { ctx.drawImage(drawSource, Math.round(x), 0, tileW, cssH); } catch {}
+                }
+            } else {
+                ctx.fillStyle = "rgba(118,184,232,.12)";
+                for (let x = 0; x < cssW + tileW; x += tileW) ctx.fillRect(Math.round(x), 0, Math.max(1, tileW - bandW), cssH);
+                ctx.fillStyle = "rgba(215,240,255,.72)";
+                ctx.font = "900 10px monospace";
+                ctx.textAlign = "center";
+                ctx.textBaseline = "middle";
+                ctx.fillText("LOADING VIDEO", cssW / 2, cssH / 2);
+            }
         }
         drawVideoFilmstripBands(ctx, cssW, cssH, tileW, bandW);
         if (dragState?.targetId === seg?.id && Number.isFinite(Number(dragState.videoScrubLocalFrame))) {
@@ -11828,8 +12371,15 @@ function renderShotboardV3(node) {
                 videoName.style.cssText = "position:absolute;left:58px;right:7px;top:5px;color:#DCEFFF;font:9px/1.1 monospace;font-weight:900;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px #000;z-index:5;pointer-events:none;";
                 const trimInfo = document.createElement("div");
                 const fps = getFps();
-                const trimSeconds = Math.max(0, Number(seg.trimStart || seg.trim_start || 0) / fps);
-                trimInfo.textContent = `trim ${trimSeconds.toFixed(2)}s`;
+                if (isShotboardV4) {
+                    const sourceInFrame = Math.max(0, Math.round(Number(seg.trimStart || seg.trim_start || 0)));
+                    const sourceOutFrame = sourceInFrame + Math.max(1, Math.round(Number(seg.length || 1))) - 1;
+                    trimInfo.textContent = `SOURCE IN F${sourceInFrame}  ·  OUT F${sourceOutFrame}  ·  ${(Math.max(1, Number(seg.length || 1)) / Math.max(1, fps)).toFixed(2)}s`;
+                    trimInfo.title = "Each filmstrip tile follows its real position inside this source range";
+                } else {
+                    const trimSeconds = Math.max(0, Number(seg.trimStart || seg.trim_start || 0) / fps);
+                    trimInfo.textContent = `trim ${trimSeconds.toFixed(2)}s`;
+                }
                 trimInfo.style.cssText = "position:absolute;left:6px;right:6px;bottom:5px;height:15px;display:flex;align-items:center;justify-content:center;border-radius:999px;background:rgba(3,15,28,.66);border:1px solid rgba(118,184,232,.32);color:#A9D9FF;font:8px/1 monospace;font-weight:900;z-index:5;pointer-events:none;";
                 videoShell.append(videoBadge, videoName, trimInfo);
                 block.appendChild(videoShell);
@@ -12934,6 +13484,45 @@ function renderShotboardV3(node) {
             wrap.append(span, input);
             return wrap;
         };
+        const makeVideoSourceOutField = (seg) => {
+            const segmentId = String(seg?.id || "");
+            const currentSegment = () => (timeline.segments || []).find((item) => String(item?.id || "") === segmentId) || seg;
+            const wrap = document.createElement("label");
+            wrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;min-width:0;`;
+            const label = document.createElement("span");
+            label.textContent = "Source OUT";
+            label.title = "Last source-video frame included in this timeline clip";
+            const initialIn = Math.max(0, Math.round(Number(seg?.trimStart || seg?.trim_start || 0)));
+            const initialOut = initialIn + Math.max(1, Math.round(Number(seg?.length || 1))) - 1;
+            const maxOut = Math.max(initialOut, Math.max(0, Math.round(Number(seg?.videoDurationFrames || seg?.video_duration_frames || initialOut + 1)) - 1));
+            const control = numberStepperControl(initialOut, "1", "0", String(maxOut), (value) => {
+                const target = currentSegment();
+                const sourceIn = Math.max(0, Math.round(Number(target.trimStart || target.trim_start || 0)));
+                const sourceMax = Math.max(sourceIn, Math.round(Number(target.videoDurationFrames || target.video_duration_frames || sourceIn + Number(target.length || 1))) - 1);
+                const sourceOut = Math.max(sourceIn, Math.min(sourceMax, Math.round(Number(value || sourceIn))));
+                target.length = Math.max(1, sourceOut - sourceIn + 1);
+                clampSegment(target);
+                target.inPoint = target.trimStart;
+                target.in_point = target.trimStart;
+                target.outPoint = target.trimStart + target.length;
+                target.out_point = target.outPoint;
+                writeTimeline({ force: true });
+                draw();
+            });
+            control.style.minWidth = "0";
+            control.style.width = "100%";
+            control.style.gridTemplateColumns = "24px minmax(46px,1fr) 24px";
+            control.style.gap = "7px";
+            control.style.padding = "0 3px";
+            control.querySelectorAll("button").forEach((button) => {
+                button.style.minWidth = "24px";
+                button.style.width = "24px";
+                button.style.margin = "0";
+            });
+            styleValueControls(control);
+            wrap.append(label, control);
+            return wrap;
+        };
         const makeStepTransitionControl = (seg, index, total) => {
             const wrap = document.createElement("label");
             wrap.style.cssText = `display:grid;grid-template-columns:minmax(170px,210px) minmax(150px,1fr) minmax(170px,230px);gap:8px;align-items:stretch;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;min-width:0;padding:7px;border:1px solid ${seg.step_transition_enabled ? "rgba(223,164,81,.70)" : purple.borderSoft};border-radius:7px;background:${seg.step_transition_enabled ? "rgba(73,50,28,.42)" : "rgba(255,255,255,.025)"};`;
@@ -13458,14 +14047,27 @@ function renderShotboardV3(node) {
             const leftPane = document.createElement("div");
             leftPane.style.cssText = "display:flex;align-items:center;min-width:0;align-self:center;width:100%;";
             const numericRow = document.createElement("div");
-            numericRow.style.cssText = "display:grid;grid-template-columns:minmax(64px,.7fr) minmax(64px,.7fr) minmax(58px,.55fr) minmax(126px,1fr) minmax(128px,1fr);gap:7px;align-items:center;min-width:0;width:100%;";
-            numericRow.append(
-                makeField(seg, "Frame", "start", "number"),
-                makeField(seg, "Len", "length", "number"),
-                isTimelineVideoSegment(seg) ? makeField(seg, "Trim", "trimStart", "number") : makeField(seg, "Ref", "ref", "number"),
-                makeField(seg, "Guide Strength", "guideStrength", "number"),
-                makeSegmentSummary(seg, index, timeline.segments.length)
-            );
+            const isV4VideoClip = isShotboardV4 && isTimelineVideoSegment(seg);
+            numericRow.style.cssText = isV4VideoClip
+                ? "display:grid;grid-template-columns:minmax(76px,.7fr) minmax(76px,.7fr) minmax(82px,.75fr) minmax(82px,.75fr) minmax(138px,1fr);gap:7px;align-items:center;min-width:0;width:100%;"
+                : "display:grid;grid-template-columns:minmax(64px,.7fr) minmax(64px,.7fr) minmax(58px,.55fr) minmax(126px,1fr) minmax(128px,1fr);gap:7px;align-items:center;min-width:0;width:100%;";
+            if (isV4VideoClip) {
+                numericRow.append(
+                    makeField(seg, "Timeline start", "start", "number"),
+                    makeField(seg, "Clip duration", "length", "number"),
+                    makeField(seg, "Source IN", "trimStart", "number"),
+                    makeVideoSourceOutField(seg),
+                    makeSegmentSummary(seg, index, timeline.segments.length),
+                );
+            } else {
+                numericRow.append(
+                    makeField(seg, "Frame", "start", "number"),
+                    makeField(seg, "Len", "length", "number"),
+                    isTimelineVideoSegment(seg) ? makeField(seg, "Trim", "trimStart", "number") : makeField(seg, "Ref", "ref", "number"),
+                    makeField(seg, "Guide Strength", "guideStrength", "number"),
+                    makeSegmentSummary(seg, index, timeline.segments.length)
+                );
+            }
             leftPane.append(numericRow);
 
             const rightPane = document.createElement("div");
@@ -13961,6 +14563,15 @@ function renderShotboardV3(node) {
         drawFrameRuler();
         drawRuler();
         updatePlayUI();
+        refreshRetakePanel();
+        if (retakeRangeOverlay) {
+            const total = Math.max(1, getTotalFrames());
+            const start = Math.max(0, Math.min(total - 1, Number(timeline.retakeStart || 0)));
+            const end = Math.max(start + 1, Math.min(total, Number(timeline.retakeEnd || (start + Number(timeline.retakeLength || 1)))));
+            retakeRangeOverlay.style.display = timeline.retakeMode ? "block" : "none";
+            retakeRangeOverlay.style.left = `${(start / total) * 100}%`;
+            retakeRangeOverlay.style.width = `${Math.max(0.15, ((end - start) / total) * 100)}%`;
+        }
         drawAudioPlaybarControls();
         promptSizeReadout.textContent = `${Math.round(promptTextScale * 100)}%`;
         promptArea.style.fontSize = promptFontSize(12);
@@ -14051,6 +14662,8 @@ function renderShotboardV3(node) {
         visualSegments.forEach((seg) => imageTrack.appendChild(makeBlock(seg, false)));
         if (!visualSegments.length) imageTrack.appendChild(makeImagePlaceholderBlock());
         drawVisualEdgeHandles(visualSegments);
+        drawRetakeHandleLayer();
+        refreshRetakeQuickBar();
         drawIcLoraTrack(motionSegmentsForDraw);
         audioSegmentsForDraw.forEach((seg) => audioTracks.appendChild(makeBlock(seg, true)));
         timelineBox.querySelectorAll(".iamccs-v3-playhead").forEach((item) => item.remove());
@@ -16548,7 +17161,16 @@ function renderShotboardV4BackendControl(node) {
             try { data = JSON.parse(timelineText || "{}"); } catch { data = {}; }
         }
         const retake = Boolean(data.retakeMode);
-        const prompt = String((retake ? data.retake_global_prompt : data.global_prompt) || data.global_prompt || data.prompt || getWidget(node, "global_prompt")?.value || "").trim();
+        const retakeOverride = normalizeRetakePromptOverride(
+            data.retake_global_prompt ?? data.retakePrompt ?? data.retake_prompt ?? ""
+        );
+        const prompt = String(
+            (retake ? retakeOverride : data.global_prompt)
+            || data.global_prompt
+            || data.prompt
+            || getWidget(node, "global_prompt")?.value
+            || ""
+        ).trim();
         const duration = Number(
             data.normalDurationFrames
             ?? data.duration_frames

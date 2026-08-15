@@ -192,6 +192,64 @@ def _normalize_clip(item: Dict[str, Any], index: int, default_type: str) -> Dict
     return clip
 
 
+def _normalize_retake_video(value: Any, fallback_length: int) -> Any:
+    """Normalize the V4 source clip while preserving its real IN/OUT window."""
+    if not isinstance(value, dict):
+        return None
+    clip = copy.deepcopy(value)
+    source_in = max(0, _safe_int(
+        clip.get("inPoint", clip.get("in_point", clip.get("trimStart", clip.get("trim_start", 0)))),
+        0,
+    ))
+    physical_length = max(0, _safe_int(
+        clip.get(
+            "videoDurationFrames",
+            clip.get("video_duration_frames", clip.get("sourceDurationFrames", clip.get("source_duration_frames", 0))),
+        ),
+        0,
+    ))
+    if physical_length > 0:
+        source_in = min(source_in, max(0, physical_length - 1))
+    raw_out = clip.get("outPoint", clip.get("out_point"))
+    explicit_out = _safe_int(raw_out, 0) if raw_out is not None else 0
+    clip_length = max(1, _safe_int(clip.get("length", clip.get("len", fallback_length)), fallback_length))
+    source_out = explicit_out if explicit_out > source_in else source_in + clip_length
+    if physical_length > 0:
+        source_out = min(source_out, physical_length)
+    source_out = max(source_in + 1, source_out)
+    clip_length = source_out - source_in
+
+    media_path = str(
+        clip.get("videoFile")
+        or clip.get("video_file")
+        or clip.get("imageFile")
+        or clip.get("image_file")
+        or clip.get("path")
+        or ""
+    ).strip()
+    clip.update({
+        "type": "video",
+        "start": max(0, _safe_int(clip.get("start", clip.get("frame", 0)), 0)),
+        "length": int(clip_length),
+        "trimStart": int(source_in),
+        "trim_start": int(source_in),
+        "inPoint": int(source_in),
+        "in_point": int(source_in),
+        "outPoint": int(source_out),
+        "out_point": int(source_out),
+    })
+    if physical_length > 0:
+        clip["videoDurationFrames"] = int(physical_length)
+        clip["video_duration_frames"] = int(physical_length)
+    if media_path:
+        clip["videoFile"] = media_path
+        clip["video_file"] = media_path
+        clip["imageFile"] = media_path
+        clip["image_file"] = media_path
+        clip["path"] = media_path
+    return clip
+
+
 def _normalize_timeline_data(timeline_data: Any, global_prompt: str, duration_seconds: float, frame_rate: int) -> Dict[str, Any]:
     raw = _json_loads(timeline_data, {})
     if not isinstance(raw, dict):
@@ -253,6 +311,14 @@ def _normalize_timeline_data(timeline_data: Any, global_prompt: str, duration_se
         "timeline_trim_split_extend",
     )
     retake_mode = _as_bool(raw.get("retakeMode", raw.get("retake_mode")), False)
+    retake_video = _normalize_retake_video(
+        raw.get("retakeVideo", raw.get("retake_video")),
+        max(1, int(round(float(duration) * int(fps)))),
+    )
+    if retake_mode and isinstance(retake_video, dict):
+        # A retake is an edit of the selected source window, not a retiming to
+        # the Shotboard canvas.  Let the source clip's IN/OUT set the duration.
+        duration = float(max(1, int(retake_video["length"]))) / float(fps)
     if retake_mode and clip_edit_mode == "timeline_trim_split_extend":
         clip_edit_mode = "retake_range"
     continuation_mode = _choice(
@@ -277,6 +343,18 @@ def _normalize_timeline_data(timeline_data: Any, global_prompt: str, duration_se
         audio_clips = [_normalize_clip(item, index, "audio") for index, item in enumerate(source_audio_segments)]
         use_custom_audio = True
 
+    computed_duration_frames = max(1, int(round(float(duration) * int(fps))))
+    normal_duration_frames = (
+        int(retake_video["length"])
+        if retake_mode and isinstance(retake_video, dict)
+        else max(
+            1,
+            _safe_int(
+                raw.get("normalDurationFrames", raw.get("normal_duration_frames", computed_duration_frames)),
+                computed_duration_frames,
+            ),
+        )
+    )
     timeline = copy.deepcopy(raw)
     timeline.update({
         "schema": V4_SCHEMA,
@@ -284,7 +362,7 @@ def _normalize_timeline_data(timeline_data: Any, global_prompt: str, duration_se
         "ui_base": "IAMCCS_CineShotboardPlannerV3",
         "frame_rate": int(fps),
         "duration_seconds": float(duration),
-        "duration_frames": max(1, int(round(float(duration) * int(fps)))),
+        "duration_frames": computed_duration_frames,
         "global_prompt": str(raw.get("global_prompt", raw.get("globalPrompt", global_prompt)) or global_prompt or ""),
         "segments": shot_clips,
         "shots": shot_clips,
@@ -301,10 +379,17 @@ def _normalize_timeline_data(timeline_data: Any, global_prompt: str, duration_se
         "sourceAudioSegments": source_audio_segments,
         "source_audio_segments": source_audio_segments,
         "retakeMode": bool(retake_mode),
-        "retakeVideo": raw.get("retakeVideo", raw.get("retake_video")),
+        "retakeVideo": retake_video,
         "retakeStart": max(0, _safe_int(raw.get("retakeStart", raw.get("retake_start", 0)), 0)),
         "retakeLength": max(0, _safe_int(raw.get("retakeLength", raw.get("retake_length", 0)), 0)),
+        "retakeEnd": max(0, _safe_int(raw.get("retakeEnd", raw.get("retake_end", _safe_int(raw.get("retakeStart", raw.get("retake_start", 0)), 0) + _safe_int(raw.get("retakeLength", raw.get("retake_length", 0)), 0))), 0)),
         "retakeStrength": _safe_float(raw.get("retakeStrength", raw.get("retake_strength", 1.0)), 1.0),
+        "retakeRegenerateVideo": _as_bool(raw.get("retakeRegenerateVideo", raw.get("retake_regenerate_video")), True),
+        "retakeRegenerateAudio": _as_bool(raw.get("retakeRegenerateAudio", raw.get("retake_regenerate_audio")), False),
+        "retakeMaskInitValueVideo": max(0.0, min(1.0, _safe_float(raw.get("retakeMaskInitValueVideo", raw.get("retake_mask_init_value_video", 0.0)), 0.0))),
+        "retakeMaskInitValueAudio": max(0.0, min(1.0, _safe_float(raw.get("retakeMaskInitValueAudio", raw.get("retake_mask_init_value_audio", 0.0)), 0.0))),
+        "retakeSlopeLength": max(1, min(100, _safe_int(raw.get("retakeSlopeLength", raw.get("retake_slope_length", 3)), 3))),
+        "retakeBoundaryMode": str(raw.get("retakeBoundaryMode", raw.get("retake_boundary_mode", "soft_ramp")) or "soft_ramp"),
         "retakePrompt": str(raw.get("retakePrompt", raw.get("retake_prompt", "")) or ""),
         "retake_global_prompt": str(raw.get("retake_global_prompt", raw.get("retakeGlobalPrompt", "")) or ""),
         "mainTrackEnabled": _as_bool(raw.get("mainTrackEnabled", raw.get("main_track_enabled")), True),
@@ -332,7 +417,7 @@ def _normalize_timeline_data(timeline_data: Any, global_prompt: str, duration_se
         "globalPropHeight": max(1, _safe_int(raw.get("globalPropHeight", raw.get("global_prop_height", 60)), 60)),
         "showFilenames": _as_bool(raw.get("showFilenames", raw.get("show_filenames")), True),
         "normalStartFrame": max(0, _safe_int(raw.get("normalStartFrame", raw.get("normal_start_frame", 0)), 0)),
-        "normalDurationFrames": max(1, _safe_int(raw.get("normalDurationFrames", raw.get("normal_duration_frames", max(1, int(round(float(duration) * int(fps)))))), max(1, int(round(float(duration) * int(fps)))))),
+        "normalDurationFrames": normal_duration_frames,
         "inpaint_audio": _as_bool(raw.get("inpaint_audio", raw.get("inpaintAudio")), False),
         "inpaintAudio": _as_bool(raw.get("inpaintAudio", raw.get("inpaint_audio")), False),
         "override_audio": _as_bool(raw.get("override_audio", raw.get("overrideAudio")), False),
@@ -355,6 +440,9 @@ def _normalize_timeline_data(timeline_data: Any, global_prompt: str, duration_se
             "clip_edit_mode": clip_edit_mode,
             "retake_mode": bool(retake_mode),
             "retake_has_video": isinstance(raw.get("retakeVideo", raw.get("retake_video")), dict),
+            "retake_range_is_inclusive_exclusive": True,
+            "retake_supports_video_audio_masks": True,
+            "retake_supports_boundary_slope": True,
             "guide_frame_policy": guide_frame_policy,
         },
         "authoring_aliases": {
@@ -409,7 +497,14 @@ def _backend_timeline_view(timeline: Dict[str, Any]) -> Dict[str, Any]:
         "retakeVideo": timeline.get("retakeVideo"),
         "retakeStart": int(timeline.get("retakeStart", 0) or 0),
         "retakeLength": int(timeline.get("retakeLength", 0) or 0),
+        "retakeEnd": int(timeline.get("retakeEnd", int(timeline.get("retakeStart", 0) or 0) + int(timeline.get("retakeLength", 0) or 0)) or 0),
         "retakeStrength": float(timeline.get("retakeStrength", 1.0) or 1.0),
+        "retakeRegenerateVideo": bool(timeline.get("retakeRegenerateVideo", True)),
+        "retakeRegenerateAudio": bool(timeline.get("retakeRegenerateAudio", False)),
+        "retakeMaskInitValueVideo": float(timeline.get("retakeMaskInitValueVideo", 0.0) or 0.0),
+        "retakeMaskInitValueAudio": float(timeline.get("retakeMaskInitValueAudio", 0.0) or 0.0),
+        "retakeSlopeLength": int(timeline.get("retakeSlopeLength", 3) or 3),
+        "retakeBoundaryMode": str(timeline.get("retakeBoundaryMode", "soft_ramp") or "soft_ramp"),
         "retakePrompt": str(timeline.get("retakePrompt", "") or ""),
         "inpaint_audio": bool(timeline.get("inpaint_audio", False)),
         "inpaintAudio": bool(timeline.get("inpaintAudio", timeline.get("inpaint_audio", False))),

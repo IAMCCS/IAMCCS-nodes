@@ -36,6 +36,83 @@ LOG = logging.getLogger("IAMCCS.MiniMaxH3.Standalone")
 H3_DIMENSION_MULTIPLE = 32
 H3_MIN_DIMENSION = 256
 H3_MAX_DIMENSION = 5760
+
+# R21 keeps every value that shipped in previous workflows and adds one new,
+# deliberately distinct route for the v16-style pre-sampler audio latent.
+# ``h3_ref2va_audio`` must never be silently reinterpreted as custom drive:
+# it selects MiniMax's reference-conditioning path and still generates a new
+# output soundtrack. ``h3_custom_audio_drive`` instead reserves a runtime
+# AUDIO tensor supplied by CineInfoH3 for an atomic latent-drive backend.
+H3_AUDIO_MODES = (
+    "h3_native_generated",
+    "h3_ref2va_audio",
+    "h3_custom_audio_drive",
+    "external_audio_post",
+)
+H3_AUDIO_MODE_ALIASES = {
+    "": "h3_native_generated",
+    "native": "h3_native_generated",
+    "native_generated": "h3_native_generated",
+    "h3_native": "h3_native_generated",
+    "generated_audio": "h3_native_generated",
+    "ref2va_audio": "h3_ref2va_audio",
+    "audio_reference": "h3_ref2va_audio",
+    # Historical IAMCCS wording. Preserve its old REF2VA meaning.
+    "driven_audio": "h3_ref2va_audio",
+    "custom_audio": "h3_custom_audio_drive",
+    "custom_audio_drive": "h3_custom_audio_drive",
+    "audio_driven": "h3_custom_audio_drive",
+    "force_audio_latent": "h3_custom_audio_drive",
+    "external_post": "external_audio_post",
+    "post_audio": "external_audio_post",
+}
+H3_AUDIO_MODE_CONTRACTS = {
+    "h3_native_generated": {
+        "label": "Native H3 generated audio",
+        "conditioning": "joint_h3_av_sampling",
+        "runtime_resource": "none",
+        "final_track": "h3_generated_audio",
+    },
+    "h3_ref2va_audio": {
+        "label": "REF2VA audio reference",
+        "conditioning": "minimax_ref_audio_conditioning",
+        "runtime_resource": "iamccs_minimax_h3_ref_audio",
+        "final_track": "h3_generated_audio",
+    },
+    "h3_custom_audio_drive": {
+        "label": "Custom audio drive / forced AV latent",
+        "conditioning": "pre_sampler_audio_latent_replacement",
+        "runtime_resource": "iamccs_minimax_h3_custom_audio",
+        "final_track": "original_custom_audio_preferred",
+    },
+    "external_audio_post": {
+        "label": "External audio post / no video conditioning",
+        "conditioning": "none",
+        "runtime_resource": "audioboard_or_explicit_post_audio",
+        "final_track": "external_post_mix",
+    },
+}
+
+
+def _normalise_h3_audio_mode(value: Any) -> str:
+    """Return one of the four R21 audio routes without breaking old boards."""
+    mode = str(value or "").strip().lower()
+    mode = H3_AUDIO_MODE_ALIASES.get(mode, mode)
+    return mode if mode in H3_AUDIO_MODES else "h3_native_generated"
+
+
+def _is_true_4k_delivery(width: Any, height: Any) -> bool:
+    """Return True only for UHD/DCI-class delivery canvases.
+
+    The RTX stage is a final delivery pass, not a generic 2x switch.  Requiring
+    both a 4K-class long edge and a cinema-usable short edge also covers
+    portrait and scope canvases without treating 2048x1152 as "4K".
+    """
+    target_width = max(0, int(_finite_float(width, 0, 0)))
+    target_height = max(0, int(_finite_float(height, 0, 0)))
+    return max(target_width, target_height) >= 3840 and min(target_width, target_height) >= 1600
+
+
 def _finite_float(value: Any, default: float, minimum: float | None = None, maximum: float | None = None) -> float:
     try:
         number = float(value)
@@ -48,6 +125,97 @@ def _finite_float(value: Any, default: float, minimum: float | None = None, maxi
     if maximum is not None:
         number = min(float(maximum), number)
     return number
+
+
+def _saved_h3_settings(timeline_data: Any) -> dict[str, Any]:
+    """Read the name-keyed Settings snapshot written by the Shotboard UI."""
+    try:
+        timeline = timeline_data if isinstance(timeline_data, dict) else json.loads(str(timeline_data or "{}"))
+    except (TypeError, ValueError):
+        return {}
+    settings = timeline.get("h3_saved_settings") if isinstance(timeline, dict) else None
+    return settings if isinstance(settings, dict) else {}
+
+
+# The external Settings node deliberately mirrors the typed Shotboard controls
+# by *name*.  Keeping this order here makes the plain ComfyUI node readable
+# while the Shotboard keeps the richer modal presentation of the same values.
+_H3_SETTINGS_NODE_GROUPS = (
+    ("01 · SHOT & CANVAS", (
+        "duration_seconds", "frame_rate", "guide_policy", "min_guide_gap_seconds",
+        "max_guides", "default_force", "promptrelay_epsilon", "ltx_round_mode",
+        "width", "height", "image_width", "image_height", "image_resize_method",
+        "image_multiple_of", "img_compression",
+    )),
+    ("02 · GENERATION & AUDIO", (
+        "task_mode", "audio_mode", "prompt_mapping", "performance_profile",
+        "text_encoder_device", "seed", "seed_stride", "steps", "sampler_name",
+        "scheduler", "denoise", "shift_video", "shift_audio",
+    )),
+    ("03 · TURBO & REFERENCE FIT", (
+        "turbo_mode", "turbo_lora_name", "turbo_strength", "turbo_sampler_mode",
+        "reference_resize_policy", "reference_resize_megapixels", "reference_resize_filter",
+        "acceleration", "ref_image_size", "sol_conditioning", "spectrum_profile",
+        "vram_clean_before_decode", "rife_mode",
+    )),
+    ("04 · REFERENCE ROLES", (
+        "reference_role_1", "reference_role_2", "reference_role_3", "reference_role_4",
+        "reference_video_role", "reference_audio_role", "voice_reference_picture_index",
+    )),
+    ("05 · V2VA SOURCE", (
+        "v2v_guide_mode", "v2v_source_range_policy", "v2v_source_offset_seconds",
+        "v2v_source_fit", "v2v_source_end_policy", "v2v_audio_pairing",
+    )),
+    ("06 · FLF CONTINUITY", (
+        "flf_join_mode", "flf_overlap_frames", "flf_continuity_mode",
+        "flf_continuity_tail_frames", "flf_continuity_audio",
+    )),
+    ("07 · UPSCALE & LTX DELIVERY", (
+        "upscale_mode", "upscale_enabled", "upscale_width", "upscale_height",
+        "upscale_prompt", "upscale_sage", "upscale_seed_offset", "wan_upscale_denoise",
+        "ltx_seam_safe", "ltx_detailer_enabled", "ltx_detailer_lora_name",
+        "ltx_detailer_strength", "ltx_4k_enabled", "ltx_4k_quality",
+        "ltx_looper_temporal_tile_size", "ltx_looper_temporal_overlap",
+        "ltx_looper_guiding_strength", "ltx_looper_overlap_strength",
+        "ltx_looper_cond_image_strength", "ltx_looper_horizontal_tiles",
+        "ltx_looper_vertical_tiles", "ltx_looper_spatial_overlap",
+    )),
+    ("08 · OPTIONAL H3 FACE DETAILER", (
+        "face_detailer_enabled", "face_detailer_profile", "face_detailer_use_sam_mask",
+    )),
+)
+_H3_SETTINGS_NODE_EXCLUDED_FIELDS = frozenset(("global_prompt", "timeline_data", "image_paths"))
+# These are editor/legacy compatibility widgets rather than MiniMax H3
+# generation controls.  Keep their hidden inputs on the node for positional
+# workflow compatibility, but never publish them through the Settings CineLinX.
+_H3_SETTINGS_CINELINX_OMITTED_FIELDS = frozenset((
+    "frame_rate", "guide_policy", "min_guide_gap_seconds", "max_guides", "default_force",
+    "promptrelay_epsilon", "ltx_round_mode", "image_width", "image_height",
+    "image_resize_method", "image_multiple_of", "img_compression",
+))
+_H3_SETTINGS_LINX_SCHEMA = "iamccs.minimax_h3.settings_cine_linx"
+
+
+def _h3_settings_from_cine_linx(cine_linx: Any) -> dict[str, Any]:
+    """Extract a named H3 Settings-node override from a CineLinX cable."""
+    if not isinstance(cine_linx, dict):
+        return {}
+    resources = cine_linx.get("resources") if isinstance(cine_linx.get("resources"), dict) else {}
+    outputs = cine_linx.get("outputs") if isinstance(cine_linx.get("outputs"), dict) else {}
+    payload = resources.get("cine_payload") if isinstance(resources.get("cine_payload"), dict) else {}
+    candidates = (
+        resources.get("iamccs_minimax_h3_settings"),
+        outputs.get("iamccs_minimax_h3_settings"),
+        payload.get("iamccs_minimax_h3_settings"),
+    )
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if candidate.get("schema") == _H3_SETTINGS_LINX_SCHEMA:
+            candidate = candidate.get("settings")
+        if isinstance(candidate, dict):
+            return copy.deepcopy(candidate)
+    return {}
 
 
 def _h3_legal_dimension(value: Any, default: int) -> int:
@@ -131,6 +299,13 @@ def _build_minimax_cine_linx(
     )
     effective_duration = float(plan.get("effective_duration_seconds", 0.0) or 0.0)
     total_segments = int(plan.get("total_segments", len(chunks)) or 0)
+    audio_contract = (
+        copy.deepcopy(plan.get("audio_contract"))
+        if isinstance(plan.get("audio_contract"), dict)
+        else {}
+    )
+    guide_track = copy.deepcopy(plan.get("guide_track")) if isinstance(plan.get("guide_track"), dict) else {}
+    longvid_active = str(plan.get("task_mode", "")).lower() == "longvid_guides"
 
     payload = {
         "backend_mode": "minimax_h3_shotboard",
@@ -149,6 +324,8 @@ def _build_minimax_cine_linx(
         "timeline_data": timeline,
         "visual_segments": slots,
         "audioSegments": audio_segments,
+        "minimax_h3_audio_contract": audio_contract,
+        "minimax_h3_guide_track": guide_track,
         "minimax_h3_shotplan": plan,
     }
     outputs = {
@@ -163,6 +340,7 @@ def _build_minimax_cine_linx(
         "segment_lengths": segment_lengths,
         "timeline_data": json.dumps(timeline, ensure_ascii=False),
         "audio_timeline_json": json.dumps({"audioSegments": audio_segments}, ensure_ascii=False),
+        "guide_track": guide_track,
     }
     resources = {
         "cine_payload": payload,
@@ -176,6 +354,8 @@ def _build_minimax_cine_linx(
         "cine_timeline_data_json": json.dumps(timeline, ensure_ascii=False),
         "cine_visual_segments_json": json.dumps(slots, ensure_ascii=False),
         "cine_audio_timeline_json": json.dumps({"audioSegments": audio_segments}, ensure_ascii=False),
+        "iamccs_minimax_h3_audio_contract": audio_contract,
+        "iamccs_minimax_h3_guide_track": guide_track,
         "iamccs_minimax_h3_shotplan": plan,
         "iamccs_minimax_h3_shotplan_json": plan_text,
         "iamccs_minimax_h3_prompt_map": plan.get("prompt_map", []),
@@ -193,9 +373,11 @@ def _build_minimax_cine_linx(
         outputs=outputs,
         resources=resources,
         policies={
-            "minimax_h3_chunk_source": "timeline_box_trim",
+            "minimax_h3_chunk_source": "longvid_global_guide_clock" if longvid_active else "timeline_box_trim",
             "minimax_h3_prompt_source": str(plan.get("prompt_mapping", "global_plus_local")),
             "minimax_h3_transport": "cine_linx",
+            "minimax_h3_audio_route": str(plan.get("audio_mode", "h3_native_generated")),
+            "audioboard_auto_drives_h3": longvid_active,
         },
         downstream_stages=("MiniMax H3 backend", "IAMCCS_CineInfo", "IAMCCS Audioboard"),
     )
@@ -417,6 +599,8 @@ def _encode_images(images: torch.Tensor, audio: dict[str, Any] | None, fps: floa
         has_audio = _write_wav(audio, wav_path)
         height = int(images.shape[1])
         width = int(images.shape[2])
+        total_frames = int(images.shape[0])
+        exact_duration = total_frames / max(0.001, float(fps))
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-video_size", f"{width}x{height}",
@@ -424,9 +608,17 @@ def _encode_images(images: torch.Tensor, audio: dict[str, Any] | None, fps: floa
         ]
         if has_audio:
             command += ["-i", str(wav_path)]
-        command += ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+        command += ["-c:v", "libx264", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p"]
         if has_audio:
-            command += ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-shortest"]
+            # The IMAGE frame count owns programme duration.  ``-shortest``
+            # can silently drop final video frames when the generated audio
+            # is a few AAC samples shorter, so pad/trim audio to that exact
+            # duration instead.
+            command += [
+                "-af",
+                f"aresample=48000:async=1:first_pts=0,apad,atrim=duration={exact_duration:.9f}",
+                "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            ]
         command += ["-movflags", "+faststart", str(output)]
         process = subprocess.Popen(
             command,
@@ -437,7 +629,6 @@ def _encode_images(images: torch.Tensor, audio: dict[str, Any] | None, fps: floa
         try:
             if process.stdin is None:
                 raise RuntimeError("ffmpeg raw-video stdin non disponibile")
-            total_frames = int(images.shape[0])
             for index, frame in enumerate(images):
                 rgb = (
                     frame[..., :3]
@@ -467,6 +658,15 @@ def _encode_images(images: torch.Tensor, audio: dict[str, Any] | None, fps: floa
 
 
 def _concat_videos(paths: list[Path], output: Path) -> None:
+    """Join independent H3 shots with exact video cuts and one audio master.
+
+    Video remains a stream-copy, so a hard cut cannot turn into a dissolve.
+    Audio is decoded per shot, conformed to stereo/48 kHz, given a 20 ms
+    equal-power edge fade at internal cuts, concatenated without overlap and
+    finally normalised once as a complete programme.  The edge treatment
+    removes AAC boundary clicks without shortening the edit or mixing two
+    different lines of dialogue together.
+    """
     ffmpeg = _find_ffmpeg()
     if ffmpeg is None:
         raise RuntimeError("ffmpeg non trovato: impossibile concatenare i segmenti MiniMax H3")
@@ -474,21 +674,239 @@ def _concat_videos(paths: list[Path], output: Path) -> None:
     if missing:
         raise FileNotFoundError("Segmenti mancanti: " + ", ".join(missing))
     output.parent.mkdir(parents=True, exist_ok=True)
+    if len(paths) == 1:
+        # A one-shot programme is already the exact native master.  Sending it
+        # through the concat demuxer needlessly re-encodes AAC and may expose
+        # H.264/AAC encoder priming as a one-frame A/V offset.  Preserve the
+        # locked custom-audio timing and the native pixels byte-for-byte.
+        shutil.copy2(paths[0], output)
+        return
     with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False, encoding="utf-8") as handle:
         list_path = Path(handle.name)
         for path in paths:
             handle.write("file '" + str(path).replace("'", "'\\''") + "'\n")
     try:
+        frame_counts: list[int] = []
+        try:
+            frame_counts = [_read_segment_frame_count(path) for path in paths]
+        except Exception:
+            # Legacy segments may pre-date the sidecar metadata.  They still
+            # concatenate safely, only without boundary-aware micro-fades.
+            frame_counts = []
+
         command = [
-            ffmpeg, "-nostdin", "-n", "-f", "concat", "-safe", "0", "-i", str(list_path),
-            "-fflags", "+genpts", "-avoid_negative_ts", "make_zero", "-c:v", "copy",
-            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(output),
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
+            "-f", "concat", "-safe", "0", "-i", str(list_path),
         ]
+        if frame_counts and len(frame_counts) == len(paths):
+            for path in paths:
+                command += ["-i", str(path)]
+
+            filters: list[str] = []
+            labels: list[str] = []
+            edge_seconds = 0.020
+            for index, frame_count in enumerate(frame_counts):
+                duration = max(1.0 / H3_FPS, float(frame_count) / H3_FPS)
+                fade = min(edge_seconds, duration / 4.0)
+                chain = (
+                    f"[{index + 1}:a]aresample=48000:async=1:first_pts=0,"
+                    f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                    f"atrim=duration={duration:.9f},asetpts=PTS-STARTPTS"
+                )
+                if index > 0:
+                    chain += f",afade=t=in:st=0:d={fade:.9f}:curve=qsin"
+                if index + 1 < len(paths):
+                    chain += (
+                        f",afade=t=out:st={max(0.0, duration - fade):.9f}:"
+                        f"d={fade:.9f}:curve=qsin"
+                    )
+                label = f"acut{index}"
+                filters.append(f"{chain}[{label}]")
+                labels.append(label)
+            audio_inputs = "".join(f"[{label}]" for label in labels)
+            exact_duration = sum(frame_counts) / H3_FPS
+            filters.append(
+                f"{audio_inputs}concat=n={len(labels)}:v=0:a=1,"
+                "loudnorm=I=-16:LRA=11:TP=-1.5,"
+                f"apad,atrim=duration={exact_duration:.9f}[amaster]"
+            )
+            command += [
+                "-filter_complex", ";".join(filters),
+                "-map", "0:v:0", "-map", "[amaster]",
+                "-fflags", "+genpts", "-avoid_negative_ts", "make_zero",
+                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+                "-t", f"{exact_duration:.9f}", "-movflags", "+faststart", str(output),
+            ]
+        else:
+            command += [
+                "-fflags", "+genpts", "-avoid_negative_ts", "make_zero", "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(output),
+            ]
         result = subprocess.run(command, capture_output=True, text=True, stdin=subprocess.DEVNULL)
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg concat failed: {result.stderr.strip() or result.stdout.strip()}")
     finally:
         list_path.unlink(missing_ok=True)
+
+
+def _segment_meta_path(path: Path) -> Path:
+    return path.with_suffix(path.suffix + ".iamccs.json")
+
+
+def _write_segment_metadata(path: Path, frame_count: int, fps: float, audio_join_policy: str = "crossfade") -> None:
+    metadata = {
+        "schema": "iamccs.minimax_h3.segment",
+        "frame_count": max(1, int(frame_count)),
+        "fps": float(fps),
+        "audio_join_policy": str(audio_join_policy or "crossfade"),
+    }
+    _segment_meta_path(path).write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _read_segment_frame_count(path: Path) -> int:
+    meta_path = _segment_meta_path(path)
+    if not meta_path.is_file():
+        raise FileNotFoundError(f"Metadati frame mancanti per il concat overlap: {meta_path}")
+    data = json.loads(meta_path.read_text(encoding="utf-8"))
+    count = int(data.get("frame_count", 0))
+    if count < 1:
+        raise ValueError(f"Frame count non valido nei metadati: {meta_path}")
+    return count
+
+
+def _read_segment_audio_join_policy(path: Path) -> str:
+    try:
+        data = json.loads(_segment_meta_path(path).read_text(encoding="utf-8"))
+        return str(data.get("audio_join_policy", "crossfade") or "crossfade")
+    except Exception:
+        return "crossfade"
+
+
+def _concat_videos_overlap(paths: list[Path], output: Path, overlap_frames: int, fps: float) -> None:
+    """WAN-style decoded-frame overlap for independently generated H3 chunks.
+
+    MiniMax H3 exposes only one first and one last keyframe per generation, so
+    this is a delivery stitch rather than latent continuation.  Corresponding
+    tail/head frames are linearly crossfaded and audio uses a synchronized
+    crossfade over the same interval.  The exact H3 boundary alternative is
+    the one-frame keyframe cut handled by ``_concat_videos``.
+    """
+    ffmpeg = _find_ffmpeg()
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg non trovato: impossibile concatenare i segmenti MiniMax H3 con overlap")
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        raise FileNotFoundError("Segmenti mancanti: " + ", ".join(missing))
+    if len(paths) < 2:
+        return _concat_videos(paths, output)
+
+    frame_counts = [_read_segment_frame_count(path) for path in paths]
+    fps = max(1.0, float(fps))
+    requested_overlap = max(1, int(overlap_frames))
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n"]
+    for path in paths:
+        command += ["-i", str(path)]
+
+    overlaps = [
+        min(requested_overlap, frame_counts[index] - 1, frame_counts[index + 1] - 1)
+        for index in range(len(paths) - 1)
+    ]
+    if any(overlap < 1 for overlap in overlaps):
+        raise ValueError(f"Overlap non valido tra i segmenti: {overlaps}")
+
+    filters: list[str] = []
+    video_parts: list[str] = []
+    first_prefix_end = frame_counts[0] - overlaps[0]
+    filters.append(f"[0:v]trim=end_frame={first_prefix_end},setpts=PTS-STARTPTS[vprefix0]")
+    video_parts.append("vprefix0")
+
+    for boundary, overlap in enumerate(overlaps):
+        left = boundary
+        right = boundary + 1
+        left_start = frame_counts[left] - overlap
+        filters.append(
+            f"[{left}:v]trim=start_frame={left_start},setpts=PTS-STARTPTS[vtail{boundary}]"
+        )
+        filters.append(
+            f"[{right}:v]trim=end_frame={overlap},setpts=PTS-STARTPTS[vhead{boundary}]"
+        )
+        denominator = overlap + 1
+        filters.append(
+            f"[vtail{boundary}][vhead{boundary}]"
+            f"blend=all_expr='A*(1-(N+1)/{denominator})+B*((N+1)/{denominator})':shortest=1"
+            f"[vblend{boundary}]"
+        )
+        video_parts.append(f"vblend{boundary}")
+
+        if right < len(paths) - 1:
+            middle_start = overlap
+            middle_end = frame_counts[right] - overlaps[right]
+            if middle_end > middle_start:
+                filters.append(
+                    f"[{right}:v]trim=start_frame={middle_start}:end_frame={middle_end},"
+                    f"setpts=PTS-STARTPTS[vbody{right}]"
+                )
+                video_parts.append(f"vbody{right}")
+        else:
+            filters.append(
+                f"[{right}:v]trim=start_frame={overlap},setpts=PTS-STARTPTS[vsuffix{right}]"
+            )
+            video_parts.append(f"vsuffix{right}")
+
+    video_inputs = "".join(f"[{label}]" for label in video_parts)
+    filters.append(f"{video_inputs}concat=n={len(video_parts)}:v=1:a=0[vjoined]")
+
+    trim_locked_audio = all(
+        _read_segment_audio_join_policy(path) == "trim_silent_tail"
+        for path in paths
+    )
+    for index in range(len(paths)):
+        filters.append(f"[{index}:a]aresample=48000,asetpts=PTS-STARTPTS[a{index}]")
+    accumulated_frames = sum(frame_counts) - sum(overlaps)
+    if trim_locked_audio:
+        # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+        # FLF custom-drive owns waveform timing: discard only the silent
+        # visual-overlap tail, never crossfade dialogue performances.
+        audio_parts = []
+        for index, frame_count in enumerate(frame_counts):
+            end_seconds = (frame_count - (overlaps[index] if index < len(overlaps) else 0)) / fps
+            label = f"atrim{index}"
+            filters.append(f"[a{index}]atrim=duration={end_seconds:.9f}[{label}]")
+            audio_parts.append(label)
+        audio_label = "ajoined"
+        filters.append(f"{''.join(f'[{label}]' for label in audio_parts)}concat=n={len(audio_parts)}:v=0:a=1[{audio_label}]")
+    else:
+        audio_label = "a0"
+        for index, overlap in enumerate(overlaps, start=1):
+            duration = overlap / fps
+            next_audio = f"ax{index}"
+            filters.append(
+                f"[{audio_label}][a{index}]acrossfade=d={duration:.9f}:c1=tri:c2=tri[{next_audio}]"
+            )
+            audio_label = next_audio
+    exact_duration = accumulated_frames / fps
+    filters.append(
+        f"[{audio_label}]loudnorm=I=-16:LRA=11:TP=-1.5,"
+        f"apad,atrim=duration={exact_duration:.9f}[amaster]"
+    )
+
+    command += [
+        "-filter_complex", ";".join(filters),
+        "-map", "[vjoined]", "-map", "[amaster]",
+        "-frames:v", str(accumulated_frames), "-r", f"{fps:.6f}",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-t", f"{exact_duration:.9f}",
+        "-movflags", "+faststart", str(output),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg overlap concat failed: {result.stderr.strip() or result.stdout.strip()}")
+    LOG.info(
+        "MiniMax H3 overlap concat complete | chunks=%d | overlap=%df | output_frames=%d | fps=%.3f",
+        len(paths), requested_overlap, accumulated_frames, fps,
+    )
 
 
 def _output_location(prefix: str) -> tuple[Path, str]:
@@ -501,17 +919,125 @@ def _output_location(prefix: str) -> tuple[Path, str]:
     return folder, _safe_name(parts[-1], "segment")
 
 
+def _decode_video_master(
+    path: Path,
+    *,
+    fps: float,
+    fallback_audio: dict[str, Any] | None = None,
+) -> tuple[torch.Tensor, dict[str, Any]]:
+    """Decode the completed native master for the one-film upscale pass.
+
+    PyAV is already a ComfyUI/VHS dependency.  Video is kept as uint8 until
+    the final tensor conversion to avoid constructing a list of full-size
+    float frames.  Audio is conformed to stereo/48 kHz and sample-aligned to
+    the decoded picture duration.
+    """
+    if not path.is_file():
+        raise FileNotFoundError(f"MiniMax H3 native master not found: {path}")
+    try:
+        import av
+    except Exception as exc:
+        raise RuntimeError(
+            "PyAV is required to load the concatenated MiniMax H3 master before upscale"
+        ) from exc
+
+    video_arrays: list[np.ndarray] = []
+    target_width: int | None = None
+    target_height: int | None = None
+    resolution_warning_emitted = False
+    with av.open(str(path)) as container:
+        if not container.streams.video:
+            raise ValueError(f"Native master has no video stream: {path}")
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        for frame in container.decode(stream):
+            if target_width is None or target_height is None:
+                target_width, target_height = int(frame.width), int(frame.height)
+            elif int(frame.width) != target_width or int(frame.height) != target_height:
+                if not resolution_warning_emitted:
+                    LOG.warning(
+                        "MiniMax H3 master contains a resolution change %dx%d -> %dx%d; conforming to the opening canvas",
+                        int(frame.width), int(frame.height), target_width, target_height,
+                    )
+                    resolution_warning_emitted = True
+                frame = frame.reformat(width=target_width, height=target_height, format="rgb24")
+            video_arrays.append(frame.to_ndarray(format="rgb24"))
+    if not video_arrays:
+        raise ValueError(f"Native master decoded zero video frames: {path}")
+    packed_video = np.stack(video_arrays, axis=0)
+    del video_arrays
+    frames = torch.from_numpy(packed_video).to(dtype=torch.float32).div_(255.0)
+    del packed_video
+
+    sample_rate = 48000
+    audio_arrays: list[np.ndarray] = []
+    with av.open(str(path)) as container:
+        if container.streams.audio:
+            audio_stream = container.streams.audio[0]
+            resampler = av.AudioResampler(format="fltp", layout="stereo", rate=sample_rate)
+            for frame in container.decode(audio_stream):
+                converted = resampler.resample(frame)
+                if converted is None:
+                    continue
+                if not isinstance(converted, list):
+                    converted = [converted]
+                for audio_frame in converted:
+                    values = audio_frame.to_ndarray()
+                    if values.ndim == 1:
+                        values = values.reshape(1, -1)
+                    audio_arrays.append(values.astype(np.float32, copy=False))
+            flushed = resampler.resample(None)
+            if flushed is not None:
+                if not isinstance(flushed, list):
+                    flushed = [flushed]
+                for audio_frame in flushed:
+                    values = audio_frame.to_ndarray()
+                    if values.ndim == 1:
+                        values = values.reshape(1, -1)
+                    audio_arrays.append(values.astype(np.float32, copy=False))
+
+    if audio_arrays:
+        packed_audio = np.concatenate(audio_arrays, axis=1)
+        waveform = torch.from_numpy(packed_audio).to(dtype=torch.float32).unsqueeze(0)
+    elif isinstance(fallback_audio, dict) and torch.is_tensor(fallback_audio.get("waveform")):
+        waveform = fallback_audio["waveform"][:1].detach().cpu().float()
+        source_rate = int(fallback_audio.get("sample_rate", sample_rate))
+        if source_rate != sample_rate:
+            import torchaudio.functional as AF
+
+            waveform = AF.resample(waveform, source_rate, sample_rate)
+    else:
+        waveform = torch.zeros((1, 2, 1), dtype=torch.float32)
+
+    if waveform.shape[1] == 1:
+        waveform = waveform.repeat(1, 2, 1)
+    elif waveform.shape[1] > 2:
+        waveform = waveform[:, :2, :]
+    target_samples = max(1, int(round(int(frames.shape[0]) / max(1.0, float(fps)) * sample_rate)))
+    if int(waveform.shape[-1]) < target_samples:
+        waveform = torch.nn.functional.pad(waveform, (0, target_samples - int(waveform.shape[-1])))
+    else:
+        waveform = waveform[..., :target_samples]
+    audio = {"waveform": waveform.contiguous(), "sample_rate": sample_rate}
+    LOG.info(
+        "MiniMax H3 native master decoded for one-film upscale | frames=%d | resolution=%dx%d | audio_samples=%d",
+        int(frames.shape[0]), int(frames.shape[2]), int(frames.shape[1]), target_samples,
+    )
+    return frames.contiguous(), audio
+
+
 def _next_numbered_render_id(output_folder: Path, base_name: str, requested_render_id: str) -> str:
     """Return a never-reused render id with a monotonically increasing suffix.
 
-    Historical unnumbered outputs count as render 0001, so an installation that
-    already contains ``segment_<render>_full.mp4`` continues at 0002.
+    Historical unnumbered outputs count as render 0001. Every stage label is
+    considered a collision, so retakes never overwrite native, delivery, or
+    custom-audio checkpoint files created by a prior render.
     """
     root = _safe_name(requested_render_id, "minimax_h3_render")
     escaped_base = re.escape(_safe_name(base_name, "segment"))
     escaped_root = re.escape(root)
     pattern = re.compile(
-        rf"^{escaped_base}_{escaped_root}(?:_(\d{{4,}}))?_(?:native_)?(?:full|seg_\d{{4,}})\.mp4$",
+        rf"^{escaped_base}_{escaped_root}(?:_(\d{{4,}}))?_(?:[a-z0-9][a-z0-9_-]*_)?(?:full|seg_\d{{4,}})\.mp4$",
         re.IGNORECASE,
     )
     used_numbers: set[int] = set()
@@ -532,11 +1058,8 @@ def _next_numbered_render_id(output_folder: Path, base_name: str, requested_rend
     while True:
         candidate = f"{root}_{next_number:04d}"
         safe_base = _safe_name(base_name, "segment")
-        segment_collision = any(output_folder.glob(f"{safe_base}_{candidate}_seg_*.mp4"))
-        native_segment_collision = any(output_folder.glob(f"{safe_base}_{candidate}_native_seg_*.mp4"))
-        final_collision = (output_folder / f"{safe_base}_{candidate}_full.mp4").exists()
-        native_final_collision = (output_folder / f"{safe_base}_{candidate}_native_full.mp4").exists()
-        if not segment_collision and not native_segment_collision and not final_collision and not native_final_collision:
+        stage_collision = any(output_folder.glob(f"{safe_base}_{candidate}_*.mp4"))
+        if not stage_collision:
             return candidate
         next_number += 1
 
@@ -726,8 +1249,8 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "global_prompt": ("STRING", {"default": "one continuous cinematic shot with coherent motion, stable identity, controlled camera and native stereo audio", "multiline": True}),
                 "timeline_data": ("STRING", {"default": "", "multiline": True}),
                 "duration_seconds": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 36000.0, "step": 0.01}),
-                "task_mode": (["auto_from_timeline", "t2va", "i2va", "fl2va", "ref2va"], {"default": "auto_from_timeline"}),
-                "audio_mode": (["h3_native_generated", "h3_ref2va_audio", "external_audio_post"], {"default": "h3_native_generated"}),
+                "task_mode": (["auto_from_timeline", "t2va", "i2va", "fl2va", "ref2va", "v2va_object_swap", "longvid_guides", "ref2vid_lipsync"], {"default": "auto_from_timeline"}),
+                "audio_mode": (list(H3_AUDIO_MODES), {"default": "h3_native_generated"}),
                 "prompt_mapping": (["global_plus_local", "local_only", "global_only"], {"default": "global_plus_local"}),
                 "upscale_mode": (["off", "ltx23", "wan22_5b"], {"default": "off"}),
                 # 0.5 MP / 16:9 is the practical Dynamic-VRAM default used by
@@ -786,10 +1309,10 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 # generation node keeps legacy widgets only as a compatibility
                 # fallback for shotplans created before schema v3.
                 "performance_profile": ([
-                    "low_vram_draft", "low_vram_balanced", "low_vram_turbo", "h3_native_quality", "custom",
+                    "low_vram_draft", "low_vram_balanced", "low_vram_turbo", "h3_turbo_quality", "h3_native_quality", "custom",
                     "rtx3060_draft", "rtx3060_balanced", "rtx3060_turbo",
                 ], {"default": "low_vram_balanced"}),
-                "seed": ("INT", {"default": 42, "min": 0, "max": 0xFFFFFFFFFFFFFFFF}),
+                "seed": ("INT", {"default": 42, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "control_after_generate": True}),
                 "seed_stride": ("INT", {"default": 1, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "step": 1}),
                 "steps": ("INT", {"default": 16, "min": 1, "max": 100, "step": 1}),
                 "sampler_name": (samplers,),
@@ -803,10 +1326,10 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "turbo_lora_name": (turbo_loras, {"default": ""}),
                 "turbo_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.05}),
                 "turbo_sampler_mode": (["audio_fixed", "res_multistep_stock"], {"default": "audio_fixed"}),
-                # The original reference workflow downsizes inputs before H3.
-                # Canvas modes are faster on 12 GiB cards than encoding a 1 MP
-                # source only to resize it again inside the native conditioner.
-                "reference_resize_policy": (["canvas_crop", "canvas_pad", "total_pixels", "off"], {"default": "canvas_crop"}),
+                # Preserve source pixels by default. The native H3 conditioner
+                # performs the single required Lanczos fit to the latent canvas.
+                # Pre-resize remains available as an explicit Low VRAM option.
+                "reference_resize_policy": (["canvas_crop", "canvas_pad", "total_pixels", "off"], {"default": "off"}),
                 "reference_resize_megapixels": ("FLOAT", {"default": 0.5, "min": 0.1, "max": 2.0, "step": 0.05}),
                 "reference_resize_filter": (["area", "bilinear", "bicubic", "nearest-exact"], {"default": "area"}),
                 # Optional LTX finishing controls. All installed LoRAs remain
@@ -821,6 +1344,47 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "ltx_4k_enabled": ("BOOLEAN", {"default": False}),
                 "ltx_4k_quality": (["ULTRA", "HIGH", "MEDIUM", "LOW"], {"default": "ULTRA"}),
                 "ltx_seam_safe": ("BOOLEAN", {"default": True}),
+                "flf_join_mode": (["h3_keyframe_cut", "wan_overlap_blend"], {"default": "h3_keyframe_cut"}),
+                "flf_overlap_frames": ("INT", {"default": 9, "min": 1, "max": 24, "step": 1}),
+                # The LTX temporal looper is the delivery sampler for long
+                # masters. These settings are Shotboard truth, not workflow
+                # constants, so a saved board reproduces its VRAM strategy.
+                "ltx_looper_temporal_tile_size": ("INT", {"default": 80, "min": 24, "max": 1000, "step": 8}),
+                "ltx_looper_temporal_overlap": ("INT", {"default": 24, "min": 16, "max": 80, "step": 8}),
+                "ltx_looper_guiding_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "ltx_looper_overlap_strength": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "ltx_looper_cond_image_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "ltx_looper_horizontal_tiles": ("INT", {"default": 1, "min": 1, "max": 6, "step": 1}),
+                "ltx_looper_vertical_tiles": ("INT", {"default": 1, "min": 1, "max": 6, "step": 1}),
+                "ltx_looper_spatial_overlap": ("INT", {"default": 1, "min": 1, "max": 8, "step": 1}),
+                # These must remain in the same serialized widget block as the
+                # existing planner settings.  ComfyUI serializes optional widgets
+                # before later required widgets; keeping them optional therefore
+                # shifts every LTX field in saved boards and invalidates prompts.
+                # `cine_linx` remains the only optional socket below.
+                "v2v_guide_mode": (["", "raw_only", "raw_pose", "raw_depth", "raw_depth_pose"], {"default": "raw_only"}),
+                "v2v_source_range_policy": (["", "timeline_segment", "sequential_requested", "repeat_from_offset"], {"default": "timeline_segment"}),
+                "v2v_source_offset_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 86400.0, "step": 0.01}),
+                "v2v_source_fit": (["", "native_adapt", "canvas_pad", "canvas_crop", "stretch"], {"default": "canvas_pad"}),
+                "v2v_source_end_policy": (["", "hold_last_for_grid", "error"], {"default": "hold_last_for_grid"}),
+                "v2v_audio_pairing": (["", "pair_with_source_video", "standalone_reference", "off"], {"default": "pair_with_source_video"}),
+                # FL2VA only.  Stable planned keyframes remain the default;
+                # the native AV option is an explicit experimental handoff
+                # that makes the next chunk inherit a short decoded AV tail.
+                # Optional + appended: old API prompts and board widgets stay
+                # binary compatible.
+                "flf_continuity_mode": (["stable_keyframes", "native_av_context"], {"default": "stable_keyframes"}),
+                "flf_continuity_tail_frames": (["22", "39", "56"], {"default": "22"}),
+                "flf_continuity_audio": ("BOOLEAN", {"default": True}),
+                "voice_reference_picture_index": ("INT", {"default": 0, "min": 0, "max": 4, "step": 1}),
+                # Optional post-native branch. The actual 1:1 IAMCCS face
+                # nodes expose every detector/crop/denoise/stitch control;
+                # these named settings only decide whether their stitched
+                # result replaces the native master before the optional
+                # upscaler.
+                "face_detailer_enabled": ("BOOLEAN", {"default": False}),
+                "face_detailer_profile": (["balanced", "small_faces", "gentle", "sam_face_mask"], {"default": "balanced"}),
+                "face_detailer_use_sam_mask": ("BOOLEAN", {"default": False}),
             },
             "optional": {
                 "cine_linx": (
@@ -894,7 +1458,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         turbo_lora_name="",
         turbo_strength=1.0,
         turbo_sampler_mode="audio_fixed",
-        reference_resize_policy="canvas_crop",
+        reference_resize_policy="off",
         reference_resize_megapixels=0.5,
         reference_resize_filter="area",
         ltx_detailer_enabled=False,
@@ -903,6 +1467,29 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         ltx_4k_enabled=False,
         ltx_4k_quality="ULTRA",
         ltx_seam_safe=True,
+        flf_join_mode="h3_keyframe_cut",
+        flf_overlap_frames=9,
+        ltx_looper_temporal_tile_size=80,
+        ltx_looper_temporal_overlap=24,
+        ltx_looper_guiding_strength=1.0,
+        ltx_looper_overlap_strength=0.5,
+        ltx_looper_cond_image_strength=1.0,
+        ltx_looper_horizontal_tiles=1,
+        ltx_looper_vertical_tiles=1,
+        ltx_looper_spatial_overlap=1,
+        v2v_guide_mode="raw_only",
+        v2v_source_range_policy="timeline_segment",
+        v2v_source_offset_seconds=0.0,
+        v2v_source_fit="canvas_pad",
+        v2v_source_end_policy="hold_last_for_grid",
+        v2v_audio_pairing="pair_with_source_video",
+        flf_continuity_mode="stable_keyframes",
+        flf_continuity_tail_frames="22",
+        flf_continuity_audio=True,
+        voice_reference_picture_index=0,
+        face_detailer_enabled=False,
+        face_detailer_profile="balanced",
+        face_detailer_use_sam_mask=False,
         cine_linx=None,
     ):
         global_prompt, timeline_data, prompter_injection = apply_prompter_to_minimax(
@@ -910,6 +1497,137 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             global_prompt,
             timeline_data,
         )
+        # A connected IAMCCS_ShotboardH3Settings node is an explicit external
+        # control surface, so it takes precedence over the Shotboard's local
+        # saved snapshot.  The values remain named throughout the transport;
+        # no positional widget array is ever used here.
+        saved_settings = {
+            **_saved_h3_settings(timeline_data),
+            **_h3_settings_from_cine_linx(cine_linx),
+        }
+        if saved_settings:
+            duration_seconds = saved_settings.get("duration_seconds", duration_seconds)
+            frame_rate = saved_settings.get("frame_rate", frame_rate)
+            guide_policy = saved_settings.get("guide_policy", guide_policy)
+            min_guide_gap_seconds = saved_settings.get("min_guide_gap_seconds", min_guide_gap_seconds)
+            max_guides = saved_settings.get("max_guides", max_guides)
+            default_force = saved_settings.get("default_force", default_force)
+            promptrelay_epsilon = saved_settings.get("promptrelay_epsilon", promptrelay_epsilon)
+            ltx_round_mode = saved_settings.get("ltx_round_mode", ltx_round_mode)
+            task_mode = saved_settings.get("task_mode", task_mode)
+            audio_mode = saved_settings.get("audio_mode", audio_mode)
+            prompt_mapping = saved_settings.get("prompt_mapping", prompt_mapping)
+            width = saved_settings.get("width", width)
+            height = saved_settings.get("height", height)
+            image_width = saved_settings.get("image_width", image_width)
+            image_height = saved_settings.get("image_height", image_height)
+            image_resize_method = saved_settings.get("image_resize_method", image_resize_method)
+            image_multiple_of = saved_settings.get("image_multiple_of", image_multiple_of)
+            img_compression = saved_settings.get("img_compression", img_compression)
+            acceleration = saved_settings.get("acceleration", acceleration)
+            ref_image_size = saved_settings.get("ref_image_size", ref_image_size)
+            reference_role_1 = saved_settings.get("reference_role_1", reference_role_1)
+            reference_role_2 = saved_settings.get("reference_role_2", reference_role_2)
+            reference_role_3 = saved_settings.get("reference_role_3", reference_role_3)
+            reference_role_4 = saved_settings.get("reference_role_4", reference_role_4)
+            reference_video_role = saved_settings.get("reference_video_role", reference_video_role)
+            reference_audio_role = saved_settings.get("reference_audio_role", reference_audio_role)
+            sol_conditioning = saved_settings.get("sol_conditioning", sol_conditioning)
+            spectrum_profile = saved_settings.get("spectrum_profile", spectrum_profile)
+            vram_clean_before_decode = saved_settings.get("vram_clean_before_decode", vram_clean_before_decode)
+            rife_mode = saved_settings.get("rife_mode", rife_mode)
+            upscale_enabled = saved_settings.get("upscale_enabled", upscale_enabled)
+            upscale_mode = saved_settings.get("upscale_mode", upscale_mode)
+            upscale_width = saved_settings.get("upscale_width", upscale_width)
+            upscale_height = saved_settings.get("upscale_height", upscale_height)
+            upscale_prompt = saved_settings.get("upscale_prompt", upscale_prompt)
+            upscale_sage = saved_settings.get("upscale_sage", upscale_sage)
+            upscale_seed_offset = saved_settings.get("upscale_seed_offset", upscale_seed_offset)
+            wan_upscale_denoise = saved_settings.get("wan_upscale_denoise", wan_upscale_denoise)
+            text_encoder_device = saved_settings.get("text_encoder_device", text_encoder_device)
+            performance_profile = saved_settings.get("performance_profile", performance_profile)
+            seed = saved_settings.get("seed", seed)
+            seed_stride = saved_settings.get("seed_stride", seed_stride)
+            steps = saved_settings.get("steps", steps)
+            sampler_name = saved_settings.get("sampler_name", sampler_name)
+            scheduler = saved_settings.get("scheduler", scheduler)
+            denoise = saved_settings.get("denoise", denoise)
+            shift_video = saved_settings.get("shift_video", shift_video)
+            shift_audio = saved_settings.get("shift_audio", shift_audio)
+            turbo_mode = saved_settings.get("turbo_mode", turbo_mode)
+            turbo_lora_name = saved_settings.get("turbo_lora_name", turbo_lora_name)
+            turbo_strength = saved_settings.get("turbo_strength", turbo_strength)
+            turbo_sampler_mode = saved_settings.get("turbo_sampler_mode", turbo_sampler_mode)
+            reference_resize_policy = saved_settings.get("reference_resize_policy", reference_resize_policy)
+            reference_resize_megapixels = saved_settings.get("reference_resize_megapixels", reference_resize_megapixels)
+            reference_resize_filter = saved_settings.get("reference_resize_filter", reference_resize_filter)
+            ltx_detailer_enabled = saved_settings.get("ltx_detailer_enabled", ltx_detailer_enabled)
+            ltx_detailer_lora_name = saved_settings.get("ltx_detailer_lora_name", ltx_detailer_lora_name)
+            ltx_detailer_strength = saved_settings.get("ltx_detailer_strength", ltx_detailer_strength)
+            ltx_4k_enabled = saved_settings.get("ltx_4k_enabled", ltx_4k_enabled)
+            ltx_4k_quality = saved_settings.get("ltx_4k_quality", ltx_4k_quality)
+            ltx_seam_safe = saved_settings.get("ltx_seam_safe", ltx_seam_safe)
+            flf_join_mode = saved_settings.get("flf_join_mode", flf_join_mode)
+            flf_overlap_frames = saved_settings.get("flf_overlap_frames", flf_overlap_frames)
+            ltx_looper_temporal_tile_size = saved_settings.get("ltx_looper_temporal_tile_size", ltx_looper_temporal_tile_size)
+            ltx_looper_temporal_overlap = saved_settings.get("ltx_looper_temporal_overlap", ltx_looper_temporal_overlap)
+            ltx_looper_guiding_strength = saved_settings.get("ltx_looper_guiding_strength", ltx_looper_guiding_strength)
+            ltx_looper_overlap_strength = saved_settings.get("ltx_looper_overlap_strength", ltx_looper_overlap_strength)
+            ltx_looper_cond_image_strength = saved_settings.get("ltx_looper_cond_image_strength", ltx_looper_cond_image_strength)
+            ltx_looper_horizontal_tiles = saved_settings.get("ltx_looper_horizontal_tiles", ltx_looper_horizontal_tiles)
+            ltx_looper_vertical_tiles = saved_settings.get("ltx_looper_vertical_tiles", ltx_looper_vertical_tiles)
+            ltx_looper_spatial_overlap = saved_settings.get("ltx_looper_spatial_overlap", ltx_looper_spatial_overlap)
+            v2v_guide_mode = saved_settings.get("v2v_guide_mode", v2v_guide_mode)
+            v2v_source_range_policy = saved_settings.get("v2v_source_range_policy", v2v_source_range_policy)
+            v2v_source_offset_seconds = saved_settings.get("v2v_source_offset_seconds", v2v_source_offset_seconds)
+            v2v_source_fit = saved_settings.get("v2v_source_fit", v2v_source_fit)
+            v2v_source_end_policy = saved_settings.get("v2v_source_end_policy", v2v_source_end_policy)
+            v2v_audio_pairing = saved_settings.get("v2v_audio_pairing", v2v_audio_pairing)
+            flf_continuity_mode = saved_settings.get("flf_continuity_mode", flf_continuity_mode)
+            flf_continuity_tail_frames = saved_settings.get("flf_continuity_tail_frames", flf_continuity_tail_frames)
+            flf_continuity_audio = saved_settings.get("flf_continuity_audio", flf_continuity_audio)
+            voice_reference_picture_index = saved_settings.get("voice_reference_picture_index", voice_reference_picture_index)
+            face_detailer_enabled = saved_settings.get("face_detailer_enabled", face_detailer_enabled)
+            face_detailer_profile = saved_settings.get("face_detailer_profile", face_detailer_profile)
+            face_detailer_use_sam_mask = saved_settings.get("face_detailer_use_sam_mask", face_detailer_use_sam_mask)
+        audio_mode = _normalise_h3_audio_mode(audio_mode)
+        longvid_requested = str(task_mode or "").strip().lower() in {
+            "longvid_guides", "longvid", "long_video_guides",
+        }
+        lipsync_requested = str(task_mode or "").strip().lower() in {"ref2vid_lipsync", "lipsync_ref2vid"}
+        requested_legacy_audio_mode = audio_mode
+        # R31 LongVid owns the audio lane through positioned AddGuide events.
+        # A REF2VA reference or a separate forced latent would otherwise add a
+        # second, incompatible audio source to the same H3 AV latent.  Keep
+        # the UI on the single truthful route and record the normalization.
+        timeline_audio_owned = longvid_requested or lipsync_requested
+        longvid_audio_normalized = timeline_audio_owned and audio_mode != "h3_native_generated"
+        if longvid_audio_normalized:
+            audio_mode = "h3_native_generated"
+        v2v_guide_mode = str(v2v_guide_mode or "raw_only")
+        if v2v_guide_mode not in {"raw_only", "raw_pose", "raw_depth", "raw_depth_pose"}:
+            v2v_guide_mode = "raw_only"
+        v2v_source_range_policy = str(v2v_source_range_policy or "timeline_segment")
+        if v2v_source_range_policy not in {"timeline_segment", "sequential_requested", "repeat_from_offset"}:
+            v2v_source_range_policy = "timeline_segment"
+        v2v_source_fit = str(v2v_source_fit or "canvas_pad")
+        if v2v_source_fit not in {"native_adapt", "canvas_pad", "canvas_crop", "stretch"}:
+            v2v_source_fit = "canvas_pad"
+        v2v_source_end_policy = str(v2v_source_end_policy or "hold_last_for_grid")
+        if v2v_source_end_policy not in {"hold_last_for_grid", "error"}:
+            v2v_source_end_policy = "hold_last_for_grid"
+        v2v_audio_pairing = str(v2v_audio_pairing or "pair_with_source_video")
+        if v2v_audio_pairing not in {"pair_with_source_video", "standalone_reference", "off"}:
+            v2v_audio_pairing = "pair_with_source_video"
+        flf_continuity_mode = str(flf_continuity_mode or "stable_keyframes")
+        if flf_continuity_mode not in {"stable_keyframes", "native_av_context"}:
+            flf_continuity_mode = "stable_keyframes"
+        try:
+            flf_continuity_tail_frames = int(flf_continuity_tail_frames)
+        except (TypeError, ValueError):
+            flf_continuity_tail_frames = 22
+        if flf_continuity_tail_frames not in {22, 39, 56}:
+            flf_continuity_tail_frames = 22
         width = _h3_legal_dimension(width, 960)
         height = _h3_legal_dimension(height, 544)
         image_width = _h3_legal_dimension(image_width, width)
@@ -919,10 +1637,22 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         ltx_detailer_requested = bool(ltx_detailer_enabled)
         ltx_detailer_available = _model_file_available("loras", selected_ltx_detailer)
         effective_ltx_detailer = ltx_detailer_requested and ltx_detailer_available
-        effective_ltx_4k = bool(ltx_4k_enabled) and bool(upscale_enabled) and str(upscale_mode) == "ltx23"
+        upscale_target_width = max(256, int(_finite_float(upscale_width, width * 2, 256, 7680)))
+        upscale_target_height = max(256, int(_finite_float(upscale_height, height * 2, 256, 4320)))
+        ltx_4k_requested = bool(ltx_4k_enabled)
+        true_4k_target = _is_true_4k_delivery(upscale_target_width, upscale_target_height)
+        effective_ltx_4k = (
+            ltx_4k_requested
+            and bool(upscale_enabled)
+            and str(upscale_mode) == "ltx23"
+            and true_4k_target
+        )
         ltx_4k_quality = str(ltx_4k_quality or "ULTRA").upper()
         if ltx_4k_quality not in {"ULTRA", "HIGH", "MEDIUM", "LOW"}:
             ltx_4k_quality = "ULTRA"
+        face_detailer_profile = str(face_detailer_profile or "balanced").lower()
+        if face_detailer_profile not in {"balanced", "small_faces", "gentle", "sam_face_mask"}:
+            face_detailer_profile = "balanced"
 
         requested_turbo_mode = str(turbo_mode or "off")
         selected_turbo_lora = str(turbo_lora_name or "").strip()
@@ -930,9 +1660,11 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         turbo_available = _model_file_available("loras", selected_turbo_lora)
         effective_turbo_mode = requested_turbo_mode if turbo_requested and turbo_available else "off"
         requested_steps = max(1, int(_finite_float(steps, 16, 1, 100)))
-        # A missing optional Turbo file must not leave a base-model generation
-        # running with an unsafe 6-10 step Turbo schedule.
-        effective_steps = max(16, requested_steps) if turbo_requested and not turbo_available else requested_steps
+        # The settings box is the single source of truth.  Turbo profiles are
+        # recommendations, not hidden sampling contracts: an authored 8-step
+        # LongVid render must remain 8 steps even if its optional LoRA is
+        # missing or a user deliberately tests a non-standard Turbo schedule.
+        effective_steps = requested_steps
         plan = build_shotplan(
             timeline_data=timeline_data,
             global_prompt=global_prompt,
@@ -940,6 +1672,8 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             task_mode=task_mode,
             audio_mode=audio_mode,
             prompt_mapping=prompt_mapping,
+            flf_join_mode=flf_join_mode,
+            flf_overlap_frames=flf_overlap_frames,
             upscale_mode=upscale_mode,
             width=width,
             height=height,
@@ -954,8 +1688,53 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             vram_clean_before_decode=vram_clean_before_decode,
             rife_mode=rife_mode,
             upscale_enabled=upscale_enabled,
+            voice_reference_picture_index=voice_reference_picture_index,
         )
+        continuity_requested = flf_continuity_mode == "native_av_context"
+        # Native AV tail injection is implemented only for true FL2VA chunks.
+        # REF2VA audio/reference and V2VA are deliberately independent/hard
+        # cut routes, even if an old board retains FLF widget values.
+        continuity_enabled = bool(
+            continuity_requested
+            and bool(plan.get("flf_anchor_mode"))
+            and int(plan.get("total_segments", 0)) > 1
+            and all(str(chunk.get("task_mode", "")).lower() == "fl2va" for chunk in plan.get("chunks", []))
+        )
+        plan["native_av_continuity"] = {
+            "schema": "iamccs.minimax_h3.native_av_continuity",
+            "schema_version": 1,
+            "mode": flf_continuity_mode,
+            "enabled": continuity_enabled,
+            "tail_frames": flf_continuity_tail_frames,
+            "continue_audio": bool(flf_continuity_audio),
+            "audio_tail_seconds": 4.0,
+            "source": "shotboard",
+        }
         plan["prompter_injection"] = prompter_injection
+        plan["audio_mode"] = audio_mode
+        longvid_active = str(plan.get("task_mode", "")).lower() == "longvid_guides"
+        plan["audio_contract"] = {
+            "schema": "iamccs.minimax_h3.audio_route",
+            "schema_version": 1,
+            "selected_mode": audio_mode,
+            **copy.deepcopy(H3_AUDIO_MODE_CONTRACTS[audio_mode]),
+            "reference_audio_resource": "iamccs_minimax_h3_ref_audio",
+            "custom_audio_resource": "iamccs_minimax_h3_custom_audio",
+            "timeline_audio_contract": (
+                "R31 LongVid: every imported main AudioBoard slot is sliced on the global 24fps clock and injected into the matching H3 chunk via MiniMaxH3AddGuide"
+                if longvid_active
+                else (
+                    "Ref2Vid LipSync: each generated hard-cut performance slot receives its matching main AudioBoard clip as <Audio 1>; lyrics/transcripts are never required in text."
+                    if str(plan.get("task_mode", "")).lower() in {"ref2vid_lipsync", "lipsync_ref2vid"}
+                    else "AudioBoard lanes remain editorial/post metadata until explicitly rendered or published as AUDIO"
+                )
+            ),
+            "automatic_audioboard_drive": timeline_audio_owned,
+            "requested_legacy_audio_mode": requested_legacy_audio_mode if timeline_audio_owned else None,
+            "normalized_for_longvid": longvid_audio_normalized if longvid_active else False,
+            "normalized_for_ref2vid_lipsync": longvid_audio_normalized if lipsync_requested else False,
+            "source": "shotboard",
+        }
         plan["performance_profile"] = str(performance_profile)
         plan["sampling"] = {
             "seed": int(seed),
@@ -989,9 +1768,29 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "downscale_only": True,
             "source": "shotboard",
         }
+        effective_v2v_audio_pairing = (
+            "pair_with_source_video"
+            if audio_mode == "h3_ref2va_audio"
+            else "off"
+        )
+        plan["v2v_settings"] = {
+            "schema": "iamccs.minimax_h3.v2v.settings",
+            "schema_version": 1,
+            "guide_mode": str(v2v_guide_mode),
+            "source_range_policy": str(v2v_source_range_policy),
+            "source_offset_seconds": float(_finite_float(v2v_source_offset_seconds, 0.0, 0.0, 86400.0)),
+            "source_fit": str(v2v_source_fit),
+            "source_end_policy": str(v2v_source_end_policy),
+            "audio_behavior": audio_mode,
+            "audio_pairing": effective_v2v_audio_pairing,
+            "requested_audio_pairing": str(v2v_audio_pairing),
+            "source_media": "CineInfoH3V2V",
+            "model_family": "ref2va",
+            "source": "shotboard",
+        }
         plan["upscale_settings"] = {
-            "target_width": int(upscale_width),
-            "target_height": int(upscale_height),
+            "target_width": upscale_target_width,
+            "target_height": upscale_target_height,
             "prompt": str(upscale_prompt or "").strip(),
             "sage": bool(upscale_sage),
             "seed_offset": int(upscale_seed_offset),
@@ -1001,6 +1800,8 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "ltx_detailer_available": ltx_detailer_available,
             "ltx_detailer_lora_name": selected_ltx_detailer,
             "ltx_detailer_strength": float(ltx_detailer_strength),
+            "ltx_4k_requested": ltx_4k_requested,
+            "ltx_4k_target_valid": true_4k_target,
             "ltx_4k_enabled": effective_ltx_4k,
             "ltx_4k_quality": ltx_4k_quality,
             "ltx_seam_safe": bool(ltx_seam_safe),
@@ -1009,18 +1810,56 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "ltx_vae_decode_temporal_size": 64 if bool(ltx_seam_safe) else 16,
             "ltx_vae_decode_temporal_overlap": 4 if bool(ltx_seam_safe) else 1,
             "ltx_vae_decode_spatial_overlap": 4 if bool(ltx_seam_safe) else 1,
+            "ltx_looper": {
+                "sampler": "LTXVLoopingSampler",
+                "temporal_tile_size": max(24, min(1000, int(ltx_looper_temporal_tile_size))),
+                "temporal_overlap": max(16, min(80, int(ltx_looper_temporal_overlap))),
+                "guiding_strength": max(0.0, min(1.0, float(ltx_looper_guiding_strength))),
+                "overlap_strength": max(0.0, min(1.0, float(ltx_looper_overlap_strength))),
+                "cond_image_strength": max(0.0, min(1.0, float(ltx_looper_cond_image_strength))),
+                "horizontal_tiles": max(1, min(6, int(ltx_looper_horizontal_tiles))),
+                "vertical_tiles": max(1, min(6, int(ltx_looper_vertical_tiles))),
+                "spatial_overlap": max(1, min(8, int(ltx_looper_spatial_overlap))),
+                "source": "shotboard",
+            },
+            "source": "shotboard",
+        }
+        plan["face_detailer_settings"] = {
+            "schema": "iamccs.minimax_h3.face_detailer",
+            "schema_version": 1,
+            "enabled": bool(face_detailer_enabled),
+            "profile": face_detailer_profile,
+            "use_sam_mask": bool(face_detailer_use_sam_mask),
+            "route": "face_detailer_then_optional_upscale" if bool(face_detailer_enabled) else "native_then_optional_upscale",
             "source": "shotboard",
         }
         chunk_frames = [int(chunk.get("frame_count", 0) or 0) for chunk in plan.get("chunks", [])]
         max_chunk_frames = max(chunk_frames, default=0)
         native_load = (float(width) * float(height) * max(1, max_chunk_frames)) / (960.0 * 544.0 * 124.0)
         warnings: list[str] = []
+        if longvid_audio_normalized:
+            warnings.append(
+                f"{'LongVid' if longvid_active else 'Ref2Vid LipSync'} uses the main AudioBoard track; incompatible {requested_legacy_audio_mode} was normalized to its owned timeline-audio route"
+            )
+        if continuity_requested and not continuity_enabled:
+            warnings.append(
+                "Native AV continuity requires FL2VA with at least two adjacent image-keyframe chunks; using stable planned keyframes"
+            )
         if ltx_detailer_requested and not ltx_detailer_available:
             warnings.append(f"Optional LTX detailer unavailable ({selected_ltx_detailer or 'no LoRA selected'}); continuing without it")
-        if bool(ltx_4k_enabled) and not effective_ltx_4k:
-            warnings.append("RTX VSR 4K is available only when LTX 2.3 upscale is enabled")
+        if ltx_4k_requested and not effective_ltx_4k:
+            if not true_4k_target:
+                warnings.append(
+                    f"RTX VSR 4K ignored for {upscale_target_width}x{upscale_target_height}; "
+                    "ordinary 2x delivery stays on the direct LTX path"
+                )
+            else:
+                warnings.append("RTX VSR 4K is available only when LTX 2.3 upscale is enabled")
         if effective_ltx_4k:
-            warnings.append("4K delivery uses LTX at half delivery resolution, then NVIDIA RTX VSR 2x; expect high system-RAM usage")
+            warnings.append(
+                "4K delivery uses a protected LTX intermediate that never downsamples the native H3 frames, "
+                "then NVIDIA RTX VSR reaches the final canvas"
+            )
         if str(text_encoder_device).lower() == "cpu_safe_12gb":
             warnings.append("Legacy CPU-safe text encoder setting migrated to GPU-first auto with CPU fallback only after CUDA OOM")
         low_vram_profile = str(performance_profile).startswith(("low_vram", "rtx3060"))
@@ -1035,8 +1874,11 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         turbo_enabled = effective_turbo_mode != "off"
         if turbo_requested and not turbo_available:
             missing_name = selected_turbo_lora or "no LoRA selected"
-            warnings.append(f"Optional Turbo LoRA unavailable ({missing_name}); using base H3 at {effective_steps} steps")
-        if turbo_enabled and not 0.8 <= float(turbo_strength) <= 1.8:
+            warnings.append(f"Optional Turbo LoRA unavailable ({missing_name}); using base H3 at the authored {effective_steps} steps")
+        lightx2v_turbo = "lightx2v" in selected_turbo_lora.lower()
+        if turbo_enabled and lightx2v_turbo and not 0.6 <= float(turbo_strength) <= 1.0:
+            warnings.append("Lightx2v Turbo strength is outside its tested 0.6-1.0 quality range")
+        elif turbo_enabled and not lightx2v_turbo and not 0.8 <= float(turbo_strength) <= 1.8:
             warnings.append("Turbo LoRA strength is outside the tested 0.8-1.8 range")
         if effective_turbo_mode == "early_8_10" and not 8 <= effective_steps <= 10:
             warnings.append("Early/non-ckpt500 Turbo is normally used at 8-10 steps")
@@ -1055,28 +1897,60 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "warnings": warnings,
         }
         plan["control_contract"] = {
-            "model_route": ["task_mode", "reference roles"],
-            "conditioning": ["width", "height", "timeline trim", "prompt mapping", "references", "audio mode"],
+            "model_route": ["task_mode", "reference roles", "V2VA Object Swap -> REF2VA"],
+            "conditioning": ["width", "height", "timeline trim", "prompt mapping", "references", "four-way audio route"],
             "sampling": ["seed", "steps", "sampler", "scheduler", "denoise", "H3 shifts", "acceleration", "Turbo LoRA", "Turbo audio sampler"],
             "reference_preprocess": ["resize policy", "target megapixels", "filter", "multiple of 32"],
-            "delivery": ["VRAM clean", "RIFE", "upscale enabled", "upscale mode", "upscale target", "upscale prompt", "upscale seed", "LTX seam-safe VAE", "LTX detailer LoRA", "optional RTX VSR 4K"],
+            "delivery": ["FLF join mode", "FLF overlap frames", "native AV continuity mode", "native AV continuity tail", "VRAM clean", "RIFE", "upscale enabled", "upscale mode", "upscale target", "upscale prompt", "upscale seed", "LTX seam-safe VAE", "LTX detailer LoRA", "optional RTX VSR 4K"],
+            "audio": {
+                "selected": audio_mode,
+                "native": "joint H3 AV generation",
+                "reference": "REF2VA conditioning through CineInfoH3 reference_audio",
+                "custom_drive": "distinct CineInfoH3 custom_audio runtime tensor for pre-sampler AV latent replacement",
+                "external_post": "post-generation soundtrack; never implied to condition lips or motion",
+                "audioboard": "editorial lanes only unless explicitly rendered/published as AUDIO",
+            },
             "transport": "one IAMCCS_SUPERNODE_LINX cable; the private H3 plan stays inside CineLinX",
+            "v2v": {
+                "source_media": "CineInfoH3V2V outside the timeline",
+                "shotboard_owns": "prompt, duration and source ranges",
+                "guide_mode": str(v2v_guide_mode),
+                "source_range_policy": str(v2v_source_range_policy),
+                "raw_source_occurrences": 1,
+            },
+            "face_detailer": {
+                "route": plan["face_detailer_settings"]["route"],
+                "nodes": "optional IAMCCS 1:1 H3 Face Track/Crop -> latent inject -> per-frame denoise -> Face Stitch -> IAMCCS Face Detailer Router",
+                "upscale_order": "native -> optional face stitch -> optional upscale",
+            },
         }
         injection_summary = str(prompter_injection.get("actual_target", "none")) if prompter_injection.get("applied") else "none"
+        guide_track = plan.get("guide_track") if isinstance(plan.get("guide_track"), dict) else {}
+        guide_summary = (
+            f"r31_guides=image:{int(guide_track.get('visual_guide_count', 0))}/audio:{int(guide_track.get('audio_guide_count', 0))}"
+            if guide_track
+            else "r31_guides=off"
+        )
         report = (
             f"MiniMax H3 Shotboard | shots={len(plan['slots'])} | keyframes={plan['total_keyframes']} | chunks={plan['total_segments']} | "
             f"duration={plan['effective_duration_seconds']:.3f}s | grid=17k+5 @24fps | "
-            f"task={task_mode} | frames=timeline trim (max 362 per box) | prompt={prompt_mapping} | "
+            f"task={task_mode} | {guide_summary} | frames=timeline trim (max 362 per box) | prompt={prompt_mapping} | "
+            f"v2v={v2v_guide_mode}/{v2v_source_range_policy}+{float(v2v_source_offset_seconds):.2f}s/"
+            f"{v2v_source_fit}/{audio_mode}->{effective_v2v_audio_pairing} | "
+            f"join={plan.get('flf_join_mode')}:{plan.get('flf_overlap_frames')}f | "
+            f"continuity={flf_continuity_mode}:{'on' if continuity_enabled else 'off'}@{flf_continuity_tail_frames}f | "
             f"audio={audio_mode} | resolution={width}x{height} | performance={performance_profile} "
             f"load={native_load:.2f}x | sampler={effective_steps}x{sampler_name}+{scheduler} | acceleration={acceleration} | "
             f"turbo={effective_turbo_mode}:{selected_turbo_lora or 'none'}@{float(turbo_strength):.2f}/{turbo_sampler_mode} | "
             f"ref_resize={reference_resize_policy}:{reference_resize_megapixels:.2f}MP/{reference_resize_filter} | "
             f"ref_size={ref_image_size} | text_encoder={plan.get('text_encoder_device', 'auto')} | "
             f"RIFE={rife_mode} | upscale={'on' if upscale_enabled else 'off'}:{plan['upscale_mode']} "
-            f"->{int(upscale_width)}x{int(upscale_height)} sage={'on' if upscale_sage else 'off'} "
+            f"->{upscale_target_width}x{upscale_target_height} sage={'on' if upscale_sage else 'off'} "
             f"ltx_detailer={'on' if effective_ltx_detailer else 'off'}:{selected_ltx_detailer or 'none'}@{float(ltx_detailer_strength):.2f} "
             f"ltx_seam_safe={'on' if ltx_seam_safe else 'off'} ltx_4k={'on' if effective_ltx_4k else 'off'}:{ltx_4k_quality} "
+            f"ltx_looper={int(ltx_looper_temporal_tile_size)}/{int(ltx_looper_temporal_overlap)} "
             f"wan_denoise={float(wan_upscale_denoise):.2f} | "
+            f"face_detailer={'on' if bool(face_detailer_enabled) else 'off'}:{face_detailer_profile}/sam={'on' if bool(face_detailer_use_sam_mask) else 'off'} | "
             f"prompter={injection_summary} | warnings={'; '.join(warnings) if warnings else 'none'}"
         )
         return (_build_minimax_cine_linx(cine_linx, plan, timeline_data, global_prompt, report),)
@@ -1275,11 +2149,12 @@ class IAMCCS_MiniMaxH3Backend:
         width = int(shotplan.get("width", 960))
         height = int(shotplan.get("height", 544))
         frame_count = int(chunk["frame_count"])
-        prompt = str(prompt_override or "").strip() or str(chunk.get("prompt", ""))
+        # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+        prompt = str(chunk.get("prompt", "")) or str(prompt_override or "").strip()
 
         planned_first = _load_image(str(chunk.get("first_image", "")))
         planned_last = _load_image(str(chunk.get("last_image", "")))
-        first = first_frame_override if torch.is_tensor(first_frame_override) else planned_first
+        first = planned_first if planned_first is not None else (first_frame_override if torch.is_tensor(first_frame_override) else None)
         use_bridge = bool(chunk.get("uses_bridge_first_frame"))
         if first is None and use_bridge and torch.is_tensor(bridge_frame):
             first = bridge_frame[:1]
@@ -1292,7 +2167,7 @@ class IAMCCS_MiniMaxH3Backend:
                 f"Bridge last-to-first mancante per il chunk {int(segment_index) + 1}. "
                 "Avvia la coda dal segmento 0 o collega bridge_frame."
             )
-        last = last_frame_override if torch.is_tensor(last_frame_override) else planned_last
+        last = planned_last if planned_last is not None else (last_frame_override if torch.is_tensor(last_frame_override) else None)
 
         audio_slice = _slice_audio(
             driven_audio,
@@ -1528,11 +2403,22 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
                 "trim_head_frames": ("INT", {"forceInput": True}),
             },
             "optional": {
+                "bridge_images": ("IMAGE",),
+                "resolved_render_id": ("STRING", {"forceInput": True}),
                 "filename_prefix": ("STRING", {"default": "IAMCCS/MiniMaxH3/segment"}),
                 "merge_segments": ("BOOLEAN", {"default": True}),
                 "keep_segments": ("BOOLEAN", {"default": True}),
                 "render_id": ("STRING", {"default": "minimax_h3_render"}),
+                # The designated terminal checkpoint owns continuation. This
+                # is explicit because a graph can contain both a native-master
+                # checkpoint and a final-delivery checkpoint.
+                "queue_next_segment": ("BOOLEAN", {"default": True}),
+                "stage_label": ("STRING", {"default": "native"}),
+                "sampled_latent": ("LATENT",),
+                "motion_context": ("IAMCCS_H3_MOTION_CONTEXT",),
+                "motion_state": ("IAMCCS_H3_MOTION_CONTEXT",),
             },
+            "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "STRING", "STRING")
@@ -1555,10 +2441,20 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
         total_segments,
         fps,
         trim_head_frames,
+        bridge_images=None,
+        resolved_render_id="",
         filename_prefix="IAMCCS/MiniMaxH3/segment",
         merge_segments=True,
         keep_segments=True,
         render_id="minimax_h3_render",
+        queue_next_segment=True,
+        stage_label="native",
+        sampled_latent=None,
+        motion_context=None,
+        motion_state=None,
+        prompt=None,
+        unique_id=None,
+        extra_pnginfo=None,
     ):
         if not torch.is_tensor(images) or images.ndim != 4 or int(images.shape[0]) < 1:
             raise ValueError("MiniMax H3 native checkpoint expects a non-empty IMAGE frame batch")
@@ -1573,47 +2469,158 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
 
         output_folder, base_name = _output_location(filename_prefix)
         requested_render_id = _safe_name(str(render_id or "").strip(), "minimax_h3_render")
-        active_render_id = (
-            _next_numbered_render_id(output_folder, base_name, requested_render_id)
-            if current_segment == 0
-            else requested_render_id
-        )
+        safe_stage_label = _safe_name(str(stage_label or "native").strip(), "native")
+        locked_render_id = str(resolved_render_id or "").strip()
+        if locked_render_id:
+            active_render_id = _safe_name(locked_render_id, requested_render_id)
+        else:
+            active_render_id = (
+                _next_numbered_render_id(output_folder, base_name, requested_render_id)
+                if current_segment == 0
+                else requested_render_id
+            )
 
         trim_count = max(0, int(trim_head_frames or 0))
+        overlap_stitch = trim_count > 1
         images_to_save = images
         audio_to_save = audio
-        if trim_count and int(images.shape[0]) > trim_count:
+        if trim_count == 1 and int(images_to_save.shape[0]) > trim_count:
             images_to_save = images[trim_count:, ...]
             audio_to_save = _trim_audio_frames(audio, trim_count, fps)
 
-        segment_name = f"{base_name}_{active_render_id}_native_seg_{current_segment + 1:04d}.mp4"
+        segment_name = f"{base_name}_{active_render_id}_{safe_stage_label}_seg_{current_segment + 1:04d}.mp4"
         segment_path = output_folder / segment_name
         _require_new_output_path(segment_path)
         _encode_images(images_to_save, audio_to_save, fps, segment_path)
+        audio_join_policy = "trim_silent_tail" if bool(audio.get("iamccs_flf_locked_audio_handles", False)) else "crossfade"
+        _write_segment_metadata(segment_path, int(images_to_save.shape[0]), fps, audio_join_policy)
 
-        messages = [f"Native checkpoint saved: {segment_name}"]
+        bridge_source = bridge_images if torch.is_tensor(bridge_images) else images
+        if torch.is_tensor(bridge_source) and int(bridge_source.shape[0]) > 0:
+            bridge_path = _bridge_path(active_render_id)
+            _save_frame(bridge_path, bridge_source[-1])
+            LOG.info("MiniMax H3 last-frame bridge salvato in %s", bridge_path)
+
+        # New Shotboard-owned continuity writes its config into the atomic
+        # motion state.  The direct socket remains accepted for older graphs,
+        # but no external helper node is required by newly saved workflows.
+        effective_motion_context = motion_context
+        if not isinstance(effective_motion_context, dict) and isinstance(motion_state, dict):
+            candidate = motion_state.get("config")
+            if isinstance(candidate, dict):
+                effective_motion_context = candidate
+        motion_saved = False
+        if isinstance(effective_motion_context, dict) and bool(effective_motion_context.get("enabled")):
+            try:
+                from .iamccs_minimax_h3_continuity import save_reference_media
+                motion_saved = save_reference_media(
+                    active_render_id,
+                    current_segment,
+                    images,
+                    audio,
+                )
+                LOG.info(
+                    "MiniMax H3 optional reference carry-over cache | render=%s segment=%d saved=%s",
+                    active_render_id,
+                    current_segment + 1,
+                    motion_saved,
+                )
+            except Exception as exc:
+                LOG.warning("MiniMax H3 reference carry-over cache save skipped: %s", exc)
+
+        messages = [f"{safe_stage_label.upper()} checkpoint saved: {segment_name}"]
         preview_path = segment_path
         if current_segment + 1 >= total_segments and bool(merge_segments):
             segment_paths = [
-                output_folder / f"{base_name}_{active_render_id}_native_seg_{index + 1:04d}.mp4"
+                output_folder / f"{base_name}_{active_render_id}_{safe_stage_label}_seg_{index + 1:04d}.mp4"
                 for index in range(total_segments)
             ]
-            final_name = f"{base_name}_{active_render_id}_native_full.mp4"
+            final_name = f"{base_name}_{active_render_id}_{safe_stage_label}_full.mp4"
             final_path = output_folder / final_name
             _require_new_output_path(final_path)
-            _concat_videos(segment_paths, final_path)
+            if overlap_stitch:
+                _concat_videos_overlap(segment_paths, final_path, trim_count, fps)
+            else:
+                _concat_videos(segment_paths, final_path)
             preview_path = final_path
-            messages.append(f"Native full video saved: {final_name}")
+            messages.append(f"{safe_stage_label.upper()} full video saved: {final_name}")
             if not bool(keep_segments):
                 for path in segment_paths:
                     path.unlink(missing_ok=True)
+                    _segment_meta_path(path).unlink(missing_ok=True)
+
+        next_segment = current_segment + 1
+        should_queue_next = bool(queue_next_segment) and next_segment < total_segments
+        if should_queue_next:
+            live_extra = None
+            live_outputs = None
+            live_sensitive = None
+            base_prompt = prompt
+            try:
+                live_prompt, live_extra, live_outputs, live_sensitive = _current_prompt()
+                if live_prompt is not None:
+                    base_prompt = live_prompt
+            except Exception:
+                pass
+            if base_prompt is None:
+                raise RuntimeError("Prompt ComfyUI corrente non disponibile per accodare il prossimo segmento")
+
+            prompt_copy = copy.deepcopy({str(key): value for key, value in base_prompt.items()})
+            updated_segment_nodes = 0
+            checkpoint_updated = False
+            h3_segment_nodes = {
+                "IAMCCS_MiniMaxH3AtomicModelRouter",
+                "IAMCCS_MiniMaxH3AtomicConditioningBackend",
+                "IAMCCS_MiniMaxH3DirectorFLFParityModelRouter",
+                "IAMCCS_MiniMaxH3DirectorFLFParityConditioning",
+            }
+            for node_id, node in prompt_copy.items():
+                inputs = node.setdefault("inputs", {})
+                # Workflow widgets may be omitted from a serialized runtime
+                # prompt when they still hold their default value. The H3
+                # queue must nevertheless advance both controlling nodes.
+                if "segment_index" in inputs or node.get("class_type") in h3_segment_nodes:
+                    inputs["segment_index"] = next_segment
+                    updated_segment_nodes += 1
+
+                is_current_checkpoint = unique_id is not None and node_id == str(unique_id)
+                if is_current_checkpoint:
+                    inputs["render_id"] = active_render_id
+                    checkpoint_updated = True
+                elif "render_id" in inputs and not isinstance(inputs.get("render_id"), list):
+                    inputs["render_id"] = active_render_id
+                if node.get("class_type") in {
+                    "IAMCCS_MiniMaxH3AtomicConditioningBackend",
+                }:
+                    # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+                    # The queued FLF chunk resolves its predecessor bridge by
+                    # stable render id without creating a graph cycle.
+                    inputs["render_id"] = active_render_id
+
+            if updated_segment_nodes == 0:
+                raise ValueError("Il checkpoint MiniMax H3 non trova nessun router o conditioning node H3 da avanzare")
+            if not checkpoint_updated:
+                raise ValueError("Il checkpoint MiniMax H3 non riesce ad aggiornare il proprio render_id")
+
+            # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+            LOG.warning(
+                "MiniMax H3 queue-next | render=%s | current=%d | next=%d | controlling_nodes=%d | checkpoint_updated=%s",
+                active_render_id, current_segment, next_segment, updated_segment_nodes, checkpoint_updated,
+            )
+            _enqueue(prompt_copy, extra_data=live_extra, outputs=live_outputs, sensitive=live_sensitive)
+            messages.append(f"Queued native segment {next_segment + 1}/{total_segments} before upscale")
 
         LOG.info(
-            "MiniMax H3 native checkpoint complete | render=%s | segment=%d/%d | fps=%d",
+            "MiniMax H3 %s checkpoint complete | render=%s | segment=%d/%d | fps=%d | join=%s:%df | motion_context=%s | queued_next=%s",
+            safe_stage_label,
             active_render_id,
             current_segment + 1,
             total_segments,
             fps,
+            "overlap_blend" if overlap_stitch else ("keyframe_cut" if trim_count == 1 else "cut"),
+            trim_count,
+            "saved" if motion_saved else "off",
+            should_queue_next,
         )
         subfolder = os.path.relpath(
             preview_path.parent,
@@ -1633,6 +2640,176 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
             },
             "result": (images, audio, active_render_id, report),
         }
+
+
+class IAMCCS_MiniMaxH3NativeMasterLoad:
+    """Expose the completed native movie only after the last H3 loop pass.
+
+    On intermediate passes this is a cheap pass-through used only to expose
+    ``master_ready=False``.  On the final pass it loads the already stitched
+    native movie, so downstream LTX/Wan sees one programme rather than the
+    last generated shot or an interleaved H3/upscale sequence.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "current_frames": ("IMAGE",),
+                "current_audio": ("AUDIO",),
+                "resolved_render_id": ("STRING", {"forceInput": True}),
+                "current_segment": ("INT", {"forceInput": True}),
+                "total_segments": ("INT", {"forceInput": True}),
+                "fps": ("INT", {"forceInput": True}),
+            },
+            "optional": {
+                "filename_prefix": ("STRING", {"default": "IAMCCS/MiniMaxH3/segment"}),
+                "stage_label": ("STRING", {"default": "native"}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "AUDIO", "BOOLEAN", "STRING", "STRING", "STRING")
+    RETURN_NAMES = (
+        "master_frames",
+        "master_audio",
+        "master_ready",
+        "master_path",
+        "resolved_render_id",
+        "report",
+    )
+    FUNCTION = "load"
+    CATEGORY = CATEGORY
+
+    @classmethod
+    def IS_CHANGED(cls, *args, **kwargs):
+        return float("nan")
+
+    def load(
+        self,
+        current_frames,
+        current_audio,
+        resolved_render_id,
+        current_segment,
+        total_segments,
+        fps,
+        filename_prefix="IAMCCS/MiniMaxH3/segment",
+        stage_label="native",
+    ):
+        current_segment = int(current_segment)
+        total_segments = max(1, int(total_segments))
+        active_render_id = _safe_name(str(resolved_render_id or "").strip(), "minimax_h3_render")
+        if current_segment + 1 < total_segments:
+            report = (
+                f"Native master waiting | completed={current_segment + 1}/{total_segments} | "
+                "upscale branch locked"
+            )
+            return current_frames, current_audio, False, "", active_render_id, report
+
+        output_folder, base_name = _output_location(filename_prefix)
+        safe_stage = _safe_name(str(stage_label or "native").strip(), "native")
+        master_path = output_folder / f"{base_name}_{active_render_id}_{safe_stage}_full.mp4"
+        master_frames, master_audio = _decode_video_master(
+            master_path,
+            fps=max(1, int(fps)),
+            fallback_audio=current_audio,
+        )
+        report = (
+            f"Native master ready | segments={total_segments} | frames={int(master_frames.shape[0])} | "
+            f"path={master_path.name} | one-film upscale unlocked"
+        )
+        return master_frames, master_audio, True, str(master_path), active_render_id, report
+
+
+class IAMCCS_MiniMaxH3FinalMasterSave:
+    """Save exactly one delivery movie after native concat and optional upscale."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "master_ready": ("BOOLEAN", {"forceInput": True}),
+                "master_path": ("STRING", {"forceInput": True}),
+                "resolved_render_id": ("STRING", {"forceInput": True}),
+                "fps": ("INT", {"forceInput": True}),
+            },
+            "optional": {
+                "images": ("IMAGE", {"lazy": True}),
+                "audio": ("AUDIO", {"lazy": True}),
+                "filename_prefix": ("STRING", {"default": "IAMCCS/MiniMaxH3/final"}),
+                "stage_label": ("STRING", {"default": "delivery"}),
+            },
+        }
+
+    RETURN_TYPES = ()
+    FUNCTION = "save"
+    OUTPUT_NODE = True
+    CATEGORY = CATEGORY
+
+    @classmethod
+    def IS_CHANGED(cls, *args, **kwargs):
+        return float("nan")
+
+    def check_lazy_status(
+        self,
+        master_ready,
+        master_path,
+        resolved_render_id,
+        fps,
+        images=None,
+        audio=None,
+        **kwargs,
+    ):
+        if not bool(master_ready):
+            return []
+        missing = []
+        if images is None:
+            missing.append("images")
+        if audio is None:
+            missing.append("audio")
+        return missing
+
+    def save(
+        self,
+        master_ready,
+        master_path,
+        resolved_render_id,
+        fps,
+        images=None,
+        audio=None,
+        filename_prefix="IAMCCS/MiniMaxH3/final",
+        stage_label="delivery",
+    ):
+        if not bool(master_ready):
+            return {
+                "ui": {
+                    "text": [
+                        "MiniMax H3 native segment preview saved; waiting for the remaining segments before upscale"
+                    ]
+                }
+            }
+        if not torch.is_tensor(images) or images.ndim != 4 or int(images.shape[0]) < 1:
+            raise ValueError("Final MiniMax H3 master save requires delivery IMAGE frames")
+        if not isinstance(audio, dict) or not torch.is_tensor(audio.get("waveform")):
+            raise ValueError("Final MiniMax H3 master save requires the concatenated AUDIO master")
+
+        output_folder, base_name = _output_location(filename_prefix)
+        active_render_id = _safe_name(str(resolved_render_id or "").strip(), "minimax_h3_render")
+        safe_stage = _safe_name(str(stage_label or "delivery").strip(), "delivery")
+        output_path = output_folder / f"{base_name}_{active_render_id}_{safe_stage}_full.mp4"
+        _require_new_output_path(output_path)
+        _encode_images(images, audio, max(1, int(fps)), output_path)
+        subfolder = os.path.relpath(output_path.parent, folder_paths.get_output_directory()).replace("\\", "/")
+        preview = {
+            "filename": output_path.name,
+            "subfolder": "" if subfolder == "." else subfolder,
+            "type": "output",
+        }
+        message = (
+            f"Final MiniMax H3 film saved after native concat and one-film upscale: {output_path.name} | "
+            f"frames={int(images.shape[0])} | native_master={Path(master_path).name}"
+        )
+        LOG.info(message)
+        return {"ui": {"text": [message], "images": [preview], "animated": (True,)}}
 
 
 class IAMCCS_MiniMaxH3SegmentQueueLoop:
@@ -1721,11 +2898,14 @@ class IAMCCS_MiniMaxH3SegmentQueueLoop:
         images_to_save = images
         audio_to_save = audio
         trim_count = max(0, int(trim_head_frames or 0))
-        if trim_count and torch.is_tensor(images) and int(images.shape[0]) > trim_count:
+        overlap_stitch = trim_count > 1
+        if trim_count == 1 and torch.is_tensor(images) and int(images.shape[0]) > trim_count:
             images_to_save = images[trim_count:, ...]
             audio_to_save = _trim_audio_frames(audio, trim_count, H3_FPS)
 
         if video is not None:
+            if overlap_stitch:
+                raise ValueError("Il concat H3 con overlap richiede l'input images, non il VIDEO opaco")
             try:
                 from comfy_api.latest import Types
 
@@ -1734,6 +2914,7 @@ class IAMCCS_MiniMaxH3SegmentQueueLoop:
                 raise RuntimeError(f"Salvataggio VIDEO MiniMax H3 fallito: {exc}") from exc
         elif torch.is_tensor(images_to_save):
             _encode_images(images_to_save, audio_to_save, H3_FPS, segment_path)
+            _write_segment_metadata(segment_path, int(images_to_save.shape[0]), H3_FPS)
         else:
             raise ValueError("Collega video oppure images al Segment Queue Loop")
 
@@ -1759,13 +2940,17 @@ class IAMCCS_MiniMaxH3SegmentQueueLoop:
                 final_name = f"{active_base_name}_{active_render_id}_full.mp4"
                 final_path = output_folder / final_name
                 _require_new_output_path(final_path)
-                _concat_videos(segment_paths, final_path)
+                if overlap_stitch:
+                    _concat_videos_overlap(segment_paths, final_path, trim_count, H3_FPS)
+                else:
+                    _concat_videos(segment_paths, final_path)
                 messages.append(f"Video finale concatenato: {final_name}")
                 subfolder = os.path.relpath(output_folder, folder_paths.get_output_directory()).replace("\\", "/")
                 preview = {"filename": final_name, "subfolder": "" if subfolder == "." else subfolder, "type": "output"}
                 if not bool(keep_segments):
                     for path in segment_paths:
                         path.unlink(missing_ok=True)
+                        _segment_meta_path(path).unlink(missing_ok=True)
             ui = {"text": messages}
             if preview is not None:
                 ui.update({"images": [preview], "animated": (True,)})
@@ -1942,9 +3127,83 @@ class IAMCCS_MiniMaxH3UpscaleRouter:
         return native_frames, audio, "Upscale router: native H3"
 
 
+class IAMCCS_ShotboardH3Settings:
+    """Named MiniMax H3 settings exported through one CineLinX output."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        # Reuse the exact contracts exposed by the Shotboard.  This keeps
+        # future option-list changes (samplers and installed LoRAs in
+        # particular) identical on both nodes rather than maintaining a
+        # fragile second positional schema.
+        planner_inputs = IAMCCS_MiniMaxH3ShotPlanner.INPUT_TYPES().get("required", {})
+        grouped = []
+        known = set()
+        for group_name, names in _H3_SETTINGS_NODE_GROUPS:
+            for name in names:
+                if name in planner_inputs and name not in _H3_SETTINGS_NODE_EXCLUDED_FIELDS:
+                    grouped.append((group_name, name))
+                    known.add(name)
+        for name in planner_inputs:
+            if name not in known and name not in _H3_SETTINGS_NODE_EXCLUDED_FIELDS:
+                grouped.append(("08 · ADVANCED COMPATIBILITY", name))
+
+        required = {}
+        for group_name, name in grouped:
+            source_spec = copy.deepcopy(planner_inputs[name])
+            value_type = source_spec[0]
+            source_options = source_spec[1] if len(source_spec) > 1 else {}
+            options = dict(source_options) if isinstance(source_options, dict) else {}
+            # This node is a persisted configuration source, not a sampler;
+            # never create a second auto-seed control widget beside `seed`.
+            options.pop("control_after_generate", None)
+            options["display_name"] = f"{group_name} · {name.replace('_', ' ')}"
+            required[name] = (value_type, options)
+        return {"required": required}
+
+    RETURN_TYPES = (SUPERNODE_LINX_TYPE,)
+    RETURN_NAMES = ("cine_linx",)
+    FUNCTION = "export"
+    CATEGORY = f"{CATEGORY}/Settings"
+
+    def export(self, **kwargs):
+        settings = {
+            str(name): copy.deepcopy(value)
+            for name, value in kwargs.items()
+            if name not in _H3_SETTINGS_NODE_EXCLUDED_FIELDS
+            and name not in _H3_SETTINGS_CINELINX_OMITTED_FIELDS
+        }
+        settings_payload = {
+            "schema": _H3_SETTINGS_LINX_SCHEMA,
+            "schema_version": 1,
+            "settings": settings,
+        }
+        report = f"MiniMax H3 Settings CineLinX | {len(settings)} named settings"
+        cine_linx = build_stage_linx_payload(
+            None,
+            stage_name="MiniMax H3 Settings",
+            stage_kind="minimax_h3_settings",
+            payload={"iamccs_minimax_h3_settings": settings_payload},
+            report=report,
+            outputs={"iamccs_minimax_h3_settings": settings_payload},
+            resources={
+                "iamccs_minimax_h3_settings": settings_payload,
+                "cine_payload": {"iamccs_minimax_h3_settings": settings_payload},
+            },
+            policies={
+                "minimax_h3_settings_source": "IAMCCS_ShotboardH3Settings",
+                "minimax_h3_settings_priority": "external_cine_linx_over_local_snapshot",
+            },
+            downstream_stages=("MiniMax H3 Shotboard",),
+        )
+        cine_linx["mode"] = "minimax_h3_settings"
+        return (cine_linx,)
+
+
 NODE_CLASS_MAPPINGS = {
     "IAMCCS_MiniMaxH3GGUFLoader": IAMCCS_MiniMaxH3GGUFLoader,
     "IAMCCS_MiniMaxH3ShotPlanner": IAMCCS_MiniMaxH3ShotPlanner,
+    "IAMCCS_ShotboardH3Settings": IAMCCS_ShotboardH3Settings,
     "IAMCCS_MiniMaxH3PromptRelayMap": IAMCCS_MiniMaxH3PromptRelayMap,
     "IAMCCS_MiniMaxH3LumosPrompt": IAMCCS_MiniMaxH3LumosPrompt,
     "IAMCCS_MiniMaxH3PlanFrames": IAMCCS_MiniMaxH3PlanFrames,
@@ -1952,6 +3211,8 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_MiniMaxH3RenderBackend": IAMCCS_MiniMaxH3RenderBackend,
     "IAMCCS_MiniMaxH3BridgeLoad": IAMCCS_MiniMaxH3BridgeLoad,
     "IAMCCS_MiniMaxH3NativeCheckpointSave": IAMCCS_MiniMaxH3NativeCheckpointSave,
+    "IAMCCS_MiniMaxH3NativeMasterLoad": IAMCCS_MiniMaxH3NativeMasterLoad,
+    "IAMCCS_MiniMaxH3FinalMasterSave": IAMCCS_MiniMaxH3FinalMasterSave,
     "IAMCCS_MiniMaxH3SegmentQueueLoop": IAMCCS_MiniMaxH3SegmentQueueLoop,
     "IAMCCS_MiniMaxH3AudioConcat": IAMCCS_MiniMaxH3AudioConcat,
     "IAMCCS_MiniMaxH3AudioPolicy": IAMCCS_MiniMaxH3AudioPolicy,
@@ -1962,6 +3223,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_MiniMaxH3GGUFLoader": "MiniMax H3 GGUF Loader + Spectrum",
     "IAMCCS_MiniMaxH3ShotPlanner": "MiniMax H3 Shotboard",
+    "IAMCCS_ShotboardH3Settings": "MiniMax H3 Shotboard Settings → CineLinX",
     "IAMCCS_MiniMaxH3PromptRelayMap": "MiniMax H3 Prompt Map",
     "IAMCCS_MiniMaxH3LumosPrompt": "MiniMax H3 Lumos Prompt Enhancer",
     "IAMCCS_MiniMaxH3PlanFrames": "MiniMax H3 Plan Frames",
@@ -1969,6 +3231,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_MiniMaxH3RenderBackend": "MiniMax H3 Render Backend (Sampler + AV Decode)",
     "IAMCCS_MiniMaxH3BridgeLoad": "MiniMax H3 Last-Frame Bridge",
     "IAMCCS_MiniMaxH3NativeCheckpointSave": "MiniMax H3 Native Checkpoint Save",
+    "IAMCCS_MiniMaxH3NativeMasterLoad": "MiniMax H3 Native Master -> One-Film Upscale",
+    "IAMCCS_MiniMaxH3FinalMasterSave": "MiniMax H3 Final Master Save",
     "IAMCCS_MiniMaxH3SegmentQueueLoop": "MiniMax H3 Segment Queue + Concat",
     "IAMCCS_MiniMaxH3AudioConcat": "MiniMax H3 Audio Chunk Concat",
     "IAMCCS_MiniMaxH3AudioPolicy": "MiniMax H3 Audio Policy",
@@ -1983,12 +3247,48 @@ from .iamccs_minimax_h3_atomic_backend import (
     NODE_CLASS_MAPPINGS as _ATOMIC_NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as _ATOMIC_NODE_DISPLAY_NAME_MAPPINGS,
 )
+from .iamccs_minimax_h3_continuity import (
+    NODE_CLASS_MAPPINGS as _CONTINUITY_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _CONTINUITY_NODE_DISPLAY_NAME_MAPPINGS,
+)
 from .iamccs_minimax_h3_cine_info import (
     NODE_CLASS_MAPPINGS as _CINE_INFO_H3_NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as _CINE_INFO_H3_NODE_DISPLAY_NAME_MAPPINGS,
 )
+from .iamccs_minimax_h3_audio_drive import (
+    NODE_CLASS_MAPPINGS as _AUDIO_DRIVE_R21_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _AUDIO_DRIVE_R21_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_minimax_h3_audio_timeline import (
+    NODE_CLASS_MAPPINGS as _AUDIO_TIMELINE_R21_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _AUDIO_TIMELINE_R21_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_cine_h3_bus import (
+    NODE_CLASS_MAPPINGS as _CINE_H3_AUDIO_BUS_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _CINE_H3_AUDIO_BUS_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_minimax_h3_v2v_backend import (
+    NODE_CLASS_MAPPINGS as _V2V_R22_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _V2V_R22_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_minimax_h3_face_detailer import (
+    NODE_CLASS_MAPPINGS as _FACE_DETAILER_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _FACE_DETAILER_NODE_DISPLAY_NAME_MAPPINGS,
+)
 
 NODE_CLASS_MAPPINGS.update(_ATOMIC_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_ATOMIC_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_CONTINUITY_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_CONTINUITY_NODE_DISPLAY_NAME_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(_CINE_INFO_H3_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_CINE_INFO_H3_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_AUDIO_DRIVE_R21_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_AUDIO_DRIVE_R21_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_AUDIO_TIMELINE_R21_NODE_CLASS_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_FACE_DETAILER_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_AUDIO_TIMELINE_R21_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_FACE_DETAILER_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_CINE_H3_AUDIO_BUS_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_CINE_H3_AUDIO_BUS_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_V2V_R22_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_V2V_R22_NODE_DISPLAY_NAME_MAPPINGS)

@@ -56,12 +56,12 @@ function hideWidget(item) {
 function defaultData() {
   return {
     schema: "iamccs.dialogue_scene",
-    schema_version: 3,
+    schema_version: 4,
     global_prompt: "cinematic field and reverse-field dialogue, hard cut coverage, one dominant speaking face per shot, visible mouth movement, natural audio-driven performance, silent listener reaction, stable identities, coherent eyelines",
     settings: { editor_profile: "dialogue", engine_profile: "tts_audio_suite_chatterbox", output_mode: "speaker_stems_for_overlap", audio_lane_mode: "speaker_stems_timeline", tts_generation_mode: "double_stem_ab", speaker_stems_zero_start: false, speaker_stem_srt_local_zero: false, inline_edit_mode: "metadata_only", emotion_routing: "clean_metadata", default_gap_seconds: 0.12, text_theme: "light_boxes", font_zoom: 1 },
     speakers: [
-      { id: "A", name: "Man A", voice: "speaker_a_low_tense", reference_text: "Keep your voice low. We do not know who is listening.", language: "en", voice_design: { gender: "male", age: "adult", pitch: "low", style: "tense", accent: "", dialect: "", instruct: "male, adult, low pitch, tense" } },
-      { id: "B", name: "Man B", voice: "speaker_b_controlled_whisper", reference_text: "Good. Now we finally have something worth protecting.", language: "en", voice_design: { gender: "male", age: "adult", pitch: "medium", style: "controlled whisper", accent: "", dialect: "", instruct: "male, adult, medium pitch, controlled whisper" } },
+      { id: "A", name: "Man A", voice: "speaker_a_low_tense", reference_text: "Keep your voice low. We do not know who is listening.", language: "en", subject_tag: "<Subject 1>", speaker_tag: "(S1)", voice_design: { gender: "male", age: "adult", pitch: "low", style: "tense", accent: "", dialect: "", instruct: "male, adult, low pitch, tense" } },
+      { id: "B", name: "Man B", voice: "speaker_b_controlled_whisper", reference_text: "Good. Now we finally have something worth protecting.", language: "en", subject_tag: "<Subject 2>", speaker_tag: "(S2)", voice_design: { gender: "male", age: "adult", pitch: "medium", style: "controlled whisper", accent: "", dialect: "", instruct: "male, adult, medium pitch, controlled whisper" } },
     ],
     lines: [
       { id: "line_001", speaker: "A", text: "You said the signal was dead. Then why is that receiver still blinking?", emotion: "tense", style: "low", paralinguistic: "Breathing", overlap_after: 0.18, ref: 1, track: 0, local_prompt: "hard cut, Man A close-up, Man A speaks clearly, visible mouth movement, tense controlled delivery, Man B listens quietly" },
@@ -128,6 +128,81 @@ function voiceDesignText(speaker) {
   if (explicit) return explicit;
   return ["gender", "age", "pitch", "style", "accent", "dialect"].map((key) => String(design[key] || "").trim()).filter(Boolean).join(", ");
 }
+function minimaxSubjectTag(value, index = 0) {
+  const match = String(value || "").trim().match(/^<Subject\s+([1-9][0-9]*)>$/i);
+  return match ? `<Subject ${match[1]}>` : `<Subject ${index + 1}>`;
+}
+function minimaxSpeakerTag(value, index = 0) {
+  const match = String(value || "").trim().match(/^\(S([1-9][0-9]*)\)$/i);
+  return match ? `(S${match[1]})` : `(S${index + 1})`;
+}
+function minimaxLanguageLabel(value) {
+  const raw = String(value || "").trim().replace(/^\[|\]$/g, "");
+  const aliases = { en: "English", it: "Italian", es: "Spanish", fr: "French", de: "German", pt: "Portuguese", ja: "Japanese", ko: "Korean", zh: "Chinese" };
+  return aliases[raw.toLowerCase()] || raw || "Language";
+}
+function minimaxDialogueText(value) {
+  const raw = String(value || "");
+  const hadWrapper = /<\/?d(?:\s+[^>]*)?>/i.test(raw);
+  let text = raw.replace(/<\/?d(?:\s+[^>]*)?>/gi, " ");
+  if (hadWrapper) text = text.replace(/^\s*\[[^\]]+\]\s*/, "");
+  text = text.replace(/^\s*<Subject\s+[1-9][0-9]*>\s*/i, "");
+  text = text.replace(/^\s*\(S[1-9][0-9]*\)\s*:?\s*/i, "");
+  if (hadWrapper) text = text.replace(/^\s*\[[^\]]+\]\s*/, "");
+  return text.replace(/\s+/g, " ").trim();
+}
+function stripMiniMaxPromptTagsForSpeech(value) {
+  return minimaxDialogueText(value)
+    .replace(/<Subject\s+[1-9][0-9]*>/gi, " ")
+    .replace(/\(S[1-9][0-9]*\)\s*:?/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+function buildMinimaxDialogueContract(data) {
+  const speakers = Array.isArray(data?.speakers) ? data.speakers : [];
+  const lines = Array.isArray(data?.lines) ? data.lines : [];
+  const speakerRows = speakers.map((speaker, index) => {
+    const subjectTag = minimaxSubjectTag(speaker?.subject_tag, index);
+    const speakerTag = minimaxSpeakerTag(speaker?.speaker_tag, index);
+    const name = String(speaker?.name || speaker?.id || `Speaker ${index + 1}`).replace(/\s+/g, " ").trim();
+    return `${subjectTag} ${speakerTag}: ${name}`;
+  });
+  const dialogueRows = [];
+  const performanceRows = [];
+  const lineContracts = [];
+  lines.forEach((line, index) => {
+    const speakerIndex = Math.max(0, speakers.findIndex((speaker) => {
+      const token = String(line?.speaker || line?.speaker_name || "").toLowerCase();
+      return [speaker?.id, speaker?.name].some((value) => String(value || "").toLowerCase() === token);
+    }));
+    const speaker = speakers[speakerIndex] || {};
+    const subjectTag = minimaxSubjectTag(speaker.subject_tag, speakerIndex);
+    const speakerTag = minimaxSpeakerTag(speaker.speaker_tag, speakerIndex);
+    const language = minimaxLanguageLabel(line?.language || speaker.language);
+    const spoken = minimaxDialogueText(line?.spoken_text || line?.text);
+    if (!spoken) return;
+    const dialogueTag = `${subjectTag} ${speakerTag}: <d>[${language}] ${spoken}</d>`;
+    const localPrompt = String(line?.local_prompt || line?.shot_prompt || "").replace(/\s+/g, " ").trim();
+    dialogueRows.push(dialogueTag);
+    if (localPrompt) performanceRows.push(`${subjectTag} ${speakerTag}: ${localPrompt}`);
+    lineContracts.push({ id: String(line?.id || `line_${String(index + 1).padStart(3, "0")}`), subject_tag: subjectTag, speaker_tag: speakerTag, language, dialogue_tag: dialogueTag, local_prompt: localPrompt });
+  });
+  const sections = [];
+  const globalPrompt = String(data?.global_prompt || "").trim();
+  if (globalPrompt) sections.push("[SCENE DIRECTION]", globalPrompt);
+  if (speakerRows.length) sections.push("[SUBJECT / SPEAKER MAP]", speakerRows.join("\n"));
+  if (dialogueRows.length) sections.push("[DIALOGUE]", dialogueRows.join("\n"));
+  if (performanceRows.length) sections.push("[VISIBLE PERFORMANCE / SHOT RELAY]", performanceRows.join("\n"));
+  return {
+    schema: "iamccs.minimax_h3.dialogue_contract",
+    schema_version: 1,
+    subject_speaker_map: speakerRows,
+    dialogue_lines: dialogueRows,
+    performance_lines: performanceRows,
+    lines: lineContracts,
+    prompt: sections.join("\n\n").trim(),
+  };
+}
 function ensureDialogueDefaults(data) {
   const base = defaultData();
   data = data && typeof data === "object" ? data : base;
@@ -143,6 +218,9 @@ function ensureDialogueDefaults(data) {
     const next = { ...speaker };
     next.id = String(next.id || String.fromCharCode(65 + index));
     next.name = String(next.name || next.id);
+    next.subject_tag = minimaxSubjectTag(next.subject_tag, index);
+    next.speaker_tag = minimaxSpeakerTag(next.speaker_tag, index);
+    next.language = String(next.language || "");
     next.voice_design = { gender: "", age: "", pitch: "", style: "", accent: "", dialect: "", instruct: "", ...(next.voice_design || {}) };
     next.voice_design.instruct = voiceDesignText(next);
     return next;
@@ -168,7 +246,7 @@ function outputMode(mode) { return mode === "tts_master_unico" ? "flatten_for_si
 function writeData(node, data) {
   data = ensureDialogueDefaults(data);
   data.schema = "iamccs.dialogue_scene";
-  data.schema_version = 3;
+  data.schema_version = 4;
   data.settings = data.settings || {};
   data.settings.audio_lane_mode = audioLaneMode(data);
   data.settings.tts_generation_mode = modeFromData(data);
@@ -228,7 +306,7 @@ function modelAwareTagToken(kind, value, mode) {
   return base;
 }
 function cleanDialogueText(value) {
-  return stripFormattingTokens(String(value || "")).replace(/\s+/g, " ").trim();
+  return stripMiniMaxPromptTagsForSpeech(stripFormattingTokens(String(value || "")));
 }
 function speakerIndex(line) {
   return String(line?.speaker || "A").toUpperCase().startsWith("B") ? 2 : 1;
@@ -1263,6 +1341,12 @@ function ensureStyle() {
   .iamccs-dte-card .iamccs-disclosure{background:rgba(0,0,0,.08)}.iamccs-dte-card .iamccs-disclosure > summary{color:#766242}
   .iamccs-line-delete{color:#ffb7b7!important;border-color:rgba(185,82,82,.55)!important;background:#321b1b!important}
   .iamccs-dte-generation{min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;padding:14px;background:#211f18;border:1px solid rgba(214,182,111,.26);border-radius:8px;box-shadow:0 1px 0 rgba(255,255,255,.04)}
+  .iamccs-minimax-contract{display:grid;gap:9px;padding:12px;border:1px solid rgba(86,180,169,.5);border-radius:7px;background:linear-gradient(145deg,#122522,#11191d);box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
+  .iamccs-minimax-contract-head{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#d9fff7;font-size:10px;font-weight:950;letter-spacing:.06em}.iamccs-minimax-contract-head span{color:#82c9bf;font-size:9px}
+  .iamccs-minimax-tag-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.iamccs-minimax-tag-grid button{height:auto;min-height:30px;padding:6px;font:900 9px/1.15 "Courier New",monospace;border-color:rgba(86,180,169,.46);color:#d9fff7;background:#17302d}
+  textarea.iamccs-minimax-preview{min-height:168px;max-height:320px;color:#d9fff7;background:#091210;border-color:#315f59;font-size:11px;line-height:1.45}
+  .iamccs-minimax-note{color:#9bb9b5;font-size:9px;font-weight:750;line-height:1.4}.iamccs-minimax-note strong{color:#efd092}
+  .iamccs-minimax-line-preview{padding:8px 9px;border:1px solid rgba(86,180,169,.3);border-radius:6px;background:rgba(16,45,41,.72);color:#cceee9;font:700 9px/1.4 "Courier New",monospace;white-space:pre-wrap;word-break:break-word}
   .iamccs-dte:not(.light) .iamccs-line-tags{background:rgba(109,141,183,.11);border-color:#303b4d}.iamccs-dte:not(.light) .iamccs-line-tag-row > span{color:#aebbd0}.iamccs-dte:not(.light) .iamccs-dte-card .iamccs-disclosure > summary{color:#c9d7ea}
   
   `;
@@ -1360,8 +1444,9 @@ function buildInjectionPayload(data, fps = 24) {
   }
   const durationFrames = Math.max(0, ...segments.map((s) => s.start + s.length), ...audioSegments.map((s) => s.start + s.length));
   const audioTrackCount = modeFromData(data) === "tts_master_unico" ? 1 : Math.max(1, data.speakers?.length || 2);
+  const minimaxContract = buildMinimaxDialogueContract(data);
   const audioBoard = { schema: "iamccs.audio_board_arranger", schema_version: 1, audioSegments, audioTrackCount, audioSyncMode: "timeline_audio", duration_seconds: durationFrames / fps, frame_rate: fps, masterAudioGain: 1, masterAudioNormalize: false, speakerStemsZeroStart: zeroStartStems, speakerStemSrtLocalZero: data.settings?.speaker_stem_srt_local_zero !== false, audioLaneMode: audioLaneMode(data), bridgeStatus: { source: "DialogueTagEditor UI Inject", pending_tts: true } };
-  const timeline = { schema: "iamccs.cine.filmmaker_timeline", schema_version: 2, global_prompt: data.global_prompt || "", prompt: data.global_prompt || "", promptrelay_enabled: true, use_custom_audio: false, audioSyncMode: "timeline_audio", duration_seconds: durationFrames / fps, frame_rate: fps, director_local_prompts: localPrompts.join(" | "), local_prompts: localPrompts.join(" | "), director_segment_lengths: lengths.join(","), segment_lengths: lengths.join(","), segments, audioSegments, audioTrackCount, dialogue: data };
+  const timeline = { schema: "iamccs.cine.filmmaker_timeline", schema_version: 2, global_prompt: data.global_prompt || "", prompt: data.global_prompt || "", promptrelay_enabled: true, use_custom_audio: false, audioSyncMode: "timeline_audio", duration_seconds: durationFrames / fps, frame_rate: fps, director_local_prompts: localPrompts.join(" | "), local_prompts: localPrompts.join(" | "), director_segment_lengths: lengths.join(","), segment_lengths: lengths.join(","), segments, audioSegments, audioTrackCount, dialogue: data, minimax_h3_dialogue: minimaxContract, minimax_h3_dialogue_prompt: minimaxContract.prompt };
   return { audioBoard, timeline };
 }
 function safeJsonParse(text, fallback = {}) {
@@ -1392,6 +1477,8 @@ function mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps = 24) {
   merged.prompt = String(data.global_prompt || "");
   merged.frame_rate = Math.max(1, Number(merged.frame_rate || fps || 24));
   merged.dialogue = data;
+  merged.minimax_h3_dialogue = buildMinimaxDialogueContract(data);
+  merged.minimax_h3_dialogue_prompt = merged.minimax_h3_dialogue.prompt;
 
   visualSegments.forEach((segment, index) => {
     const prompt = promptEntries[index];
@@ -1603,11 +1690,18 @@ function install(node, reason = "install") {
   let light = String(data.settings?.text_theme || "light_boxes") === "light_boxes";
   const root = document.createElement("div");
   root.className = "iamccs-dte";
+  let lastMiniMaxTarget = null;
+  let refreshMinimaxPreview = () => {};
+  root.addEventListener("focusin", (event) => {
+    const target = event.target;
+    if ((target instanceof HTMLTextAreaElement && !target.readOnly) || target?.isContentEditable) lastMiniMaxTarget = target;
+  });
   const save = () => {
     data.settings ||= {};
     data.settings.font_zoom = zoom;
     data.settings.text_theme = light ? "light_boxes" : "dark_boxes";
     writeData(node, data);
+    refreshMinimaxPreview();
   };
   const render = () => {
     root.replaceChildren();
@@ -1714,13 +1808,22 @@ function install(node, reason = "install") {
       const id = input(speaker.id || String.fromCharCode(65 + index));
       const name = input(speaker.name || speaker.id || "");
       const voice = input(speaker.voice || "", "voice alias/path");
+      const subjectTag = input(minimaxSubjectTag(speaker.subject_tag, index), "<Subject N>");
+      const speakerTag = input(minimaxSpeakerTag(speaker.speaker_tag, index), "(SN)");
+      const language = input(speaker.language || "", "Language or locale");
       const persistSpeaker = () => {
         speaker.name = name.value || speaker.id || String.fromCharCode(65 + index);
         speaker.voice = voice.value || "";
+        speaker.language = language.value || "";
+        speaker.subject_tag = minimaxSubjectTag(subjectTag.value, index);
+        speaker.speaker_tag = minimaxSpeakerTag(speakerTag.value, index);
         save();
       };
       name.oninput = persistSpeaker;
       voice.oninput = persistSpeaker;
+      language.oninput = persistSpeaker;
+      subjectTag.onchange = () => { persistSpeaker(); subjectTag.value = speaker.subject_tag; render(); };
+      speakerTag.onchange = () => { persistSpeaker(); speakerTag.value = speaker.speaker_tag; render(); };
       id.onchange = () => {
         const previousId = String(speaker.id || String.fromCharCode(65 + index));
         const nextId = String(id.value || String.fromCharCode(65 + index)).trim().toUpperCase();
@@ -1732,7 +1835,7 @@ function install(node, reason = "install") {
         scriptText = linesToText(data);
         render();
       };
-      card.append(fieldLabel("Speaker " + (index + 1)), id, name, voice, disclosure("Voice design", voiceDesignPanel(speaker, () => {
+      card.append(fieldLabel("Speaker " + (index + 1)), id, name, voice, fieldLabel("MiniMax identity", "prompt metadata"), subjectTag, speakerTag, language, disclosure("Voice design", voiceDesignPanel(speaker, () => {
         save();
         render();
       }), false, "OmniVoice"));
@@ -1807,6 +1910,50 @@ function install(node, reason = "install") {
     paintConvertButtons("");
     conversionPanel.append(fieldLabel("TTS convert", "write tags"), conversionGrid, ttsFormatStatus, fieldLabel("Add node", "registered"), ttsNodeSelect, nodeActions, conversionStatus);
     generation.append(disclosure("TTS setup", conversionPanel, true, "create rig"));
+
+    const minimaxPanel = document.createElement("div");
+    minimaxPanel.className = "iamccs-minimax-contract";
+    const minimaxHead = document.createElement("div");
+    minimaxHead.className = "iamccs-minimax-contract-head";
+    minimaxHead.innerHTML = "<strong>MINIMAX H3 DIALOGUE</strong><span>Prompter-compatible contract</span>";
+    const minimaxTagGrid = document.createElement("div");
+    minimaxTagGrid.className = "iamccs-minimax-tag-grid";
+    [
+      ["<Subject 1>", "<Subject 1>"],
+      ["(S1)", "(S1)"],
+      ["<d> dialogue", "<d>[Language] ...</d>"],
+    ].forEach(([label, token]) => {
+      const tagButton = button(label, "");
+      tagButton.title = "Insert into the last focused prompt field; if no prompt field is active, copy the tag.";
+      tagButton.onclick = async () => {
+        const connected = lastMiniMaxTarget && root.contains(lastMiniMaxTarget);
+        if (connected) insertAt(lastMiniMaxTarget, token);
+        else await copyTextToClipboard(token);
+      };
+      minimaxTagGrid.append(tagButton);
+    });
+    const minimaxPreview = textarea("", "MiniMax H3 dialogue prompt");
+    minimaxPreview.classList.add("iamccs-minimax-preview");
+    minimaxPreview.readOnly = true;
+    const minimaxCopy = button("Copy MiniMax Prompt", "gold");
+    const minimaxCopyStatus = document.createElement("div");
+    minimaxCopyStatus.className = "iamccs-minimax-note";
+    minimaxCopyStatus.innerHTML = "<strong>Metadata only.</strong> Subject, speaker and &lt;d&gt; tags never enter the TTS speech string. Keep speech clear of independent chunk handoff beats.";
+    refreshMinimaxPreview = () => {
+      const contract = buildMinimaxDialogueContract(data);
+      minimaxPreview.value = contract.prompt;
+      minimaxPreview.dataset.lineCount = String(contract.dialogue_lines.length);
+    };
+    minimaxCopy.onclick = async () => {
+      refreshMinimaxPreview();
+      const copied = await copyTextToClipboard(minimaxPreview.value);
+      minimaxCopyStatus.innerHTML = copied
+        ? "<strong>Copied.</strong> MiniMax prompt contract is ready for Prompter or Shotboard."
+        : "<strong>Copy failed.</strong> Select the preview text and copy manually.";
+    };
+    minimaxPanel.append(minimaxHead, minimaxTagGrid, minimaxPreview, minimaxCopy, minimaxCopyStatus);
+    refreshMinimaxPreview();
+    generation.append(disclosure("MiniMax H3 prompt", minimaxPanel, true, "subject + dialogue tags"));
 
     const center = document.createElement("div");
     center.className = "iamccs-dte-center";
@@ -2022,6 +2169,17 @@ function install(node, reason = "install") {
         promptBox.classList.add("iamccs-local");
         textBox.style.fontSize = Math.round(12 * zoom) + "px";
         promptBox.style.fontSize = Math.round(12 * zoom) + "px";
+        const lineMiniMaxPreview = document.createElement("div");
+        lineMiniMaxPreview.className = "iamccs-minimax-line-preview";
+        const refreshLineMiniMaxPreview = () => {
+          const speakerIndex = Math.max(0, speakerOptions.findIndex(([id]) => id === (speakerSel.value || line.speaker || "A")));
+          const speaker = (data.speakers || [])[speakerIndex] || {};
+          const subjectTag = minimaxSubjectTag(speaker.subject_tag, speakerIndex);
+          const speakerTag = minimaxSpeakerTag(speaker.speaker_tag, speakerIndex);
+          const languageLabel = minimaxLanguageLabel(line.language || speaker.language);
+          lineMiniMaxPreview.textContent = `${subjectTag} ${speakerTag}: <d>[${languageLabel}] ${minimaxDialogueText(textBox.value)}</d>`;
+        };
+        refreshLineMiniMaxPreview();
 
         const syncMeta = (rerender = false) => {
           const speakerIndex = Math.max(0, speakerOptions.findIndex(([id]) => id === speakerSel.value));
@@ -2048,6 +2206,7 @@ function install(node, reason = "install") {
         textBox.oninput = () => {
           line.text = textBox.value;
           line.spoken_text = textBox.value;
+          refreshLineMiniMaxPreview();
           syncScriptFromData();
           save();
         };
@@ -2081,6 +2240,7 @@ function install(node, reason = "install") {
         card.append(
           head,
           labelledBox("Text", textBox),
+          labelledBox("MiniMax dialogue tag", lineMiniMaxPreview),
           primaryControls,
           lineTags,
           labelledBox("Local shot prompt", promptBox),

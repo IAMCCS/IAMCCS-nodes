@@ -11,7 +11,7 @@ SUPERNODE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX"
 DEFAULT_GLOBAL_PROMPT = "cinematic field and reverse-field dialogue, hard cut coverage, one dominant speaking face per shot, visible mouth movement, natural audio-driven performance, silent listener reaction, stable identities, coherent eyelines"
 DEFAULT_DIALOGUE = {
     "schema": "iamccs.dialogue_scene",
-    "schema_version": 3,
+    "schema_version": 4,
     "global_prompt": DEFAULT_GLOBAL_PROMPT,
     "settings": {
         "editor_profile": "dialogue",
@@ -122,6 +122,138 @@ def _float(value: Any, fallback: float = 0.0) -> float:
 
 def _clean_text(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def _minimax_subject_tag(value: Any, index: int) -> str:
+    raw = str(value or "").strip()
+    if re.fullmatch(r"<Subject\s+[1-9][0-9]*>", raw, flags=re.IGNORECASE):
+        number = re.search(r"[1-9][0-9]*", raw)
+        return f"<Subject {number.group(0)}>" if number else f"<Subject {index + 1}>"
+    return f"<Subject {index + 1}>"
+
+
+def _minimax_speaker_tag(value: Any, index: int) -> str:
+    raw = str(value or "").strip()
+    if re.fullmatch(r"\(S[1-9][0-9]*\)", raw, flags=re.IGNORECASE):
+        number = re.search(r"[1-9][0-9]*", raw)
+        return f"(S{number.group(0)})" if number else f"(S{index + 1})"
+    return f"(S{index + 1})"
+
+
+def _minimax_language_label(value: Any) -> str:
+    raw = str(value or "").strip().strip("[]")
+    aliases = {
+        "en": "English",
+        "it": "Italian",
+        "es": "Spanish",
+        "fr": "French",
+        "de": "German",
+        "pt": "Portuguese",
+        "ja": "Japanese",
+        "ko": "Korean",
+        "zh": "Chinese",
+    }
+    return aliases.get(raw.lower(), raw or "Language")
+
+
+def _minimax_dialogue_text(value: Any) -> str:
+    # Spoken content remains user-authored. Remove only nested dialogue wrappers
+    # so the export owns one valid <d>...</d> block per line.
+    raw = str(value or "")
+    had_wrapper = bool(re.search(r"</?d(?:\s+[^>]*)?>", raw, flags=re.IGNORECASE))
+    text = re.sub(r"</?d(?:\s+[^>]*)?>", " ", raw, flags=re.IGNORECASE)
+    if had_wrapper:
+        text = re.sub(r"^\s*\[[^\]]+\]\s*", "", text)
+    text = re.sub(r"^\s*<Subject\s+[1-9][0-9]*>\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"^\s*\(S[1-9][0-9]*\)\s*:?\s*", "", text, flags=re.IGNORECASE)
+    if had_wrapper:
+        text = re.sub(r"^\s*\[[^\]]+\]\s*", "", text)
+    return _clean_text(text)
+
+
+def _strip_minimax_prompt_tags_for_speech(value: Any) -> str:
+    text = _minimax_dialogue_text(value)
+    text = re.sub(r"<Subject\s+[1-9][0-9]*>", " ", text, flags=re.IGNORECASE)
+    text = re.sub(r"\(S[1-9][0-9]*\)\s*:?", " ", text, flags=re.IGNORECASE)
+    return _clean_text(text)
+
+
+def _build_minimax_dialogue_contract(
+    global_prompt: str,
+    speakers: List[Dict[str, Any]],
+    lines: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    lookup = _speaker_lookup(speakers)
+    speaker_rows: List[str] = []
+    speaker_contracts: List[Dict[str, Any]] = []
+    for index, speaker in enumerate(speakers):
+        subject_tag = _minimax_subject_tag(speaker.get("subject_tag"), index)
+        speaker_tag = _minimax_speaker_tag(speaker.get("speaker_tag"), index)
+        name = _clean_text(speaker.get("name") or speaker.get("id") or f"Speaker {index + 1}")
+        language = _minimax_language_label(speaker.get("language"))
+        speaker_rows.append(f"{subject_tag} {speaker_tag}: {name}")
+        speaker_contracts.append({
+            "id": str(speaker.get("id") or index + 1),
+            "name": name,
+            "subject_tag": subject_tag,
+            "speaker_tag": speaker_tag,
+            "language": language,
+        })
+
+    dialogue_rows: List[str] = []
+    performance_rows: List[str] = []
+    line_contracts: List[Dict[str, Any]] = []
+    for index, line in enumerate(lines):
+        speaker = lookup.get(_speaker_key(line.get("speaker"))) or lookup.get(_speaker_key(line.get("speaker_name")))
+        if not isinstance(speaker, dict):
+            speaker = speakers[index % len(speakers)] if speakers else {"id": line.get("speaker") or "A"}
+        try:
+            speaker_index = speakers.index(speaker)
+        except ValueError:
+            speaker_index = index
+        subject_tag = _minimax_subject_tag(speaker.get("subject_tag"), speaker_index)
+        speaker_tag = _minimax_speaker_tag(speaker.get("speaker_tag"), speaker_index)
+        language = _minimax_language_label(line.get("language") or speaker.get("language"))
+        spoken = _minimax_dialogue_text(line.get("spoken_text") or line.get("text"))
+        if not spoken:
+            continue
+        formatted = f"{subject_tag} {speaker_tag}: <d>[{language}] {spoken}</d>"
+        dialogue_rows.append(formatted)
+        local_prompt = _clean_text(line.get("local_prompt") or line.get("shot_prompt"))
+        if local_prompt:
+            performance_rows.append(f"{subject_tag} {speaker_tag}: {local_prompt}")
+        line_contracts.append({
+            "id": str(line.get("id") or f"line_{index + 1:03d}"),
+            "speaker": str(speaker.get("id") or line.get("speaker") or ""),
+            "subject_tag": subject_tag,
+            "speaker_tag": speaker_tag,
+            "language": language,
+            "dialogue_tag": formatted,
+            "local_prompt": local_prompt,
+        })
+
+    sections: List[str] = []
+    if str(global_prompt or "").strip():
+        sections.extend(["[SCENE DIRECTION]", str(global_prompt).strip()])
+    if speaker_rows:
+        sections.extend(["[SUBJECT / SPEAKER MAP]", "\n".join(speaker_rows)])
+    if dialogue_rows:
+        sections.extend(["[DIALOGUE]", "\n".join(dialogue_rows)])
+    if performance_rows:
+        sections.extend(["[VISIBLE PERFORMANCE / SHOT RELAY]", "\n".join(performance_rows)])
+    return {
+        "schema": "iamccs.minimax_h3.dialogue_contract",
+        "schema_version": 1,
+        "speakers": speaker_contracts,
+        "lines": line_contracts,
+        "subject_speaker_map": speaker_rows,
+        "dialogue_lines": dialogue_rows,
+        "performance_lines": performance_rows,
+        "prompt": "\n\n".join(sections).strip(),
+        "dialogue_syntax": "<Subject N> (SN): <d>[Language] user-authored transcript</d>",
+        "chunk_boundary_guidance": "For independently rendered chunks, keep speech out of the final handoff beat and the opening handoff beat of the next chunk.",
+        "tts_isolation": "MiniMax prompt tags are metadata only and are never injected into TTS speech text.",
+    }
 
 
 def _srt_time(seconds: float) -> str:
@@ -289,7 +421,7 @@ def _normalise_dialogue_scene(data: Dict[str, Any], frame_rate: float, speech_wp
     settings["default_gap_seconds"] = float(settings.get("default_gap_seconds", default_gap_seconds))
 
     scene["schema"] = "iamccs.dialogue_scene"
-    scene["schema_version"] = 3
+    scene["schema_version"] = 4
     scene["global_prompt"] = str(scene.get("global_prompt") or scene.get("prompt") or DEFAULT_GLOBAL_PROMPT).strip()
 
     speakers = scene.get("speakers") if isinstance(scene.get("speakers"), list) else []
@@ -303,6 +435,8 @@ def _normalise_dialogue_scene(data: Dict[str, Any], frame_rate: float, speech_wp
         speaker["voice"] = str(speaker.get("voice") or "").strip()
         speaker["reference_text"] = str(speaker.get("reference_text") or speaker.get("reference") or "").strip()
         speaker["language"] = str(speaker.get("language") or "").strip()
+        speaker["subject_tag"] = _minimax_subject_tag(speaker.get("subject_tag"), index)
+        speaker["speaker_tag"] = _minimax_speaker_tag(speaker.get("speaker_tag"), index)
         design = speaker.get("voice_design") if isinstance(speaker.get("voice_design"), dict) else {}
         speaker["voice_design"] = {key: str(design.get(key) or "").strip() for key in ("gender", "age", "pitch", "style", "accent", "dialect", "instruct")}
         speaker["voice_design"]["instruct"] = _voice_design_instruct(speaker)
@@ -331,6 +465,7 @@ def _normalise_dialogue_scene(data: Dict[str, Any], frame_rate: float, speech_wp
             "speaker_name": str(speaker.get("name") or speaker_token),
             "text": text,
             "spoken_text": text,
+            "language": str(line.get("language") or speaker.get("language") or "").strip(),
             "emotion": str(line.get("emotion") or "none"),
             "style": str(line.get("style") or "none"),
             "paralinguistic": str(line.get("paralinguistic") or "none"),
@@ -372,7 +507,7 @@ def _is_omnivoice_profile(engine_profile: str) -> bool:
 
 
 def _format_dialogue_text(line: Dict[str, Any], speaker: Dict[str, Any], engine_profile: str, inline_edit_mode: str) -> str:
-    text = _clean_text(line.get("spoken_text") or line.get("text"))
+    text = _strip_minimax_prompt_tags_for_speech(line.get("spoken_text") or line.get("text"))
     if not text:
         return ""
     speaker_id = str(speaker.get("id") or line.get("speaker") or "A").strip() or "A"
@@ -567,6 +702,7 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
     duration_seconds = float(total_frames) / max(1.0, float(frame_rate)) if total_frames else 0.0
     local_prompt_parts = [str(seg.get("prompt") or "").strip() for seg in shotboard_segments if isinstance(seg, dict) and str(seg.get("prompt") or "").strip()]
     segment_length_parts = [str(int(seg.get("length", 1))) for seg in shotboard_segments if isinstance(seg, dict)]
+    minimax_dialogue = _build_minimax_dialogue_contract(global_prompt, speakers, export_lines)
     output_track_count = 1 if single_track_mode else max(1, len(ordered_keys))
     # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     visual_timeline = {
@@ -589,7 +725,7 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
     }
     payload = {
         "schema": "iamccs.dialogue_tag_editor",
-        "schema_version": 3,
+        "schema_version": 4,
         "dialogue_scene": data,
         "global_prompt": global_prompt,
         "local_prompts": local_prompt_parts,
@@ -619,6 +755,8 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
         "tagged_text": "\n".join(tagged_parts).strip(),
         "speaker_srt": {key: "".join(stem_srt.get(key, [])).strip() for key in ordered_keys},
         "speaker_text": {key: "\n".join(stem_text.get(key, [])).strip() for key in ordered_keys},
+        "minimax_h3_dialogue": minimax_dialogue,
+        "minimax_h3_prompt": minimax_dialogue.get("prompt", ""),
         # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
         "audio_board_template": {
             "schema": "iamccs.audio_board_arranger",
@@ -691,6 +829,8 @@ class IAMCCS_DialogueTagEditor:
         speaker_srt = payload.get("speaker_srt") if isinstance(payload.get("speaker_srt"), dict) else {}
         local_prompts = payload.get("local_prompts") if isinstance(payload.get("local_prompts"), list) else []
         segment_lengths = payload.get("segment_lengths") if isinstance(payload.get("segment_lengths"), list) else []
+        minimax_dialogue = payload.get("minimax_h3_dialogue") if isinstance(payload.get("minimax_h3_dialogue"), dict) else {}
+        minimax_prompt = str(minimax_dialogue.get("prompt") or payload.get("minimax_h3_prompt") or "")
         master_srt = str(payload.get("master_srt") or "")
         tagged_text = str(payload.get("tagged_text") or "")
         timeline_json = json.dumps(shotboard_timeline, ensure_ascii=False, indent=2)
@@ -714,6 +854,9 @@ class IAMCCS_DialogueTagEditor:
             "cine_segment_lengths": ",".join(str(item) for item in segment_lengths),
             "cine_promptrelay_enabled": bool(local_prompts),
             "cine_board_timeline_data": timeline_json,
+            "iamccs_minimax_h3_dialogue_contract": minimax_dialogue,
+            "iamccs_minimax_h3_dialogue_prompt": minimax_prompt,
+            "cine_minimax_h3_dialogue_prompt": minimax_prompt,
         })
         outputs.update({
             "dialogue_json": resources.get("cine_dialogue_json", "{}"),
@@ -726,12 +869,15 @@ class IAMCCS_DialogueTagEditor:
             "global_prompt": payload.get("global_prompt", ""),
             "local_prompts": " | ".join(str(item) for item in local_prompts),
             "segment_lengths": ",".join(str(item) for item in segment_lengths),
+            "minimax_h3_dialogue_prompt": minimax_prompt,
         })
         cine_payload.update({
             "dialogue_tag_editor": True,
             "dialogue": payload,
             "duration_seconds": outputs["duration_seconds"],
             "timeline_data": outputs["timeline_data"],
+            "minimax_h3_dialogue": minimax_dialogue,
+            "minimax_h3_dialogue_prompt": minimax_prompt,
         })
         out_linx.setdefault("chain", []).append({"role": "dialogue_tag_editor", "name": "IAMCCS_DialogueTagEditor"})
         _dialogue_refresh_linx(out_linx)

@@ -483,6 +483,14 @@ def _try_make_sage_attention_override(mode: str, allow_compile: bool) -> tuple[O
     def attention_override_sage(func, *args, **kwargs):
         return attention_sage.__wrapped__(*args, **kwargs)
 
+    def attention_override_sage_container(q, k, v, *args, **kwargs):
+        container_function = getattr(attention_sage, "container_function", None)
+        if container_function is not None:
+            return container_function(q, k, v, *args, **kwargs)
+        return attention_sage.__wrapped__(q.take(), k.take(), v.take(), *args, **kwargs)
+
+    attention_override_sage.container_function = attention_override_sage_container
+
     return attention_override_sage, None
 
 
@@ -1266,6 +1274,29 @@ class IAMCCS_VRAMFlushLatent:
 
 class IAMCCS_VAEDecodeTiledSafe:
     @staticmethod
+    def _is_minimax_h3_video_vae(vae) -> bool:
+        """Detect ComfyUI's native MiniMax H3 video VAE.
+
+        Newer ComfyUI builds give this VAE its own chunked I/O decode path:
+        it streams temporal chunks through the decoder, writes into an output
+        buffer, and finalizes pixels directly to [0, 1]. IAMCCS should not
+        wrap it in the older generic tiled/temporal chunking code.
+        """
+        try:
+            first_stage = getattr(vae, "first_stage_model", None)
+            if first_stage is None:
+                return False
+            cls_name = first_stage.__class__.__name__
+            module_name = str(getattr(first_stage.__class__, "__module__", ""))
+            return (
+                cls_name == "MiniMaxH3VideoVAE"
+                and "minimax" in module_name.lower()
+                and bool(getattr(first_stage, "comfy_has_chunked_io", False))
+            )
+        except Exception:
+            return False
+
+    @staticmethod
     def _auto_tile_params(vram_gb: float | None, compression: int) -> tuple[int, int]:
         # Conservative defaults for video VAE decode (auto mode, no duration context).
         # tile_size = image-space pixels; we snap to (compression*8) multiples.
@@ -1402,6 +1433,23 @@ class IAMCCS_VAEDecodeTiledSafe:
         latents = samples.get("samples") if isinstance(samples, dict) else None
         if latents is None:
             raise ValueError("Invalid LATENT input: expected dict with key 'samples'")
+        try:
+            if getattr(latents, "is_nested", False):
+                latents = latents.unbind()[0]
+        except Exception:
+            pass
+
+        if self._is_minimax_h3_video_vae(vae) and hasattr(latents, "shape") and len(latents.shape) == 5:
+            if bool(last_frame_fix):
+                log.info("[IAMCCS_VAEDecodeTiledSafe] MiniMax H3 detected: ignoring LTX last_frame_fix.")
+            images = vae.decode(latents)
+            try:
+                if len(images.shape) == 5:
+                    images = images.reshape(-1, images.shape[-3], images.shape[-2], images.shape[-1])
+            except Exception:
+                pass
+            return (images,)
+
 
         # LTX VAE last-frame artifact workaround: duplicate the last temporal frame
         # so the decoder has a clean context frame at the boundary, preventing
@@ -1792,6 +1840,12 @@ class IAMCCS_VAEDecodeToDisk:
         latents = samples.get("samples") if isinstance(samples, dict) else None
         if latents is None or not hasattr(latents, "shape"):
             raise ValueError("Invalid LATENT input: expected dict with key 'samples'")
+        try:
+            if getattr(latents, "is_nested", False):
+                latents = latents.unbind()[0]
+        except Exception:
+            pass
+
 
         # Resolution-aware auto tile: tile_size is determined by VRAM tier only.
         # (per-tile VRAM is independent of total video resolution — no penalty needed)
@@ -1846,6 +1900,17 @@ class IAMCCS_VAEDecodeToDisk:
             return n
 
         frames_saved = 0
+
+        if IAMCCS_VAEDecodeTiledSafe._is_minimax_h3_video_vae(vae) and len(latents.shape) == 5:
+            log.info(
+                "[IAMCCS_VAEDecodeToDisk] MiniMax H3 detected: using native chunked VAE.decode() path for %s -> %s",
+                tuple(latents.shape),
+                out_dir,
+            )
+            img = vae.decode(latents)
+            img = _flatten_to_4d(img)
+            frames_saved += _save_frames(img.float(), int(start_number))
+            return (out_dir, int(frames_saved), int(start_number + frames_saved))
 
         # Video latent: [B, C, T_lat, H, W]
         if len(latents.shape) == 5:

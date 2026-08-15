@@ -64,6 +64,89 @@ def _retake_video(timeline: Dict[str, Any]) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _retake_source_window(timeline: Dict[str, Any], fallback_length: int = 1) -> Dict[str, int]:
+    """Resolve the editorial source window without inventing a retime.
+
+    ``trimStart`` and source ``IN`` are aliases.  An explicit source ``OUT``
+    wins over a stale clip length; otherwise the clip length defines OUT.  The
+    physical media duration only clamps the requested window.  This makes the
+    selected source clip, rather than the Shotboard canvas duration, the truth
+    for a retake.
+    """
+    clip = _retake_video(timeline)
+    fallback_length = max(1, _safe_int(fallback_length, 1))
+    physical_length = max(0, _safe_int(
+        clip.get(
+            "videoDurationFrames",
+            clip.get("video_duration_frames", clip.get("sourceDurationFrames", clip.get("source_duration_frames", 0))),
+        ),
+        0,
+    ))
+    source_in = max(0, _safe_int(
+        clip.get("inPoint", clip.get("in_point", clip.get("trimStart", clip.get("trim_start", 0)))),
+        0,
+    ))
+    if physical_length > 0:
+        source_in = min(source_in, max(0, physical_length - 1))
+
+    raw_out = clip.get("outPoint", clip.get("out_point"))
+    explicit_out = _safe_int(raw_out, 0) if raw_out is not None else 0
+    clip_length = max(1, _safe_int(clip.get("length", clip.get("len", fallback_length)), fallback_length))
+    source_out = explicit_out if explicit_out > source_in else source_in + clip_length
+    if physical_length > 0:
+        source_out = min(source_out, physical_length)
+    source_out = max(source_in + 1, source_out)
+
+    timeline_start = max(0, _safe_int(clip.get("start", clip.get("frame", 0)), 0))
+    return {
+        "source_in": int(source_in),
+        "source_out": int(source_out),
+        "length": int(source_out - source_in),
+        "physical_length": int(physical_length),
+        "timeline_start": int(timeline_start),
+    }
+
+
+def _resolve_retake_prompt(timeline: Dict[str, Any], fallback_prompt: Any = "") -> Tuple[str, str, str, str]:
+    """Return effective prompt and diagnostics for a V4 retake.
+
+    An empty retake override is intentionally *not* an empty conditioning: it
+    inherits the Shotboard global prompt.  The backend widget remains the last
+    compatibility fallback.
+    """
+    timeline_prompt = str(timeline.get("global_prompt", timeline.get("prompt", "")) or "").strip()
+    retake_prompt = str(
+        timeline.get("retake_global_prompt", timeline.get("retakePrompt", timeline.get("retake_prompt", "")))
+        or ""
+    ).strip()
+    fallback = str(fallback_prompt or "").strip()
+    if retake_prompt:
+        return retake_prompt, "timeline.retake_global_prompt", timeline_prompt, retake_prompt
+    if timeline_prompt:
+        return timeline_prompt, "timeline.global_prompt (retake override empty)", timeline_prompt, retake_prompt
+    if fallback:
+        return fallback, "backend_fallback.global_prompt", timeline_prompt, retake_prompt
+    return "", "empty", timeline_prompt, retake_prompt
+
+
+def _tail_pad_frames(frames: torch.Tensor, target_count: int) -> torch.Tensor:
+    """Fit a source window to LTX's 8n+1 length without temporal stretching.
+
+    Existing frames remain byte-for-byte/tensor-for-tensor in their original
+    positions.  Only the final source frame is repeated for the LTX tail; the
+    downstream duration crop removes those repeated frames after decode.
+    """
+    if not torch.is_tensor(frames) or frames.ndim < 1 or int(frames.shape[0]) <= 0:
+        raise ValueError("frame batch is empty")
+    target_count = max(1, int(target_count))
+    current = int(frames.shape[0])
+    if current >= target_count:
+        return frames[:target_count]
+    repeat_shape = [target_count - current] + [1] * (frames.ndim - 1)
+    tail = frames[-1:].repeat(*repeat_shape)
+    return torch.cat([frames, tail], dim=0)
+
+
 def _normalize_resize_method(value: Any) -> str:
     method = str(value or "").strip().lower()
     aliases = {
@@ -171,7 +254,14 @@ def _video_dimensions(path_ref: Any) -> Tuple[int, int]:
         return 0, 0
 
 
-def _load_video_frames(video_ref: Any, trim_start_frames: float, length_frames: float, frame_rate: float, resample_mode: str = "nearest") -> torch.Tensor:
+def _load_video_frames(
+    video_ref: Any,
+    trim_start_frames: float,
+    length_frames: float,
+    frame_rate: float,
+    resample_mode: str = "nearest",
+    shortfall_mode: str = "resample",
+) -> torch.Tensor:
     file_path = _resolve_media_path(video_ref)
     if not file_path:
         return torch.zeros((1, 512, 512, 3), dtype=torch.float32)
@@ -226,6 +316,14 @@ def _load_video_frames(video_ref: Any, trim_start_frames: float, length_frames: 
 
     images = torch.from_numpy(np.asarray(frames, dtype=np.float32) / 255.0)
     target_count = max(1, int(round(length_frames)))
+    if str(shortfall_mode or "resample").strip().lower() == "tail_pad":
+        # Convert a genuinely different source FPS, but never distribute a
+        # decoder/source shortfall across the whole retake.  Any remaining
+        # shortfall is repeated only at the final frame.
+        natural_target = max(1, int(round(int(images.shape[0]) * target_fps / max(0.001, source_fps))))
+        natural_target = min(target_count, natural_target)
+        images = _resample_frames(images, natural_target, resample_mode, source_fps=source_fps, target_fps=target_fps)
+        return _tail_pad_frames(images, target_count)
     return _resample_frames(images, target_count, resample_mode, source_fps=source_fps, target_fps=target_fps)
 
 
@@ -696,21 +794,24 @@ def _build_guide_data(
 
 def _empty_audio(pixel_frames: int, frame_rate: float) -> Dict[str, Any]:
     sample_rate = 44100
-    total_samples = max(1, int(math.ceil(max(1, int(pixel_frames)) / max(1.0, float(frame_rate or 24.0)) * sample_rate)))
+    total_samples = max(1, int(round(max(1, int(pixel_frames)) / max(1.0, float(frame_rate or 24.0)) * sample_rate)))
     return {"waveform": torch.zeros((1, 2, total_samples), dtype=torch.float32), "sample_rate": sample_rate}
 
 
 def _audio_segments_for_mode(timeline: Dict[str, Any], override_audio: bool, duration_frames: int) -> Tuple[List[Dict[str, Any]], str]:
     if _retake_active(timeline) and _retake_video(timeline):
         retake = _retake_video(timeline)
+        source_window = _retake_source_window(timeline, duration_frames)
         video_file = retake.get("imageFile") or retake.get("videoFile") or retake.get("fileName")
         if video_file:
             return [{
                 "videoFile": video_file,
                 "audioFile": video_file,
                 "start": 0,
-                "length": retake.get("videoDurationFrames", duration_frames),
-                "trimStart": 0,
+                "length": int(source_window["length"]),
+                "trimStart": int(source_window["source_in"]),
+                "inPoint": int(source_window["source_in"]),
+                "outPoint": int(source_window["source_out"]),
             }], "videoFile"
     if override_audio:
         return _segments_from_timeline(timeline, "motionSegments"), "videoFile"
@@ -775,16 +876,20 @@ def _build_combined_audio(timeline: Dict[str, Any], start_frame: int, duration_f
             trim += offset
             seg_len = max(1.0, seg_len - offset)
             seg_start = max(0.0, seg_start - float(start_frame))
-            src_start = max(0, int(trim / max(1.0, float(frame_rate)) * sample_rate))
-            src_len = max(1, int(seg_len / max(1.0, float(frame_rate)) * sample_rate))
-            src_end = min(int(waveform.shape[1]), src_start + src_len)
+            fps = max(1.0, float(frame_rate))
+            # Convert frame boundaries independently.  Rounding the IN and OUT
+            # points avoids cumulative sample drift at rates such as 24 fps.
+            src_start = max(0, int(round((trim / fps) * sample_rate)))
+            requested_src_end = max(src_start + 1, int(round(((trim + seg_len) / fps) * sample_rate)))
+            src_end = min(int(waveform.shape[1]), requested_src_end)
             if src_end <= src_start:
                 continue
             clip_waveform = waveform[:, src_start:src_end]
-            dst_start = int(seg_start / max(1.0, float(frame_rate)) * sample_rate)
+            dst_start = int(round((seg_start / fps) * sample_rate))
             if dst_start >= int(out_waveform.shape[1]):
                 continue
-            dst_end = min(int(out_waveform.shape[1]), dst_start + int(clip_waveform.shape[1]))
+            requested_dst_end = max(dst_start + 1, int(round(((seg_start + seg_len) / fps) * sample_rate)))
+            dst_end = min(int(out_waveform.shape[1]), requested_dst_end, dst_start + int(clip_waveform.shape[1]))
             actual = dst_end - dst_start
             if actual > 0:
                 out_waveform[:, dst_start:dst_end] += clip_waveform[:, :actual]
@@ -818,13 +923,24 @@ def _encode_audio_latent(audio_vae: Any, audio_out: Dict[str, Any], timeline: Di
             retake_len = float(timeline.get("retakeLength", timeline.get("retake_length", 0)) or 0)
             overlap_start = max(float(start_frame), retake_start)
             overlap_end = min(float(start_frame + duration_frames), retake_start + retake_len)
+            start_idx = 0
+            end_idx = 0
             if overlap_end > overlap_start:
                 rel_start = overlap_start - float(start_frame)
                 rel_len = overlap_end - overlap_start
                 total_sec = max(1.0 / max(1.0, frame_rate), float(duration_frames) / max(1.0, frame_rate))
                 start_idx = int(((rel_start / max(1.0, frame_rate)) / total_sec) * frames)
                 end_idx = int((((rel_start + rel_len) / max(1.0, frame_rate)) / total_sec) * frames)
-                mask[:, max(0, min(frames, start_idx)):max(0, min(frames, end_idx)), :] = 1.0
+            mask = _apply_temporal_region_mask(
+                mask,
+                start_idx,
+                end_idx,
+                1.0,
+                _safe_float(timeline.get("retakeMaskInitValueAudio", timeline.get("retake_mask_init_value_audio", 0.0)), 0.0),
+                _safe_bool(timeline.get("retakeRegenerateAudio", timeline.get("retake_regenerate_audio", False)), False),
+                str(timeline.get("retakeBoundaryMode", timeline.get("retake_boundary_mode", "soft_ramp")) or "soft_ramp"),
+                max(1, _safe_int(timeline.get("retakeSlopeLength", timeline.get("retake_slope_length", 3)), 3)),
+            )
         else:
             mask = torch.ones((batch, frames, height), dtype=torch.float32, device=latent_samples.device)
             segments, file_key = _audio_segments_for_mode(timeline, override_audio, duration_frames)
@@ -978,8 +1094,10 @@ class IAMCCS_CineShotboardV4Backend:
         fps = max(1.0, fps)
         start_from_timeline = timeline.get("normalStartFrame", timeline.get("normal_start_frame", timeline.get("start_frame", None)))
         start = int(start_from_timeline if start_from_timeline is not None else (start_frame or payload.get("start_frame", 0)) or 0)
-        # Keep the raw timeline duration as the truth. V3 and the duration crop
-        # both distinguish it from the LTX 8n+1 padded latent length.
+        # Keep the raw editorial duration distinct from the LTX 8n+1 latent
+        # length.  In retake mode the selected source IN/OUT window is the
+        # authoritative editorial duration; a stale Shotboard canvas duration
+        # must never retime the source clip.
         raw_duration = _safe_int(timeline.get("normalDurationFrames", timeline.get("normal_duration_frames", timeline.get("duration_frames", 0))), 0)
         if raw_duration <= 0:
             timeline_duration_seconds = _safe_float(
@@ -999,23 +1117,46 @@ class IAMCCS_CineShotboardV4Backend:
         if raw_duration <= 0:
             duration_seconds = _safe_float(timeline.get("duration_seconds", resources.get("cine_duration_seconds", payload.get("duration_seconds", 5.0))), 5.0)
             raw_duration = max(1, int(round(duration_seconds * fps)))
-        ltxv_length = _round_ltx_frames(raw_duration, "up_8n_plus_1")
         retake_active = _retake_active(timeline)
-        timeline_prompt = str(timeline.get("global_prompt", timeline.get("prompt", "")) or "").strip()
-        retake_timeline_prompt = str(timeline.get("retake_global_prompt", timeline.get("retakePrompt", timeline.get("retake_prompt", ""))) or "").strip()
+        retake_source_window: Dict[str, int] = {}
+        if retake_active and _retake_video(timeline):
+            retake_source_window = _retake_source_window(timeline, raw_duration)
+            source_offset = max(0, int(start) - int(retake_source_window.get("timeline_start", 0)))
+            raw_duration = max(1, int(retake_source_window["length"]) - source_offset)
+            normalized_video = dict(_retake_video(timeline))
+            normalized_video.update({
+                "trimStart": int(retake_source_window["source_in"]),
+                "trim_start": int(retake_source_window["source_in"]),
+                "inPoint": int(retake_source_window["source_in"]),
+                "in_point": int(retake_source_window["source_in"]),
+                "outPoint": int(retake_source_window["source_out"]),
+                "out_point": int(retake_source_window["source_out"]),
+                "length": int(retake_source_window["length"]),
+            })
+            timeline = copy.deepcopy(timeline)
+            timeline["retakeVideo"] = normalized_video
+            timeline["retake_video"] = normalized_video
+            timeline["normalDurationFrames"] = int(raw_duration)
+            timeline["normal_duration_frames"] = int(raw_duration)
+            timeline["duration_frames"] = int(raw_duration)
+            timeline["duration_seconds"] = float(raw_duration) / float(fps)
+        ltxv_length = _round_ltx_frames(raw_duration, "up_8n_plus_1")
+
         fallback_prompt = str(global_prompt or resources.get("cine_global_prompt", outputs.get("global_prompt", payload.get("global_prompt", ""))) or "")
-        prompt_source = "empty"
-        if retake_active and retake_timeline_prompt:
-            prompt = retake_timeline_prompt
-            prompt_source = "timeline.retake_global_prompt"
-        elif timeline_prompt:
-            prompt = timeline_prompt
-            prompt_source = "timeline.global_prompt"
-        elif fallback_prompt:
-            prompt = fallback_prompt
-            prompt_source = "backend_fallback.global_prompt"
+        if retake_active:
+            prompt, prompt_source, timeline_prompt, retake_timeline_prompt = _resolve_retake_prompt(timeline, fallback_prompt)
         else:
-            prompt = ""
+            timeline_prompt = str(timeline.get("global_prompt", timeline.get("prompt", "")) or "").strip()
+            retake_timeline_prompt = str(timeline.get("retake_global_prompt", timeline.get("retakePrompt", timeline.get("retake_prompt", ""))) or "").strip()
+            if timeline_prompt:
+                prompt = timeline_prompt
+                prompt_source = "timeline.global_prompt"
+            elif fallback_prompt:
+                prompt = fallback_prompt
+                prompt_source = "backend_fallback.global_prompt"
+            else:
+                prompt = ""
+                prompt_source = "empty"
 
         local_prompts = str(resources.get("cine_local_prompts", outputs.get("local_prompts", payload.get("local_prompts", ""))) or "")
         segment_lengths = str(resources.get("cine_segment_lengths", outputs.get("segment_lengths", payload.get("segment_lengths", ""))) or "")
@@ -1080,6 +1221,14 @@ class IAMCCS_CineShotboardV4Backend:
 
         effective_override_audio = _safe_bool(timeline.get("overrideAudio", timeline.get("override_audio", override_audio)), bool(override_audio))
         effective_inpaint_audio = _safe_bool(timeline.get("inpaintAudio", timeline.get("inpaint_audio", inpaint_audio)), bool(inpaint_audio))
+        retake_regenerate_audio = _safe_bool(
+            timeline.get("retakeRegenerateAudio", timeline.get("retake_regenerate_audio", False)),
+            False,
+        )
+        if retake_active and not retake_regenerate_audio:
+            # The source waveform and its zero-noise audio latent are the truth.
+            # Do not let a generic inpaint widget turn audio regeneration back on.
+            effective_inpaint_audio = False
         timeline_has_audio = bool(_segments_from_timeline(timeline, "audioSegments"))
         effective_custom_audio = bool(use_custom_audio or _safe_bool(timeline.get("use_custom_audio", False), False) or timeline_has_audio or effective_override_audio or retake_active)
         # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
@@ -1123,10 +1272,15 @@ class IAMCCS_CineShotboardV4Backend:
         guide_data["timeline_data"] = _json_dumps(timeline)
         guide_data["start_frame"] = int(start)
         guide_data["duration_frames"] = int(raw_duration)
+        guide_data["ltxv_length"] = int(ltxv_length)
         guide_data["resize_method"] = method
         guide_data["global_prompt"] = str(prompt)
         guide_data["local_prompts"] = str(local_prompts)
         guide_data["segment_lengths"] = str(segment_lengths)
+        if retake_source_window:
+            guide_data["retake_source_window"] = dict(retake_source_window)
+            guide_data["source_clip_authoritative"] = True
+            guide_data["retake_tail_pad_frames"] = max(0, int(ltxv_length) - int(raw_duration))
         timeline_source = str(timeline.get("_iamccs_timeline_source", "unknown") or "unknown")
         retake_video = _retake_video(timeline)
         retake_video_file = str(
@@ -1169,9 +1323,22 @@ class IAMCCS_CineShotboardV4Backend:
             "image_attention_strength": float(resolved_image_attention),
             "retake_mode": bool(retake_active),
             "retake_video_file": retake_video_file,
+            "retake_source_in": int(retake_source_window.get("source_in", 0)) if retake_source_window else 0,
+            "retake_source_out": int(retake_source_window.get("source_out", 0)) if retake_source_window else 0,
+            "retake_source_length": int(retake_source_window.get("length", 0)) if retake_source_window else 0,
+            "retake_source_clip_authoritative": bool(retake_source_window),
+            "retake_tail_pad_frames": max(0, int(ltxv_length) - int(raw_duration)) if retake_source_window else 0,
+            "retake_audio_passthrough": bool(retake_active and not retake_regenerate_audio),
             "retake_start": _safe_int(timeline.get("retakeStart", timeline.get("retake_start", 0)), 0),
             "retake_length": _safe_int(timeline.get("retakeLength", timeline.get("retake_length", 0)), 0),
+            "retake_end": _safe_int(timeline.get("retakeEnd", timeline.get("retake_end", 0)), 0),
             "retake_strength": _safe_float(timeline.get("retakeStrength", timeline.get("retake_strength", 1.0)), 1.0),
+            "retake_regenerate_video": _safe_bool(timeline.get("retakeRegenerateVideo", timeline.get("retake_regenerate_video", True)), True),
+            "retake_regenerate_audio": _safe_bool(timeline.get("retakeRegenerateAudio", timeline.get("retake_regenerate_audio", False)), False),
+            "retake_mask_init_value_video": _safe_float(timeline.get("retakeMaskInitValueVideo", timeline.get("retake_mask_init_value_video", 0.0)), 0.0),
+            "retake_mask_init_value_audio": _safe_float(timeline.get("retakeMaskInitValueAudio", timeline.get("retake_mask_init_value_audio", 0.0)), 0.0),
+            "retake_slope_length": _safe_int(timeline.get("retakeSlopeLength", timeline.get("retake_slope_length", 3)), 3),
+            "retake_boundary_mode": str(timeline.get("retakeBoundaryMode", timeline.get("retake_boundary_mode", "soft_ramp")) or "soft_ramp"),
             "video_to_video_enabled": bool(_safe_bool(timeline.get("videoToVideoEnabled", timeline.get("video_to_video_enabled", False)), False)),
             "clip_edit_mode": str(timeline.get("clipEditMode", timeline.get("clip_edit_mode", "")) or ""),
             "continuation_mode": str(timeline.get("continuationMode", timeline.get("continuation_mode", "")) or ""),
@@ -1204,6 +1371,50 @@ def _append_attention_entry(conditioning: Any, token_count: int, latent_shape: L
         "latent_shape": list(latent_shape),
     })
     return _set_conditioning_entries(conditioning, entries)
+
+
+def _apply_temporal_region_mask(
+    mask: torch.Tensor,
+    start: int,
+    end: int,
+    region_value: float,
+    init_value: float = 0.0,
+    enabled: bool = True,
+    boundary_mode: str = "soft_ramp",
+    slope_len: int = 3,
+) -> torch.Tensor:
+    """Fill an inclusive/exclusive temporal mask with protected outer frames.
+
+    V4 keeps the official LTX retake convention (0 outside, 1 inside) while
+    applying an optional ramp *inside* the editable range. This avoids exposing
+    frames outside the user's IN/OUT selection when the downstream graph does
+    not consume LTXVSetAudioVideoMaskByTime's separate blend-coefficient output.
+    """
+    init = max(0.0, min(1.0, float(init_value)))
+    value = max(0.0, min(1.0, float(region_value)))
+    mask.fill_(init)
+    time_dim = 2 if mask.ndim >= 5 else 1
+    frame_count = int(mask.shape[time_dim])
+    start = max(0, min(frame_count, int(start)))
+    end = max(start, min(frame_count, int(end)))
+    if not enabled or end <= start:
+        return mask
+    region = [slice(None)] * mask.ndim
+    region[time_dim] = slice(start, end)
+    mask[tuple(region)] = value
+    if str(boundary_mode or "soft_ramp") != "soft_ramp" or value == init:
+        return mask
+    ramp = min(max(1, int(slope_len)), max(1, (end - start) // 2))
+    for offset in range(ramp):
+        factor = float(offset + 1) / float(ramp + 1)
+        edge_value = init + ((value - init) * factor)
+        left = [slice(None)] * mask.ndim
+        right = [slice(None)] * mask.ndim
+        left[time_dim] = start + offset
+        right[time_dim] = end - 1 - offset
+        mask[tuple(left)] = edge_value
+        mask[tuple(right)] = edge_value
+    return mask
 
 
 def _clone_noise_mask(latent: Dict[str, Any], latent_image: torch.Tensor) -> torch.Tensor:
@@ -1553,11 +1764,32 @@ class IAMCCS_CineShotboardV4Guide:
             if not video_file and not retake_video and motion_segments:
                 video_file = motion_segments[0].get("videoFile", "")
             if need_base_video and video_file:
-                frames = _load_video_frames(video_file, start_frame, (latent_length - 1) * time_scale + 1, float((motion_guide_data or {}).get("frame_rate", (guide_data or {}).get("frame_rate", 24))), "nearest")
+                source_window = (
+                    dict((guide_data or {}).get("retake_source_window", {}))
+                    if isinstance((guide_data or {}).get("retake_source_window", {}), dict)
+                    else _retake_source_window(timeline, int((guide_data or {}).get("duration_frames", 1)))
+                )
+                if not source_window:
+                    source_window = _retake_source_window(timeline, int((guide_data or {}).get("duration_frames", 1)))
+                source_offset = max(0, int(start_frame) - int(source_window.get("timeline_start", 0)))
+                source_in = int(source_window.get("source_in", 0)) + source_offset
+                source_frames = max(1, min(
+                    int((guide_data or {}).get("duration_frames", source_window.get("length", 1))),
+                    max(1, int(source_window.get("length", 1)) - source_offset),
+                ))
+                encoded_pixel_frames = (latent_length - 1) * time_scale + 1
+                frames = _load_video_frames(
+                    video_file,
+                    source_in,
+                    source_frames,
+                    float((motion_guide_data or {}).get("frame_rate", (guide_data or {}).get("frame_rate", 24))),
+                    "nearest",
+                    shortfall_mode="tail_pad",
+                )
+                frames = _tail_pad_frames(frames, encoded_pixel_frames)
                 retake_resize = "pad" if resize_method == "maintain aspect ratio" else resize_method
                 pixels = _resize_image(frames, target_width, target_height, retake_resize, 1)
-                keep = ((int(pixels.shape[0]) - 1) // time_scale) * time_scale + 1
-                pixels = pixels[:keep, :, :, :3]
+                pixels = pixels[:encoded_pixel_frames, :, :, :3]
                 if use_tiled_encode:
                     base_latent = vae.encode_tiled(pixels, tile_x=int(tile_size), tile_y=int(tile_size), overlap=int(tile_overlap))
                 else:
@@ -1571,9 +1803,16 @@ class IAMCCS_CineShotboardV4Guide:
                         latent_image[:, :, :l_start] = base_latent[:, :, :l_start]
                     if l_end < paste_len:
                         latent_image[:, :, l_end:paste_len] = base_latent[:, :, l_end:paste_len]
-            noise_mask = torch.zeros_like(noise_mask)
-            if l_end > l_start:
-                noise_mask[:, :, l_start:l_end] = float(retake_strength)
+            noise_mask = _apply_temporal_region_mask(
+                torch.zeros_like(noise_mask),
+                l_start,
+                l_end,
+                float(retake_strength),
+                _safe_float(timeline.get("retakeMaskInitValueVideo", timeline.get("retake_mask_init_value_video", 0.0)), 0.0),
+                _safe_bool(timeline.get("retakeRegenerateVideo", timeline.get("retake_regenerate_video", True)), True),
+                str(timeline.get("retakeBoundaryMode", timeline.get("retake_boundary_mode", "soft_ramp")) or "soft_ramp"),
+                max(1, _safe_int(timeline.get("retakeSlopeLength", timeline.get("retake_slope_length", 3)), 3)),
+            )
             crop_frames = max(0, int(latent_image.shape[2]) - initial_latent_length)
             positive = node_helpers.conditioning_set_values(positive, {"nghtdrp_guide_crop_latent_frames": crop_frames})
             negative = node_helpers.conditioning_set_values(negative, {"nghtdrp_guide_crop_latent_frames": crop_frames})

@@ -68,7 +68,46 @@ const MODE_META = {
             ["non_diegetic_music", "non_diegetic_music", "Only audience-facing music; say none when no score is wanted."],
         ],
     },
+    v2va_object_swap: {
+        label: "V2VA OBJECT SWAP",
+        subtitle: "Picture-defined replacement inside source Video 1",
+        sections: [
+            ["v2va_subject_definitions", "Subject definitions", "Map each connected <Picture N> to a stable replacement <Subject N>, and identify the source subject in <Video 1>."],
+            ["v2va_source_video_authority", "Source Video 1 authority", "State that <Video 1> governs source duration, action timing, camera, framing, occlusion order, environment and edit rhythm."],
+            ["v2va_replacement_retention", "Replacement / retention analysis", "Separate exactly what is replaced from the source subjects, environment, interactions, contacts and light response that remain."],
+            ["v2va_interval_edits", "Interval edit instructions", "Use source-video time ranges only when different intervals need different visible changes."],
+            ["v2va_sound_policy", "Sound policy", "Choose whether connected source audio is retained, replaced, muted or supplemented. Name <Audio 1> only when it is connected."],
+            ["v2va_exclusions", "Exclusions / continuity safeguards", "Prevent identity blending, duplicates, environment/camera drift and unrequested changes. Do not invent mask or ControlNet behavior."],
+        ],
+    },
+    audio_driven: {
+        label: "AUDIO DRIVE",
+        subtitle: "Custom audio → synchronized H3 performance",
+        sections: [
+            ["audio_drive_contract", "Audio drive contract", "Declare that connected custom audio owns timing, pauses, breaths and spoken order."],
+            ["audio_subject_map", "Subject / speaker map", "Map each visible <Subject N> to a stable speaker label such as (S1)."],
+            ["audio_scene_intent", "Scene intent", "Location, time, dramatic purpose and visible starting situation; do not invent a new story."],
+            ["audio_timed_performance", "Timed performance", "Map phrases, pauses and breaths to chronological facial, gaze, gesture and body action."],
+            ["audio_dialogue_map", "Dialogue map", "Use <Subject 1> (S1): <d>[Language] ...</d>; transcript wording must match the user's audio."],
+            ["audio_visual_sync", "Visible sync cues", "Mouth articulation, breath, contact or musical actions that must visibly follow the soundtrack."],
+            ["audio_camera_sync", "Camera", "Keep the speaker readable with one coherent shot design; avoid hiding the mouth during required sync."],
+            ["audio_environment", "Environment sound", "Only ambience or contact layers not already fixed by the custom audio."],
+            ["audio_continuity_locks", "Continuity safeguards", "Identity, wardrobe, anatomy, props, geography, eyeline and lip visibility that cannot drift."],
+        ],
+    },
 };
+
+const MODE_ALIASES = {
+    v2v_object_swap: "v2va_object_swap",
+    v2va: "v2va_object_swap",
+    object_swap: "v2va_object_swap",
+};
+
+function canonicalMode(value) {
+    const raw = String(value || "t2va").trim().toLowerCase();
+    const resolved = MODE_ALIASES[raw] || raw;
+    return MODE_META[resolved] ? resolved : "t2va";
+}
 
 const EXAMPLES = {
     t2va: {
@@ -116,6 +155,25 @@ const EXAMPLES = {
         detailed_description: "Begin low and close to <Subject 2> as <Subject 1> taps a sparse pattern with brushes. Continue in one clockwise move, revealing the performer and concrete columns. The rhythm grows through one controlled fill, then stops on a precise final hit as <Subject 1> looks toward an off-camera listener. Preserve subject labels and the spatial side of every drum throughout.",
         overall_soundscape: "Dry brush hits expand into a compact stereo kit, with traffic wash above, shoe movement on concrete and short overpass reflections. Keep the drum transients synchronized to visible contacts and reduce traffic as the camera closes in.",
         non_diegetic_music: "None. Every musical element is performed visibly by <Subject 1> on <Subject 2>.",
+    },
+    v2va_object_swap: {
+        v2va_subject_definitions: "<Picture 1> defines the replacement <Subject 1>: [write only visible identity, body, wardrobe, material or object facts that must be preserved].\n<Video 1> contains source <Subject 2>: [identify exactly what is being replaced]. Each additional <Picture N> may define only its named <Subject N> or continuity attribute.",
+        v2va_source_video_authority: "<Video 1> is the temporal source authority for duration, action timing, body or object motion, camera path, framing, occlusion order, environment and edit rhythm. Preserve those relationships unless an interval instruction explicitly changes one.",
+        v2va_replacement_retention: "Replace source <Subject 2> from <Video 1> with replacement <Subject 1> from <Picture 1>. Retain [list source environment, secondary subjects, interactions, contact points, lighting response and camera behavior]. Change only [list requested identity, object, clothing or appearance attributes].",
+        v2va_interval_edits: "[Define source-time intervals from <Video 1>, for example 00:00.00-00:02.50, and state the visible replacement action or retained event in each interval. Leave this field untimed when the edit applies uniformly to the complete source video.]",
+        v2va_sound_policy: "[State whether connected source-video audio is retained, replaced, muted or supplemented. Name <Audio 1> only when an audio reference is actually connected. Keep dialogue wording, lip timing, contact sounds and ambience consistent with the chosen policy.]",
+        v2va_exclusions: "Do not change unselected subjects, source environment, camera trajectory, duration, occlusion order or interactions. No identity blending between <Subject 1> and <Subject 2>, duplicate replacement, geometry drift, temporal jump, subtitle, logo or invented reference.",
+    },
+    audio_driven: {
+        audio_drive_contract: "Treat the connected custom audio as the timing authority. Preserve its order, pauses, breaths and duration; do not invent, remove or reorder speech.",
+        audio_subject_map: "<Subject 1> (S1): [describe the visible speaker and the identity/reference facts that must remain stable].",
+        audio_scene_intent: "[Describe location, time, dramatic purpose and the visible starting situation.]",
+        audio_timed_performance: "[Map audible phrases, pauses and breaths to chronological facial expression, gaze, gesture and body action.]",
+        audio_dialogue_map: "<Subject 1> (S1): <d>[Language] ...</d>",
+        audio_visual_sync: "[Describe visible mouth articulation, breath, contact or musical actions that must synchronize with the connected audio.]",
+        audio_camera_sync: "[Describe one coherent framing and camera move that supports the timed performance without hiding the speaker.]",
+        audio_environment: "[Describe only environmental ambience and contact sounds not already fixed by the custom audio.]",
+        audio_continuity_locks: "[List identity, wardrobe, anatomy, prop, geography, eyeline and lip-visibility facts that cannot drift.]",
     },
 };
 
@@ -223,9 +281,9 @@ function safeProject(raw) {
     try { parsed = JSON.parse(String(raw || "{}")); } catch {}
     return {
         schema: "iamccs.minimax_h3.prompter_project",
-        schema_version: 2,
+        schema_version: 3,
         project_name: String(parsed.project_name || "Untitled H3 Prompt"),
-        task_mode: MODE_META[parsed.task_mode] ? parsed.task_mode : "t2va",
+        task_mode: canonicalMode(parsed.task_mode),
         injection_target: ["global", "local_auto", "local_1", "local_2", "local_3"].includes(parsed.injection_target) ? parsed.injection_target : "global",
         writing_mode: ["manual", "guided", "assistant_fill"].includes(parsed.writing_mode) ? parsed.writing_mode : "guided",
         merge_policy: ["replace", "append"].includes(parsed.merge_policy) ? parsed.merge_policy : "replace",
@@ -237,7 +295,7 @@ function safeProject(raw) {
 }
 
 function composePrompt(project) {
-    const mode = MODE_META[project.task_mode] ? project.task_mode : "t2va";
+    const mode = canonicalMode(project.task_mode);
     return MODE_META[mode].sections
         .map(([key, label]) => {
             const body = String(project.sections?.[key] || "").trim();
@@ -306,7 +364,7 @@ function mountPrompter(node) {
     rawNames.forEach((name) => hideWidget(widget(node, name)));
 
     let project = safeProject(widget(node, "project_data")?.value);
-    project.task_mode = String(widget(node, "task_mode")?.value || project.task_mode);
+    project.task_mode = canonicalMode(widget(node, "task_mode")?.value || project.task_mode);
     project.injection_target = String(widget(node, "injection_target")?.value || project.injection_target);
     project.writing_mode = String(widget(node, "writing_mode")?.value || project.writing_mode);
     project.merge_policy = String(widget(node, "merge_policy")?.value || project.merge_policy);
@@ -521,9 +579,18 @@ function mountPrompter(node) {
     addTagRow("Speech", [
         { caption: "(S1)", value: "(S1)", syntax: true, title: "Stable speaker identity 1" },
         { caption: "(S2)", value: "(S2)", syntax: true, title: "Stable speaker identity 2" },
-        { caption: "<d> dialogue", value: "<d>[English] dialogue</d>", select: "dialogue", syntax: true, title: "MiniMax dialogue or lyrics block" },
+        { caption: "<d> dialogue", value: "<d>[Language] ...</d>", select: "...", syntax: true, title: "MiniMax dialogue or lyrics block; replace Language and the ellipsis" },
         { caption: "<scenetrans>", value: "<scenetrans>", syntax: true, title: "Dialogue continues across a scene transition" },
         { caption: "<cutoff>", value: "<cutoff>", syntax: true, title: "Speech is intentionally cut off by the video ending" },
+    ]);
+    addTagRow("Audio drive", [
+        {
+            caption: "S1 driven line",
+            value: "<Subject 1> (S1): <d>[Language] ...</d>",
+            select: "...",
+            syntax: true,
+            title: "Content-free R21 audio-drive template. Replace Language and transcript; the connected audio remains timing authority.",
+        },
     ]);
     const right = el("aside", "iamccs-pr-right");
     right.appendChild(el("div", "iamccs-pr-kicker", "Final prompt"));
@@ -731,7 +798,12 @@ function mountPrompter(node) {
         nameInput.value = project.project_name;
         policy.value = project.merge_policy;
         exampleSelect.disabled = project.task_mode !== "t2va";
-        exampleSelect.title = project.task_mode === "t2va" ? "Choose a cinematic T2V prompt project" : "T2V cinematic projects are available in T2VA mode";
+        exampleSelect.title = project.task_mode === "t2va"
+            ? "Choose a cinematic T2V prompt project"
+            : project.task_mode === "audio_driven"
+                ? "Audio Drive loads a content-free structural template; write the user's own scene and transcript."
+                : "T2V cinematic projects are available in T2VA mode";
+        exampleBtn.textContent = project.task_mode === "audio_driven" ? "Load Audio Drive Template" : "Load Example";
         targetButtons.forEach((item, key) => item.classList.toggle("active", key === project.injection_target));
         writingButtons.forEach((item, key) => item.classList.toggle("active", key === project.writing_mode));
         populateAIScope();
@@ -751,7 +823,7 @@ function mountPrompter(node) {
         const selectedT2V = mode === "t2va" ? T2V_PROJECTS.find((item) => item.id === exampleSelect.value) : null;
         const exampleSections = selectedT2V?.sections || EXAMPLES[mode] || {};
         project.sections = { ...project.sections, ...exampleSections };
-        project.project_name = selectedT2V?.name || `${MODE_META[mode].label} Example Project`;
+        project.project_name = selectedT2V?.name || (mode === "audio_driven" ? "Audio Drive Prompt Template" : `${MODE_META[mode].label} Example Project`);
         renderControls();
         renderSections();
         commit();

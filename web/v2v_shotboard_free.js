@@ -2,7 +2,8 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 const NODE_CLASS = "IAMCCS_V2VShotboardFreeScail";
-const VERSION = "1.1.4-easy-scail-autoload";
+const NODE_DISPLAY = "V2V Shotboard Easy - SCAIL Edition";
+const VERSION = "1.1.5-easy-mask-monitors";
 const UNIFIED_WORKFLOW_PATH = "workflows/IAMCCS_V2V_SHOTBOARD_EASY/IAMCCS_V2V_SHOTBOARD_EASY_SCAIL2_UNIFIED.json";
 const UNIFIED_WORKFLOW_NAME = "IAMCCS_V2V_SHOTBOARD_EASY_SCAIL2_UNIFIED";
 const runtime = { session: null, eventsBound: false };
@@ -14,8 +15,12 @@ function nodeClass(node) {
     return String(node?.comfyClass || node?.type || node?.constructor?.type || "");
 }
 
+function isPlannerNode(node) {
+    return nodeClass(node) === NODE_CLASS || String(node?.title || node?.constructor?.title || "") === NODE_DISPLAY;
+}
+
 function graphFor(source = null) {
-    return source?.graph || app?.graph || null;
+    return source?.graph || app?.canvas?.graph || app?.graph || null;
 }
 
 function graphNodes(source = null) {
@@ -431,7 +436,7 @@ async function loadUnifiedBackend(session, payload) {
 
     await app.loadGraphData(workflow, true, true, UNIFIED_WORKFLOW_NAME);
     await new Promise((resolve) => window.setTimeout(resolve, 50));
-    const planner = graphNodes().find((item) => nodeClass(item) === NODE_CLASS);
+    const planner = graphNodes().find((item) => isPlannerNode(item));
     if (!planner) throw new Error("Unified Easy workflow loaded without its planner node");
 
     for (const [name, value] of Object.entries(payload)) write(planner, name, value);
@@ -778,6 +783,16 @@ function lanePriority(node, item, lane) {
         else if (/16\s*fps|16fps/.test(text)) score += 700;
         if (/preview|temp/.test(text)) score -= 120;
     }
+    if (lane === "pose") {
+        if (/active mode pose mask|pose video mask|pose[_ -]?mask/.test(text)) score += 1400;
+        if (/object ids preview|sam3[_ -]?trackpreview|sam tracking/.test(text)) score -= 900;
+    }
+    if (lane === "mask") {
+        if (/active mode reference mask|reference image mask|reference[_ -]?mask/.test(text)) score += 1500;
+        else if (/colored mask|identity mask/.test(text)) score += 900;
+        if (/object ids preview|sam3[_ -]?trackpreview|sam tracking/.test(text)) score -= 900;
+    }
+    if (lane === "intermediate" && /object ids preview|sam3[_ -]?trackpreview|sam tracking/.test(text)) score += 1000;
     if (lane === "intermediate" && frames === 1 && !item?.animated) score -= 500;
     return score;
 }
@@ -929,6 +944,9 @@ function itemsFromExecuted(detail) {
 
 function classifyOutput(node, item) {
     const text = `${nodeClass(node)} ${node?.title || ""} ${item?.filename || ""}`.toLowerCase();
+    if (/object ids preview|sam3[_ -]?trackpreview|sam tracking/.test(text)) return "intermediate";
+    if (/reference image mask|reference[_ -]?mask/.test(text)) return "mask";
+    if (/pose video mask|pose[_ -]?mask/.test(text)) return "pose";
     if (/pose|dwpose|openpose|skeleton|vitpose/.test(text)) return "pose";
     if (/sam|mask|segment|track/.test(text)) return "mask";
     if (/final|output|combine|savevideo|video combine/.test(text)) return "output";
@@ -1139,10 +1157,10 @@ function controlMarkup(node) {
             <div id="v2vfProgressCopy" class="iamccs-v2vf-progress-copy">Waiting for ComfyUI</div>
         </div>
         <div class="iamccs-v2vf-preview-grid">
-            <div class="iamccs-v2vf-preview"><b>POSE</b><div id="v2vfPreview-pose" class="iamccs-v2vf-media"></div></div>
-            <div class="iamccs-v2vf-preview"><b>SAM / MASK</b><div id="v2vfPreview-mask" class="iamccs-v2vf-media"></div></div>
-            <div class="iamccs-v2vf-preview"><b>INTERMEDIATE</b><div id="v2vfPreview-intermediate" class="iamccs-v2vf-media"></div></div>
-            <div class="iamccs-v2vf-preview"><b>OUTPUT</b><div id="v2vfPreview-output" class="iamccs-v2vf-media"></div></div>
+            <div class="iamccs-v2vf-preview"><b>POSE MASK</b><div id="v2vfPreview-pose" class="iamccs-v2vf-media"></div></div>
+            <div class="iamccs-v2vf-preview"><b>REFERENCE MASK</b><div id="v2vfPreview-mask" class="iamccs-v2vf-media"></div></div>
+            <div class="iamccs-v2vf-preview"><b>SAM TRACKING</b><div id="v2vfPreview-intermediate" class="iamccs-v2vf-media"></div></div>
+            <div class="iamccs-v2vf-preview"><b>FINAL OUTPUT</b><div id="v2vfPreview-output" class="iamccs-v2vf-media"></div></div>
         </div>`;
 }
 
@@ -1466,7 +1484,8 @@ function configureNode(node) {
 app.registerExtension({
     name: `IAMCCS.V2VShotboardFreeScail.${VERSION}`,
     async beforeRegisterNodeDef(nodeType, nodeData) {
-        if (nodeData?.name !== NODE_CLASS) return;
+        const definitionName = String(nodeData?.name || nodeData?.class_type || nodeData?.display_name || "");
+        if (definitionName !== NODE_CLASS && definitionName !== NODE_DISPLAY) return;
         const originalCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function() {
             const result = originalCreated?.apply?.(this, arguments);
@@ -1480,11 +1499,24 @@ app.registerExtension({
             return result;
         };
     },
+    async nodeCreated(node) {
+        if (!isPlannerNode(node)) return;
+        configureNode(node);
+    },
+    async setup() {
+        const configureVisiblePlanner = () => {
+            for (const node of graphNodes()) {
+                if (isPlannerNode(node)) configureNode(node);
+            }
+        };
+        configureVisiblePlanner();
+        window.setInterval(configureVisiblePlanner, 1000);
+    },
 });
 
 globalThis.IAMCCSV2VShotboardEasy = {
     open() {
-        const node = graphNodes().find((item) => nodeClass(item) === NODE_CLASS);
+        const node = graphNodes().find((item) => isPlannerNode(item));
         if (!node) throw new Error("Load a V2V Shotboard Easy workflow first");
         openShotboard(node);
     },

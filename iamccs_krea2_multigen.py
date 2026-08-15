@@ -2,7 +2,7 @@
 
 Runs one Krea 2 image-edit generation for every non-empty prompt in
 ``multi_prompt``.  It intentionally composes the installed Krea 2 Edit,
-Conditioning Rebalance and RES4LYF nodes instead of duplicating their logic.
+Conditioning Rebalance nodes and the IAMCCS-native sampler.
 """
 
 import json
@@ -19,7 +19,7 @@ def _runtime_node(name):
     if cls is None:
         raise RuntimeError(
             f"Required node '{name}' is not installed. Install/update the Krea 2 "
-            "Edit, Conditioning Rebalance and RES4LYF custom nodes."
+            "Edit, Conditioning Rebalance and IAMCCS custom nodes."
         )
     return cls()
 
@@ -40,7 +40,7 @@ def _run_runtime_node(node, **inputs):
         return (result,)
     raise RuntimeError(
         f"Installed node '{type(node).__name__}' has no supported execution method. "
-        "Update IAMCCS-nodes and RES4LYF, then restart ComfyUI."
+        "Update IAMCCS-nodes, then restart ComfyUI."
     )
 
 

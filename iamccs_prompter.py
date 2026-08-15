@@ -25,10 +25,27 @@ from typing import Any
 SUPERNODE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX"
 CATEGORY = "IAMCCS/MiniMax H3/Prompting"
 PROJECT_SCHEMA = "iamccs.minimax_h3.prompter_project"
-PROJECT_VERSION = 2
+PROJECT_VERSION = 3
 H3_ABSOLUTE_CHAR_LIMIT = 7000
 AI_IMAGE_LIMIT = 4
 AI_IMAGE_MAX_BYTES = 16 * 1024 * 1024
+AUDIO_HANDOFF_AUTHORING_RULE = (
+    "Never carry dialogue or a new vocalisation across two independently generated chunks. "
+    "For every non-final chunk, finish all dialogue and shouts at least 1.00 second before the end; "
+    "reserve the final 1.00 second for continuous ambience, physical action sounds and quiet natural breathing. "
+    "Every following chunk must also reserve its first 1.00 second for that same ambience and continued physical action before any new line starts. "
+    "Do not impose this restriction on the final or only chunk."
+)
+TASK_MODE_ALIASES = {
+    "v2v_object_swap": "v2va_object_swap",
+    "v2va": "v2va_object_swap",
+    "object_swap": "v2va_object_swap",
+}
+
+
+def _normalise_task_mode(value: Any) -> str:
+    mode = str(value or "t2va").strip().lower()
+    return TASK_MODE_ALIASES.get(mode, mode)
 
 
 MODE_SECTIONS: dict[str, tuple[tuple[str, str], ...]] = {
@@ -78,6 +95,25 @@ MODE_SECTIONS: dict[str, tuple[tuple[str, str], ...]] = {
         ("overall_soundscape", "overall_soundscape"),
         ("non_diegetic_music", "non_diegetic_music"),
     ),
+    "v2va_object_swap": (
+        ("v2va_subject_definitions", "SUBJECT DEFINITIONS"),
+        ("v2va_source_video_authority", "SOURCE VIDEO 1 AUTHORITY"),
+        ("v2va_replacement_retention", "REPLACEMENT / RETENTION ANALYSIS"),
+        ("v2va_interval_edits", "INTERVAL EDIT INSTRUCTIONS"),
+        ("v2va_sound_policy", "SOUND POLICY"),
+        ("v2va_exclusions", "EXCLUSIONS / CONTINUITY SAFEGUARDS"),
+    ),
+    "audio_driven": (
+        ("audio_drive_contract", "AUDIO DRIVE CONTRACT"),
+        ("audio_subject_map", "SUBJECT / SPEAKER MAP"),
+        ("audio_scene_intent", "SCENE INTENT"),
+        ("audio_timed_performance", "TIMED PERFORMANCE"),
+        ("audio_dialogue_map", "DIALOGUE MAP"),
+        ("audio_visual_sync", "VISIBLE SYNC CUES"),
+        ("audio_camera_sync", "CAMERA"),
+        ("audio_environment", "ENVIRONMENT SOUND"),
+        ("audio_continuity_locks", "CONTINUITY SAFEGUARDS"),
+    ),
 }
 
 
@@ -100,6 +136,44 @@ DEFAULT_SECTIONS = {
     "retention_analysis": "Retain identity and wardrobe from <Picture 1>. Retain the physical timing and camera rhythm from <Video 1> only where supplied. Use <Audio 1> for voice character or cadence only when it is connected; do not invent an unseen speaker.",
     "detailed_description": "Begin with the supplied reference composition. <Subject 1> hears the approaching train, tightens one hand around <Subject 2>, then turns with a controlled breath. Use a single lateral camera move and preserve spatial geography. If dialogue is desired: <Subject 1> (S1): <d>[English] Not this train.</d>",
     "overall_soundscape": "Layer the location ambience, contact sounds, movement and dialogue in chronological order. Keep perspective and reverberation consistent with camera distance; avoid wall-to-wall effects.",
+    # V2VA Object Swap is a text/reference contract. It deliberately makes no
+    # ControlNet, mask, depth, pose, segmentation, or tracker claim.
+    "v2va_subject_definitions": (
+        "<Picture 1> defines the replacement <Subject 1>: [write only visible identity, body, wardrobe, material or object facts that must be preserved].\n"
+        "<Video 1> contains source <Subject 2>: [identify exactly what is being replaced]. Each additional <Picture N> may define only the named <Subject N> or continuity attribute."
+    ),
+    "v2va_source_video_authority": (
+        "<Video 1> is the temporal source authority for duration, action timing, body or object motion, camera path, framing, occlusion order, environment and edit rhythm. "
+        "Preserve those source relationships unless an interval instruction below explicitly changes one."
+    ),
+    "v2va_replacement_retention": (
+        "Replace source <Subject 2> from <Video 1> with replacement <Subject 1> from <Picture 1>. "
+        "Retain [list source environment, secondary subjects, interactions, contact points, lighting response and camera behavior]. "
+        "Change only [list the requested identity, object, clothing or appearance attributes]."
+    ),
+    "v2va_interval_edits": (
+        "[Define source-time intervals from <Video 1>, for example 00:00.00-00:02.50, and state the visible replacement action or retained event in each interval. "
+        "Leave this field untimed when the edit applies uniformly to the complete source video.]"
+    ),
+    "v2va_sound_policy": (
+        "[State whether connected source-video audio is retained, replaced, muted or supplemented. Name <Audio 1> only when an audio reference is actually connected. "
+        "Keep dialogue wording, lip timing, contact sounds and ambience consistent with the chosen policy.]"
+    ),
+    "v2va_exclusions": (
+        "Do not change unselected subjects, source environment, camera trajectory, duration, occlusion order or interactions. "
+        "No identity blending between <Subject 1> and <Subject 2>, duplicate replacement, geometry drift, temporal jump, subtitle, logo or invented reference."
+    ),
+    # R21 audio-drive fields are deliberately content-free. They are a
+    # reusable authoring scaffold, not a hardcoded character, story or line.
+    "audio_drive_contract": "Treat the connected custom audio as the timing authority. Preserve its order, pauses, breaths and duration; do not invent, remove or reorder speech.",
+    "audio_subject_map": "<Subject 1> (S1): [describe the visible speaker and the identity/reference facts that must remain stable].",
+    "audio_scene_intent": "[Describe location, time, dramatic purpose and the visible starting situation.]",
+    "audio_timed_performance": "[Map audible phrases, pauses and breaths to chronological facial expression, gaze, gesture and body action.]",
+    "audio_dialogue_map": "<Subject 1> (S1): <d>[Language] ...</d>",
+    "audio_visual_sync": "[Describe visible mouth articulation, breath, contact or musical actions that must synchronize with the connected audio.]",
+    "audio_camera_sync": "[Describe one coherent framing and camera move that supports the timed performance without hiding the speaker.]",
+    "audio_environment": "[Describe only environmental ambience and contact sounds not already fixed by the custom audio.]",
+    "audio_continuity_locks": "[List identity, wardrobe, anatomy, prop, geography, eyeline and lip-visibility facts that cannot drift.]",
 }
 
 
@@ -151,12 +225,33 @@ def _safe_project(value: Any) -> dict[str, Any]:
     sections = source.get("sections")
     if isinstance(sections, dict):
         project["sections"].update({str(key): str(value or "") for key, value in sections.items()})
+        # R21 audio-drive projects created before the Final Draft field rename
+        # used the aliases below.  Preserve their authored content instead of
+        # silently falling back to the current bracketed example placeholders.
+        def _legacy_text(*keys: str) -> str:
+            return "\n".join(
+                str(sections.get(key) or "").strip()
+                for key in keys
+                if str(sections.get(key) or "").strip()
+            )
+
+        legacy_audio_aliases = {
+            "audio_timed_performance": _legacy_text("audio_timing_map", "audio_performance"),
+            "audio_visual_sync": _legacy_text("audio_visible_sync"),
+            "audio_camera_sync": _legacy_text("audio_camera"),
+            "audio_environment": _legacy_text("audio_ambience"),
+            "audio_continuity_locks": _legacy_text("audio_continuity"),
+        }
+        for current_key, migrated_value in legacy_audio_aliases.items():
+            if migrated_value and not str(sections.get(current_key) or "").strip():
+                project["sections"][current_key] = migrated_value
     project["ai_direction"] = str(project.get("ai_direction") or "")
     project["ai_scope"] = str(project.get("ai_scope") or "active_field")
     visual_roles = project.get("ai_visual_roles")
     project["ai_visual_roles"] = visual_roles if isinstance(visual_roles, dict) else {}
     project["schema"] = PROJECT_SCHEMA
     project["schema_version"] = PROJECT_VERSION
+    project["task_mode"] = _normalise_task_mode(project.get("task_mode"))
     return project
 
 
@@ -195,7 +290,7 @@ def _parse_assistant_draft(value: str) -> dict[str, str]:
 
 
 def _compose_prompt(project: dict[str, Any], task_mode: str, writing_mode: str, assistant_draft: str) -> tuple[str, dict[str, Any]]:
-    mode = str(task_mode or project.get("task_mode") or "t2va").strip().lower()
+    mode = _normalise_task_mode(task_mode or project.get("task_mode") or "t2va")
     if mode not in MODE_SECTIONS:
         mode = "t2va"
     manual = project.get("sections") if isinstance(project.get("sections"), dict) else {}
@@ -277,7 +372,7 @@ def _assistant_instruction(
     target_keys: Any = None,
     images: Any = None,
 ) -> tuple[str, str]:
-    mode = str(task_mode or "t2va").lower()
+    mode = _normalise_task_mode(task_mode or "t2va")
     if mode not in MODE_SECTIONS:
         mode = "t2va"
     allowed = [key for key, _label in MODE_SECTIONS[mode]]
@@ -294,6 +389,17 @@ def _assistant_instruction(
         "i2va": "Treat <Picture 1> as the exact opening-frame authority. Animate from it without redesigning identity, wardrobe, composition or screen geography.",
         "fl2va": "Treat the opening and closing pictures as exact boundary frames. Describe one physically continuous path from the first frame to the last; do not solve the transition with a cut, dissolve or unrelated redesign.",
         "ref2va": "Use explicit <Picture N>, <Video N>, <Audio N> and <Subject N> references. State what each reference contributes and what must be ignored; preserve the lowercase REF2VA section semantics.",
+        "v2va_object_swap": (
+            "Write a MiniMax H3 video-to-video object/subject replacement contract. Use <Picture N> only for connected replacement/identity references, <Video 1> for the connected source video's temporal motion, camera and environment authority, and stable <Subject N> labels. "
+            "Separate what is replaced from what remains, then express user-supplied interval edits in source-video time. Do not claim a mask, tracker, ControlNet, depth, pose or segmentation signal unless the user's connected workflow explicitly provides and names it."
+        ),
+        "audio_driven": (
+            "Treat the connected custom audio as immutable timing authority for visible performance. "
+            "Map the user-supplied transcript with stable speaker notation such as <Subject 1> (S1): "
+            "<d>[Language] ...</d>. Never invent words that are not supplied by the user, never call custom "
+            "drive audio <Audio 1> unless it is also explicitly connected as a REF2VA reference, and keep the "
+            "speaker's mouth visible when lip synchronization is requested."
+        ),
     }[mode]
     system = (
         "You are the autonomous IAMCCS MiniMax H3 prompt editor. Improve the user's own direction; do not replace it with a different story. "
@@ -302,6 +408,7 @@ def _assistant_instruction(
         "Write concise production-ready English optimized for MiniMax H3 audiovisual generation. Preserve exact identity facts, reference tags, requested timing, language and quoted dialogue unless the user explicitly asks to change them. "
         "Use chronological visible action, realistic body mechanics, stable screen geography and one coherent camera language. Prefer one motivated camera move over a list of conflicting moves. "
         "Separate diegetic ambience, dialogue and contact effects from non-diegetic score. Use <Subject N> consistently and keep dialogue inside <d>[Language] ...</d> with stable speaker labels such as (S1) when those tags are present. "
+        f"Chunk-boundary sound rule: {AUDIO_HANDOFF_AUTHORING_RULE} "
         "Do not invent extra characters, products, dialogue, scene changes, cuts, subtitles or logos. Turn negative wishes into concrete continuity safeguards, not vague quality adjectives. "
         f"Mode rule: {mode_rules} "
         "When images are attached, analyze only the contribution named by each image role. An opening image governs the first frame; a closing image governs the last frame; identity, composition and style images govern only those named attributes. "
@@ -513,7 +620,7 @@ def rewrite_sections_with_ai(
         raise ValueError(f"Unsupported AI provider: {provider}")
 
     rewritten = _extract_json_object(content)
-    allowed = {key for key, _label in MODE_SECTIONS.get(str(task_mode).lower(), MODE_SECTIONS["t2va"])}
+    allowed = {key for key, _label in MODE_SECTIONS.get(_normalise_task_mode(task_mode), MODE_SECTIONS["t2va"])}
     supplied = {key for key, value in sections.items() if key in allowed and str(value or "").strip()}
     requested = {str(key) for key in target_keys} if isinstance(target_keys, list) else supplied
     requested = requested & allowed
@@ -533,6 +640,7 @@ def rewrite_sections_with_ai(
             for item in visual_inputs
         ],
         "system_prompt_characters": len(system),
+        "audio_handoff_authoring_rule": AUDIO_HANDOFF_AUTHORING_RULE,
     }
 
 
@@ -543,18 +651,143 @@ def _linx_resources(value: Any) -> dict[str, Any]:
     return resources if isinstance(resources, dict) else {}
 
 
-def apply_prompter_to_minimax(
+VISION_CONTEXT_SCHEMA = "iamccs.minimax_h3.vision_context"
+VISION_CONTEXT_RESOURCE = "iamccs_h3_vision_context_by_target"
+VISION_MANIFEST_RESOURCE = "iamccs_h3_vision_manifest"
+
+
+def _format_vision_context(task_mode: str, context: Any) -> str:
+    text = str(context or "").strip()
+    if not text:
+        return ""
+    if str(task_mode or "").strip().lower() == "ref2va":
+        return f"visual_reference_analysis:\n{text}"
+    return f"[VISUAL REFERENCE ANALYSIS]\n{text}"
+
+
+def _vision_context_requests(
     cine_linx: Any,
+    task_mode: str,
+    primary_target: str,
+) -> tuple[dict[str, str], str, dict[str, Any]]:
+    resources = _linx_resources(cine_linx)
+    manifest = resources.get(VISION_MANIFEST_RESOURCE)
+    contexts = resources.get(VISION_CONTEXT_RESOURCE)
+    if not isinstance(manifest, dict) or manifest.get("schema") != VISION_CONTEXT_SCHEMA:
+        return {}, "append", {"consumed": False, "reason": "no_h3_vision_manifest"}
+    if not isinstance(contexts, dict):
+        contexts = manifest.get("target_contexts")
+    if not isinstance(contexts, dict):
+        return {}, "append", {"consumed": False, "reason": "no_h3_vision_target_contexts"}
+
+    allowed_targets = {"global", "local_auto", "local_1", "local_2", "local_3"}
+    clean: dict[str, str] = {}
+    for target, context in contexts.items():
+        target_name = str(target or "").strip().lower()
+        if target_name not in allowed_targets:
+            continue
+        formatted = _format_vision_context(task_mode, context)
+        if formatted:
+            clean[target_name] = formatted[:H3_ABSOLUTE_CHAR_LIMIT]
+    policy = str(
+        resources.get(
+            "iamccs_h3_vision_context_merge_policy",
+            manifest.get("context_merge_policy", "append"),
+        )
+        or "append"
+    ).strip().lower()
+    policy = policy if policy in {"append", "replace"} else "append"
+    return clean, policy, {
+        "consumed": bool(clean),
+        "schema_version": manifest.get("schema_version"),
+        "status": manifest.get("status"),
+        "analysis_mode": manifest.get("analysis_mode"),
+        "available_targets": sorted(clean),
+        "primary_target": str(primary_target),
+        "merge_policy": policy,
+        "pictures": [
+            {
+                "slot": item.get("slot"),
+                "role": item.get("role"),
+                "target": item.get("target"),
+            }
+            for item in manifest.get("pictures", [])
+            if isinstance(item, dict)
+        ],
+    }
+
+
+def _append_prompter_stage(
+    upstream_linx: Any,
+    injection: dict[str, Any],
+    injections: list[dict[str, Any]],
+    final_prompt: str,
+    project_json: str,
+    report: str,
+    mode: str,
+    injection_target: str,
+    character_count: int,
+) -> dict[str, Any]:
+    out = dict(upstream_linx) if isinstance(upstream_linx, dict) else {}
+    out["type"] = SUPERNODE_LINX_TYPE
+    out["mode"] = "iamccs_minimax_h3_prompter"
+    out["active_stage"] = "iamccs_prompter"
+    out["active_stage_kind"] = "prompt_authoring"
+
+    chain = [dict(item) for item in (out.get("chain") or []) if isinstance(item, dict)]
+    chain.append({"role": "prompt_author", "name": "IAMCCS_Prompter"})
+    out["chain"] = chain
+    stages = [dict(item) for item in (out.get("stages") or []) if isinstance(item, dict)]
+    stages.append({
+        "name": "iamccs_prompter",
+        "kind": "prompt_authoring",
+        "payload": {
+            "task_mode": mode,
+            "target": str(injection_target),
+            "characters": character_count,
+            "injection_count": len(injections),
+        },
+    })
+    out["stages"] = stages
+    out["stage_count"] = len(stages)
+
+    resources = dict(_linx_resources(out))
+    resources.update({
+        # Keep the singular contract for every older Shotboard/workflow.
+        "iamccs_prompter_injection": injection,
+        # New contract: deterministic ordered requests can address global and
+        # independent local prompt targets in one CineLinX pass.
+        "iamccs_prompter_injections": [dict(item) for item in injections],
+        "iamccs_prompter_prompt": final_prompt,
+        "iamccs_prompter_project_json": project_json,
+        "iamccs_prompter_audio_handoff_rule": AUDIO_HANDOFF_AUTHORING_RULE,
+        "iamccs_prompter_audio_driven_dialogue_template": "<Subject 1> (S1): <d>[Language] ...</d>",
+        "cine_global_prompt": final_prompt if str(injection_target) == "global" else "",
+        "cine_report": report,
+    })
+    out["resources"] = resources
+
+    outputs = dict(out.get("outputs") or {})
+    outputs.update({
+        "final_prompt": final_prompt,
+        "project_json": project_json,
+        "injection_target": str(injection_target),
+        "report": report,
+    })
+    out["outputs"] = outputs
+    out["resource_keys"] = sorted(resources)
+    out["resource_types"] = {key: type(value).__name__ for key, value in resources.items()}
+    return out
+
+
+def _apply_one_prompter_request(
     global_prompt: str,
     timeline_data: Any,
+    request: dict[str, Any],
 ) -> tuple[str, str, dict[str, Any]]:
-    """Apply a Prompter CineLinX request where the Shotboard timeline is known."""
-    resources = _linx_resources(cine_linx)
-    request = resources.get("iamccs_prompter_injection")
-    if not isinstance(request, dict):
-        return str(global_prompt or ""), str(timeline_data or ""), {"applied": False, "reason": "no_prompter_cine_linx"}
+    """Apply one explicit request without reading mutable state from CineLinX."""
 
-    prompt = str(request.get("prompt", resources.get("iamccs_prompter_prompt", "")) or "").strip()
+    prompt = str(request.get("prompt", "") or "").strip()
     target = str(request.get("target", "global") or "global").strip().lower()
     policy = str(request.get("merge_policy", "replace") or "replace").strip().lower()
     if not prompt:
@@ -656,6 +889,48 @@ def apply_prompter_to_minimax(
     }
 
 
+def apply_prompter_to_minimax(
+    cine_linx: Any,
+    global_prompt: str,
+    timeline_data: Any,
+) -> tuple[str, str, dict[str, Any]]:
+    """Apply legacy or multi-target Prompter requests to a known Shotboard."""
+    resources = _linx_resources(cine_linx)
+    requests = resources.get("iamccs_prompter_injections")
+    if not isinstance(requests, list):
+        legacy = resources.get("iamccs_prompter_injection")
+        requests = [legacy] if isinstance(legacy, dict) else []
+    requests = [dict(item) for item in requests if isinstance(item, dict)]
+    if not requests:
+        return str(global_prompt or ""), str(timeline_data or ""), {
+            "applied": False,
+            "reason": "no_prompter_cine_linx",
+        }
+
+    resolved_global = str(global_prompt or "")
+    resolved_timeline = str(timeline_data or "")
+    applications: list[dict[str, Any]] = []
+    for request_index, request in enumerate(requests):
+        resolved_global, resolved_timeline, result = _apply_one_prompter_request(
+            resolved_global,
+            resolved_timeline,
+            request,
+        )
+        applications.append({"request_index": request_index, **result})
+
+    applied = [item for item in applications if item.get("applied")]
+    actual_targets = [str(item.get("actual_target")) for item in applied if item.get("actual_target")]
+    return resolved_global, resolved_timeline, {
+        "applied": bool(applied),
+        "requested_count": len(requests),
+        "applied_count": len(applied),
+        "actual_target": ",".join(actual_targets) if actual_targets else "none",
+        "actual_targets": actual_targets,
+        "applications": applications,
+        "multi_target_contract": len(requests) > 1,
+    }
+
+
 class IAMCCS_Prompter:
     @classmethod
     def INPUT_TYPES(cls):
@@ -668,7 +943,10 @@ class IAMCCS_Prompter:
                         "multiline": True,
                     },
                 ),
-                "task_mode": (["t2va", "i2va", "fl2va", "ref2va"], {"default": "t2va"}),
+                "task_mode": (
+                    ["t2va", "i2va", "fl2va", "ref2va", "v2va_object_swap", "audio_driven"],
+                    {"default": "t2va"},
+                ),
                 "injection_target": (
                     ["global", "local_auto", "local_1", "local_2", "local_3"],
                     {"default": "global"},
@@ -681,6 +959,15 @@ class IAMCCS_Prompter:
                 "character_budget": ("INT", {"default": 6800, "min": 1000, "max": H3_ABSOLUTE_CHAR_LIMIT, "step": 100}),
             },
             "optional": {
+                "cine_linx": (
+                    SUPERNODE_LINX_TYPE,
+                    {
+                        "tooltip": (
+                            "Optional upstream IAMCCS Cine H3 Vision Info. Its analyzed visual context is "
+                            "routed to the declared global/local targets without embedding image tensors in this node."
+                        ),
+                    },
+                ),
                 "assistant_draft": (
                     "STRING",
                     {
@@ -711,9 +998,10 @@ class IAMCCS_Prompter:
         merge_policy,
         character_budget,
         assistant_draft="",
+        cine_linx=None,
     ):
         project = _safe_project(project_data)
-        mode = str(task_mode or project.get("task_mode") or "t2va").lower()
+        mode = _normalise_task_mode(task_mode or project.get("task_mode") or "t2va")
         project["task_mode"] = mode
         project["injection_target"] = str(injection_target)
         project["writing_mode"] = str(writing_mode)
@@ -721,6 +1009,16 @@ class IAMCCS_Prompter:
         final_prompt, details = _compose_prompt(project, mode, str(writing_mode), str(assistant_draft or ""))
         if not final_prompt:
             raise ValueError("IAMCCS_Prompter: compila almeno un box prima di accodare il workflow")
+
+        primary_target = str(injection_target or "global").strip().lower()
+        vision_contexts, vision_merge_policy, vision_report = _vision_context_requests(
+            cine_linx,
+            mode,
+            primary_target,
+        )
+        primary_vision_context = vision_contexts.pop(primary_target, "")
+        if primary_vision_context:
+            final_prompt = _merge_text(final_prompt, primary_vision_context, vision_merge_policy)
         char_count = len(final_prompt)
         budget = min(H3_ABSOLUTE_CHAR_LIMIT, max(1000, int(character_budget)))
         if char_count > H3_ABSOLUTE_CHAR_LIMIT:
@@ -737,7 +1035,28 @@ class IAMCCS_Prompter:
             "merge_policy": str(merge_policy),
             "task_mode": mode,
             "project_name": str(project.get("project_name") or "Untitled Prompt"),
+            "source": "iamccs_prompter",
         }
+
+        injections = [injection]
+        for target, context in vision_contexts.items():
+            if not str(context or "").strip():
+                continue
+            if len(context) > H3_ABSOLUTE_CHAR_LIMIT:
+                raise ValueError(
+                    f"IAMCCS_Prompter: visual context for {target} contains {len(context)} characters; "
+                    f"the MiniMax H3 request limit is {H3_ABSOLUTE_CHAR_LIMIT}."
+                )
+            injections.append({
+                "schema": "iamccs.minimax_h3.prompt_injection",
+                "schema_version": 1,
+                "prompt": context,
+                "target": target,
+                "merge_policy": vision_merge_policy,
+                "task_mode": mode,
+                "project_name": injection["project_name"],
+                "source": "iamccs_cine_h3_vision_info",
+            })
         project_json = json.dumps(project, ensure_ascii=False, indent=2)
         report_data = {
             "node": "IAMCCS_Prompter",
@@ -749,44 +1068,27 @@ class IAMCCS_Prompter:
             "characters": char_count,
             "character_budget": budget,
             "within_recommended_budget": char_count <= budget,
+            "injection_count": len(injections),
+            "injection_targets": [item["target"] for item in injections],
+            "vision_context": vision_report,
+            "audio_handoff_authoring_rule": AUDIO_HANDOFF_AUTHORING_RULE,
+            "audio_driven_dialogue_template": "<Subject 1> (S1): <d>[Language] ...</d>",
             **details,
             "truth": "The MiniMax Shotboard resolves local_auto only after reading its own timeline slots.",
         }
         report = json.dumps(report_data, ensure_ascii=False, indent=2)
-        cine_linx = {
-            "type": SUPERNODE_LINX_TYPE,
-            "mode": "iamccs_minimax_h3_prompter",
-            "active_stage": "iamccs_prompter",
-            "active_stage_kind": "prompt_authoring",
-            "chain": [{"role": "prompt_author", "name": "IAMCCS_Prompter"}],
-            "stages": [
-                {
-                    "name": "iamccs_prompter",
-                    "kind": "prompt_authoring",
-                    "payload": {
-                        "task_mode": mode,
-                        "target": str(injection_target),
-                        "characters": char_count,
-                    },
-                }
-            ],
-            "resources": {
-                "iamccs_prompter_injection": injection,
-                "iamccs_prompter_prompt": final_prompt,
-                "iamccs_prompter_project_json": project_json,
-                "cine_global_prompt": final_prompt if str(injection_target) == "global" else "",
-                "cine_report": report,
-            },
-            "outputs": {
-                "final_prompt": final_prompt,
-                "project_json": project_json,
-                "injection_target": str(injection_target),
-                "report": report,
-            },
-        }
-        cine_linx["resource_keys"] = sorted(cine_linx["resources"].keys())
-        cine_linx["resource_types"] = {key: type(value).__name__ for key, value in cine_linx["resources"].items()}
-        return cine_linx, final_prompt, project_json, report
+        out_linx = _append_prompter_stage(
+            cine_linx,
+            injection,
+            injections,
+            final_prompt,
+            project_json,
+            report,
+            mode,
+            str(injection_target),
+            char_count,
+        )
+        return out_linx, final_prompt, project_json, report
 
 
 def _register_prompter_routes() -> None:
