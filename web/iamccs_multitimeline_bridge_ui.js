@@ -80,6 +80,34 @@ function activeTake(node) {
     return Math.max(1, Math.min(maxTakes(node), Math.round(num(widget(node, "active_take")?.value, 1))));
 }
 
+function upstreamH3Duration(node) {
+    const queue = [node];
+    const visited = new Set();
+    let settingsFallback = null;
+    while (queue.length) {
+        const current = queue.shift();
+        const id = Number(current?.id || 0);
+        if (!current || !id || visited.has(id)) continue;
+        visited.add(id);
+        const type = nodeType(current);
+        if (type === "IAMCCS_MiniMaxH3ShotPlanner") {
+            const seconds = num(widget(current, "duration_seconds")?.value, 0);
+            if (seconds > 0) return { seconds, source: "H3 Shotboard" };
+        }
+        if (type === "IAMCCS_ShotboardH3Settings" && !settingsFallback) {
+            const seconds = num(widget(current, "duration_seconds")?.value, 0);
+            if (seconds > 0) settingsFallback = { seconds, source: "H3 Settings" };
+        }
+        for (const input of current.inputs || []) {
+            if (input?.link == null) continue;
+            const link = app.graph?.links?.[input.link];
+            const origin = link ? app.graph?.getNodeById?.(link.origin_id) : null;
+            if (origin) queue.push(origin);
+        }
+    }
+    return settingsFallback;
+}
+
 function selectedTakesCsv(node) {
     const raw = String(node?.properties?.iamccs_selected_takes_csv || "").trim();
     if (raw) return raw;
@@ -404,12 +432,13 @@ function installBridgeUI(node, reason = "install") {
         const chunkTemplate = String(widget(node, "chunk_template")?.value || "20s");
         const customSeconds = num(widget(node, "custom_chunk_seconds")?.value, 20);
         const fixedCount = Math.max(1, Math.round(num(widget(node, "fixed_take_count")?.value, 3)));
+        const h3Duration = upstreamH3Duration(node);
         root.innerHTML = "";
 
         const head = document.createElement("div");
         head.className = "iamccs-mtb-head";
         const title = document.createElement("div");
-        title.innerHTML = `<div class="iamccs-mtb-title">IAMCCS MultiTimeline Bridge</div><div class="iamccs-mtb-sub">real indexed take bridge, no raw JSON editing</div>`;
+        title.innerHTML = `<div class="iamccs-mtb-title">IAMCCS MultiTimeline Bridge</div><div class="iamccs-mtb-sub">${h3Duration ? `duration linked · ${h3Duration.source} · ${h3Duration.seconds.toFixed(3)}s` : "bridge duration fallback · connect H3 Shotboard/Settings for linked truth"}</div>`;
         const refresh = document.createElement("button");
         refresh.type = "button";
         refresh.textContent = "Refresh UI";
@@ -429,6 +458,8 @@ function installBridgeUI(node, reason = "install") {
         secondsInput.step = "0.25";
         secondsInput.value = String(customSeconds);
         secondsInput.onchange = () => setWidget(node, "custom_chunk_seconds", Math.max(1, Number(secondsInput.value || 20)));
+        templateSelect.title = h3Duration ? `${h3Duration.source} is the runtime duration authority. This remains the fallback.` : "Runtime chunk template";
+        secondsInput.title = h3Duration ? `${h3Duration.source} is the runtime duration authority. This remains the fallback.` : "Custom fallback duration";
         const activeSelect = select(Array.from({ length: max }, (_, index) => {
             const take = index + 1;
             return [String(take), `T${String(take).padStart(2, "0")} / generation ${take}`];

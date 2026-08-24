@@ -9,6 +9,15 @@
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows + general nodes 4 ComfyUI
 
+## Version: 1.5.2 (MiniMax H3 utilities and workflow polish)
+
+This update adds useful MiniMax H3 utilities and other workflow improvements:
+
+- Better audio-drive, audio-timeline and multi-chunk lane support for MiniMax H3 Shotboard workflows.
+- More resilient MiniMax backend device handling, compiler fallbacks and long-video lip-sync paths.
+- Polished Shotboard, dialogue-tag editor, prompter, exporter and RTX/VFX user interfaces.
+- Backup archives are excluded from the node package and kept outside the repository.
+
 ## Version: 1.5.1 (Multigen Roll, Master Audio EDL Export and AudioBoard UX)
 
 This release extends the Shotboard multigen editorial workflow:

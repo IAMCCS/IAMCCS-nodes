@@ -26,6 +26,7 @@ import folder_paths
 
 from .iamccs_minimax_h3_shotboard_core import H3_FPS, build_shotplan, plan_json
 from .iamccs_prompter import SUPERNODE_LINX_TYPE, apply_prompter_to_minimax
+from .audio.dialogue_tag_editor import apply_dialogue_to_minimax
 from .iamccs_supernodes_linx import build_stage_linx_payload
 
 
@@ -267,6 +268,86 @@ def _timeline_dict(timeline_data: Any) -> dict[str, Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _apply_audioboard_to_minimax(cine_linx: Any, timeline_data: Any) -> tuple[str, dict[str, Any]]:
+    """Merge the published AudioBoard lanes into an H3 timeline by field name.
+
+    AudioBoard never replaces visual slots, prompts, duration or H3 settings.
+    Its authority is limited to audio/editorial fields plus the proven V3 roll
+    contract carried in CineLinX.
+    """
+    timeline = _timeline_dict(timeline_data)
+    if not isinstance(cine_linx, dict):
+        return json.dumps(timeline, ensure_ascii=False), {"applied": False, "source": "none"}
+    resources = cine_linx.get("resources") if isinstance(cine_linx.get("resources"), dict) else {}
+    outputs = cine_linx.get("outputs") if isinstance(cine_linx.get("outputs"), dict) else {}
+    payload = resources.get("cine_payload") if isinstance(resources.get("cine_payload"), dict) else {}
+    tracks = resources.get("cine_audio_tracks") if isinstance(resources.get("cine_audio_tracks"), dict) else {}
+
+    audio_timeline: dict[str, Any] = {}
+    for candidate in (
+        resources.get("cine_audio_timeline_json"),
+        outputs.get("audio_timeline_json"),
+        payload.get("audio_timeline_json"),
+    ):
+        parsed = _timeline_dict(candidate)
+        if isinstance(parsed.get("audioSegments"), list):
+            audio_timeline = parsed
+            break
+
+    raw_segments = tracks.get("shotboard_segments") if isinstance(tracks.get("shotboard_segments"), list) else None
+    if raw_segments is None:
+        raw_segments = audio_timeline.get("audioSegments") if isinstance(audio_timeline.get("audioSegments"), list) else []
+    segments = [
+        copy.deepcopy(item) for item in raw_segments
+        if isinstance(item, dict)
+        and not bool(item.get("placeholder", False))
+        and bool(str(item.get("audioFile") or item.get("audio_file") or "").strip() or str(item.get("audioB64") or "").strip())
+    ]
+    if not segments:
+        return json.dumps(timeline, ensure_ascii=False), {"applied": False, "source": "none", "reason": "no_concrete_audio"}
+
+    track_count = max(
+        1,
+        int(tracks.get("shotboard_track_count") or audio_timeline.get("audioTrackCount") or max((int(item.get("track", 0) or 0) + 1 for item in segments), default=1)),
+    )
+    timeline["audioSegments"] = segments
+    timeline["audioTrackCount"] = track_count
+    timeline["audioSyncMode"] = str(audio_timeline.get("audioSyncMode") or payload.get("audioSyncMode") or "timeline_audio")
+    timeline["use_custom_audio"] = bool(resources.get("cine_use_custom_audio", True))
+    for key in ("trackSettings", "masterBus", "selectedMixer"):
+        value = audio_timeline.get(key)
+        if isinstance(value, (dict, list)):
+            timeline[key] = copy.deepcopy(value)
+    for key in ("masterAudioGain", "masterAudioNormalize", "masterMono", "audioBusMode", "onlyFirstTrack"):
+        if key in audio_timeline:
+            timeline[key] = copy.deepcopy(audio_timeline[key])
+
+    roll = resources.get("cine_roll_contract")
+    if not isinstance(roll, dict):
+        roll = tracks.get("roll_contract") if isinstance(tracks.get("roll_contract"), dict) else {}
+    if isinstance(roll, dict) and roll:
+        timeline["roll"] = copy.deepcopy(roll)
+        timeline["roll_contract"] = copy.deepcopy(roll)
+    timeline["audio_data"] = json.dumps({
+        "audioSegments": segments,
+        "audioTrackCount": track_count,
+        "audioSyncMode": timeline["audioSyncMode"],
+        "use_custom_audio": timeline["use_custom_audio"],
+        "roll": copy.deepcopy(roll),
+    }, ensure_ascii=False)
+    report = {
+        "applied": True,
+        "source": "IAMCCS_AudioBoardArranger",
+        "audio_clips": len(segments),
+        "audio_tracks": track_count,
+        "roll_enabled": bool(isinstance(roll, dict) and roll.get("enabled")),
+        "roll_pre_frames": int(roll.get("subsequent_take_pre_frames", 0) or 0) if isinstance(roll, dict) else 0,
+        "roll_post_frames": int(roll.get("post_frames", 0) or 0) if isinstance(roll, dict) else 0,
+        "duration_authority": "H3 settings/Shotboard (AudioBoard does not overwrite it)",
+    }
+    return json.dumps(timeline, ensure_ascii=False), report
 
 
 def _build_minimax_cine_linx(
@@ -1087,6 +1168,49 @@ def _current_prompt():
     return prompt, extra_data, outputs, sensitive
 
 
+def _editor_continuation_outputs(prompt: dict[str, Any], outputs: Any) -> list[str]:
+    """Keep the direct H3 editor collector alive across checkpoint re-queues.
+
+    ComfyUI's ``currently_running`` output list can contain only the output
+    node that is being processed when the checkpoint schedules the next H3
+    segment. Reusing that transient list verbatim lets native segment files
+    continue rendering while silently dropping the Video Editor collector
+    after S001. Only workflows containing the explicit H3 editor route opt in.
+    """
+    normalized = [str(value) for value in (outputs or [])]
+    has_direct_editor_route = any(
+        isinstance(node, dict)
+        and node.get("class_type") == "IAMCCS_MiniMaxH3EditorTakeRoute"
+        for node in prompt.values()
+    )
+    if not has_direct_editor_route:
+        return normalized
+
+    manual_editorial_types = {
+        "IAMCCS_ShotboardVideoEditorRenderV1",
+        "IAMCCS_shotboarder_aud+vid_exporter_PRO",
+    }
+    normalized = [
+        node_id for node_id in normalized
+        if not (
+            isinstance(prompt.get(str(node_id)), dict)
+            and prompt[str(node_id)].get("class_type") in manual_editorial_types
+        )
+    ]
+
+    # Automatic H3 continuation is allowed to collect native slot assets only.
+    # Render and delivery are editorial actions: keeping either one in this
+    # list makes the last checkpoint export before the user has finished the
+    # Video Editor cut (and can also impose an optional master-audio policy).
+    continuation_output_types = {"IAMCCS_ShotboardVideoEditorV1"}
+    for node_id, node in prompt.items():
+        if isinstance(node, dict) and node.get("class_type") in continuation_output_types:
+            node_key = str(node_id)
+            if node_key not in normalized:
+                normalized.append(node_key)
+    return normalized
+
+
 def _enqueue(prompt: dict[str, Any], extra_data=None, outputs=None, sensitive=None) -> None:
     import nodes as comfy_nodes
     import server
@@ -1097,6 +1221,20 @@ def _enqueue(prompt: dict[str, Any], extra_data=None, outputs=None, sensitive=No
         extra_data = live_extra if extra_data is None else extra_data
         outputs = live_outputs if outputs is None else outputs
         sensitive = live_sensitive if sensitive is None else sensitive
+    original_outputs = [str(value) for value in (outputs or [])]
+    outputs = _editor_continuation_outputs(prompt, outputs)
+    editor_outputs_added = [value for value in outputs if value not in original_outputs]
+    manual_outputs_removed = [value for value in original_outputs if value not in outputs]
+    if editor_outputs_added:
+        LOG.info(
+            "MiniMax H3 editor continuation preserved | output_nodes_added=%s",
+            ",".join(editor_outputs_added),
+        )
+    if manual_outputs_removed:
+        LOG.info(
+            "MiniMax H3 manual editorial outputs excluded from automatic continuation | output_nodes_removed=%s",
+            ",".join(manual_outputs_removed),
+        )
     if not outputs:
         outputs = [
             str(node_id) for node_id, node in prompt.items()
@@ -1129,7 +1267,7 @@ class IAMCCS_MiniMaxH3GGUFLoader:
                 "spectrum_debug": ("BOOLEAN", {"default": False}),
             },
             "optional": {
-                "text_encoder_device": (["auto", "cpu_safe_12gb"], {"default": "auto"}),
+                "text_encoder_device": (["gpu_auto", "cpu_direct", "auto", "cpu_safe_12gb"], {"default": "gpu_auto"}),
             },
         }
 
@@ -1148,7 +1286,7 @@ class IAMCCS_MiniMaxH3GGUFLoader:
         acceleration,
         spectrum_history,
         spectrum_debug,
-        text_encoder_device="auto",
+        text_encoder_device="gpu_auto",
     ):
         if str(unet_name).startswith("NO_") or str(clip_name).startswith("NO_"):
             raise FileNotFoundError("GGUF H3 UNET/CLIP non disponibili. Attendi la fine dei download e riavvia ComfyUI.")
@@ -1164,10 +1302,13 @@ class IAMCCS_MiniMaxH3GGUFLoader:
         )[0]
         clip_cls = _node_class("CLIPLoaderGGUF")
         clip = clip_cls().load_clip(clip_name, type="minimax")[0]
-        requested_text_encoder_device = str(text_encoder_device or "auto").lower()
-        text_encoder_device = "auto"
-        if requested_text_encoder_device == "cpu_safe_12gb":
-            text_encoder_device = "auto(gpu-first; migrated legacy cpu_safe_12gb)"
+        requested_text_encoder_device = str(text_encoder_device or "gpu_auto").lower()
+        text_encoder_device = {
+            "auto": "gpu_auto",
+            "cpu_safe_12gb": "cpu_direct",
+        }.get(requested_text_encoder_device, requested_text_encoder_device)
+        if text_encoder_device not in {"gpu_auto", "cpu_direct"}:
+            raise ValueError(f"Unsupported MiniMax H3 text encoder device mode: {requested_text_encoder_device}")
         vae_cls = _node_class("VAELoader")
         video_vae = vae_cls().load_vae(video_vae_name)[0]
         audio_vae = vae_cls().load_vae(audio_vae_name)[0]
@@ -1249,7 +1390,11 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "global_prompt": ("STRING", {"default": "one continuous cinematic shot with coherent motion, stable identity, controlled camera and native stereo audio", "multiline": True}),
                 "timeline_data": ("STRING", {"default": "", "multiline": True}),
                 "duration_seconds": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 36000.0, "step": 0.01}),
-                "task_mode": (["auto_from_timeline", "t2va", "i2va", "fl2va", "ref2va", "v2va_object_swap", "longvid_guides", "ref2vid_lipsync"], {"default": "auto_from_timeline"}),
+                "task_mode": ([
+                    "auto_from_timeline", "t2va", "i2va", "fl2va", "ref2va",
+                    "v2va_object_swap", "longvid_guides", "longvid_guided_lipsync",
+                    "ref2vid_lipsync", "longvid_ref2vid_lipsync",
+                ], {"default": "auto_from_timeline"}),
                 "audio_mode": (list(H3_AUDIO_MODES), {"default": "h3_native_generated"}),
                 "prompt_mapping": (["global_plus_local", "local_only", "global_only"], {"default": "global_plus_local"}),
                 "upscale_mode": (["off", "ltx23", "wan22_5b"], {"default": "off"}),
@@ -1304,7 +1449,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "wan_upscale_denoise": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01}),
                 # ComfyUI automatic placement is GPU-first. The atomic backend
                 # retries on CPU only after a genuine CUDA out-of-memory error.
-                "text_encoder_device": (["auto", "cpu_safe_12gb"], {"default": "auto"}),
+                "text_encoder_device": (["gpu_auto", "cpu_direct", "auto", "cpu_safe_12gb"], {"default": "gpu_auto"}),
                 # These values are intentionally owned by the Shotboard.  The
                 # generation node keeps legacy widgets only as a compatibility
                 # fallback for shotplans created before schema v3.
@@ -1444,7 +1589,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         upscale_sage=True,
         upscale_seed_offset=10000,
         wan_upscale_denoise=0.2,
-        text_encoder_device="auto",
+        text_encoder_device="gpu_auto",
         performance_profile="low_vram_balanced",
         seed=42,
         seed_stride=1,
@@ -1495,6 +1640,15 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         global_prompt, timeline_data, prompter_injection = apply_prompter_to_minimax(
             cine_linx,
             global_prompt,
+            timeline_data,
+        )
+        global_prompt, timeline_data, dialogue_injection = apply_dialogue_to_minimax(
+            cine_linx,
+            global_prompt,
+            timeline_data,
+        )
+        timeline_data, audioboard_injection = _apply_audioboard_to_minimax(
+            cine_linx,
             timeline_data,
         )
         # A connected IAMCCS_ShotboardH3Settings node is an explicit external
@@ -1590,19 +1744,41 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             face_detailer_enabled = saved_settings.get("face_detailer_enabled", face_detailer_enabled)
             face_detailer_profile = saved_settings.get("face_detailer_profile", face_detailer_profile)
             face_detailer_use_sam_mask = saved_settings.get("face_detailer_use_sam_mask", face_detailer_use_sam_mask)
+        requested_text_encoder_device = str(text_encoder_device or "gpu_auto").strip().lower()
+        text_encoder_device = {
+            "auto": "gpu_auto",
+            "cpu_safe_12gb": "cpu_direct",
+        }.get(requested_text_encoder_device, requested_text_encoder_device)
+        if text_encoder_device not in {"gpu_auto", "cpu_direct"}:
+            text_encoder_device = "gpu_auto"
         audio_mode = _normalise_h3_audio_mode(audio_mode)
-        longvid_requested = str(task_mode or "").strip().lower() in {
-            "longvid_guides", "longvid", "long_video_guides",
+        requested_task_key = str(task_mode or "").strip().lower()
+        # LongVid lip-sync deliberately remains on the proven T2VA/AddGuide
+        # topology.  The older REF2VA+AddGuide hybrid is accepted only as a
+        # serialized alias and is migrated to the safe guided audio-drive
+        # route by ``build_shotplan``.
+        longvid_lipsync_requested = requested_task_key in {
+            "longvid_guided_lipsync", "longvid_audio_drive_lipsync",
+            "longvid_ref2vid_lipsync", "longvid_lipsync", "longvid_ref2va_lipsync",
         }
-        lipsync_requested = str(task_mode or "").strip().lower() in {"ref2vid_lipsync", "lipsync_ref2vid"}
+        longvid_requested = requested_task_key in {"longvid_guides", "longvid", "long_video_guides"} or longvid_lipsync_requested
+        lipsync_requested = requested_task_key in {"ref2vid_lipsync", "lipsync_ref2vid"} or longvid_lipsync_requested
         requested_legacy_audio_mode = audio_mode
-        # R31 LongVid owns the audio lane through positioned AddGuide events.
-        # A REF2VA reference or a separate forced latent would otherwise add a
-        # second, incompatible audio source to the same H3 AV latent.  Keep
-        # the UI on the single truthful route and record the normalization.
+        # LipSync uses one actual AudioBoard source in two compatible stock-H3
+        # contexts: Ref2VA/AddGuide conditioning and a locked AV latent.
         timeline_audio_owned = longvid_requested or lipsync_requested
-        longvid_audio_normalized = timeline_audio_owned and audio_mode != "h3_native_generated"
-        if longvid_audio_normalized:
+        lipsync_audio_forced = lipsync_requested and audio_mode != "h3_custom_audio_drive"
+        longvid_guided_audio_drive = longvid_requested and (
+            longvid_lipsync_requested or audio_mode == "h3_custom_audio_drive"
+        )
+        longvid_audio_normalized = (
+            longvid_requested
+            and not longvid_lipsync_requested
+            and audio_mode not in {"h3_native_generated", "h3_custom_audio_drive"}
+        )
+        if lipsync_requested:
+            audio_mode = "h3_custom_audio_drive"
+        elif longvid_audio_normalized:
             audio_mode = "h3_native_generated"
         v2v_guide_mode = str(v2v_guide_mode or "raw_only")
         if v2v_guide_mode not in {"raw_only", "raw_pose", "raw_depth", "raw_depth_pose"}:
@@ -1711,8 +1887,24 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "source": "shotboard",
         }
         plan["prompter_injection"] = prompter_injection
+        plan["dialogue_injection"] = dialogue_injection
+        plan["audioboard_injection"] = audioboard_injection
         plan["audio_mode"] = audio_mode
-        longvid_active = str(plan.get("task_mode", "")).lower() == "longvid_guides"
+        longvid_active = str(plan.get("task_mode", "")).lower() in {"longvid_guides", "longvid_ref2vid_lipsync"}
+        longvid_lipsync_active = bool(longvid_active and longvid_guided_audio_drive)
+        if longvid_lipsync_active:
+            timeline_audio_contract = (
+                "LongVid Guided LipSync: timeline images remain positioned T2VA/AddGuide guides while AudioBoard is rebased per H3 chunk, "
+                "locked into the native H3 AV latent before sampling, and restored as the exact final soundtrack. No REF2VA reference block is materialized."
+            )
+        elif longvid_active and longvid_guided_audio_drive:
+            timeline_audio_contract = "R31 LongVid Guided Audio Drive: timeline images remain positioned T2VA guides while each rebased AudioBoard chunk is both injected via MiniMaxH3AddGuide and locked into the native H3 AV latent before sampling"
+        elif longvid_active:
+            timeline_audio_contract = "R31 LongVid: every imported main AudioBoard slot is sliced on the global 24fps clock and injected into the matching H3 chunk via MiniMaxH3AddGuide"
+        elif str(plan.get("task_mode", "")).lower() in {"ref2vid_lipsync", "lipsync_ref2vid"}:
+            timeline_audio_contract = "Ref2Vid LipSync: each hard-cut performance slot receives its matching AudioBoard clip as <Audio 1> and locks that exact clip into the H3 AV latent; lyrics/transcripts are never required in text."
+        else:
+            timeline_audio_contract = "AudioBoard lanes remain editorial/post metadata until explicitly rendered or published as AUDIO"
         plan["audio_contract"] = {
             "schema": "iamccs.minimax_h3.audio_route",
             "schema_version": 1,
@@ -1720,19 +1912,13 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             **copy.deepcopy(H3_AUDIO_MODE_CONTRACTS[audio_mode]),
             "reference_audio_resource": "iamccs_minimax_h3_ref_audio",
             "custom_audio_resource": "iamccs_minimax_h3_custom_audio",
-            "timeline_audio_contract": (
-                "R31 LongVid: every imported main AudioBoard slot is sliced on the global 24fps clock and injected into the matching H3 chunk via MiniMaxH3AddGuide"
-                if longvid_active
-                else (
-                    "Ref2Vid LipSync: each generated hard-cut performance slot receives its matching main AudioBoard clip as <Audio 1>; lyrics/transcripts are never required in text."
-                    if str(plan.get("task_mode", "")).lower() in {"ref2vid_lipsync", "lipsync_ref2vid"}
-                    else "AudioBoard lanes remain editorial/post metadata until explicitly rendered or published as AUDIO"
-                )
-            ),
+            "timeline_audio_contract": timeline_audio_contract,
             "automatic_audioboard_drive": timeline_audio_owned,
             "requested_legacy_audio_mode": requested_legacy_audio_mode if timeline_audio_owned else None,
             "normalized_for_longvid": longvid_audio_normalized if longvid_active else False,
-            "normalized_for_ref2vid_lipsync": longvid_audio_normalized if lipsync_requested else False,
+            "guided_audio_drive": longvid_guided_audio_drive if longvid_active else False,
+            "forced_locked_for_lipsync": lipsync_audio_forced,
+            "normalized_for_ref2vid_lipsync": False,
             "source": "shotboard",
         }
         plan["performance_profile"] = str(performance_profile)
@@ -1837,9 +2023,19 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         max_chunk_frames = max(chunk_frames, default=0)
         native_load = (float(width) * float(height) * max(1, max_chunk_frames)) / (960.0 * 544.0 * 124.0)
         warnings: list[str] = []
-        if longvid_audio_normalized:
+        if lipsync_audio_forced:
             warnings.append(
-                f"{'LongVid' if longvid_active else 'Ref2Vid LipSync'} uses the main AudioBoard track; incompatible {requested_legacy_audio_mode} was normalized to its owned timeline-audio route"
+                f"{'LongVid Guided LipSync' if longvid_lipsync_requested else 'Ref2Vid LipSync'} locks the matching AudioBoard chunk before H3 sampling; "
+                f"{requested_legacy_audio_mode} was replaced with h3_custom_audio_drive"
+            )
+        elif longvid_audio_normalized:
+            warnings.append(f"LongVid uses positioned AudioBoard guides; incompatible {requested_legacy_audio_mode} was normalized to h3_native_generated")
+        elif longvid_guided_audio_drive:
+            warnings.append("LongVid Guided Audio Drive: positioned images use AddGuide; the exact rebased AudioBoard chunk uses the v20 VAEEncodeAudio + zero-mask AV-latent lock and is not duplicated as an audio AddGuide")
+        lipsync_contract = plan.get("lipsync") if isinstance(plan.get("lipsync"), dict) else {}
+        if bool(lipsync_contract.get("enabled")) and not bool(lipsync_contract.get("dialogue_tags_present", False)):
+            warnings.append(
+                "LipSync prompt has no <d>[Language] verbatim dialogue/lyrics</d>. The audio latent remains locked, but the official MiniMax prompt contract and the working v20 workflow use <d> tags for visible speech."
             )
         if continuity_requested and not continuity_enabled:
             warnings.append(
@@ -1860,8 +2056,14 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "4K delivery uses a protected LTX intermediate that never downsamples the native H3 frames, "
                 "then NVIDIA RTX VSR reaches the final canvas"
             )
-        if str(text_encoder_device).lower() == "cpu_safe_12gb":
-            warnings.append("Legacy CPU-safe text encoder setting migrated to GPU-first auto with CPU fallback only after CUDA OOM")
+        if requested_text_encoder_device == "auto":
+            warnings.append("Legacy text encoder setting 'auto' mapped to GPU Auto")
+        elif requested_text_encoder_device == "cpu_safe_12gb":
+            warnings.append("Legacy text encoder setting 'cpu_safe_12gb' mapped to CPU Direct")
+        elif requested_text_encoder_device not in {"gpu_auto", "cpu_direct"}:
+            warnings.append(f"Unknown text encoder setting '{requested_text_encoder_device}' mapped to GPU Auto")
+        if text_encoder_device == "cpu_direct":
+            warnings.append("CPU Direct selected: Qwen never attempts a GPU allocation; Ref2VA/FL2VA conditioning is slower but avoids a GPU-OOM retry")
         low_vram_profile = str(performance_profile).startswith(("low_vram", "rtx3060"))
         if low_vram_profile and max_chunk_frames > 124:
             warnings.append("Low VRAM: trim this timeline box to 124 frames or less; use a following box for continuation")
@@ -1925,6 +2127,15 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             },
         }
         injection_summary = str(prompter_injection.get("actual_target", "none")) if prompter_injection.get("applied") else "none"
+        dialogue_summary = (
+            f"{dialogue_injection.get('actual_target', 'global_plus_local')}:{int(dialogue_injection.get('local_slots_applied', 0) or 0)}"
+            if dialogue_injection.get("applied") else "none"
+        )
+        audioboard_summary = (
+            f"{int(audioboard_injection.get('audio_clips', 0) or 0)}clips/{int(audioboard_injection.get('audio_tracks', 0) or 0)}tracks"
+            f"/roll={'on' if audioboard_injection.get('roll_enabled') else 'off'}"
+            if audioboard_injection.get("applied") else "none"
+        )
         guide_track = plan.get("guide_track") if isinstance(plan.get("guide_track"), dict) else {}
         guide_summary = (
             f"r31_guides=image:{int(guide_track.get('visual_guide_count', 0))}/audio:{int(guide_track.get('audio_guide_count', 0))}"
@@ -1951,7 +2162,8 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             f"ltx_looper={int(ltx_looper_temporal_tile_size)}/{int(ltx_looper_temporal_overlap)} "
             f"wan_denoise={float(wan_upscale_denoise):.2f} | "
             f"face_detailer={'on' if bool(face_detailer_enabled) else 'off'}:{face_detailer_profile}/sam={'on' if bool(face_detailer_use_sam_mask) else 'off'} | "
-            f"prompter={injection_summary} | warnings={'; '.join(warnings) if warnings else 'none'}"
+            f"prompter={injection_summary} | dialogue={dialogue_summary} | audioboard={audioboard_summary} | "
+            f"warnings={'; '.join(warnings) if warnings else 'none'}"
         )
         return (_build_minimax_cine_linx(cine_linx, plan, timeline_data, global_prompt, report),)
 
@@ -2417,6 +2629,11 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
                 "sampled_latent": ("LATENT",),
                 "motion_context": ("IAMCCS_H3_MOTION_CONTEXT",),
                 "motion_state": ("IAMCCS_H3_MOTION_CONTEXT",),
+                # Appended sockets preserve every legacy widget position.
+                # Editor workflows use this policy to keep one file per H3
+                # slot, while LongVid still materializes one programme asset.
+                "cine_linx": (SUPERNODE_LINX_TYPE,),
+                "editor_delivery_policy": (["legacy_master", "per_slot_except_longvid"], {"default": "legacy_master"}),
             },
             "hidden": {"prompt": "PROMPT", "unique_id": "UNIQUE_ID", "extra_pnginfo": "EXTRA_PNGINFO"},
         }
@@ -2452,6 +2669,8 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
         sampled_latent=None,
         motion_context=None,
         motion_state=None,
+        cine_linx=None,
+        editor_delivery_policy="legacy_master",
         prompt=None,
         unique_id=None,
         extra_pnginfo=None,
@@ -2528,9 +2747,20 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
             except Exception as exc:
                 LOG.warning("MiniMax H3 reference carry-over cache save skipped: %s", exc)
 
+        plan_mode = ""
+        if str(editor_delivery_policy or "") == "per_slot_except_longvid" and isinstance(cine_linx, dict):
+            try:
+                plan_mode = str(_resolve_shotplan(cine_linx).get("task_mode", "") or "").strip().lower()
+            except Exception:
+                plan_mode = ""
+        editor_longvid = plan_mode.startswith("longvid")
+        effective_merge_segments = bool(merge_segments)
+        if str(editor_delivery_policy or "") == "per_slot_except_longvid":
+            effective_merge_segments = bool(editor_longvid)
+
         messages = [f"{safe_stage_label.upper()} checkpoint saved: {segment_name}"]
         preview_path = segment_path
-        if current_segment + 1 >= total_segments and bool(merge_segments):
+        if current_segment + 1 >= total_segments and effective_merge_segments:
             segment_paths = [
                 output_folder / f"{base_name}_{active_render_id}_{safe_stage_label}_seg_{index + 1:04d}.mp4"
                 for index in range(total_segments)
@@ -2548,6 +2778,12 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
                 for path in segment_paths:
                     path.unlink(missing_ok=True)
                     _segment_meta_path(path).unlink(missing_ok=True)
+        elif str(editor_delivery_policy or "") == "per_slot_except_longvid":
+            messages.append(
+                "Editor delivery: LongVid single master"
+                if editor_longvid
+                else f"Editor delivery: independent take T{current_segment + 1:02d} (automatic concat disabled)"
+            )
 
         next_segment = current_segment + 1
         should_queue_next = bool(queue_next_segment) and next_segment < total_segments

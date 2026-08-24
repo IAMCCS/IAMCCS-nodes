@@ -69,6 +69,32 @@ def _source_index(segment: dict[str, Any], fallback: int) -> int:
 
 
 # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
+def _canonicalize_source_sockets(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Assign one deterministic internal AUDIO socket to every real clip.
+
+    AudioBoard lanes are editorial tracks, not Comfy graph sockets: several
+    clips may live on one track.  Rebuild the socket mapping from the current
+    clip order so stale ``audio_input`` values can never point at a vanished
+    manual connection.
+    """
+    canonical: list[dict[str, Any]] = []
+    next_socket = 1
+    for original in segments:
+        segment = copy.deepcopy(original)
+        if bool(segment.get("placeholder", False)):
+            canonical.append(segment)
+            continue
+        # These aliases are deliberately overwritten. They are a runtime
+        # transport address, never a user-editable timeline setting.
+        segment["audio_input"] = next_socket
+        segment["audioInput"] = next_socket
+        segment["source_audio_index"] = next_socket
+        segment["sourceAudioIndex"] = next_socket
+        canonical.append(segment)
+        next_socket += 1
+    return canonical
+
+
 def _input_audio_path(segment: dict[str, Any]) -> tuple[str, Path]:
     filename = str(
         segment.get("audioFile")
@@ -140,31 +166,55 @@ class IAMCCS_CineH3AudioBus:
         if not segments:
             raise ValueError("Cine H3 Audio Bus found no audioSegments in cine_linx")
 
+        # A visual AudioBoard track can contain many independent audio clips.
+        # The transport below is clip-addressed (one internal socket per clip),
+        # while ``track`` remains untouched for the mix / editorial UI.
+        canonical_segments = _canonicalize_source_sockets(segments)
+        canonical_timeline = copy.deepcopy(timeline)
+        canonical_timeline["audioSegments"] = canonical_segments
+
+        # ``lanes`` keeps the original eight graph outputs for existing
+        # workflows. ``resource_lanes`` is the native CineLinX transport and
+        # intentionally has no clip-count cap.
         lanes: list[dict[str, Any] | None] = [None] * MAX_AUDIO_LANES
+        resource_lanes: list[dict[str, Any]] = []
         manifest_lanes: list[dict[str, Any]] = []
-        for fallback, segment in enumerate(segments):
+        for segment in canonical_segments:
             if bool(segment.get("placeholder", False)):
                 continue
-            lane_index = _source_index(segment, fallback)
-            if lane_index >= MAX_AUDIO_LANES:
-                raise ValueError(f"Audio lane {lane_index + 1} exceeds the supported {MAX_AUDIO_LANES} inputs")
+            lane_index = int(segment["audio_input"]) - 1
             filename, path = _input_audio_path(segment)
-            if lanes[lane_index] is None:
-                lanes[lane_index] = _load_native_audio(path)
-            manifest_lanes.append(_lane_manifest(segment, lane_index, filename, lanes[lane_index]))
+            audio = _load_native_audio(path)
+            resource_lanes.append(audio)
+            if lane_index < MAX_AUDIO_LANES:
+                lanes[lane_index] = audio
+            manifest_lanes.append(_lane_manifest(segment, lane_index, filename, audio))
 
         manifest = {
             "schema": "iamccs.minimax_h3.audio_bus",
-            "schema_version": 1,
+            "schema_version": 2,
             "source": "shotboard_audioSegments",
+            "transport": "clip_addressed_cine_linx",
             "lanes": manifest_lanes,
-            "timeline": timeline,
+            "timeline": canonical_timeline,
         }
         out_linx = copy.deepcopy(_as_dict(cine_linx))
         resources = out_linx.setdefault("resources", {})
         outputs = out_linx.setdefault("outputs", {})
+        timeline_json = json.dumps(canonical_timeline, ensure_ascii=False)
+        tracks = copy.deepcopy(_as_dict(resources.get("cine_audio_tracks")))
+        tracks["shotboard_segments"] = copy.deepcopy(canonical_segments)
+        tracks["segments"] = copy.deepcopy(canonical_segments)
+        resources["cine_audio_tracks"] = tracks
+        resources["cine_audio_timeline_json"] = timeline_json
+        resources["cine_audio_bus_timeline_json"] = timeline_json
+        # Native in-band transport: the mix node can now recover every clip
+        # from cine_linx even when a workflow has no manual audio_4..audio_8
+        # wires. Existing socket wires still override these values.
+        resources["iamccs_cine_h3_audio_bus_audio_lanes"] = resource_lanes
         resources["iamccs_cine_h3_audio_bus_manifest"] = manifest
         resources["iamccs_cine_h3_audio_bus_metadata_json"] = json.dumps(manifest, ensure_ascii=False)
+        outputs["audio_timeline_json"] = timeline_json
         outputs["cine_h3_audio_bus_metadata_json"] = json.dumps(manifest, ensure_ascii=False)
         out_linx.setdefault("chain", []).append({"role": "cine_h3_audio_bus", "name": "IAMCCS_CineH3AudioBus"})
         out_linx["resource_keys"] = sorted(resources.keys())

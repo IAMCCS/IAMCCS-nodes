@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Tuple
 import torch
 import torchaudio
 from comfy_api.latest import InputImpl, Types
+from comfy_execution.graph import ExecutionBlocker
 
 try:
     from PIL import Image
@@ -368,6 +369,80 @@ def _seconds_for_template(template: str, custom_chunk_seconds: Any) -> float:
     if normalized.endswith("s"):
         normalized = normalized[:-1]
     return max(1.0, _safe_float(normalized, 20.0))
+
+
+def _h3_duration_authority(cine_linx: Any) -> Tuple[float, str]:
+    """Resolve the active H3 duration without relying on widget positions.
+
+    External H3 Settings and the Shotboard's saved selected duration are the
+    authoring truth.  The resolved plan is a fallback because its internal H3
+    frame grid can be longer before the exact-delivery crop restores the user
+    duration.  The bridge widget is used only without an H3 contract.
+    """
+    if not isinstance(cine_linx, dict):
+        return 0.0, "bridge_widget"
+    resources = cine_linx.get("resources") if isinstance(cine_linx.get("resources"), dict) else {}
+    outputs = cine_linx.get("outputs") if isinstance(cine_linx.get("outputs"), dict) else {}
+    payload = resources.get("cine_payload") if isinstance(resources.get("cine_payload"), dict) else {}
+
+    for candidate in (
+        resources.get("iamccs_minimax_h3_settings"),
+        outputs.get("iamccs_minimax_h3_settings"),
+        payload.get("iamccs_minimax_h3_settings"),
+    ):
+        if not isinstance(candidate, dict):
+            continue
+        settings = candidate.get("settings") if candidate.get("schema") == "iamccs.minimax_h3.settings_cine_linx" else candidate
+        if not isinstance(settings, dict):
+            continue
+        seconds = _safe_float(settings.get("duration_seconds"), 0.0)
+        if seconds > 0:
+            return seconds, "h3_settings_cine_linx"
+
+    for candidate in (
+        payload.get("timeline_data"),
+        outputs.get("timeline_data"),
+        resources.get("cine_timeline_data_json"),
+        resources.get("cine_board_timeline_data"),
+    ):
+        parsed = _safe_json_loads(candidate, {})
+        if not isinstance(parsed, dict):
+            continue
+        selected = parsed.get("h3_saved_settings") if isinstance(parsed.get("h3_saved_settings"), dict) else {}
+        seconds = _safe_float(selected.get("duration_seconds"), 0.0)
+        if seconds > 0:
+            return seconds, "h3_shotboard_selected_duration"
+
+    for candidate in (
+        resources.get("iamccs_minimax_h3_shotplan"),
+        outputs.get("shotplan"),
+        payload.get("minimax_h3_shotplan"),
+        payload.get("shotplan"),
+    ):
+        if not isinstance(candidate, dict) or candidate.get("schema") != "iamccs.minimax_h3.shotplan":
+            continue
+        seconds = _safe_float(candidate.get("requested_duration_seconds", candidate.get("effective_duration_seconds", 0.0)), 0.0)
+        if seconds > 0:
+            return seconds, "h3_shotboard_resolved_plan"
+
+    has_h3_contract = any(key in resources for key in (
+        "iamccs_minimax_h3_shotplan",
+        "iamccs_minimax_h3_settings",
+        "iamccs_minimax_h3_audio_contract",
+    ))
+    if has_h3_contract:
+        for candidate in (
+            payload.get("timeline_data"),
+            outputs.get("timeline_data"),
+            resources.get("cine_timeline_data_json"),
+            resources.get("cine_board_timeline_data"),
+        ):
+            parsed = _safe_json_loads(candidate, {})
+            if isinstance(parsed, dict):
+                seconds = _safe_float(parsed.get("duration_seconds"), 0.0)
+                if seconds > 0:
+                    return seconds, "h3_shotboard_timeline"
+    return 0.0, "bridge_widget"
 
 
 def _segments(raw: Any) -> List[Dict[str, Any]]:
@@ -1683,7 +1758,9 @@ class IAMCCS_MultiTimelineBridge:
         visual_timelines_json="",
     ):
         fps = max(1.0, float(frame_rate))
-        chunk_seconds = _seconds_for_template(chunk_template, custom_chunk_seconds)
+        widget_chunk_seconds = _seconds_for_template(chunk_template, custom_chunk_seconds)
+        h3_duration_seconds, duration_source = _h3_duration_authority(cine_linx)
+        chunk_seconds = h3_duration_seconds if h3_duration_seconds > 0 else widget_chunk_seconds
         chunk_frames = max(1, int(round(chunk_seconds * fps)))
         max_take_count = max(1, _safe_int(max_takes, 12))
         manifest = _bus_manifest(
@@ -1865,6 +1942,8 @@ class IAMCCS_MultiTimelineBridge:
             "chunk_template": str(chunk_template),
             "chunk_seconds": float(chunk_seconds),
             "chunk_frames": int(chunk_frames),
+            "chunk_duration_source": duration_source,
+            "bridge_widget_chunk_seconds": float(widget_chunk_seconds),
             "source_bus": str(source_bus),
             "take_source_mode": str(take_source_mode),
             "source_duration_frames": int(source_duration),
@@ -1926,6 +2005,8 @@ class IAMCCS_MultiTimelineBridge:
             "source_bus": str(source_bus),
             "chunk_seconds": float(chunk_seconds),
             "chunk_frames": int(chunk_frames),
+            "chunk_duration_source": duration_source,
+            "bridge_widget_chunk_seconds": float(widget_chunk_seconds),
             "take_count": len(takes),
             "active_take": active_take_number,
             "source_segments": len(source_segments),
@@ -2559,11 +2640,14 @@ def _persist_video_take(
     target_duration_seconds: float | None = None,
     target_duration_frames: int | None = None,
     tail_trim_frames: int | None = None,
+    editor_clip_index: int | None = None,
 ) -> Dict[str, Any]:
     comp = _video_components(video)
     fps = float(comp.frame_rate or 24.0)
     root = _parking_root(session_key)
-    filename = f"T{int(slot):02d}_A{int(slot):02d}_{int(time.time() * 1000)}.iamccs_take.pt"
+    clip_index = max(0, _safe_int(editor_clip_index, 0))
+    clip_token = f"_S{clip_index:03d}" if clip_index > 0 else ""
+    filename = f"T{int(slot):02d}{clip_token}_A{int(slot):02d}_{int(time.time() * 1000)}.iamccs_take.pt"
     path = os.path.join(root, filename)
     # The AUDIO socket carries the original timeline waveform assembled by the
     # backend.  VIDEO.audio is the LTX audio-latent reconstruction and cannot
@@ -2602,6 +2686,7 @@ def _persist_video_take(
         "schema": "iamccs.video_editor.parked_take",
         "schema_version": 1,
         "slot": int(slot),
+        "clip_index": int(clip_index),
         "timeline_id": _take_timeline_id(slot),
         "audio_lane": _take_audio_lane_name(slot),
         "fps": fps,
@@ -2799,6 +2884,15 @@ def _audio_duration_seconds(audio: Any) -> float:
     if waveform is None:
         return 0.0
     return float(waveform.shape[-1]) / max(1.0, float(sample_rate))
+
+
+def _audio_with_gain(audio: Any, gain: float) -> Any:
+    """Return an AUDIO copy with non-destructive editor gain applied."""
+    if not isinstance(audio, dict) or audio.get("waveform") is None:
+        return audio
+    out = dict(audio)
+    out["waveform"] = audio["waveform"] * max(0.0, float(gain))
+    return out
 
 
 def _mix_editor_audio_tracks(audio_tracks: List[Any]) -> Any:
@@ -3194,6 +3288,339 @@ def _build_routed_timeline_data(
     return routed, report
 
 
+def _h3_editor_shotplan(cine_linx: Any) -> Dict[str, Any]:
+    if not isinstance(cine_linx, dict):
+        return {}
+    resources = _resources(cine_linx)
+    outputs = _outputs(cine_linx)
+    payload = _payload(cine_linx)
+    for candidate in (
+        resources.get("iamccs_minimax_h3_shotplan"),
+        resources.get("minimax_h3_shotplan"),
+        resources.get("shotplan"),
+        outputs.get("shotplan"),
+        payload.get("minimax_h3_shotplan"),
+        payload.get("shotplan"),
+    ):
+        if isinstance(candidate, dict) and str(candidate.get("schema", "")).startswith("iamccs.minimax_h3.shotplan"):
+            return candidate
+    return {}
+
+
+class IAMCCS_MiniMaxH3EditorTakeRoute:
+    """Route H3 media to the editor without an automatic programme concat.
+
+    Ordinary H3 modes publish the current generated chunk as T01, T02, ... .
+    LongVid is different: its chunks share one continuous guide clock, so the
+    route blocks intermediate chunks and publishes the completed native master
+    once as T01.  Lazy master inputs keep the concat/load branch out of every
+    non-LongVid execution.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "cine_linx": (SUPERNODE_LINX_TYPE,),
+                "current_segment": ("INT", {"forceInput": True}),
+                "total_segments": ("INT", {"forceInput": True}),
+                "fps": ("INT", {"forceInput": True}),
+                "resolved_render_id": ("STRING", {"forceInput": True}),
+            },
+            "optional": {
+                "slot_frames": ("IMAGE", {"lazy": True}),
+                "slot_audio": ("AUDIO", {"lazy": True}),
+                "master_ready": ("BOOLEAN", {"lazy": True}),
+                "master_frames": ("IMAGE", {"lazy": True}),
+                "master_audio": ("AUDIO", {"lazy": True}),
+            },
+        }
+
+    RETURN_TYPES = (SUPERNODE_LINX_TYPE, "STRING", "IMAGE", "AUDIO", "STRING")
+    RETURN_NAMES = ("cine_linx", "take_package_json", "editor_frames", "editor_audio", "report")
+    FUNCTION = "route"
+    CATEGORY = "IAMCCS/Cine/Multigeneration"
+
+    def check_lazy_status(
+        self,
+        cine_linx,
+        current_segment,
+        total_segments,
+        fps,
+        resolved_render_id,
+        slot_frames=None,
+        slot_audio=None,
+        master_ready=None,
+        master_frames=None,
+        master_audio=None,
+        **kwargs,
+    ):
+        plan = _h3_editor_shotplan(cine_linx)
+        longvid = str(plan.get("task_mode", "") or "").strip().lower().startswith("longvid")
+        if not longvid:
+            missing = []
+            if slot_frames is None:
+                missing.append("slot_frames")
+            if slot_audio is None:
+                missing.append("slot_audio")
+            return missing
+        if master_ready is None:
+            return ["master_ready"]
+        if not bool(master_ready):
+            return []
+        missing = []
+        if master_frames is None:
+            missing.append("master_frames")
+        if master_audio is None:
+            missing.append("master_audio")
+        return missing
+
+    def route(
+        self,
+        cine_linx,
+        current_segment,
+        total_segments,
+        fps,
+        resolved_render_id,
+        slot_frames=None,
+        slot_audio=None,
+        master_ready=None,
+        master_frames=None,
+        master_audio=None,
+    ):
+        plan = _h3_editor_shotplan(cine_linx)
+        if not plan:
+            raise ValueError("MiniMax H3 Editor Take Route requires an IAMCCS H3 shotplan in cine_linx")
+        chunks = plan.get("chunks") if isinstance(plan.get("chunks"), list) else []
+        current = max(0, _safe_int(current_segment, 0))
+        total = max(1, _safe_int(total_segments, len(chunks) or 1))
+        frame_rate = max(1.0, _safe_float(fps, plan.get("fps", 24.0)))
+        task_mode = str(plan.get("task_mode", "") or "").strip().lower()
+        longvid = task_mode.startswith("longvid")
+        selected_identity = _shotboard_timeline_identity_from_linx(cine_linx) or _active_identity_from_linx(cine_linx)
+        selected_timeline = max(1, min(5, _safe_int(selected_identity.get("take_index"), 1)))
+        take_index = selected_timeline
+        clip_index = 1 if longvid else current + 1
+
+        if longvid and not bool(master_ready):
+            blocker = ExecutionBlocker(None)
+            report = _json_dump({
+                "node": "IAMCCS_MiniMaxH3EditorTakeRoute",
+                "status": "waiting_for_longvid_master",
+                "completed_chunk": current + 1,
+                "total_chunks": total,
+                "editor_assets_published": 0,
+            })
+            return blocker, blocker, blocker, blocker, report
+
+        if longvid:
+            media_frames = master_frames
+            media_audio = master_audio
+            nominal_frames = max(
+                1,
+                int(round(_safe_float(plan.get("requested_duration_seconds"), 0.0) * frame_rate)),
+            )
+            generated_frames = max(
+                nominal_frames,
+                _safe_int(plan.get("total_unique_frames"), nominal_frames),
+            )
+            global_start = 0
+            slot_label = "LongVid programme"
+            chunk = {}
+        else:
+            if current >= len(chunks):
+                raise ValueError(
+                    f"MiniMax H3 Editor Take Route segment {current + 1} is outside the {len(chunks)}-chunk shotplan"
+                )
+            media_frames = slot_frames
+            media_audio = slot_audio
+            chunk = chunks[current] if isinstance(chunks[current], dict) else {}
+            generated_frames = max(1, _safe_int(chunk.get("frame_count"), 1))
+            overlap_frames = max(0, _safe_int(chunk.get("trim_head_frames"), 0))
+            # FLF overlap is already a real leading handle. Hard-cut modes use
+            # the authored slot length as nominal, leaving only legal H3 grid
+            # padding available for requested editorial roll.
+            nominal_source = (
+                chunk.get("unique_frames", generated_frames)
+                if overlap_frames > 0
+                else chunk.get("requested_frame_count", generated_frames)
+            )
+            nominal_frames = max(1, _safe_int(nominal_source, generated_frames))
+            nominal_frames = min(nominal_frames, generated_frames)
+            global_start = max(0, _safe_int(chunk.get("timeline_start_frame"), 0))
+            slot_label = str(chunk.get("slot_label") or f"Shot {take_index:02d}")
+
+        if not torch.is_tensor(media_frames) or media_frames.ndim != 4 or int(media_frames.shape[0]) < 1:
+            raise ValueError("MiniMax H3 Editor Take Route received no rendered IMAGE frames")
+        if not isinstance(media_audio, dict) or not torch.is_tensor(media_audio.get("waveform")):
+            raise ValueError("MiniMax H3 Editor Take Route received no rendered AUDIO")
+
+        actual_frames = int(media_frames.shape[0])
+        generated_frames = min(max(1, generated_frames), actual_frames)
+        nominal_frames = min(max(1, nominal_frames), actual_frames)
+        requested_roll = _roll_contract_from_linx(cine_linx, frame_rate)
+        default_roll = max(0, _safe_int(requested_roll.get("frames"), 0))
+        contract_pre = max(
+            0,
+            _safe_int(
+                requested_roll.get("first_take_pre_frames" if clip_index == 1 else "subsequent_take_pre_frames"),
+                0 if clip_index == 1 else default_roll,
+            ),
+        )
+        contract_post = max(0, _safe_int(requested_roll.get("post_frames"), default_roll))
+        explicit_pre = max(0, _safe_int(chunk.get("pre_roll_frames"), 0)) if chunk else 0
+        overlap_pre = max(0, _safe_int(chunk.get("trim_head_frames"), 0)) if chunk else 0
+        available_handles = max(0, actual_frames - nominal_frames)
+        pre_roll = min(max(explicit_pre, overlap_pre, contract_pre), available_handles)
+        explicit_post = max(0, _safe_int(chunk.get("post_roll_frames"), 0)) if chunk else 0
+        post_roll = min(max(explicit_post, contract_post), max(0, available_handles - pre_roll))
+        if nominal_frames + pre_roll + post_roll > actual_frames:
+            nominal_frames = max(1, actual_frames - pre_roll - post_roll)
+
+        timeline_id = _take_timeline_id(take_index)
+        audio_lane = _take_audio_lane_name(take_index)
+        roll_contract = {
+            "schema": "iamccs.audio.roll_contract",
+            "enabled": bool(pre_roll or post_roll),
+            "pre_roll_frames": int(pre_roll),
+            "post_roll_frames": int(post_roll),
+            "nominal_duration_frames": int(nominal_frames),
+            "generation_duration_frames": int(actual_frames),
+            "source": "MiniMax H3 rendered media handles",
+            "requested_contract": copy.deepcopy(requested_roll),
+            "clamped_to_real_generated_handles": bool(
+                pre_roll < max(explicit_pre, overlap_pre, contract_pre)
+                or post_roll < max(explicit_post, contract_post)
+            ),
+        }
+        active_take = {
+            "schema": "iamccs.multigeneration.take",
+            "schema_version": 1,
+            "take_index": int(take_index),
+            "timeline_id": timeline_id,
+            "audio_lane": audio_lane,
+            "audio_track_index": max(0, take_index - 1),
+            "global_start_frames": int(global_start),
+            "global_end_frames": int(global_start + nominal_frames),
+            "generation_start_frames": int(max(0, global_start - pre_roll)),
+            "generation_end_frames": int(global_start + nominal_frames + post_roll),
+            "duration_frames": int(actual_frames),
+            "nominal_duration_frames": int(nominal_frames),
+            "pre_roll_frames": int(pre_roll),
+            "post_roll_frames": int(post_roll),
+            "roll_contract": roll_contract,
+            "audioSegments": [],
+            "audioTrackCount": 1,
+            "slot_label": slot_label,
+            "longvid_single_asset": bool(longvid),
+            "editor_clip_index": int(clip_index),
+            "editor_lane_index": int(take_index),
+        }
+        generation_index = {
+            "schema": "iamccs.multigeneration.index",
+            "schema_version": 2,
+            "source": "IAMCCS_MiniMaxH3EditorTakeRoute",
+            "frame_rate": float(frame_rate),
+            "take_count": 1 if longvid else int(total),
+            "active_take": int(take_index),
+            "active_timeline_id": timeline_id,
+            "active_audio_lane": audio_lane,
+            "takes": [active_take],
+            "tail_trim_frames": 0,
+            "editor_delivery_policy": "longvid_single_master" if longvid else "one_asset_per_generated_slot",
+            "editor_lane_policy": "accumulate_all_slots_on_selected_timeline",
+        }
+        out_linx = _clone_linx(cine_linx, "iamccs_minimax_h3_editor_take_route")
+        _apply_active_take(out_linx, generation_index, active_take, "collapse_to_lane_1")
+        package = _take_package_from_linx(out_linx)
+        package.update({
+            "duration_frames": int(actual_frames),
+            "duration_seconds": float(actual_frames) / frame_rate,
+            "nominal_duration_frames": int(nominal_frames),
+            "pre_roll_frames": int(pre_roll),
+            "post_roll_frames": int(post_roll),
+            "roll_contract": roll_contract,
+            "source": "IAMCCS_MiniMaxH3EditorTakeRoute",
+            "longvid_single_asset": bool(longvid),
+            "editor_clip_index": int(clip_index),
+            "editor_lane_index": int(take_index),
+            "editor_session_key": _safe_slug(f"iamccs_h3_{resolved_render_id}"),
+            "editor_collect_policy": "append_same_lane",
+        })
+        resources = _resources(out_linx)
+        payload = _payload(out_linx)
+        outputs = _outputs(out_linx)
+        package_json = _json_dump(package)
+        resources["cine_multigeneration_take_package"] = copy.deepcopy(package)
+        resources["cine_multigeneration_take_package_json"] = package_json
+        resources["cine_take_package"] = copy.deepcopy(package)
+        resources["cine_take_package_json"] = package_json
+        payload["take_package"] = copy.deepcopy(package)
+        outputs["take_package_json"] = package_json
+        out_linx.setdefault("chain", []).append({
+            "role": "minimax_h3_editor_take_route",
+            "take_index": int(take_index),
+            "clip_index": int(clip_index),
+            "timeline_id": timeline_id,
+            "delivery": "longvid_single_master" if longvid else "independent_generated_slot",
+        })
+        _refresh_linx_index(out_linx)
+        report = _json_dump({
+            "node": "IAMCCS_MiniMaxH3EditorTakeRoute",
+            "status": "published",
+            "task_mode": task_mode,
+            "take_index": int(take_index),
+            "timeline_id": timeline_id,
+            "slot_label": slot_label,
+            "actual_frames": int(actual_frames),
+            "nominal_frames": int(nominal_frames),
+            "pre_roll_frames": int(pre_roll),
+            "post_roll_frames": int(post_roll),
+            "automatic_concat": bool(longvid),
+            "truth": "Every H3 slot is a distinct editor clip accumulated on the selected T/A lane. LongVid is one clip on that same selected lane. The Video Editor alone assembles and exports the film.",
+        })
+        return out_linx, package_json, media_frames, media_audio, report
+
+
+class IAMCCS_MiniMaxH3EditorFinalGate:
+    """Expose the editable manifest to render/export only on the last H3 pass."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "cine_linx": (SUPERNODE_LINX_TYPE,),
+                "editor_manifest_json": ("STRING", {"forceInput": True}),
+                "current_segment": ("INT", {"forceInput": True}),
+                "total_segments": ("INT", {"forceInput": True}),
+            },
+        }
+
+    RETURN_TYPES = (SUPERNODE_LINX_TYPE, "STRING", "STRING")
+    RETURN_NAMES = ("cine_linx", "editor_manifest_json", "report")
+    FUNCTION = "gate"
+    CATEGORY = "IAMCCS/Cine/Multigeneration"
+
+    def gate(self, cine_linx, editor_manifest_json, current_segment, total_segments):
+        current = max(0, _safe_int(current_segment, 0))
+        total = max(1, _safe_int(total_segments, 1))
+        if current + 1 < total:
+            blocker = ExecutionBlocker(None)
+            report = _json_dump({
+                "node": "IAMCCS_MiniMaxH3EditorFinalGate",
+                "status": "editor_populated_export_waiting",
+                "completed": current + 1,
+                "total": total,
+            })
+            return blocker, blocker, report
+        return cine_linx, editor_manifest_json, _json_dump({
+            "node": "IAMCCS_MiniMaxH3EditorFinalGate",
+            "status": "editor_ready_for_final_export",
+            "completed": current + 1,
+            "total": total,
+        })
+
+
 class IAMCCS_TakePackage:
     """Expose and validate the immutable T/A package before routing timeline_data."""
 
@@ -3457,7 +3884,13 @@ def _audio_preview_peaks(waveform: torch.Tensor, bins: int = 1200) -> List[Dict[
     return peaks
 
 
-def _persist_audio_preview(session_key: Any, slot: int, audio: Any, root: str) -> Dict[str, Any]:
+def _persist_audio_preview(
+    session_key: Any,
+    slot: int,
+    audio: Any,
+    root: str,
+    editor_clip_index: int | None = None,
+) -> Dict[str, Any]:
     waveform, sample_rate = _audio_waveform(audio)
     if waveform is None or not torch.is_tensor(waveform) or waveform.numel() <= 0:
         return {}
@@ -3465,7 +3898,9 @@ def _persist_audio_preview(session_key: Any, slot: int, audio: Any, root: str) -
         output_root = _output_dir()
         rel_dir = os.path.relpath(root, output_root).replace("\\", "/")
         stamp = int(time.time() * 1000)
-        filename = f"T{int(slot):02d}_A{int(slot):02d}_audio_{stamp}.wav"
+        clip_index = max(0, _safe_int(editor_clip_index, 0))
+        clip_token = f"_S{clip_index:03d}" if clip_index > 0 else ""
+        filename = f"T{int(slot):02d}{clip_token}_A{int(slot):02d}_audio_{stamp}.wav"
         path = os.path.join(root, filename)
         wav = waveform[0].detach().float().cpu().contiguous()
         wav = torch.clamp(wav, -1.0, 1.0)
@@ -3479,12 +3914,19 @@ def _persist_audio_preview(session_key: Any, slot: int, audio: Any, root: str) -
         return {"audio_preview_error": str(exc)}
 
 
-def _audio_manifest_entry(slot: int, audio: Any, session_key: Any = None, root: str | None = None) -> Dict[str, Any] | None:
+def _audio_manifest_entry(
+    slot: int,
+    audio: Any,
+    session_key: Any = None,
+    root: str | None = None,
+    editor_clip_index: int | None = None,
+) -> Dict[str, Any] | None:
     waveform, sample_rate = _audio_waveform(audio)
     if waveform is None:
         return None
     manifest = {
         "slot": int(slot),
+        "clip_index": max(0, _safe_int(editor_clip_index, 0)),
         "audio_lane": _take_audio_lane_name(slot),
         "sample_rate": int(sample_rate),
         "samples": int(waveform.shape[-1]),
@@ -3494,7 +3936,15 @@ def _audio_manifest_entry(slot: int, audio: Any, session_key: Any = None, root: 
         "collected_runtime": True,
     }
     if root is not None:
-        manifest.update(_persist_audio_preview(session_key, slot, audio, root))
+        manifest.update(
+            _persist_audio_preview(
+                session_key,
+                slot,
+                audio,
+                root,
+                editor_clip_index=editor_clip_index,
+            )
+        )
     return manifest
 
 
@@ -3641,8 +4091,10 @@ def _append_video_take_to_manifest(
     pre_roll_frames: int | None = None,
     post_roll_frames: int | None = None,
     roll_contract: Dict[str, Any] | None = None,
+    editor_clip_index: int | None = None,
 ) -> Dict[str, Any]:
     take_index = max(1, int(take_index))
+    clip_index = max(1, _safe_int(editor_clip_index, 1))
     comp = _video_components(video)
     fps = float(comp.frame_rate or manifest.get("fps") or 24.0)
     source_duration = int(comp.images.shape[0]) / max(1.0, fps)
@@ -3675,6 +4127,7 @@ def _append_video_take_to_manifest(
         target_duration_seconds=duration,
         target_duration_frames=parking_target_frames,
         tail_trim_frames=tail_trim_frames,
+        editor_clip_index=clip_index,
     )
     parked_frames = max(1, _safe_int(persisted.get("parking_frames"), int(comp.images.shape[0])))
     parked_duration = _safe_float(persisted.get("parking_duration_seconds"), duration)
@@ -3703,11 +4156,12 @@ def _append_video_take_to_manifest(
         "nominal_source_start_frames": int(nominal_start_frames),
         "nominal_source_end_frames": int(nominal_end_frames),
     })
-    asset_id = f"take_T{take_index:02d}_video"
+    asset_id = f"take_T{take_index:02d}_S{clip_index:03d}_video"
     asset = {
         "id": asset_id,
         "type": "video",
         "takeIndex": int(take_index),
+        "clipIndex": int(clip_index),
         "timelineId": _take_timeline_id(take_index),
         "audioLane": _take_audio_lane_name(take_index),
         "path": persisted.get("parking_tensor_path", ""),
@@ -3734,12 +4188,13 @@ def _append_video_take_to_manifest(
         **persisted,
     }
     manifest.setdefault("assets", {})[asset_id] = asset
-    video_clip_id = f"clip_T{take_index:02d}_V"
+    video_clip_id = f"clip_T{take_index:02d}_S{clip_index:03d}_V"
     manifest.setdefault("clips", []).append({
         "id": video_clip_id,
         "assetId": asset_id,
         "type": "video",
         "takeIndex": int(take_index),
+        "clipIndex": int(clip_index),
         "timelineId": _take_timeline_id(take_index),
         "audioLane": _take_audio_lane_name(take_index),
         "startTime": float(start),
@@ -3768,13 +4223,20 @@ def _append_video_take_to_manifest(
     # This keeps T02's visible waveform and nominal trim aligned to the master
     # rather than to LTX's reconstructed audio component.
     audio_source = clip_audio if clip_audio is not None else comp.audio
-    audio_entry = _audio_manifest_entry(take_index, audio_source, session_key=session_key, root=_parking_root(session_key)) if audio_source is not None else None
+    audio_entry = _audio_manifest_entry(
+        take_index,
+        audio_source,
+        session_key=session_key,
+        root=_parking_root(session_key),
+        editor_clip_index=clip_index,
+    ) if audio_source is not None else None
     if audio_entry:
-        audio_asset_id = f"take_T{take_index:02d}_audio"
+        audio_asset_id = f"take_T{take_index:02d}_S{clip_index:03d}_audio"
         manifest["assets"][audio_asset_id] = {
             "id": audio_asset_id,
             "type": "audio",
             "takeIndex": int(take_index),
+            "clipIndex": int(clip_index),
             "timelineId": _take_timeline_id(take_index),
             "audioLane": _take_audio_lane_name(take_index),
             "duration": float(audio_entry.get("duration_seconds") or duration),
@@ -3786,7 +4248,7 @@ def _append_video_take_to_manifest(
             "roll_contract": copy.deepcopy(roll_contract_data),
             **audio_entry,
         }
-        audio_clip_id = f"clip_T{take_index:02d}_A"
+        audio_clip_id = f"clip_T{take_index:02d}_S{clip_index:03d}_A"
         audio_source_duration = max(
             1.0 / max(1.0, fps),
             _safe_float(audio_entry.get("duration_seconds"), parked_duration),
@@ -3799,6 +4261,7 @@ def _append_video_take_to_manifest(
             "assetId": audio_asset_id,
             "type": "audio",
             "takeIndex": int(take_index),
+            "clipIndex": int(clip_index),
             "timelineId": _take_timeline_id(take_index),
             "audioLane": _take_audio_lane_name(take_index),
             "startTime": float(start),
@@ -3872,6 +4335,13 @@ class IAMCCS_ShotboardVideoEditorV1:
     CATEGORY = "IAMCCS/Cine/Multigeneration"
     OUTPUT_NODE = True
 
+    @classmethod
+    def IS_CHANGED(cls, *args, **kwargs):
+        # This node persists rendered clips into a session manifest. Reusing a
+        # cached first-pass result would drop S002+ while H3 keeps rendering
+        # and saving its native files.
+        return float("nan")
+
     def collect(
         self,
         cine_linx,
@@ -3896,7 +4366,7 @@ class IAMCCS_ShotboardVideoEditorV1:
         unique_id=None,
         extra_pnginfo=None,
     ):
-        valid_collect_policies = {"append_sequence", "replace_same_take", "append_always"}
+        valid_collect_policies = {"append_sequence", "append_same_lane", "replace_same_take", "append_always"}
         valid_append_modes = {"append_sequence", "timeline_origin"}
         raw_fps = fps
         if (
@@ -3929,10 +4399,85 @@ class IAMCCS_ShotboardVideoEditorV1:
             or editor_input_resources.get("editor_manifest_json")
             or ""
         )
-        manifest = _editor_manifest_for_session(editor_input_manifest, session_key, fps)
         take_package = _safe_json_loads(take_package_json, {})
         if not isinstance(take_package, dict) or not take_package:
             take_package = _take_package_from_linx(out_linx)
+        authored_collect_policy = str(collect_policy)
+        package_collect_policy = str(take_package.get("editor_collect_policy") or "").strip()
+        is_h3_slot_package = (
+            str(take_package.get("source") or "") == "IAMCCS_MiniMaxH3EditorTakeRoute"
+            and _safe_int(take_package.get("editor_clip_index"), 0) > 0
+        )
+        if is_h3_slot_package:
+            # The package is runtime truth. A workflow saved before R22D may
+            # still serialize append_sequence, whose take-level duplicate
+            # guard rejects S002 even though S001/S002 intentionally share T01.
+            collect_policy = "append_same_lane"
+            if package_collect_policy and package_collect_policy != "append_same_lane":
+                raise ValueError(
+                    "IAMCCS H3 editor package has an unsupported collection policy: "
+                    f"{package_collect_policy!r}"
+                )
+            if authored_collect_policy != collect_policy:
+                print(
+                    "[IAMCCS ShotboardVideoEditorV1] H3_SLOT_POLICY_SYNC "
+                    f"widget={authored_collect_policy} effective={collect_policy} "
+                    f"clip=S{_safe_int(take_package.get('editor_clip_index'), 1):03d}"
+                )
+        package_session = str(take_package.get("editor_session_key") or "").strip() if isinstance(take_package, dict) else ""
+        if package_session:
+            session_key = _safe_slug(package_session)
+            serialized_manifest = _safe_json_loads(editor_input_manifest, {})
+            serialized_session = (
+                _safe_slug(serialized_manifest.get("session_key"))
+                if isinstance(serialized_manifest, dict) and serialized_manifest.get("session_key")
+                else ""
+            )
+            if serialized_session and serialized_session != session_key:
+                # A completed prior render may still be visible in the hidden
+                # editor widget. The resolved H3 render id is authoritative;
+                # never seed a new loop with clips from the previous session.
+                editor_manifest_json = ""
+                editor_input_manifest = ""
+        manifest = _editor_manifest_for_session(editor_input_manifest, session_key, fps)
+        mixer_settings: List[Dict[str, Any]] = []
+        mixer_source = ""
+        if isinstance(cine_editor_linx, dict):
+            editor_mixer_payload = editor_input_resources.get("cine_payload") if isinstance(editor_input_resources.get("cine_payload"), dict) else {}
+            mixer_candidates = (
+                ("cine_audio_mixer", editor_input_resources.get("cine_audio_mixer")),
+                ("cine_audio_tracks", editor_input_resources.get("cine_audio_tracks")),
+                ("cine_payload.audioMixer", editor_mixer_payload.get("audioMixer")),
+                ("cine_payload", editor_mixer_payload),
+            )
+            for candidate_source, candidate in mixer_candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                raw_settings = candidate.get("trackSettings", candidate.get("track_settings"))
+                if isinstance(raw_settings, list) and raw_settings:
+                    mixer_settings = [item for item in raw_settings if isinstance(item, dict)]
+                    mixer_source = candidate_source
+                    break
+        if mixer_settings:
+            manifest_tracks = manifest.get("tracks") if isinstance(manifest.get("tracks"), list) else []
+            tracks_by_id = {
+                str(track.get("id") or ""): track
+                for track in manifest_tracks
+                if isinstance(track, dict) and str(track.get("id") or "")
+            }
+            for index, settings in enumerate(mixer_settings[:5], start=1):
+                track = tracks_by_id.get(f"A{index}")
+                if not isinstance(track, dict):
+                    continue
+                track["volume"] = max(0.0, min(2.0, _safe_float(settings.get("volume", 1.0), 1.0)))
+                track["muted"] = bool(settings.get("mute", settings.get("muted", False)))
+                track["solo"] = bool(settings.get("solo", False))
+            manifest["editor_audio_mixer_sync"] = {
+                "source": mixer_source,
+                "track_count": min(5, len(mixer_settings)),
+                "fields": ["volume", "muted", "solo"],
+                "truth": "cine_editor_linx AudioBoard Mixer settings imported without replacing the H3 generation cine_linx",
+            }
         active_identity = _active_identity_from_linx(out_linx)
         videos = [video_1, video_2, video_3, video_4, video_5]
         audios = [audio_1, audio_2, audio_3, audio_4, audio_5]
@@ -3946,6 +4491,7 @@ class IAMCCS_ShotboardVideoEditorV1:
         package_take = _safe_int(take_package.get("take_index"), 0) if isinstance(take_package, dict) else 0
         package_timeline = str(take_package.get("timeline_id") or "").strip() if isinstance(take_package, dict) else ""
         package_audio_lane = str(take_package.get("audio_lane") or "").strip() if isinstance(take_package, dict) else ""
+        package_clip_index = max(1, _safe_int(take_package.get("editor_clip_index"), 1)) if isinstance(take_package, dict) else 1
         identity_take = _safe_int(active_identity.get("take_index"), 0) if isinstance(active_identity, dict) else 0
         identity_timeline = str(active_identity.get("timeline_id") or "").strip() if isinstance(active_identity, dict) else ""
         for index, video in enumerate(videos, start=1):
@@ -4013,9 +4559,11 @@ class IAMCCS_ShotboardVideoEditorV1:
                 pre_roll_frames=_safe_int(take_package.get("pre_roll_frames"), 0) if isinstance(take_package, dict) else 0,
                 post_roll_frames=_safe_int(take_package.get("post_roll_frames"), 0) if isinstance(take_package, dict) else 0,
                 roll_contract=take_package.get("roll_contract") if isinstance(take_package, dict) and isinstance(take_package.get("roll_contract"), dict) else {},
+                editor_clip_index=package_clip_index,
             )
             collected.append({
                 "take_index": int(take_index),
+                "clip_index": int(package_clip_index),
                 "timeline_id": _take_timeline_id(take_index),
                 "audio_lane": _take_audio_lane_name(take_index),
             })
@@ -4033,6 +4581,16 @@ class IAMCCS_ShotboardVideoEditorV1:
                 _replace_manifest_master_audio(manifest, published_master, fps)
         manifest_json = _json_dump(manifest)
         _VIDEO_EDITOR_MANIFEST_REGISTRY[_safe_slug(session_key)] = copy.deepcopy(manifest)
+        if is_h3_slot_package:
+            parked_video_clips = [
+                clip for clip in manifest.get("clips", [])
+                if isinstance(clip, dict) and str(clip.get("type")) == "video"
+            ]
+            print(
+                "[IAMCCS ShotboardVideoEditorV1] H3_SLOT_COLLECTED "
+                f"session={session_key} lane=T{package_take:02d}/A{package_take} "
+                f"clip=S{package_clip_index:03d} manifest_video_clips={len(parked_video_clips)}"
+            )
         editor_linx_out = _clone_linx(
             cine_editor_linx if isinstance(cine_editor_linx, dict) else {},
             "iamccs_video_editor_inputs",
@@ -4067,6 +4625,7 @@ class IAMCCS_ShotboardVideoEditorV1:
             "clip_count": len(manifest.get("clips", [])),
             "duration_seconds": _safe_float(manifest.get("duration_seconds"), 0.0),
             "policy": str(collect_policy),
+            "editor_audio_mixer_sync": copy.deepcopy(manifest.get("editor_audio_mixer_sync", {})),
             "cine_editor_linx_inputs": editor_inputs,
             "truth": "Generated takes are persisted as manifest assets and timeline clips. T/A identity must match cine_linx and TakePackage; no inferred remap is allowed.",
         }
@@ -4256,6 +4815,63 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
         if not clips:
             raise ValueError("IAMCCS ShotboardVideoEditorRenderV1: no video clips found in editor manifest.")
         assets = manifest.get("assets") if isinstance(manifest.get("assets"), dict) else {}
+        tracks = manifest.get("tracks") if isinstance(manifest.get("tracks"), list) else []
+        tracks_by_id = {
+            str(track.get("id") or ""): track
+            for track in tracks
+            if isinstance(track, dict) and str(track.get("id") or "")
+        }
+        editor_audio_clips = [
+            clip for clip in manifest.get("clips", [])
+            if isinstance(clip, dict)
+            and str(clip.get("type")) == "audio"
+            and str(clip.get("trackId") or "").strip().upper() not in {"AM", "MASTER"}
+            and str(clip.get("audioLane") or "").strip().upper() != "MASTER"
+            and str(clip.get("role") or "").strip().lower() not in {"master_audio", "master_excerpt"}
+        ]
+
+        def editor_track(clip: Dict[str, Any]) -> Dict[str, Any]:
+            return tracks_by_id.get(str(clip.get("trackId") or ""), {})
+
+        def editor_audio_muted(clip: Dict[str, Any]) -> bool:
+            track = editor_track(clip)
+            return bool(clip.get("muted", False)) or bool(track.get("muted", track.get("mute", False)))
+
+        audible_editor_audio = [clip for clip in editor_audio_clips if not editor_audio_muted(clip)]
+        editor_solo_active = any(
+            bool(clip.get("solo", False)) or bool(editor_track(clip).get("solo", False))
+            for clip in audible_editor_audio
+        )
+
+        def editor_audio_enabled(clip: Dict[str, Any] | None) -> bool:
+            if not isinstance(clip, dict) or editor_audio_muted(clip):
+                return False
+            if not editor_solo_active:
+                return True
+            return bool(clip.get("solo", False)) or bool(editor_track(clip).get("solo", False))
+
+        def editor_audio_gain(clip: Dict[str, Any]) -> float:
+            track = editor_track(clip)
+            return max(
+                0.0,
+                _safe_float(clip.get("volume", 1.0), 1.0)
+                * _safe_float(track.get("volume", 1.0), 1.0),
+            )
+
+        def companion_audio_clip(video_clip: Dict[str, Any]) -> Dict[str, Any] | None:
+            take_index = _safe_int(video_clip.get("takeIndex"), 0)
+            clip_index = _safe_int(video_clip.get("clipIndex"), 0)
+            timeline_id = str(video_clip.get("timelineId") or "")
+            for audio_clip in editor_audio_clips:
+                if take_index > 0 and _safe_int(audio_clip.get("takeIndex"), 0) != take_index:
+                    continue
+                if clip_index > 0 and _safe_int(audio_clip.get("clipIndex"), 0) != clip_index:
+                    continue
+                if timeline_id and str(audio_clip.get("timelineId") or "") != timeline_id:
+                    continue
+                return audio_clip
+            return None
+
         comps = []
         for clip in clips:
             asset = assets.get(str(clip.get("assetId"))) if isinstance(assets.get(str(clip.get("assetId"))), dict) else {}
@@ -4281,6 +4897,13 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
                 trim_start,
                 trim_end,
             )
+            audio_clip = companion_audio_clip(clip)
+            if audio_clip is not None:
+                audio = _audio_with_gain(audio, editor_audio_gain(audio_clip)) if editor_audio_enabled(audio_clip) else None
+            elif editor_solo_active:
+                # A legacy video without a published companion audio clip must
+                # not leak through when the user has explicitly soloed a lane.
+                audio = None
             images = _apply_goya_suite_clip_edit(images, clip)
             comps.append(Types.VideoComponents(images=images, audio=audio, frame_rate=comp.frame_rate))
         first = comps[0]
@@ -4323,6 +4946,19 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
                     "master_excerpt/master_audio asset was found in the editor manifest. "
                     f"asset_keys={asset_keys}; master_item={master_item!r}"
                 )
+            master_track = tracks_by_id.get("AM", {})
+            master_muted = bool(master_track.get("muted", master_track.get("mute", False))) or bool(
+                master_clip.get("muted", False) if isinstance(master_clip, dict) else False
+            )
+            if master_muted:
+                audio = None
+            elif isinstance(master_clip, dict):
+                master_gain = max(
+                    0.0,
+                    _safe_float(master_clip.get("volume", 1.0), 1.0)
+                    * _safe_float(master_track.get("volume", 1.0), 1.0),
+                )
+                audio = _audio_with_gain(audio, master_gain)
         elif effective_audio_policy == "first_video_audio":
             audio = first.audio
         elif effective_audio_policy == "concat_clip_audio":
@@ -4337,8 +4973,10 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
                 if track_id in {"AM", "MASTER"} or audio_lane == "MASTER" or role in {"master_audio", "master_excerpt"}:
                     continue
                 asset = assets.get(str(clip.get("assetId"))) if isinstance(assets.get(str(clip.get("assetId"))), dict) else {}
-                if bool(asset.get("manual")):
-                    manual_audio_items.append((clip, asset))
+                if bool(asset.get("manual")) and editor_audio_enabled(clip):
+                    mix_clip = copy.deepcopy(clip)
+                    mix_clip["volume"] = editor_audio_gain(clip)
+                    manual_audio_items.append((mix_clip, asset))
             if manual_audio_items:
                 audio = _mix_manual_audio_into_timeline(audio, manual_audio_items, int(frames.shape[0]), fps)
         video = InputImpl.VideoFromComponents(Types.VideoComponents(
@@ -4358,6 +4996,15 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
             "tail_trim_frames_per_clip": int(effective_tail_trim),
             "tail_trim_source": "render_widget" if max(0, _safe_int(tail_trim_frames_per_clip, 0)) > 0 else "editor_manifest",
             "has_audio": audio is not None,
+            "editor_audio_solo_active": bool(editor_solo_active),
+            "editor_muted_audio_tracks": sorted(
+                track_id for track_id, track in tracks_by_id.items()
+                if str(track_id).upper().startswith("A") and bool(track.get("muted", track.get("mute", False)))
+            ),
+            "editor_solo_audio_tracks": sorted(
+                track_id for track_id, track in tracks_by_id.items()
+                if str(track_id).upper().startswith("A") and bool(track.get("solo", False))
+            ),
             "goya_suite_effect_clips": sum(1 for clip in clips if isinstance(clip.get("suite_edit"), dict) or isinstance(clip.get("videoFx"), dict) or isinstance(clip.get("transform"), dict)),
             "goya_suite_effects_baked": True,
             "legacy_widget_migration": legacy_widget_migration,
@@ -4545,6 +5192,8 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_ShotboardV4MultigenAdapter": IAMCCS_ShotboardV4MultigenAdapter,
     "IAMCCS_MultiTimelineBridge": IAMCCS_MultiTimelineBridge,
     "IAMCCS_TakePackage": IAMCCS_TakePackage,
+    "IAMCCS_MiniMaxH3EditorTakeRoute": IAMCCS_MiniMaxH3EditorTakeRoute,
+    "IAMCCS_MiniMaxH3EditorFinalGate": IAMCCS_MiniMaxH3EditorFinalGate,
     "IAMCCS_TakeRouter": IAMCCS_TakeRouter,
     "IAMCCS_MultiTimelineTakePicker": IAMCCS_MultiTimelineTakePicker,
     "IAMCCS_ShotboardVideoEditorV1": IAMCCS_ShotboardVideoEditorV1,
@@ -4558,6 +5207,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_ShotboardV4MultigenAdapter": "IAMCCS Shotboard V4 Multigen Adapter",
     "IAMCCS_MultiTimelineBridge": "IAMCCS MultiTimeline Bridge",
     "IAMCCS_TakePackage": "IAMCCS TakePackage",
+    "IAMCCS_MiniMaxH3EditorTakeRoute": "IAMCCS MiniMax H3 Editor Take Route",
+    "IAMCCS_MiniMaxH3EditorFinalGate": "IAMCCS MiniMax H3 Editor Final Gate",
     "IAMCCS_TakeRouter": "IAMCCS Take Router",
     "IAMCCS_MultiTimelineTakePicker": "IAMCCS MultiTimeline Take Picker",
     "IAMCCS_ShotboardVideoEditorV1": "IAMCCS Shotboard Video Editor V1",

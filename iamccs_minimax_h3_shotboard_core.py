@@ -619,15 +619,45 @@ def _lipsync_audio_event(
 
 
 def _lipsync_prompt(creative_prompt: str) -> str:
-    """Keep transcript/lyrics out of the text contract for Ref2Vid LipSync."""
-    contract = (
-        "[REF2VID LIPSYNC]\n"
-        "<Picture 1> is the static identity and visual reference. <Audio 1> is the complete spoken or sung performance timing source. "
-        "Synchronize mouth shapes, phonemes, silence, breaths and facial acting to <Audio 1>. "
-        "Do not request, infer, transcribe or place lyrics, dialogue text, captions or a script in the prompt. "
-        "Keep the reference identity and camera framing stable unless the creative direction explicitly changes them."
+    """Apply the same reference-audio prompt contract used by working H3 flows."""
+    authored = str(creative_prompt or "").strip()
+    lower = authored.lower()
+    # IAMCCS Prompter can already emit MiniMax's official six-section REF
+    # grammar. Never put a proprietary header in front of that valid prompt.
+    if "subject_definitions:" in lower and "detailed_description:" in lower:
+        if "<audio 1>" not in lower:
+            raise ValueError(
+                "Ref2Vid LipSync full-reference prompt must define and use <Audio 1>. "
+                "Use IAMCCS Prompter REF2VA/Audio Driven or add the AudioBoard performance as <Audio 1>."
+            )
+        return authored
+    detail = authored or (
+        "[Shot 1] <Subject 1> (S1) remains clearly visible and performs the supplied <Audio 1>. "
+        "Keep the mouth unobstructed and the camera stable enough to read articulation."
     )
-    return "\n\n".join(part for part in (contract, creative_prompt) if part).strip()
+    if not detail.lstrip().lower().startswith("[shot 1]"):
+        detail = f"[Shot 1] {detail}"
+    # This is the successful v20/official Full-Reference relationship: Audio 1
+    # is visible to Qwen as a reference and the exact same signal is also
+    # locked into the sampler latent. Creative words are never fabricated.
+    return (
+        "subject_definitions:\n"
+        "<Subject 1> is the visible performer in <Picture 1>; preserve identity, face and framing.\n"
+        "<Audio 1> is the complete copied spoken or sung performance for <Subject 1> (S1).\n\n"
+        "summary:\n"
+        "[reference generation + audio reuse] <Subject 1> performs the complete supplied <Audio 1> with visible lip synchronization.\n\n"
+        "retention_analysis:\n"
+        "<Subject 1>: fully_preserved - preserve the identity and visible facial performance from <Picture 1>.\n"
+        "<Audio 1>: fully_copy - reuse <Audio 1> 1:1 as the complete final performance timing track.\n\n"
+        "detailed_description:\n"
+        f"{detail}\n"
+        "Synchronize <Subject 1> (S1)'s mouth shapes, phonemes, silence, breaths and facial acting to <Audio 1>. "
+        "Every user-supplied spoken line or lyric must remain verbatim inside <d>[Language] ...</d>; never infer missing words.\n\n"
+        "overall_soundscape:\n"
+        "<Audio 1> is reused as the authoritative synchronized performance track.\n\n"
+        "non_diegetic_music:\n"
+        "N/A"
+    ).strip()
 
 
 def _longvid_guide_plan(
@@ -652,6 +682,7 @@ def _longvid_guide_plan(
     active_upscale_mode: str,
     upscale_enabled: bool,
     voice_reference_picture_index: int,
+    lipsync: bool = False,
 ) -> dict[str, Any]:
     """Compile the long-video timeline into stock ``MiniMaxH3AddGuide`` events.
 
@@ -660,7 +691,26 @@ def _longvid_guide_plan(
     image/audio slot into each legal H3 chunk it intersects.  The atomic
     backend consumes the resulting local events with the stock AddGuide node.
     """
-    # The live Shotboard serializes its canonical edited boxes in ``rows``.
+    # LipSync uses stock ReferenceToVideo for identity, AddGuide for positioned
+    # AudioBoard conditioning, and AudioDrive to lock that same rebased chunk.
+    plan_mode = "longvid_ref2vid_lipsync" if lipsync else "longvid_guides"
+    chunk_task = "ref2va" if lipsync else "t2va"
+    guided_audio_drive = bool(not lipsync and audio_mode == "h3_custom_audio_drive")
+    guide_prompt_header = (
+        "[LONGVID REF2VID LIPSYNC]\n"
+        "<Picture 1> is the persistent visual identity. AudioBoard clips are pinned at their exact local timeline positions and are the performance timing source. "
+        "Synchronize mouth shapes, phonemes, breaths, silence and facial acting to those positioned audio guides. "
+        "Write every user-supplied spoken line or lyric verbatim as <d>[Language] ...</d>; never infer missing words."
+        if lipsync else (
+            "[LONGVID GUIDED AUDIO DRIVE]\n"
+            "Main-timeline image guides remain positional H3 guides. The visible subject speaks or sings the exact supplied AudioBoard performance with natural, precise lip synchronization. "
+            "The matching locked audio latent is the sole phonetic timing authority: synchronize mouth shapes, phonemes, breaths and facial acting to it, and keep the mouth closed during silence. "
+            "Write every user-supplied spoken line or lyric verbatim as <d>[Language] ...</d>; never infer missing words."
+            if guided_audio_drive else
+            "[LONGVID TIMELINE GUIDES]\nMain-timeline image and audio guides are pinned at their stated local times. Preserve them exactly at those positions; generate the intervening motion naturally."
+        )
+    )
+    # The live Shotboard serializes its canonical edited boxes in rows.
     # Older exports can also retain a stale ``segments`` mirror. LongVid must
     # honour what is visibly present on the editor timeline, otherwise an
     # edit such as deleting a guide can leave a mismatched duration/prompt
@@ -753,6 +803,12 @@ def _longvid_guide_plan(
         )
         max_timeline_frame = max(max_timeline_frame, start_frame + duration_frames)
 
+    if (lipsync or guided_audio_drive) and not audio_guides:
+        raise ValueError(
+            "LongVid Guided Audio Drive requires at least one imported main AudioBoard clip. "
+            "Place dialogue/music in an AudioBoard lane and anchor it to the intended timeline position."
+        )
+
     requested_frames = max(
         H3_MIN_FRAMES,
         int(round(max(duration_seconds, _timeline_duration_seconds(timeline, duration_seconds)) * H3_FPS)),
@@ -804,9 +860,7 @@ def _longvid_guide_plan(
         prompt = "\n\n".join(
             part
             for part in (
-                "[LONGVID TIMELINE GUIDES]\n"
-                "Main-timeline image and audio guides are pinned at their stated local times. "
-                "Preserve them exactly at those positions; generate the intervening motion naturally.",
+                guide_prompt_header,
                 creative_prompt,
             )
             if part
@@ -816,7 +870,7 @@ def _longvid_guide_plan(
             "slot_index": chunk_index,
             "slot_id": f"longvid_chunk_{chunk_index + 1}",
             "slot_label": f"LongVid {chunk_index + 1:03d}",
-            "task_mode": "t2va",
+            "task_mode": chunk_task,
             "frame_count": frame_count,
             "requested_frame_count": min(H3_MAX_TRAINED_FRAMES, remaining),
             "fps": H3_FPS,
@@ -852,7 +906,7 @@ def _longvid_guide_plan(
                 "chunk_index": chunk_index,
                 "slot_index": chunk_index,
                 "slot_label": chunk["slot_label"],
-                "task_mode": "t2va",
+                "task_mode": chunk_task,
                 "start_seconds": chunk["timeline_start_seconds"],
                 "duration_seconds": chunk["duration_seconds"],
                 "prompt": prompt,
@@ -865,12 +919,14 @@ def _longvid_guide_plan(
     guide_track = {
         "schema": "iamccs.minimax_h3.guide_track",
         "schema_version": 1,
-        "mode": "longvid_guides",
+        "mode": plan_mode,
         "clock": {"fps": H3_FPS, "origin": "timeline_start"},
         "visual_guide_count": len(visual_guides),
         "audio_guide_count": len(audio_guides),
         "events": visual_guides + audio_guides,
         "backend": "r31_stock_minimax_h3_add_guide",
+        "lipsync": bool(lipsync or guided_audio_drive),
+        "guided_audio_drive": guided_audio_drive,
         "source": "shotboard_main_slots",
     }
     return {
@@ -881,9 +937,9 @@ def _longvid_guide_plan(
         "fps": H3_FPS,
         "width": resolved_width,
         "height": resolved_height,
-        "task_mode": "longvid_guides",
-        "generation_mode": "longvid_guides",
-        "continuation_mode": "longvid_timeline_guides_hard_cuts",
+        "task_mode": plan_mode,
+        "generation_mode": plan_mode,
+        "continuation_mode": "longvid_ref2vid_lipsync_guides_hard_cuts" if lipsync else ("longvid_guided_audio_drive_hard_cuts" if guided_audio_drive else "longvid_timeline_guides_hard_cuts"),
         "audio_mode": audio_mode,
         "prompt_mapping": prompt_mapping,
         "flf_join_mode": "h3_keyframe_cut",
@@ -910,6 +966,14 @@ def _longvid_guide_plan(
         "upscale_enabled": bool(_bool(upscale_enabled, False)),
         "upscale_mode": active_upscale_mode,
         "chunk_policy": "longvid_global_clock_chunked_at_362_frames",
+        "lipsync": {
+            "enabled": bool(lipsync or guided_audio_drive),
+            "contract": "ref2va_identity_plus_positioned_audioboard_guides" if lipsync else ("t2va_positioned_image_guides_plus_v20_zero_mask_audio_lock" if guided_audio_drive else "off"),
+            "audio_authority": "locked_audioboard_chunk" if (lipsync or guided_audio_drive) else "native_guides",
+            "reference_model": bool(lipsync),
+            "dialogue_tags_present": bool(chunks) and all("<d>" in str(item.get("prompt", "")).lower() and "</d>" in str(item.get("prompt", "")).lower() for item in chunks),
+            "dialogue_tag_contract": "user_supplied_verbatim_only",
+        },
         "flf_anchor_mode": False,
         "i2v_hard_cut_mode": False,
         "ref2v_hard_cut_mode": False,
@@ -1005,13 +1069,13 @@ def build_shotplan(
     ref_image_size = _text(ref_image_size).lower() or "match"
     if ref_image_size not in {"match", "max"}:
         raise ValueError(f"ref_image_size H3 non valido: {ref_image_size}")
-    text_encoder_device = _text(text_encoder_device).lower() or "auto"
-    if text_encoder_device not in {"cpu_safe_12gb", "auto"}:
-        raise ValueError(f"device text encoder H3 non valido: {text_encoder_device}")
-    # Old boards remain loadable, but CPU is now an OOM-only fallback handled
-    # by the atomic conditioning backend rather than a forced placement mode.
-    if text_encoder_device == "cpu_safe_12gb":
-        text_encoder_device = "auto"
+    requested_text_encoder_device = _text(text_encoder_device).lower() or "gpu_auto"
+    text_encoder_device = {
+        "auto": "gpu_auto",
+        "cpu_safe_12gb": "cpu_direct",
+    }.get(requested_text_encoder_device, requested_text_encoder_device)
+    if text_encoder_device not in {"gpu_auto", "cpu_direct"}:
+        raise ValueError(f"device text encoder H3 non valido: {requested_text_encoder_device}")
     sol_conditioning = _text(sol_conditioning).lower() or "exact_kv_and_rows"
     if sol_conditioning not in {"exact_kv", "exact_kv_and_rows"}:
         raise ValueError(f"Sol-Attn conditioning non valido: {sol_conditioning}")
@@ -1037,8 +1101,18 @@ def build_shotplan(
     # R31 is deliberately explicit.  ``auto`` continues to resolve exactly
     # as old boards did, so adding positioned guides can never change an
     # existing FLF/I2VA/REF2VA render route.
-    if requested_task_mode in {"longvid_guides", "longvid", "long_video_guides"}:
-        return _longvid_guide_plan(
+    longvid_lipsync_requested = requested_task_mode in {
+        "longvid_guided_lipsync", "longvid_audio_drive_lipsync",
+        # Legacy aliases formerly selected an unstable REF2VA+AddGuide hybrid.
+        # Keep them loadable, but compile them into the safe T2VA/AddGuide
+        # audio-drive topology so old workflows cannot recreate the mosaic.
+        "longvid_ref2vid_lipsync", "longvid_lipsync", "longvid_ref2va_lipsync",
+    }
+    if requested_task_mode in {"longvid_guides", "longvid", "long_video_guides"} or longvid_lipsync_requested:
+        # Direct callers receive the same audio authority as the ShotPlanner UI.
+        if longvid_lipsync_requested:
+            audio_mode = "h3_custom_audio_drive"
+        plan = _longvid_guide_plan(
             timeline=timeline,
             global_prompt=global_prompt,
             duration_seconds=max(0.01, _float(duration_seconds, 10.0)),
@@ -1059,7 +1133,18 @@ def build_shotplan(
             active_upscale_mode=active_upscale_mode,
             upscale_enabled=upscale_enabled,
             voice_reference_picture_index=voice_reference_picture_index,
+            # Safe LongVid lip-sync is Guided FL2VA/T2VA audio drive, never the
+            # old REF2VA-reference + duplicated AddGuide image topology.
+            lipsync=False,
         )
+        if longvid_lipsync_requested:
+            plan["requested_task_mode"] = requested_task_mode
+            plan["mode_migration"] = {
+                "from": requested_task_mode,
+                "to": "longvid_guides+h3_custom_audio_drive",
+                "reason": "safe_guided_lipsync_without_ref2va_hybrid",
+            }
+        return plan
 
     fallback_duration = min(H3_MAX_TRAINED_FRAMES / H3_FPS, max(H3_MIN_FRAMES / H3_FPS, 10.0))
     slots = _normalise_slots(timeline, duration_seconds, fallback_duration)
@@ -1307,10 +1392,12 @@ def build_shotplan(
         "lipsync": {
             "enabled": lipsync_requested,
             "schema": "iamccs.minimax_h3.ref2vid_lipsync",
-            "schema_version": 1,
+            "schema_version": 2,
             "image_source": "CineInfoH3 reference image preferred; main visual slot fallback",
             "audio_source": "main AudioBoard slot per performance chunk",
-            "lyrics_in_prompt": False,
+            "audio_pipeline": "same_audioboard_chunk_as_ref_audio_1_and_zero_denoise_audio_latent",
+            "dialogue_tags_present": bool(chunks) and all("<d>" in str(item.get("prompt", "")).lower() and "</d>" in str(item.get("prompt", "")).lower() for item in chunks),
+            "dialogue_tag_contract": "user_supplied_verbatim_only",
         },
         "legacy_explicit_last": legacy_explicit_last,
         "chunk_max_frames": H3_MAX_TRAINED_FRAMES,

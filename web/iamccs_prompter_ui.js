@@ -296,14 +296,59 @@ function safeProject(raw) {
 
 function composePrompt(project) {
     const mode = canonicalMode(project.task_mode);
-    return MODE_META[mode].sections
-        .map(([key, label]) => {
-            const body = String(project.sections?.[key] || "").trim();
-            if (!body) return "";
-            return mode === "ref2va" ? `${label}:\n${body}` : `[${label.toUpperCase()}]\n${body}`;
-        })
-        .filter(Boolean)
-        .join("\n\n");
+    const value = (key) => String(project.sections?.[key] || "").trim();
+    if (!MODE_META[mode].sections.some(([key]) => value(key))) return "";
+    const join = (keys) => keys.map(value).filter(Boolean).join("\n");
+    if (mode === "ref2va") {
+        return MODE_META[mode].sections.map(([key, label]) => {
+            let body = value(key) || "N/A";
+            if (key === "summary" && body !== "N/A" && !body.toLowerCase().startsWith("[reference")) body = `[reference generation] ${body}`;
+            return `${label}:\n${body}`;
+        }).join("\n\n");
+    }
+    if (mode === "v2va_object_swap") {
+        let summary = value("v2va_source_video_authority") || "N/A";
+        if (summary !== "N/A" && !summary.toLowerCase().startsWith("[reference")) summary = `[reference generation + video reference] ${summary}`;
+        return [
+            `subject_definitions:\n${value("v2va_subject_definitions") || "N/A"}`,
+            `summary:\n${summary}`,
+            `retention_analysis:\n${value("v2va_replacement_retention") || "N/A"}`,
+            `detailed_description:\n${join(["v2va_interval_edits", "v2va_exclusions"]) || "N/A"}`,
+            `overall_soundscape:\n${value("v2va_sound_policy") || "N/A"}`,
+            "non_diegetic_music:\nN/A",
+        ].join("\n\n");
+    }
+    let detailKeys = [];
+    let alignment = "";
+    let sound = "";
+    let music = "";
+    if (mode === "t2va") {
+        detailKeys = ["scene", "shot_list", "acting", "dialogue", "light_and_image", "camera", "negatives"];
+        sound = value("production_sound");
+        music = value("non_diegetic_music");
+    } else if (mode === "i2va") {
+        detailKeys = ["reference_use", "identity_continuity_locks", "scene", "shot_list", "acting", "dialogue", "light_and_image", "camera", "negatives"];
+        alignment = "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.";
+        sound = value("production_sound");
+        music = value("non_diegetic_music");
+    } else if (mode === "fl2va") {
+        detailKeys = ["reference_use", "identity_continuity_locks", "action", "shot_list", "acting", "dialogue", "light_and_image", "camera", "negatives"];
+        alignment = value("boundary_frames");
+        sound = value("production_sound");
+        music = value("non_diegetic_music");
+    } else {
+        detailKeys = ["audio_drive_contract", "audio_subject_map", "audio_scene_intent", "audio_timed_performance", "audio_dialogue_map", "audio_visual_sync", "audio_camera_sync", "audio_continuity_locks"];
+        sound = value("audio_environment");
+        music = "N/A";
+    }
+    let detail = join(detailKeys);
+    if (detail && !/^\s*\[Shot\s+1\]/i.test(detail)) detail = `[Shot 1] ${detail}`;
+    return [
+        alignment,
+        `integrated_multimodal_description:\n${detail || "N/A"}`,
+        `overall_soundscape:\n${sound || "N/A"}`,
+        `non_diegetic_music:\n${music || "N/A"}`,
+    ].filter(Boolean).join("\n\n");
 }
 
 function el(tag, className = "", text = "") {
@@ -339,21 +384,39 @@ function nodeType(node) {
 function shotboardsForPrompter(node) {
     const graph = node?.graph || app?.graph;
     const connected = [];
-    for (const output of node?.outputs || []) {
-        for (const linkId of Array.isArray(output?.links) ? output.links : []) {
-            const link = graph?.links?.[linkId];
-            const targetId = link?.target_id ?? link?.[3];
-            const target = targetId != null ? graph?.getNodeById?.(targetId) : null;
-            if (nodeType(target) === "IAMCCS_MiniMaxH3ShotPlanner") connected.push(target);
+    const queue = [node];
+    const visited = new Set([String(node?.id ?? "prompter")]);
+    // CineLinX is composable: Prompter can feed H3 Settings (or another
+    // IAMCCS pass-through stage) before reaching the Shotboard. Walk only
+    // CineLinX outputs so unrelated branches can never become inject targets.
+    while (queue.length) {
+        const source = queue.shift();
+        for (const output of source?.outputs || []) {
+            const outputName = String(output?.name || "").toLowerCase();
+            const outputType = String(output?.type || "").toUpperCase();
+            if (outputName !== "cine_linx" && outputType !== "IAMCCS_SUPERNODE_LINX") continue;
+            for (const linkId of Array.isArray(output?.links) ? output.links : []) {
+                const link = graph?.links?.[linkId];
+                const targetId = link?.target_id ?? link?.[3];
+                const target = targetId != null ? graph?.getNodeById?.(targetId) : null;
+                if (!target) continue;
+                if (nodeType(target) === "IAMCCS_MiniMaxH3ShotPlanner") {
+                    connected.push(target);
+                    continue;
+                }
+                const visitKey = String(target?.id ?? targetId);
+                if (!visited.has(visitKey)) {
+                    visited.add(visitKey);
+                    queue.push(target);
+                }
+            }
         }
     }
     if (connected.length) return [...new Set(connected)];
     const all = Array.isArray(graph?._nodes) ? graph._nodes.filter((item) => nodeType(item) === "IAMCCS_MiniMaxH3ShotPlanner") : [];
-    if (all.length <= 1) return all;
-    return all.slice().sort((a, b) => {
-        const distance = (item) => Math.hypot(Number(item?.pos?.[0] || 0) - Number(node?.pos?.[0] || 0), Number(item?.pos?.[1] || 0) - Number(node?.pos?.[1] || 0));
-        return distance(a) - distance(b);
-    }).slice(0, 1);
+    // A single board is an unambiguous legacy fallback. With multiple boards,
+    // require a real CineLinX path instead of modifying the nearest board.
+    return all.length === 1 ? all : [];
 }
 
 function mountPrompter(node) {
@@ -373,22 +436,23 @@ function mountPrompter(node) {
     root.innerHTML = `
         <style>
             .iamccs-pr-root{--ink:#17191d;--paper:#f3efe5;--paper2:#e7e0d0;--gold:#d9ad58;--blue:#79a8d8;--muted:#9aa3ad;width:960px;height:720px;background:linear-gradient(140deg,#151820,#0c0e13 72%);color:#e9edf2;border:1px solid #363c48;border-radius:12px;overflow:hidden;font:12px Inter,Segoe UI,sans-serif;box-shadow:0 18px 50px #0008;display:flex;flex-direction:column}
-            .iamccs-pr-root *{box-sizing:border-box}.iamccs-pr-top{height:58px;display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid #303641;background:#10131a}.iamccs-pr-mark{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:linear-gradient(135deg,#e0b660,#9b6a25);color:#17130a;font:800 15px Georgia}.iamccs-pr-brand{min-width:180px}.iamccs-pr-title{font:700 15px Georgia,serif;letter-spacing:.4px}.iamccs-pr-sub{font-size:10px;color:#9fa8b5;margin-top:2px}.iamccs-pr-name{height:34px;flex:1;min-width:160px;border:1px solid #38404d!important;border-radius:7px!important;background:#171b23!important;color:#f4f6f8!important;padding:0 10px!important}.iamccs-pr-actions{display:flex;gap:6px}.iamccs-pr-btn{height:30px;border:1px solid #3b4350;border-radius:6px;background:#202630;color:#e6ebf0;padding:0 10px;cursor:pointer;font:600 11px Inter,Segoe UI,sans-serif}.iamccs-pr-btn:hover{border-color:#d9ad58;color:#fff}.iamccs-pr-btn.primary{background:#b78537;border-color:#e1ba70;color:#15110a}.iamccs-pr-btn.danger{color:#e9a29c}.iamccs-pr-modes{height:46px;padding:7px 14px;display:flex;align-items:center;gap:7px;border-bottom:1px solid #303641;background:#141820}.iamccs-pr-mode{height:30px;min-width:72px}.iamccs-pr-mode.active{background:#30455d;border-color:#79a8d8;color:#fff}.iamccs-pr-mode-note{margin-left:auto;color:#9ea7b2;font-size:10px}.iamccs-pr-layout{display:grid;grid-template-columns:178px minmax(0,1fr) 292px;min-height:0;flex:1}.iamccs-pr-left{border-right:1px solid #303641;padding:11px;background:#11151c;overflow:auto}.iamccs-pr-kicker{font-size:9px;text-transform:uppercase;letter-spacing:1.4px;color:#d9ad58;margin:2px 0 7px}.iamccs-pr-targets,.iamccs-pr-writing{display:grid;gap:5px;margin-bottom:13px}.iamccs-pr-target,.iamccs-pr-write{height:29px;text-align:left}.iamccs-pr-target.active,.iamccs-pr-write.active{border-color:#d9ad58;background:#382f20;color:#ffe6ad}.iamccs-pr-hint{font-size:10px;line-height:1.45;color:#929ba7;padding:8px;border-radius:7px;background:#181d25;border:1px solid #2c333e;margin-bottom:12px}.iamccs-pr-policy{width:100%;height:30px;background:#1b2029;color:#e9edf2;border:1px solid #343c48;border-radius:6px;padding:0 7px}.iamccs-pr-center{overflow:auto;padding:12px 14px;background:radial-gradient(circle at 50% -10%,#262d3a 0,#181c24 45%,#141820 100%)}.iamccs-pr-section{background:#f4f0e6;color:#17191d;border-radius:6px;margin-bottom:10px;box-shadow:0 4px 12px #0005;overflow:hidden;border:1px solid #cfc5b1}.iamccs-pr-section-head{height:35px;display:flex;align-items:center;gap:8px;padding:0 10px;background:#e7e0d2;border-bottom:1px solid #cdc3b1}.iamccs-pr-num{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:#1e2938;color:#f4d596;font:700 10px Georgia}.iamccs-pr-section-title{font:700 12px Georgia,serif;letter-spacing:.3px}.iamccs-pr-state{margin-left:auto;color:#75808c;font-size:9px;text-transform:uppercase}.iamccs-pr-text{display:block;width:100%;min-height:82px;resize:vertical;border:0!important;outline:0!important;background:#f8f5ed!important;color:#181a1d!important;padding:10px 12px!important;font:12px/1.5 'Courier New',monospace!important}.iamccs-pr-tip{padding:7px 11px;background:#eee8dc;color:#66645e;font-size:10px;line-height:1.35;border-top:1px dashed #d3c8b5}.iamccs-pr-right{border-left:1px solid #303641;background:#10141a;padding:11px;display:flex;min-height:0;flex-direction:column}.iamccs-pr-status{display:flex;gap:6px;margin-bottom:8px}.iamccs-pr-pill{border-radius:10px;padding:3px 7px;background:#222a35;color:#aeb7c2;font-size:9px}.iamccs-pr-pill.ok{background:#1d3a2b;color:#99ddb2}.iamccs-pr-pill.warn{background:#493322;color:#f3c184}.iamccs-pr-preview{flex:1;min-height:0;overflow:auto;border:1px solid #3a414c;border-radius:6px;background:#f4f0e7;color:#1b1b1b;padding:12px;white-space:pre-wrap;font:11px/1.5 'Courier New',monospace}.iamccs-pr-preview:empty:before{content:'The composed H3 prompt will appear here.';color:#8c8981}.iamccs-pr-footer{margin-top:8px;display:flex;gap:6px}.iamccs-pr-footer .iamccs-pr-btn{flex:1}.iamccs-pr-assist{display:none;margin-bottom:8px;padding:8px;border:1px solid #44637d;background:#172635;color:#bed8ec;border-radius:6px;font-size:10px;line-height:1.4}.iamccs-pr-assist.show{display:block}.iamccs-pr-load{display:none}.iamccs-pr-empty .iamccs-pr-section-head{background:#f0e0d7}.iamccs-pr-empty .iamccs-pr-state{color:#b26751}.iamccs-pr-root.mode-manual .iamccs-pr-tip{display:none}
+            .iamccs-pr-root *{box-sizing:border-box}.iamccs-pr-top{height:58px;display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid #303641;background:#10131a}.iamccs-pr-mark{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:linear-gradient(135deg,#e0b660,#9b6a25);color:#17130a;font:800 15px Georgia}.iamccs-pr-brand{min-width:180px}.iamccs-pr-title{font:700 15px Georgia,serif;letter-spacing:.4px}.iamccs-pr-sub{font-size:10px;color:#9fa8b5;margin-top:2px}.iamccs-pr-name{height:34px;flex:1;min-width:160px;border:1px solid #38404d!important;border-radius:7px!important;background:#171b23!important;color:#f4f6f8!important;padding:0 10px!important}.iamccs-pr-actions{display:flex;gap:6px}.iamccs-pr-btn{height:30px;border:1px solid #3b4350;border-radius:6px;background:#202630;color:#e6ebf0;padding:0 10px;cursor:pointer;font:600 11px Inter,Segoe UI,sans-serif}.iamccs-pr-btn:hover{border-color:#d9ad58;color:#fff}.iamccs-pr-btn.primary{background:#b78537;border-color:#e1ba70;color:#15110a}.iamccs-pr-btn.danger{color:#e9a29c}.iamccs-pr-modes{height:46px;padding:7px 14px;display:flex;align-items:center;gap:7px;border-bottom:1px solid #303641;background:#141820}.iamccs-pr-mode{height:30px;min-width:72px}.iamccs-pr-mode.active{background:#30455d;border-color:#79a8d8;color:#fff}.iamccs-pr-mode-note{margin-left:auto;color:#9ea7b2;font-size:10px}.iamccs-pr-layout{display:grid;grid-template-columns:236px minmax(0,1fr) 272px;min-height:0;flex:1}.iamccs-pr-left{min-width:0;border-right:1px solid #303641;padding:11px;background:#11151c;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable}.iamccs-pr-kicker{font-size:9px;text-transform:uppercase;letter-spacing:1.4px;color:#d9ad58;margin:2px 0 7px}.iamccs-pr-targets,.iamccs-pr-writing{display:grid;gap:5px;margin-bottom:13px}.iamccs-pr-target,.iamccs-pr-write{height:29px;text-align:left}.iamccs-pr-target.active,.iamccs-pr-write.active{border-color:#d9ad58;background:#382f20;color:#ffe6ad}.iamccs-pr-hint{font-size:10px;line-height:1.45;color:#929ba7;padding:8px;border-radius:7px;background:#181d25;border:1px solid #2c333e;margin-bottom:12px}.iamccs-pr-policy{width:100%;height:30px;background:#1b2029;color:#e9edf2;border:1px solid #343c48;border-radius:6px;padding:0 7px}.iamccs-pr-center{min-width:0;overflow:auto;padding:12px 14px;background:radial-gradient(circle at 50% -10%,#262d3a 0,#181c24 45%,#141820 100%)}.iamccs-pr-section{background:#f4f0e6;color:#17191d;border-radius:6px;margin-bottom:10px;box-shadow:0 4px 12px #0005;overflow:hidden;border:1px solid #cfc5b1}.iamccs-pr-section-head{height:35px;display:flex;align-items:center;gap:8px;padding:0 10px;background:#e7e0d2;border-bottom:1px solid #cdc3b1}.iamccs-pr-num{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:#1e2938;color:#f4d596;font:700 10px Georgia}.iamccs-pr-section-title{font:700 12px Georgia,serif;letter-spacing:.3px}.iamccs-pr-state{margin-left:auto;color:#75808c;font-size:9px;text-transform:uppercase}.iamccs-pr-text{display:block;width:100%;min-height:82px;resize:vertical;border:0!important;outline:0!important;background:#f8f5ed!important;color:#181a1d!important;padding:10px 12px!important;font:12px/1.5 'Courier New',monospace!important}.iamccs-pr-tip{padding:7px 11px;background:#eee8dc;color:#66645e;font-size:10px;line-height:1.35;border-top:1px dashed #d3c8b5}.iamccs-pr-right{min-width:0;border-left:1px solid #303641;background:#10141a;padding:11px;display:flex;min-height:0;flex-direction:column}.iamccs-pr-status{display:flex;gap:6px;margin-bottom:8px}.iamccs-pr-pill{border-radius:10px;padding:3px 7px;background:#222a35;color:#aeb7c2;font-size:9px}.iamccs-pr-pill.ok{background:#1d3a2b;color:#99ddb2}.iamccs-pr-pill.warn{background:#493322;color:#f3c184}.iamccs-pr-preview{flex:1;min-height:0;overflow:auto;border:1px solid #3a414c;border-radius:6px;background:#f4f0e7;color:#1b1b1b;padding:12px;white-space:pre-wrap;font:11px/1.5 'Courier New',monospace}.iamccs-pr-preview:empty:before{content:'The composed H3 prompt will appear here.';color:#8c8981}.iamccs-pr-footer{margin-top:8px;display:flex;gap:6px}.iamccs-pr-footer .iamccs-pr-btn{flex:1}.iamccs-pr-assist{display:none;margin-bottom:8px;padding:8px;border:1px solid #44637d;background:#172635;color:#bed8ec;border-radius:6px;font-size:10px;line-height:1.4}.iamccs-pr-assist.show{display:block}.iamccs-pr-load{display:none}.iamccs-pr-empty .iamccs-pr-section-head{background:#f0e0d7}.iamccs-pr-empty .iamccs-pr-state{color:#b26751}.iamccs-pr-root.mode-manual .iamccs-pr-tip{display:none}
         </style>`;
     const aiStyle = document.createElement("style");
     aiStyle.textContent = `
-        .iamccs-pr-ai{display:none;margin-top:10px;padding:9px;border:1px solid #425d78;border-radius:8px;background:linear-gradient(145deg,#172330,#111922);gap:7px}
-        .iamccs-pr-ai.show{display:grid}.iamccs-pr-ai-title{color:#9fc9ef;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase}
-        .iamccs-pr-ai-row{display:grid;grid-template-columns:1fr 1fr;gap:6px}.iamccs-pr-ai label{display:grid;gap:3px;color:#8999aa;font-size:9px;font-weight:700}
-        .iamccs-pr-ai input,.iamccs-pr-ai select{width:100%;height:29px;border:1px solid #35485b;border-radius:5px;background:#0e151d;color:#e7eef5;padding:0 6px;font-size:10px}
-        .iamccs-pr-ai textarea{width:100%;min-height:66px;resize:vertical;border:1px solid #35485b;border-radius:5px;background:#0e151d;color:#e7eef5;padding:7px;font:10px/1.4 Inter,Segoe UI,sans-serif}
-        .iamccs-pr-ai-status{min-height:28px;color:#91a4b5;font-size:9px;line-height:1.35}.iamccs-pr-ai-status.ok{color:#8fd1aa}.iamccs-pr-ai-status.error{color:#ed9c92}
-        .iamccs-pr-ai .iamccs-pr-btn{width:100%;border-color:#6094c0;background:#274866;color:#eef7ff}
-        .iamccs-pr-ai-modelrow{display:grid;grid-template-columns:minmax(0,1fr) 30px;gap:5px}.iamccs-pr-ai-modelrow .iamccs-pr-btn{height:29px;padding:0!important}
-        .iamccs-pr-ai-images{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px}.iamccs-pr-ai-image{display:grid;grid-template-columns:44px minmax(0,1fr);gap:5px;padding:4px;border:1px solid #304255;border-radius:6px;background:#0c141c;min-width:0}.iamccs-pr-ai-thumb{width:44px;height:44px;object-fit:cover;border-radius:4px;background:#202832}.iamccs-pr-ai-image-meta{display:grid;gap:3px;min-width:0}.iamccs-pr-ai-image-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aebdca;font-size:8px}.iamccs-pr-ai-image select{height:24px!important;font-size:8px!important}.iamccs-pr-ai-file{display:none}
+        .iamccs-pr-ai{display:none;min-width:0;margin-top:10px;padding:10px;border:1px solid #425d78;border-radius:9px;background:linear-gradient(145deg,#172330,#101821);gap:8px;box-shadow:inset 0 1px 0 #ffffff0d,0 8px 20px #0005}.iamccs-pr-ai [hidden]{display:none!important}
+        .iamccs-pr-ai.show{display:grid;grid-template-columns:minmax(0,1fr)}.iamccs-pr-ai-head{display:flex;align-items:center;gap:7px;min-width:0}.iamccs-pr-ai-title{min-width:0;color:#b6dbfb;font-size:10px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.iamccs-pr-ai-provider-chip{margin-left:auto;max-width:92px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 6px;border:1px solid #456784;border-radius:999px;background:#112638;color:#9bcdf2;font-size:8px;font-weight:800;text-transform:uppercase}.iamccs-pr-ai-provider-chip.ok{border-color:#3e7958;background:#153226;color:#9de1b7}.iamccs-pr-ai-help{padding:7px 8px;border-left:2px solid #6b9fc9;border-radius:4px;background:#101d28;color:#9fb0bf;font-size:9px;line-height:1.4}
+        .iamccs-pr-ai-row{display:grid;grid-template-columns:minmax(0,1fr);gap:7px;min-width:0}.iamccs-pr-ai label{display:grid;gap:4px;min-width:0;color:#94a6b7;font-size:9px;font-weight:800;letter-spacing:.02em}
+        .iamccs-pr-ai input,.iamccs-pr-ai select{display:block;min-width:0;width:100%;height:31px;border:1px solid #3b5065;border-radius:6px;background:#0b141d;color:#edf4fa;padding:0 8px;font-size:10px;outline:none}.iamccs-pr-ai input:focus,.iamccs-pr-ai select:focus,.iamccs-pr-ai textarea:focus{border-color:#77add7;box-shadow:0 0 0 2px #5b9bcc26}
+        .iamccs-pr-ai textarea{display:block;min-width:0;width:100%;min-height:72px;resize:vertical;border:1px solid #3b5065;border-radius:6px;background:#0b141d;color:#edf4fa;padding:8px;font:10px/1.45 Inter,Segoe UI,sans-serif;outline:none}
+        .iamccs-pr-ai-status{min-width:0;min-height:31px;padding:7px 8px;border:1px solid #2c4052;border-radius:6px;background:#0d1720;color:#91a4b5;font-size:9px;line-height:1.4;overflow-wrap:anywhere}.iamccs-pr-ai-status.ok{border-color:#356c4e;color:#8fd1aa}.iamccs-pr-ai-status.error{border-color:#75443f;color:#ed9c92}
+        .iamccs-pr-ai .iamccs-pr-btn{width:100%;height:auto;min-height:31px;border-color:#6094c0;background:#274866;color:#eef7ff;padding:6px 8px;line-height:1.25;white-space:normal}
+        .iamccs-pr-ai-modelrow{display:grid;grid-template-columns:minmax(0,1fr) 32px;gap:6px;min-width:0}.iamccs-pr-ai-modelrow .iamccs-pr-btn{height:31px;min-height:31px;padding:0!important;font-size:14px}.iamccs-pr-ai-modelrow datalist{display:none}
+        .iamccs-pr-ai-images{display:grid;grid-template-columns:minmax(0,1fr);gap:5px;min-width:0}.iamccs-pr-ai-image{display:grid;grid-template-columns:44px minmax(0,1fr);gap:6px;padding:5px;border:1px solid #304255;border-radius:6px;background:#0c141c;min-width:0}.iamccs-pr-ai-thumb{width:44px;height:44px;object-fit:cover;border-radius:4px;background:#202832}.iamccs-pr-ai-image-meta{display:grid;gap:3px;min-width:0}.iamccs-pr-ai-image-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aebdca;font-size:8px}.iamccs-pr-ai-image select{height:24px!important;font-size:8px!important}.iamccs-pr-ai-file{display:none}
         .iamccs-pr-example-select{height:30px;max-width:146px;border:1px solid #3b4350;border-radius:6px;background:#171b23;color:#e9edf2;padding:0 6px;font:600 10px Inter,Segoe UI,sans-serif}
         .iamccs-pr-inject{width:100%;height:38px!important;margin:0 0 7px;background:linear-gradient(135deg,#d3a447,#8d5c20)!important;border:1px solid #f0ca7d!important;color:#171109!important;font-size:12px!important;font-weight:900!important;letter-spacing:.06em;box-shadow:0 5px 14px #0007}
         .iamccs-pr-inject-status{min-height:30px;margin-bottom:12px;padding:7px;border:1px solid #303944;border-radius:6px;background:#151b22;color:#91a0ae;font-size:9px;line-height:1.35}.iamccs-pr-inject-status.ok{border-color:#3f7957;color:#9fe0b7}.iamccs-pr-inject-status.error{border-color:#824b45;color:#efaaa1}
+        .iamccs-pr-field-ai{margin-left:4px!important;height:25px!important;min-width:54px;padding:0 8px!important;border:1px solid #9271d8!important;border-radius:4px!important;background:linear-gradient(145deg,#5b3f93,#302452)!important;color:#f4ebff!important;box-shadow:inset 0 1px 0 #ffffff25,0 2px 7px #2b174f55!important;font-size:9px!important;font-weight:900!important;letter-spacing:.045em!important}.iamccs-pr-field-ai:hover{border-color:#c8a9ff!important;background:linear-gradient(145deg,#7555b5,#3d2d68)!important;box-shadow:0 0 0 1px #b68cff33,0 3px 10px #28134688!important}.iamccs-pr-field-ai:disabled{cursor:wait;opacity:.72}
         .iamccs-pr-tagdeck{position:sticky;top:-12px;z-index:4;margin:-2px 0 12px;padding:9px 10px;border:1px solid #45505f;border-radius:8px;background:linear-gradient(145deg,#111720f5,#1c2430f5);box-shadow:0 5px 16px #0008;backdrop-filter:blur(6px)}
         .iamccs-pr-taghead{display:flex;align-items:center;gap:8px;margin-bottom:7px}.iamccs-pr-tagtitle{color:#f1d492;font:800 10px Georgia,serif;letter-spacing:.09em}.iamccs-pr-taghint{margin-left:auto;color:#93a1b1;font-size:9px}.iamccs-pr-tagrows{display:grid;gap:5px}.iamccs-pr-tagrow{display:flex;align-items:center;gap:4px;flex-wrap:wrap}.iamccs-pr-taglabel{width:51px;color:#718297;font-size:8px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.iamccs-pr-tag{height:24px!important;padding:0 7px!important;border-color:#3d4a5b!important;background:#1c2632!important;color:#dce7f2!important;font:700 9px 'Courier New',monospace!important}.iamccs-pr-tag:hover{border-color:#d9ad58!important;color:#ffe5ab!important}.iamccs-pr-tag.syntax{background:#342a1c!important;border-color:#685536!important;color:#f5d38e!important}
     `;
@@ -468,10 +532,24 @@ function mountPrompter(node) {
     const policy = el("select", "iamccs-pr-policy");
     policy.innerHTML = `<option value="replace">Replace target</option><option value="append">Append to target</option>`;
     left.appendChild(policy);
+    left.appendChild(el("div", "iamccs-pr-kicker", "Reference-video prompt baseline"));
+    const referencePresetSelect = el("select", "iamccs-pr-policy");
+    referencePresetSelect.innerHTML = [
+        `<option value="ref2va_motion">REF2VA · Video 1 motion/camera authority</option>`,
+        `<option value="ref2va_paired_av">REF2VA · Video 1 + Audio 1 paired authority</option>`,
+        `<option value="v2va_replace">V2VA · Picture replacement in Video 1</option>`,
+    ].join("");
+    const applyReferencePresetBtn = button("APPLY REFERENCE BASELINE", "iamccs-pr-write");
+    applyReferencePresetBtn.title = "Populate editable MiniMax reference fields. The resulting boxes remain the prompt truth.";
+    left.append(referencePresetSelect, applyReferencePresetBtn);
     const assistantHint = el("div", "iamccs-pr-hint", "AI Rewrite treats every filled box as your rough idea, then rewrites those same boxes into MiniMax H3-ready English in one request. Blank boxes stay blank and your project remains editable before queueing.");
     left.appendChild(assistantHint);
     const aiPanel = el("div", "iamccs-pr-ai");
-    aiPanel.appendChild(el("div", "iamccs-pr-ai-title", "Autonomous MiniMax assistant"));
+    const aiHead = el("div", "iamccs-pr-ai-head");
+    aiHead.appendChild(el("div", "iamccs-pr-ai-title", "✦ MiniMax AI rewrite"));
+    const aiProviderChip = el("div", "iamccs-pr-ai-provider-chip", "LOCAL");
+    aiHead.appendChild(aiProviderChip);
+    aiPanel.append(aiHead, el("div", "iamccs-pr-ai-help", "1 · Connect the provider  2 · Choose a model  3 · Write a rough idea in a prompt box  4 · Press that box's ✦ AI button. ComfyUI will not queue."));
     const aiScope = el("select");
     const aiDirection = el("textarea");
     aiDirection.placeholder = "Your direction for the AI: what to preserve, emphasize, simplify or change. The rough idea remains in the selected prompt field.";
@@ -489,6 +567,8 @@ function mountPrompter(node) {
     aiModel.setAttribute("list", aiModelList.id);
     const refreshModelsBtn = button("↻");
     refreshModelsBtn.title = "Read the models installed in Ollama";
+    const connectOllamaBtn = button("CONNECT OLLAMA", "iamccs-pr-write");
+    connectOllamaBtn.title = "Verify the Ollama endpoint and load its installed model list.";
     const aiApiKey = el("input");
     aiApiKey.type = "password";
     aiApiKey.autocomplete = "off";
@@ -515,9 +595,9 @@ function mountPrompter(node) {
     aiImageInput.multiple = true;
     const addAIImagesBtn = button("Add up to 4 AI image references");
     const aiImages = el("div", "iamccs-pr-ai-images");
-    const rewriteBtn = button("Improve selected prompt with AI");
+    const rewriteBtn = button("✦ Improve selected section with AI");
     const aiStatus = el("div", "iamccs-pr-ai-status", "Ollama is local. Choose the field to improve; cloud keys are never stored in the workflow.");
-    aiPanel.append(aiRow1, aiRow2, keyLabel, addAIImagesBtn, aiImageInput, aiImages, rewriteBtn, aiStatus);
+    aiPanel.append(aiRow1, aiRow2, keyLabel, connectOllamaBtn, addAIImagesBtn, aiImageInput, aiImages, rewriteBtn, aiStatus);
     left.appendChild(aiPanel);
 
     const center = el("main", "iamccs-pr-center");
@@ -645,6 +725,15 @@ function mountPrompter(node) {
             temperature: Number(aiTemperature.value || 0.35),
         };
     };
+    const renderAIProviderChrome = () => {
+        const isOllama = aiProvider.value === "ollama";
+        keyLabel.hidden = isOllama;
+        connectOllamaBtn.hidden = !isOllama;
+        refreshModelsBtn.hidden = !isOllama;
+        aiProviderChip.textContent = isOllama ? "OLLAMA · LOCAL" : "CLOUD / API";
+        aiProviderChip.classList.toggle("ok", isOllama);
+        aiBaseUrl.placeholder = isOllama ? "http://127.0.0.1:11434" : "Provider API base URL";
+    };
     const aiVisualFiles = [];
     const visualRolesForTarget = () => {
         project.ai_visual_roles = project.ai_visual_roles && typeof project.ai_visual_roles === "object" ? project.ai_visual_roles : {};
@@ -682,6 +771,8 @@ function mountPrompter(node) {
     const loadOllamaModels = async ({ quiet = false } = {}) => {
         if (aiProvider.value !== "ollama") return [];
         refreshModelsBtn.disabled = true;
+        connectOllamaBtn.disabled = true;
+        connectOllamaBtn.textContent = "CONNECTING…";
         if (!quiet) aiStatus.textContent = "Reading installed Ollama models…";
         try {
             const response = await api.fetchApi(`/iamccs/prompter/ollama/models?base_url=${encodeURIComponent(aiBaseUrl.value.trim() || "http://127.0.0.1:11434")}`);
@@ -695,13 +786,22 @@ function mountPrompter(node) {
             persistAI();
             aiStatus.className = "iamccs-pr-ai-status ok";
             aiStatus.textContent = names.length ? `${names.length} Ollama model(s) available. Selected: ${aiModel.value}.` : "Ollama is reachable but has no installed models.";
+            connectOllamaBtn.textContent = "OLLAMA CONNECTED";
+            connectOllamaBtn.style.borderColor = "#5F9C79";
+            connectOllamaBtn.style.background = "#17352D";
+            aiProviderChip.textContent = "OLLAMA · READY";
             return names;
         } catch (error) {
             aiStatus.className = "iamccs-pr-ai-status error";
             aiStatus.textContent = `Ollama unavailable: ${error?.message || error}`;
+            connectOllamaBtn.textContent = "OLLAMA ERROR · RETRY";
+            connectOllamaBtn.style.borderColor = "#B76464";
+            connectOllamaBtn.style.background = "#3B2020";
+            aiProviderChip.textContent = "OLLAMA · ERROR";
             return [];
         } finally {
             refreshModelsBtn.disabled = false;
+            connectOllamaBtn.disabled = false;
         }
     };
     aiProvider.onchange = async () => {
@@ -710,10 +810,12 @@ function mountPrompter(node) {
         aiModel.value = selected.model || "";
         aiApiKey.value = "";
         persistAI();
+        renderAIProviderChrome();
         if (aiProvider.value === "ollama") await loadOllamaModels();
     };
     [aiBaseUrl, aiModel, aiTemperature].forEach((control) => control.addEventListener("change", persistAI));
     refreshModelsBtn.onclick = () => loadOllamaModels();
+    connectOllamaBtn.onclick = () => loadOllamaModels();
     addAIImagesBtn.onclick = () => aiImageInput.click();
     aiImageInput.onchange = async () => {
         const files = Array.from(aiImageInput.files || []).filter((file) => /^image\//.test(file.type)).slice(0, 4);
@@ -770,6 +872,19 @@ function mountPrompter(node) {
                 renderPreview();
                 commit();
             });
+            const fieldAIButton = button("✦ AI", "iamccs-pr-field-ai");
+            fieldAIButton.title = `Rewrite only ${label} as a MiniMax H3-ready section. This calls the selected AI service without queueing ComfyUI.`;
+            fieldAIButton.addEventListener("pointerdown", (event) => event.preventDefault());
+            fieldAIButton.onclick = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                activePromptArea = area;
+                activePromptKey = key;
+                aiScope.value = key;
+                project.ai_scope = key;
+                runAIRewrite({ directTargetKeys: [key], triggerButton: fieldAIButton });
+            };
+            head.appendChild(fieldAIButton);
             card.append(head, area, el("div", "iamccs-pr-tip", tip));
             center.appendChild(card);
             refreshState();
@@ -809,7 +924,9 @@ function mountPrompter(node) {
         populateAIScope();
         aiDirection.value = String(project.ai_direction || "");
         root.classList.toggle("mode-manual", project.writing_mode === "manual");
-        aiPanel.classList.toggle("show", project.writing_mode === "assistant_fill");
+        // Provider/model selection and per-field AI buttons are editing tools,
+        // not generation modes. Keep them available in Manual and Guided too.
+        aiPanel.classList.add("show");
         renderAIImages();
         targetHint.textContent = project.injection_target === "local_auto"
             ? "The MiniMax Shotboard reads its timeline, selects the first empty local slot among 1–3, and appends to Local 3 only when all three already contain text."
@@ -829,16 +946,51 @@ function mountPrompter(node) {
         commit();
     };
 
-    rewriteBtn.onclick = async () => {
+    applyReferencePresetBtn.onclick = () => {
+        const preset = referencePresetSelect.value;
+        if (preset === "v2va_replace") {
+            project.task_mode = "v2va_object_swap";
+            project.sections = { ...project.sections, ...EXAMPLES.v2va_object_swap };
+            project.project_name = "V2VA Picture Replacement · Video 1 Authority";
+        } else {
+            project.task_mode = "ref2va";
+            const pairedAudio = preset === "ref2va_paired_av";
+            project.sections = {
+                ...project.sections,
+                subject_definitions: "<Picture 1> defines <Subject 1> identity, anatomy, wardrobe and visible materials. Name additional <Picture N> references only for their explicit subjects or continuity roles.",
+                summary: pairedAudio
+                    ? "Recreate the source performance with <Picture 1> identity while preserving <Video 1> timing/camera and <Audio 1> dialogue or musical timing."
+                    : "Recreate the source motion and camera design from <Video 1> with the identity and appearance established by <Picture 1>.",
+                retention_analysis: pairedAudio
+                    ? "<Video 1> is authoritative for duration, action timing, camera path, framing, occlusion order and edit rhythm. <Audio 1> is authoritative for dialogue/music order, pauses, breaths and audible timing. <Picture 1> is authoritative only for <Subject 1> identity and appearance. Do not inherit an unwanted source performer identity or source background unless explicitly requested."
+                    : "<Video 1> is authoritative for duration, action timing, camera path, framing, occlusion order and edit rhythm. <Picture 1> is authoritative for <Subject 1> identity and appearance. Retain only the named source environment/style facts; do not blend source and reference identities.",
+                detailed_description: pairedAudio
+                    ? "Follow <Video 1> chronologically and keep every visible action aligned to <Audio 1>. Preserve readable mouth visibility, phoneme timing, pauses, breaths, contacts and camera continuity; change only the appearance facts assigned to <Picture 1>."
+                    : "Follow <Video 1> chronologically. Preserve its physical action, contacts, camera movement, composition changes and occlusion order; replace only the identity/appearance facts assigned to <Picture 1>.",
+                overall_soundscape: pairedAudio
+                    ? "Keep <Audio 1> intact as the timing/performance reference. Add only production sounds that are visibly motivated and do not mask dialogue or musical transients."
+                    : "Retain source-video sound only when it is connected and explicitly requested; otherwise generate production sound synchronized to the retained visible contacts and space.",
+                non_diegetic_music: "None unless an audience-only score is explicitly requested.",
+            };
+            project.project_name = pairedAudio ? "REF2VA Paired Video + Audio Authority" : "REF2VA Video Motion Authority";
+        }
+        renderControls();
+        renderSections();
+        commit();
+    };
+
+    const runAIRewrite = async ({ directTargetKeys = null, triggerButton = rewriteBtn } = {}) => {
         const allSections = Object.fromEntries(
             MODE_META[project.task_mode].sections.map(([key]) => [key, String(project.sections?.[key] || "").trim()])
         );
-        let targetKeys = [];
-        if (aiScope.value === "all_filled") {
+        let targetKeys = Array.isArray(directTargetKeys)
+            ? directTargetKeys.filter((key) => Object.prototype.hasOwnProperty.call(allSections, key))
+            : [];
+        if (!targetKeys.length && aiScope.value === "all_filled") {
             targetKeys = Object.entries(allSections).filter(([, value]) => value).map(([key]) => key);
-        } else if (aiScope.value === "active_field") {
+        } else if (!targetKeys.length && aiScope.value === "active_field") {
             if (activePromptKey) targetKeys = [activePromptKey];
-        } else if (Object.prototype.hasOwnProperty.call(allSections, aiScope.value)) {
+        } else if (!targetKeys.length && Object.prototype.hasOwnProperty.call(allSections, aiScope.value)) {
             targetKeys = [aiScope.value];
         }
         const direction = aiDirection.value.trim();
@@ -857,8 +1009,9 @@ function mountPrompter(node) {
         project.ai_scope = aiScope.value;
         persistAI();
         commit();
-        rewriteBtn.disabled = true;
-        rewriteBtn.textContent = "Rewriting MiniMax fieldsâ€¦";
+        const idleButtonText = String(triggerButton?.textContent || "✦ AI");
+        triggerButton.disabled = true;
+        triggerButton.textContent = "✦ THINKING…";
         aiStatus.className = "iamccs-pr-ai-status";
         aiStatus.textContent = `Sending ${targetKeys.join(", ")} to ${aiProvider.options[aiProvider.selectedIndex]?.text || aiProvider.value}.`;
         try {
@@ -903,10 +1056,11 @@ function mountPrompter(node) {
             aiStatus.textContent = `Rewrite failed: ${error?.message || error}`;
         } finally {
             aiApiKey.value = "";
-            rewriteBtn.disabled = false;
-            rewriteBtn.textContent = "Improve selected prompt with AI";
+            triggerButton.disabled = false;
+            triggerButton.textContent = idleButtonText;
         }
     };
+    rewriteBtn.onclick = () => runAIRewrite({ triggerButton: rewriteBtn });
 
     modeButtons.forEach((item, key) => {
         item.onclick = () => {
@@ -1030,6 +1184,7 @@ function mountPrompter(node) {
 
     renderControls();
     renderSections();
+    renderAIProviderChrome();
     commit();
     if (aiProvider.value === "ollama") setTimeout(() => loadOllamaModels({ quiet: true }), 0);
 }

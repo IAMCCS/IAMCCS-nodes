@@ -3,7 +3,7 @@ import { api } from "../../scripts/api.js";
 
 const TYPE = "IAMCCS_shotboarder_aud+vid_exporter_PRO";
 const STYLE_ID = "iamccs-shotboarder-exporter-pro-style";
-const UI_VERSION = "20260721-exporter-audio-edl-layout";
+const UI_VERSION = "20260824-rtx-safe-alignment";
 const NODE_SIZE = [680, 940];
 const HIDDEN_FIELDS = [
   "filename_prefix",
@@ -75,7 +75,7 @@ const RTX_RESIZE_TYPE_OPTIONS = [
   ["Preset Ratio", "Preset Ratio"],
   ["Same Size", "Same Size"],
 ];
-const RTX_DIVISIBLE_OPTIONS = ["1", "8", "16", "32", "64", "128"].map((value) => [value, value]);
+const RTX_DIVISIBLE_OPTIONS = ["8", "16", "32", "64", "128"].map((value) => [value, value]);
 const RTX_RATIO_OPTIONS = ["1:1", "4:5", "5:4", "3:4", "4:3", "2:3", "3:2", "16:9", "9:16", "16:10", "10:16", "21:9", "9:21"].map((value) => [value, value]);
 const RTX_RESIZE_METHOD_OPTIONS = [
   ["Center Crop (Fill)", "Center Crop (Fill)"],
@@ -274,6 +274,8 @@ function install(node) {
   addOptions(root.querySelector('[data-field="rtx_divisible_by"]'), RTX_DIVISIBLE_OPTIONS);
   addOptions(root.querySelector('[data-field="rtx_ratio_preset"]'), RTX_RATIO_OPTIONS);
   addOptions(root.querySelector('[data-field="rtx_resize_method"]'), RTX_RESIZE_METHOD_OPTIONS);
+
+  if (Number(read(node, "rtx_divisible_by", 8)) < 8) write(node, "rtx_divisible_by", "8");
 
   const sync = (name, element, parse = (value) => value) => {
     const value = read(node, name, element.type === "checkbox" ? false : "");

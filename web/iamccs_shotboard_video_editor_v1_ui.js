@@ -4,7 +4,7 @@ import { api } from "../../scripts/api.js";
 const TYPE = "IAMCCS_ShotboardVideoEditorV1";
 const RENDER_TYPE = "IAMCCS_ShotboardVideoEditorRenderV1";
 const STYLE_ID = "iamccs-shotboard-video-editor-v1-style-monitor-compatible";
-const UI_VERSION = "20260721-independent-monitor-transport";
+const UI_VERSION = "20260824-multitrack-audio-mute-solo";
 const NODE_SIZE = [1600, 1560];
 const CHROME_HEIGHT = 156;
 const WIDGET_HEIGHT = NODE_SIZE[1] - CHROME_HEIGHT;
@@ -152,7 +152,12 @@ function normalizeManifestTracks(manifest) {
     byId.delete(base.id);
   }
   for (const track of byId.values()) normalized.push(track);
-  data.tracks = normalized;
+  data.tracks = normalized.map((track) => ({
+    ...track,
+    muted: Boolean(track?.muted ?? track?.mute ?? false),
+    solo: Boolean(track?.solo ?? false),
+    volume: Math.max(0, Math.min(2, Number.isFinite(Number(track?.volume)) ? Number(track.volume) : 1)),
+  }));
   return data;
 }
 
@@ -212,10 +217,31 @@ function videoTakeIndexes(manifest) {
     .filter((take) => take > 0));
 }
 
+function videoClipIdentity(clip) {
+  if (!clip || String(clip.type || "") !== "video") return "";
+  const explicitId = String(clip.id || "").trim();
+  if (explicitId) return `id:${explicitId}`;
+  const assetId = String(clip.assetId || "").trim();
+  const take = Math.max(0, Math.round(Number(clip.takeIndex || 0)));
+  const slot = Math.max(0, Math.round(Number(clip.clipIndex || 0)));
+  if (assetId) return `asset:${assetId}`;
+  return `lane:${take}:slot:${slot}:start:${Number(clip.startTime || 0).toFixed(6)}`;
+}
+
 function incomingAppendTakes(current, incoming) {
-  const currentTakes = videoTakeIndexes(current);
-  const incomingTakes = videoTakeIndexes(incoming);
-  return Array.from(incomingTakes).filter((take) => !currentTakes.has(take)).sort((a, b) => a - b);
+  const currentClipKeys = new Set((Array.isArray(current?.clips) ? current.clips : [])
+    .map(videoClipIdentity)
+    .filter(Boolean));
+  const missingIncomingVideoClips = (Array.isArray(incoming?.clips) ? incoming.clips : [])
+    .filter((clip) => String(clip?.type || "") === "video")
+    .filter((clip) => {
+      const key = videoClipIdentity(clip);
+      return key && !currentClipKeys.has(key);
+    });
+  return Array.from(new Set(missingIncomingVideoClips
+    .map((clip) => Math.max(0, Math.round(Number(clip?.takeIndex || 0))))
+    .filter((take) => take > 0)))
+    .sort((a, b) => a - b);
 }
 
 function mergeIncomingAppendManifest(current, incoming) {
@@ -504,7 +530,7 @@ function isManifestJsonText(value) {
 
 function repairEditorHiddenWidgets(node, manifestText = "") {
   if (!Array.isArray(node?.widgets)) return;
-  const validCollect = new Set(["append_sequence", "replace_same_take", "append_always"]);
+  const validCollect = new Set(["append_sequence", "append_same_lane", "replace_same_take", "append_always"]);
   const validAppend = new Set(["append_sequence", "timeline_origin"]);
   const defaults = {
     session_key: "shotboard_video_editor_v1",
@@ -688,6 +714,31 @@ function visibleAudioPeaksForClip(manifest, clip) {
   const first = Math.max(0, Math.floor((start / sourceDuration) * peaks.length));
   const last = Math.min(peaks.length, Math.ceil((end / sourceDuration) * peaks.length));
   return peaks.slice(Math.min(first, peaks.length - 1), Math.max(first + 1, last));
+}
+
+function audioWaveformGeometry(manifest, clip, pixelsPerSecond) {
+  const scale = Math.max(1, Number(pixelsPerSecond || 1));
+  const sourceDuration = clipSourceDuration(manifest, clip);
+  const trimStart = Math.max(0, Math.min(sourceDuration, Number(clip?.trimStart || 0)));
+  return {
+    sourceDuration,
+    trimStart,
+    cssWidth: Math.max(32, sourceDuration * scale),
+    cssLeft: -(trimStart * scale),
+  };
+}
+
+function manualTrackFromSelection(kind, selectedTrackId) {
+  const mediaKind = String(kind || "").toLowerCase();
+  const prefix = mediaKind === "video" ? "V" : mediaKind === "audio" ? "A" : "";
+  const lane = String(selectedTrackId || "").trim().toUpperCase();
+  const match = lane.match(/^([VA])([1-5])$/);
+  if (!prefix || !match || match[1] !== prefix) return null;
+  const laneNumber = Number(match[2]);
+  return {
+    trackId: `${prefix}${laneNumber}`,
+    trackIndex: (prefix === "V" ? 0 : 5) + laneNumber - 1,
+  };
 }
 
 function shouldRefreshRealWaveform(manifest, clip) {
@@ -917,6 +968,12 @@ function installStyle() {
     .iamccs-sve .lane-head { position:sticky; left:0; z-index:6; background:#11191b; border-right:1px solid #344145; padding:7px 6px; color:#dce8e5; font-weight:900; box-shadow:4px 0 0 rgba(0,0,0,.2); }
     .iamccs-sve .lane.master-audio .lane-head { background:#2a2414; color:#ffe4a2; }
     .iamccs-sve .lane-head .kind { display:block; font-size:9px; color:#80a5a8; font-weight:600; margin-top:2px; }
+    .iamccs-sve .lane-head .lane-name { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; padding-right:2px; }
+    .iamccs-sve .lane-head .lane-actions { display:flex; gap:4px; margin-top:6px; }
+    .iamccs-sve .lane-head .lane-toggle { width:29px; height:21px; padding:0; border:1px solid #4b5e63; background:#0b1214; color:#8da3a6; font:900 9px/19px Consolas,monospace; text-align:center; cursor:pointer; border-radius:0; }
+    .iamccs-sve .lane-head .lane-toggle:hover { border-color:#c7a75d; color:#ffe4a2; }
+    .iamccs-sve .lane-head .lane-toggle.mute.on { border-color:#ff6b62; background:#7d211f; color:#fff; box-shadow:0 0 7px rgba(255,72,64,.42); }
+    .iamccs-sve .lane-head .lane-toggle.solo.on { border-color:#ffe06b; background:#806516; color:#fff7bd; box-shadow:0 0 7px rgba(255,224,107,.42); }
     .iamccs-sve .lane.is-selected { outline:2px solid rgba(255,226,168,.62); outline-offset:-2px; box-shadow:inset 0 0 0 1px rgba(255,226,168,.25), inset 0 0 24px rgba(214,170,85,.10); }
     .iamccs-sve .lane.is-selected .lane-head { background:linear-gradient(180deg,#4a3719,#1a1711); color:#ffe4a2; border-right-color:#f0cf79; box-shadow:4px 0 0 rgba(214,170,85,.22), inset 0 0 0 1px rgba(255,226,168,.24); }
     .iamccs-sve .lane.is-selected .lane-body { background-color:rgba(214,170,85,.055); }
@@ -932,13 +989,15 @@ function installStyle() {
     .iamccs-sve .film img { height:100%; width:54px; object-fit:cover; border-right:1px solid rgba(255,255,255,.18); }
     /* A canvas is a replaced element: inset alone preserves its intrinsic 700 px width.
        Stretch it to the clip so long master excerpts render across their full timeline span. */
-    .iamccs-sve .wave { position:absolute; inset:0; width:100%; height:100%; display:block; opacity:.9; }
+    .iamccs-sve .wave { position:absolute; top:0; bottom:0; height:100%; display:block; opacity:.9; pointer-events:none; }
     .iamccs-sve .handle { position:absolute; top:0; width:14px; height:100%; background:linear-gradient(90deg,rgba(255,225,139,.92),rgba(255,225,139,.32)); cursor:ew-resize; z-index:6; touch-action:none; }
     .iamccs-sve .handle.left { left:0; }
     .iamccs-sve .handle.right { right:0; }
     .iamccs-sve .handle::after { content:""; position:absolute; top:9px; bottom:9px; width:2px; left:6px; background:rgba(20,16,8,.56); box-shadow:4px 0 0 rgba(20,16,8,.34); }
     .iamccs-sve .clip-preview-label { position:absolute; right:4px; bottom:3px; z-index:8; height:16px; padding:1px 5px; border:1px solid rgba(255,240,199,.72); background:rgba(5,8,8,.74); color:#fff3bf; font:9px/12px Consolas,monospace; pointer-events:none; }
-    .iamccs-sve .playhead { position:absolute; top:0; bottom:0; width:2px; background:#ffe06b; z-index:20; pointer-events:none; }
+    .iamccs-sve .playhead { position:absolute; top:0; bottom:0; width:2px; background:#ffe06b; z-index:20; pointer-events:none; filter:drop-shadow(0 0 2px rgba(255,224,107,.6)); }
+    .iamccs-sve .meter-ruler .playhead::before { content:""; position:absolute; left:50%; top:0; transform:translateX(-50%); width:14px; height:9px; background:#ffe06b; border:1px solid #fff0a8; box-shadow:0 2px 4px rgba(0,0,0,.55); clip-path:polygon(0 0,100% 0,50% 100%); }
+    .iamccs-sve .meter-ruler .playhead::after { content:""; position:absolute; left:50%; top:1px; transform:translateX(-50%); width:3px; height:3px; border-radius:50%; background:#5b4600; }
     .iamccs-sve .ruler-render-controls { position:absolute; right:8px; top:4px; height:30px; z-index:35; display:flex; gap:6px; align-items:center; background:rgba(7,16,17,.94); border:1px solid #506066; padding:2px 5px; pointer-events:auto; }
     .iamccs-sve .ruler-render-controls .mini-field { height:24px; padding:0 5px; }
     .iamccs-sve .ruler-render-controls .mini-field input { height:19px; width:42px; }
@@ -1227,8 +1286,6 @@ function installEditor(node, reason = "install") {
   let sourceStartMs = 0;
   let sourceStartHead = 0;
   let currentSourceClipId = "";
-  let currentAudioClipId = "";
-  let currentAudioUrl = "";
   const waveformPeakJobs = new Set();
   const previewVideoJobs = new Set();
   const monitorVideoState = new WeakMap();
@@ -1237,9 +1294,9 @@ function installEditor(node, reason = "install") {
   let replaceProjectOnInject = false;
   let status = null;
   let fullscreenState = null;
-  const audioEl = document.createElement("audio");
-  audioEl.preload = "auto";
-  audioEl.style.display = "none";
+  const audioPreviewHost = document.createElement("div");
+  audioPreviewHost.style.display = "none";
+  const audioPreviewElements = new Map();
 
   const persist = () => {
     manifest.ui_state = manifest.ui_state || {};
@@ -1338,40 +1395,70 @@ function installEditor(node, reason = "install") {
       })[0] || null;
   };
 
-  const audioClipAtTime = (time = playhead) => {
-    const clips = (manifest.clips || [])
-      .filter((clip) => (
-        clip.type === "audio" &&
-        !clip.muted &&
-        time >= Number(clip.startTime || 0) &&
-        time < Number(clip.startTime || 0) + Number(clip.duration || 0) &&
-        audioUrlForClip(manifest, clip)
-      ))
-      .sort((a, b) => {
-        const am = isMasterClip(a) ? 1 : 0;
-        const bm = isMasterClip(b) ? 1 : 0;
-        if (am !== bm) return bm - am;
-        return Number(b.trackIndex || 0) - Number(a.trackIndex || 0);
-      });
-    return clips[0] || null;
+  const audioTrackForClip = (clip) => {
+    const trackId = String(trackIdForClip(clip) || "");
+    const tracks = Array.isArray(manifest?.tracks) ? manifest.tracks : [];
+    return tracks.find((track) => String(track?.id || "") === trackId) || null;
+  };
+
+  const audioClipGain = (clip) => {
+    const track = audioTrackForClip(clip);
+    const clipGain = Number.isFinite(Number(clip?.volume)) ? Number(clip.volume) : 1;
+    const trackGain = Number.isFinite(Number(track?.volume)) ? Number(track.volume) : 1;
+    return Math.max(0, Math.min(1, clipGain * trackGain));
+  };
+
+  const activeAudioClipsAtTime = (time = playhead) => {
+    const available = (manifest.clips || []).filter((clip) => {
+      if (clip?.type !== "audio" || clip.muted || !audioUrlForClip(manifest, clip)) return false;
+      const track = audioTrackForClip(clip);
+      return !Boolean(track?.muted ?? track?.mute ?? false);
+    });
+    const soloActive = available.some((clip) => Boolean(clip?.solo || audioTrackForClip(clip)?.solo));
+    return available.filter((clip) => {
+      if (soloActive && !Boolean(clip?.solo || audioTrackForClip(clip)?.solo)) return false;
+      return time >= Number(clip.startTime || 0)
+        && time < Number(clip.startTime || 0) + Number(clip.duration || 0);
+    });
+  };
+
+  const audioElementForClip = (clip, url) => {
+    const id = String(clip?.id || clip?.assetId || url || "");
+    if (!id) return null;
+    let entry = audioPreviewElements.get(id);
+    if (!entry) {
+      const element = document.createElement("audio");
+      element.preload = "auto";
+      element.style.display = "none";
+      audioPreviewHost.appendChild(element);
+      entry = { element, url: "" };
+      audioPreviewElements.set(id, entry);
+    }
+    if (entry.url !== url) {
+      entry.url = url;
+      entry.element.src = url;
+    }
+    return entry.element;
   };
 
   const updateAudioMeter = () => {
     const fill = root.querySelector(".audio-meter .meter-fill");
     const label = root.querySelector(".audio-meter .meter-label");
     if (!fill || !label) return;
-    const clip = audioClipAtTime(playhead);
+    const clips = activeAudioClipsAtTime(playhead);
     let level = 0;
-    if (clip) {
+    for (const clip of clips) {
       const peaks = audioPeaksForClip(manifest, clip);
+      let clipLevel = 0;
       if (peaks.length) {
         const local = Math.max(0, playhead - Number(clip.startTime || 0) + Number(clip.trimStart || 0));
         const sourceDuration = clipSourceDuration(manifest, clip);
         const index = Math.max(0, Math.min(peaks.length - 1, Math.floor((local / Math.max(0.001, sourceDuration)) * peaks.length)));
-        level = Math.max(Number(peaks[index]?.rms || 0), Number(peaks[index]?.max || 0) * 0.65);
-      } else if (!audioEl.paused) {
-        level = 0.28;
+        clipLevel = Math.max(Number(peaks[index]?.rms || 0), Number(peaks[index]?.max || 0) * 0.65);
+      } else if (!audioPreviewElements.get(String(clip?.id || ""))?.element?.paused) {
+        clipLevel = 0.28;
       }
+      level = Math.min(1, Math.sqrt((level * level) + ((clipLevel * audioClipGain(clip)) ** 2)));
     }
     level = Math.max(0, Math.min(1, level));
     fill.style.width = `${Math.round(level * 100)}%`;
@@ -1379,29 +1466,27 @@ function installEditor(node, reason = "install") {
   };
 
   const syncAudioPlayback = (force = false) => {
-    const clip = audioClipAtTime(playhead);
-    if (!clip) {
-      if (!audioEl.paused) audioEl.pause();
-      currentAudioClipId = "";
-      currentAudioUrl = "";
-      return;
+    const clips = activeAudioClipsAtTime(playhead);
+    const activeIds = new Set();
+    for (const clip of clips) {
+      const id = String(clip?.id || clip?.assetId || "");
+      const url = audioUrlForClip(manifest, clip);
+      const element = audioElementForClip(clip, url);
+      if (!id || !element) continue;
+      activeIds.add(id);
+      const desiredTime = Math.max(0, Number(clip.trimStart || 0) + (playhead - Number(clip.startTime || 0)));
+      element.volume = audioClipGain(clip);
+      if (force || Math.abs((element.currentTime || 0) - desiredTime) > 0.18) {
+        try { element.currentTime = desiredTime; } catch {}
+      }
+      if (playing && element.paused) {
+        element.play().catch((err) => {
+          if (status) status.textContent = `Audio preview blocked: ${err?.message || err}`;
+        });
+      }
     }
-    const url = audioUrlForClip(manifest, clip);
-    const desiredTime = Math.max(0, Number(clip.trimStart || 0) + (playhead - Number(clip.startTime || 0)));
-    const changed = currentAudioClipId !== clip.id || currentAudioUrl !== url;
-    if (changed) {
-      currentAudioClipId = clip.id;
-      currentAudioUrl = url;
-      audioEl.src = url;
-    }
-    audioEl.volume = Math.max(0, Math.min(1, Number(clip.volume ?? 1)));
-    if (force || changed || Math.abs((audioEl.currentTime || 0) - desiredTime) > 0.18) {
-      try { audioEl.currentTime = desiredTime; } catch {}
-    }
-    if (playing && audioEl.paused) {
-      audioEl.play().catch((err) => {
-        if (status) status.textContent = `Audio preview blocked: ${err?.message || err}`;
-      });
+    for (const [id, entry] of audioPreviewElements.entries()) {
+      if (!activeIds.has(id) && !entry.element.paused) entry.element.pause();
     }
   };
 
@@ -1768,8 +1853,8 @@ function installEditor(node, reason = "install") {
     }
   };
 
-  function drawWaveCanvas(canvas, peaks, errorText = "") {
-    const width = 700;
+  function drawWaveCanvas(canvas, peaks, errorText = "", requestedWidth = 700) {
+    const width = Math.max(128, Math.min(4096, Math.round(Number(requestedWidth || 700))));
     const height = 46;
     canvas.width = width;
     canvas.height = height;
@@ -1872,12 +1957,24 @@ function installEditor(node, reason = "install") {
     }
   }
 
+  const positionWaveCanvas = (canvas, clip) => {
+    if (!canvas) return;
+    const geometry = audioWaveformGeometry(manifest, clip, pxPerSecond());
+    canvas.style.left = `${geometry.cssLeft}px`;
+    canvas.style.right = "auto";
+    canvas.style.width = `${geometry.cssWidth}px`;
+    canvas.dataset.waveSourceDuration = String(geometry.sourceDuration);
+    canvas.dataset.waveTrimStart = String(geometry.trimStart);
+  };
+
   const renderWave = (clip) => {
-    const peaks = visibleAudioPeaksForClip(manifest, clip);
+    const peaks = audioPeaksForClip(manifest, clip);
     const asset = audioAssetForClip(manifest, clip);
     const canvas = document.createElement("canvas");
     canvas.className = "wave real-wave";
-    drawWaveCanvas(canvas, peaks, asset?.waveform_error || "");
+    const geometry = audioWaveformGeometry(manifest, clip, pxPerSecond());
+    drawWaveCanvas(canvas, peaks, asset?.waveform_error || "", geometry.cssWidth);
+    positionWaveCanvas(canvas, clip);
     if ((!peaks.length && !asset?.waveform_error) || (peaks.length && shouldRefreshRealWaveform(manifest, clip))) generateRealWaveformPeaks(clip);
     return canvas;
   };
@@ -1949,6 +2046,7 @@ function installEditor(node, reason = "install") {
     el.style.left = `${Number(clip.startTime || 0) * scale}px`;
     el.style.width = `${Math.max(32, Number(clip.duration || 0.1) * scale)}px`;
     el.classList.add("is-dragging");
+    if (clip?.type === "audio") positionWaveCanvas(el.querySelector("canvas.wave"), clip);
     const label = el.querySelector(".clip-preview-label");
     if (label) {
       const start = Number(clip.startTime || 0);
@@ -1987,7 +2085,6 @@ function installEditor(node, reason = "install") {
         updateClipElementPreview(target, "MOVE");
       }
       clip.startTime = nextStart;
-      playhead = clip.startTime;
       updateMonitor();
       if (status) status.textContent = `${dragTargets.length > 1 ? "Move linked clips" : "Move clip"}: ${fmtTime(clip.startTime)} -> ${fmtTime(clip.startTime + Number(clip.duration || 0))}.`;
     };
@@ -2068,9 +2165,7 @@ function installEditor(node, reason = "install") {
        }
       }
       for (const target of trimTargets) syncMasterClipRenderTrim(manifest, target);
-      playhead = edge === "left"
-        ? clip.startTime
-        : Math.max(clip.startTime, clip.startTime + clip.duration - 0.001);
+      syncAudioPlayback(true);
       updateMonitor();
       if (status) status.textContent = `${trimTargets.length > 1 ? "Trim linked clips" : "Trim"} ${edge === "left" ? "in" : "out"}: ${fmtTime(clip.startTime)} -> ${fmtTime(clip.startTime + clip.duration)}.`;
     };
@@ -2086,6 +2181,18 @@ function installEditor(node, reason = "install") {
     window.addEventListener("pointermove", move, { passive: false, capture: true });
     window.addEventListener("pointerup", up, { passive: false, capture: true });
     window.addEventListener("pointercancel", up, { passive: false, capture: true });
+  }
+
+  function toggleAudioTrackState(track, field) {
+    if (!track || !["muted", "solo"].includes(field)) return;
+    track[field] = !Boolean(track[field]);
+    persist();
+    syncAudioPlayback(true);
+    renderTimeline();
+    if (status) {
+      const label = field === "muted" ? "Mute" : "Solo";
+      status.textContent = `${track.name || track.id} ${label} ${track[field] ? "ON" : "OFF"}.`;
+    }
   }
 
   const renderTimeline = () => {
@@ -2150,7 +2257,28 @@ function installEditor(node, reason = "install") {
       lane.dataset.trackId = laneId;
       const head = document.createElement("div");
       head.className = "lane-head";
-      head.innerHTML = `${track.name || track.id}<span class="kind">${track.kind || ""} lane</span>`;
+      head.innerHTML = `<span class="lane-name">${track.name || track.id}</span><span class="kind">${track.kind || ""} lane</span>`;
+      if (String(track.kind || "").includes("audio")) {
+        const actions = document.createElement("div");
+        actions.className = "lane-actions";
+        for (const [field, label] of [["muted", "M"], ["solo", "S"]]) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = `lane-toggle ${field === "muted" ? "mute" : "solo"}${track[field] ? " on" : ""}`;
+          button.textContent = label;
+          button.title = `${field === "muted" ? "Mute" : "Solo"} ${track.name || track.id}`;
+          button.setAttribute("aria-pressed", track[field] ? "true" : "false");
+          button.addEventListener("pointerdown", (event) => event.stopPropagation());
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            selectTrack(track);
+            toggleAudioTrackState(track, field);
+          });
+          actions.appendChild(button);
+        }
+        head.appendChild(actions);
+      }
       head.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -2276,7 +2404,9 @@ function installEditor(node, reason = "install") {
     timer = null;
     if (raf) cancelAnimationFrame(raf);
     raf = 0;
-    if (!audioEl.paused) audioEl.pause();
+    for (const entry of audioPreviewElements.values()) {
+      if (!entry.element.paused) entry.element.pause();
+    }
     persist();
     updateMonitor();
   }
@@ -2308,6 +2438,18 @@ function installEditor(node, reason = "install") {
     return null;
   }
 
+  function manualTrackOccupied(trackId, kind, startTime, duration) {
+    const start = Math.max(0, Number(startTime || 0));
+    const end = start + Math.max(0.001, Number(duration || 0));
+    return (manifest.clips || []).some((clip) => {
+      if (!clip || clip.type !== kind || isMasterClip(clip)) return false;
+      if (String(clip.trackId || "") !== String(trackId || "")) return false;
+      const clipStart = Number(clip.startTime || 0);
+      const clipEnd = clipStart + Math.max(0.001, Number(clip.duration || 0));
+      return start < clipEnd && end > clipStart;
+    });
+  }
+
   function addManual(kind, button = null) {
     showManualMediaPicker(button, kind, async (file) => {
       try {
@@ -2317,9 +2459,20 @@ function installEditor(node, reason = "install") {
           : { duration: await audioFileDuration(file), preview_strip: [] };
         const duration = Math.max(0, Number(details.duration || 0));
         if (!(duration > 0)) throw new Error(`Could not read ${kind} duration.`);
-        const startTime = Math.max(0, Number(manifest.duration_seconds || 0));
-        const track = firstFreeManualTrack(kind, startTime, duration);
+        // Manual media is inserted at the editorial playhead.  The selected
+        // compatible lane is authoritative; never silently reroute a clip to
+        // another lane merely because the project already has a later end.
+        const startTime = Math.max(0, Number(playhead || 0));
+        const selectedLane = String(selectedLaneId() || "").trim().toUpperCase();
+        const selectedTrack = manualTrackFromSelection(kind, selectedLane);
+        if (selectedLane && !selectedTrack) {
+          throw new Error(`Selected lane ${selectedLane} cannot contain ${kind}. Select a ${kind === "video" ? "V1-V5" : "A1-A5"} lane.`);
+        }
+        const track = selectedTrack || firstFreeManualTrack(kind, startTime, duration);
         if (!track) throw new Error(`All ${kind === "video" ? "V1-V5" : "A1-A5"} lanes are occupied at the insertion point.`);
+        if (selectedTrack && manualTrackOccupied(track.trackId, kind, startTime, duration)) {
+          throw new Error(`Selected lane ${track.trackId} is occupied at ${fmtTime(startTime)}. Move the playhead/clip or choose another ${kind === "video" ? "V" : "A"} lane.`);
+        }
         if (status) status.textContent = `Uploading ${kind} ${file.name || "file"}...`;
         const uploaded = await uploadEditorMediaFile(file, {
           subfolder: "IAMCCS_video_editor_manual",
@@ -2675,7 +2828,12 @@ function installEditor(node, reason = "install") {
     selectedClipId = "";
     selectedTrackId = "";
     currentSourceClipId = "";
-    currentAudioClipId = "";
+    const previewEntry = audioPreviewElements.get(removedId);
+    if (previewEntry) {
+      try { previewEntry.element.pause(); } catch {}
+      try { previewEntry.element.remove(); } catch {}
+      audioPreviewElements.delete(removedId);
+    }
     persist();
     renderTimeline();
     if (status) status.textContent = `Deleted selected clip ${removedId || ""}${wasMaster ? ". MA priority disabled." : "."}`;
@@ -2935,6 +3093,17 @@ function installEditor(node, reason = "install") {
           promptNode.inputs.audio_source_mode = "master_file_direct";
           promptNode.inputs.master_audio_file = masterPath;
         } else {
+          // The editor renderer embeds the soundtrack assembled from the
+          // individual slot clips in its VIDEO output.  Do not inherit a
+          // serialized master_file_direct widget when no master was authored.
+          promptNode.inputs.audio_source_mode = "audio_input";
+          // copy_source cannot copy an edited tensor waveform. Migrate only
+          // that impossible legacy combination; explicit encoders remain the
+          // user's truth.
+          if (String(promptNode.inputs.audio_profile || "") === "copy_source") {
+            const videoProfile = String(promptNode.inputs.video_profile || "").toLowerCase();
+            promptNode.inputs.audio_profile = videoProfile.includes("mp4") ? "aac_320" : "pcm_s16le";
+          }
           delete promptNode.inputs.master_audio_file;
         }
         repaired += 1;
@@ -2972,9 +3141,22 @@ function installEditor(node, reason = "install") {
         : { nodes: [renderNode.serialize?.() || { id: renderNode.id, type: RENDER_TYPE }] };
       try {
         if (typeof comfyApp?.graphToPrompt === "function") {
-          const full = await comfyApp.graphToPrompt();
-          const fullOutput = full?.output || full?.prompt || {};
           const allowed = downstreamNodeIds(renderNode);
+          // R22D stores Render and Exporter as Never so ordinary H3 queues
+          // only populate the editor.  The explicit RENDER action briefly
+          // enables this isolated downstream branch for serialization, then
+          // restores every graph mode before anything is submitted.
+          const graph = node.graph || app.graph;
+          const manualNodes = (graph?._nodes || []).filter((item) => allowed.has(String(item?.id ?? "")));
+          const previousModes = manualNodes.map((item) => [item, item.mode]);
+          let full;
+          try {
+            for (const [item] of previousModes) item.mode = 0;
+            full = await comfyApp.graphToPrompt();
+          } finally {
+            for (const [item, previousMode] of previousModes) item.mode = previousMode;
+          }
+          const fullOutput = full?.output || full?.prompt || {};
           const branchOutput = {};
           for (const [id, promptNode] of Object.entries(fullOutput || {})) {
             if (allowed.has(String(id))) branchOutput[id] = promptNode;
@@ -3440,7 +3622,7 @@ function installEditor(node, reason = "install") {
   status.className = "status";
   status.textContent = "Ready.";
 
-  root.append(top, takes, main, timeline, status, audioEl);
+  root.append(top, takes, main, timeline, status, audioPreviewHost);
   const uiWidget = node.addDOMWidget("Shotboard Video Editor V1", "iamccs_shotboard_video_editor_v1", root, { serialize: false });
   uiWidget.iamccsSveVersion = UI_VERSION;
   uiWidget.computeSize = () => [NODE_SIZE[0] - 18, WIDGET_HEIGHT];

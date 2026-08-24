@@ -1,5 +1,12 @@
 # IAMCCS Nodes - Changelog
 
+## 2026-08-24 - version 1.5.2 - MiniMax H3 utilities and workflow polish
+
+- Added MiniMax H3 audio-drive, audio-timeline and Shotboard utilities, including improved multi-chunk lane handling and long-video lip-sync support.
+- Improved the MiniMax H3 atomic backend, device handling and compiler fallbacks for more resilient generation workflows.
+- Refined Shotboard, dialogue-tag editor, prompter and exporter interfaces, with supporting RTX/VFX workflow improvements.
+- Removed in-repository backup archives from distribution; backups are now kept outside the node package.
+
 ## 2026-07-21 - version 1.5.1 - Multigen Roll, Master Audio EDL Export and AudioBoard UX
 
 - Added non-destructive pre-roll/post-roll support to the multigen editorial path.

@@ -3315,7 +3315,7 @@ function renderAudioBoardArranger(node) {
                     const targetId = Number(target?.id || 0);
                     const type = String(target?.comfyClass || target?.type || "");
                     if (!target || !targetId) continue;
-                    if (type === "IAMCCS_CineShotboardPlannerV3" || type === "IAMCCS_CineShotboardPlannerV4") {
+                    if (type === "IAMCCS_CineShotboardPlannerV3" || type === "IAMCCS_CineShotboardPlannerV4" || type === "IAMCCS_MiniMaxH3ShotPlanner") {
                         if (!foundIds.has(targetId)) {
                             foundIds.add(targetId);
                             found.push(target);
@@ -4352,7 +4352,7 @@ function renderAudioBoardArranger(node) {
     const publishToShotboard = async () => {
         const boards = linkedShotboardNodes();
         if (!boards.length) {
-            addEdit("Publish skipped: no connected Shotboard V3.");
+            addEdit("Publish skipped: no connected Shotboard planner.");
             draw();
             return;
         }
@@ -4395,7 +4395,7 @@ function renderAudioBoardArranger(node) {
         }
         syncToShotboard("manual_publish");
         if (masterAudioAsset) addEdit("Published one continuous master audio asset to Shotboard and Video Editor.");
-        addEdit(`Published ${segments().length} audio clip${segments().length === 1 ? "" : "s"} to connected Shotboard V3.`);
+        addEdit(`Published ${segments().length} audio clip${segments().length === 1 ? "" : "s"} to connected Shotboard.`);
         transport.playing = false;
         transport.pendingLoopRestart = false;
         draw();
@@ -4414,7 +4414,7 @@ function renderAudioBoardArranger(node) {
             state.trackSettings = Array.isArray(data.trackSettings) ? data.trackSettings : state.trackSettings;
             state.selectedMixer = data.selectedMixer && typeof data.selectedMixer === "object" ? data.selectedMixer : state.selectedMixer;
             state.audioSyncMode = String(data.audioSyncMode || "timeline_audio");
-            addEdit("Pulled audio lanes from connected Shotboard V3.");
+            addEdit("Pulled audio lanes from connected Shotboard.");
             writeState("pull", false);
             draw();
         } catch {}

@@ -148,6 +148,7 @@ function minimaxDialogueText(value) {
   if (hadWrapper) text = text.replace(/^\s*\[[^\]]+\]\s*/, "");
   text = text.replace(/^\s*<Subject\s+[1-9][0-9]*>\s*/i, "");
   text = text.replace(/^\s*\(S[1-9][0-9]*\)\s*:?\s*/i, "");
+  text = text.replace(/<\/?(?:scenetrans|cutoff)>/gi, " ");
   if (hadWrapper) text = text.replace(/^\s*\[[^\]]+\]\s*/, "");
   return text.replace(/\s+/g, " ").trim();
 }
@@ -157,6 +158,24 @@ function stripMiniMaxPromptTagsForSpeech(value) {
     .replace(/\(S[1-9][0-9]*\)\s*:?/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+function minimaxBoundaryMode(value) {
+  const mode = String(value || "normal").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const aliases = { continue: "continues_across_cut", continues: "continues_across_cut", scenetrans: "continues_across_cut", scene_transition: "continues_across_cut", cutoff: "cutoff_at_end", cut_off: "cutoff_at_end", interrupted: "cutoff_at_end" };
+  const normalized = aliases[mode] || mode;
+  return ["normal", "continues_across_cut", "cutoff_at_end"].includes(normalized) ? normalized : "normal";
+}
+function minimaxBoundaryMarker(value) {
+  return { continues_across_cut: "<scenetrans>", cutoff_at_end: "<cutoff>" }[minimaxBoundaryMode(value)] || "";
+}
+function joinMiniMaxPrompt(...parts) {
+  const seen = new Set();
+  return parts.map((part) => String(part || "").trim()).filter((part) => {
+    const key = part.replace(/\s+/g, " ").toLowerCase();
+    if (!part || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).join("\n\n");
 }
 function buildMinimaxDialogueContract(data) {
   const speakers = Array.isArray(data?.speakers) ? data.speakers : [];
@@ -181,11 +200,13 @@ function buildMinimaxDialogueContract(data) {
     const language = minimaxLanguageLabel(line?.language || speaker.language);
     const spoken = minimaxDialogueText(line?.spoken_text || line?.text);
     if (!spoken) return;
-    const dialogueTag = `${subjectTag} ${speakerTag}: <d>[${language}] ${spoken}</d>`;
+    const boundaryMode = minimaxBoundaryMode(line?.minimax_boundary_mode || line?.dialogue_boundary_mode || line?.boundary_mode);
+    const boundaryMarker = minimaxBoundaryMarker(boundaryMode);
+    const dialogueTag = `${subjectTag} ${speakerTag}: <d>[${language}] ${spoken}${boundaryMarker ? ` ${boundaryMarker}` : ""}</d>`;
     const localPrompt = String(line?.local_prompt || line?.shot_prompt || "").replace(/\s+/g, " ").trim();
     dialogueRows.push(dialogueTag);
     if (localPrompt) performanceRows.push(`${subjectTag} ${speakerTag}: ${localPrompt}`);
-    lineContracts.push({ id: String(line?.id || `line_${String(index + 1).padStart(3, "0")}`), subject_tag: subjectTag, speaker_tag: speakerTag, language, dialogue_tag: dialogueTag, local_prompt: localPrompt });
+    lineContracts.push({ id: String(line?.id || `line_${String(index + 1).padStart(3, "0")}`), subject_tag: subjectTag, speaker_tag: speakerTag, language, dialogue_tag: dialogueTag, local_prompt: localPrompt, boundary_mode: boundaryMode, boundary_marker: boundaryMarker });
   });
   const sections = [];
   const globalPrompt = String(data?.global_prompt || "").trim();
@@ -195,12 +216,16 @@ function buildMinimaxDialogueContract(data) {
   if (performanceRows.length) sections.push("[VISIBLE PERFORMANCE / SHOT RELAY]", performanceRows.join("\n"));
   return {
     schema: "iamccs.minimax_h3.dialogue_contract",
-    schema_version: 1,
+    schema_version: 2,
     subject_speaker_map: speakerRows,
     dialogue_lines: dialogueRows,
     performance_lines: performanceRows,
     lines: lineContracts,
     prompt: sections.join("\n\n").trim(),
+    scene_direction: globalPrompt,
+    global_truth: sections.join("\n\n").trim(),
+    local_truth: lineContracts.map((line) => joinMiniMaxPrompt(line.local_prompt, line.dialogue_tag)),
+    boundary_syntax: { normal: "No boundary token", continues_across_cut: "<scenetrans>", cutoff_at_end: "<cutoff>" },
   };
 }
 function ensureDialogueDefaults(data) {
@@ -227,7 +252,7 @@ function ensureDialogueDefaults(data) {
   });
   data.lines = data.lines.map((line, index) => {
     const speaker = String(line.speaker || (index % 2 ? "B" : "A")).toUpperCase();
-    return { tts_params: {}, pause_after: 0, ...line, speaker, spoken_text: line.spoken_text || line.text || "", track: Number(line.track ?? (speaker === "B" ? 1 : 0)) };
+    return { tts_params: {}, pause_after: 0, minimax_boundary_mode: "normal", ...line, speaker, spoken_text: line.spoken_text || line.text || "", track: Number(line.track ?? (speaker === "B" ? 1 : 0)), minimax_boundary_mode: minimaxBoundaryMode(line.minimax_boundary_mode || line.dialogue_boundary_mode || line.boundary_mode) };
   });
   return data;
 }
@@ -273,6 +298,7 @@ function linesToText(data) {
     if (Number(line.tts_params?.speed || line.speed || 0) > 0) attrs.push("speed:" + Number(line.tts_params?.speed || line.speed).toFixed(2));
     if (line.tts_params?.seed || line.seed) attrs.push("seed:" + String(line.tts_params?.seed || line.seed));
     if (Number(line.ref || 0) > 0) attrs.push("ref:" + line.ref);
+    if (minimaxBoundaryMode(line.minimax_boundary_mode) !== "normal") attrs.push("minimax_boundary:" + minimaxBoundaryMode(line.minimax_boundary_mode));
     return "[" + attrs.join("|") + "] " + (line.text || "");
   }).join("\n");
 }
@@ -917,7 +943,7 @@ function parseScript(text, data) {
     if (!value) return;
     const match = value.match(/^\[([^\]]+)\]\s*(.*)$/);
     const atSpeakerMatch = value.match(/^@([A-Za-z])#\s*(.*)$/);
-    const line = { ...(old[index] || {}), id: old[index]?.id || "line_" + String(index + 1).padStart(3, "0"), speaker: index % 2 ? "B" : "A", text: value, emotion: "none", style: "none", paralinguistic: "none", tts_model: "", extra_tags: [], overlap_after: 0, ref: index % 2 ? 2 : 1, track: index % 2 ? 1 : 0 };
+    const line = { ...(old[index] || {}), id: old[index]?.id || "line_" + String(index + 1).padStart(3, "0"), speaker: index % 2 ? "B" : "A", text: value, emotion: "none", style: "none", paralinguistic: "none", tts_model: "", extra_tags: [], overlap_after: 0, ref: index % 2 ? 2 : 1, track: index % 2 ? 1 : 0, minimax_boundary_mode: minimaxBoundaryMode(old[index]?.minimax_boundary_mode) };
     if (match) {
       line.text = match[2].trim();
       match[1].split("|").map((part) => part.trim()).filter(Boolean).forEach((part, partIndex) => {
@@ -941,6 +967,7 @@ function parseScript(text, data) {
           line.tts_params.seed = val || "";
         }
         else if (key === "ref") line.ref = Math.max(1, Number(val || 1));
+        else if (key === "minimax_boundary") line.minimax_boundary_mode = minimaxBoundaryMode(val);
         else if (rest.length) {
           line.extra_tags.push(part);
           if (/emotion|mood/i.test(key) && line.emotion === "none") line.emotion = val || "none";
@@ -1293,7 +1320,7 @@ function ensureStyle() {
   style.textContent = `
   .iamccs-dte{--ink:#242018;--paper:#f7f1e4;--paper2:#efe5d0;--desk:#181713;--brass:#b8893b;--brass2:#d6b66f;--green:#5e7d72;--blue:#516f8f;--tag:#7c5a91;--line:#d7c8ab;width:100%;height:100%;box-sizing:border-box;background:linear-gradient(180deg,#24231d 0%,#171713 100%);color:#efe8d8;border:1px solid rgba(214,182,111,.42);border-radius:8px;overflow:hidden;font:12px/1.45 Inter,ui-sans-serif,system-ui,sans-serif;display:grid;grid-template-rows:58px 1fr 34px;box-shadow:inset 0 0 0 1px rgba(255,255,255,.03)}
   .iamccs-dte *{box-sizing:border-box}.iamccs-dte-head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:#2b2a22;border-bottom:1px solid rgba(214,182,111,.36)}
-  .iamccs-dte-title{font-family:Georgia,serif;font-size:18px;font-weight:900;color:#f7ecd0;letter-spacing:.01em}.iamccs-dte-sub{font-size:10px;color:#c9bea4;margin-top:2px}.iamccs-dte-actions{display:flex;gap:8px;align-items:center}
+  .iamccs-dte-title{font-family:Georgia,serif;font-size:18px;font-weight:900;color:#f7ecd0;letter-spacing:.01em}.iamccs-dte-sub{font-size:10px;color:#c9bea4;margin-top:2px}.iamccs-dte-actions{display:flex;gap:8px;align-items:center;justify-content:flex-end;min-width:0}.iamccs-dte-actions button{white-space:nowrap}
   .iamccs-dte-main{display:grid;grid-template-columns:236px 1fr 286px;min-height:0;padding:12px;gap:12px;background:#191813;overflow:hidden}.iamccs-dte-side,.iamccs-dte-tags,.iamccs-dte-center{min-width:0;border:1px solid rgba(214,182,111,.26);border-radius:8px;box-shadow:0 1px 0 rgba(255,255,255,.04)}
   .iamccs-dte-side,.iamccs-dte-tags{background:#211f18;padding:14px;min-height:0;overflow:auto;overscroll-behavior:contain}.iamccs-dte-center{display:grid;grid-template-rows:auto auto auto minmax(260px,1fr);min-height:0;background:#ebe0c8;color:var(--ink);overflow:auto}
   .iamccs-dte-toolbar{display:flex;align-items:center;gap:8px;padding:8px 10px;border-bottom:1px solid var(--line);background:#d9c9a7}.iamccs-dte-section{padding:14px 16px;border-bottom:1px solid var(--line);min-height:0;background:#f2ead8}.iamccs-dte-section.fill{border-bottom:0;overflow:hidden;display:grid;grid-template-rows:auto 1fr}
@@ -1343,10 +1370,12 @@ function ensureStyle() {
   .iamccs-dte-generation{min-width:0;min-height:0;overflow:auto;overscroll-behavior:contain;padding:14px;background:#211f18;border:1px solid rgba(214,182,111,.26);border-radius:8px;box-shadow:0 1px 0 rgba(255,255,255,.04)}
   .iamccs-minimax-contract{display:grid;gap:9px;padding:12px;border:1px solid rgba(86,180,169,.5);border-radius:7px;background:linear-gradient(145deg,#122522,#11191d);box-shadow:inset 0 1px 0 rgba(255,255,255,.05)}
   .iamccs-minimax-contract-head{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#d9fff7;font-size:10px;font-weight:950;letter-spacing:.06em}.iamccs-minimax-contract-head span{color:#82c9bf;font-size:9px}
-  .iamccs-minimax-tag-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}.iamccs-minimax-tag-grid button{height:auto;min-height:30px;padding:6px;font:900 9px/1.15 "Courier New",monospace;border-color:rgba(86,180,169,.46);color:#d9fff7;background:#17302d}
+  .iamccs-minimax-tag-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(92px,1fr));gap:6px}.iamccs-minimax-tag-grid button{width:100%;height:auto;min-height:34px;padding:6px 8px;font:900 9px/1.2 "Courier New",monospace;border-color:rgba(86,180,169,.46);color:#d9fff7;background:#17302d;white-space:normal;overflow-wrap:anywhere;text-align:center}
   textarea.iamccs-minimax-preview{min-height:168px;max-height:320px;color:#d9fff7;background:#091210;border-color:#315f59;font-size:11px;line-height:1.45}
+  .iamccs-minimax-actions{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:7px;align-items:stretch}.iamccs-minimax-actions button{width:100%;height:auto;min-height:36px;padding:7px 10px;white-space:normal;line-height:1.18;overflow-wrap:anywhere}.iamccs-dte button.iamccs-minimax-apply{background:linear-gradient(180deg,#286e65,#16463f);border-color:#67c1b3;color:#eafffa}.iamccs-dte button.iamccs-minimax-apply.is-done{background:linear-gradient(180deg,#9bdd83,#5a9c55);border-color:#d8f3b9;color:#10210f;box-shadow:0 0 0 2px rgba(105,220,117,.22),0 0 16px rgba(105,220,117,.24)}
   .iamccs-minimax-note{color:#9bb9b5;font-size:9px;font-weight:750;line-height:1.4}.iamccs-minimax-note strong{color:#efd092}
   .iamccs-minimax-line-preview{padding:8px 9px;border:1px solid rgba(86,180,169,.3);border-radius:6px;background:rgba(16,45,41,.72);color:#cceee9;font:700 9px/1.4 "Courier New",monospace;white-space:pre-wrap;word-break:break-word}
+  .iamccs-dte select.iamccs-minimax-boundary{width:100%;height:34px;margin:0;padding:4px 9px;border-color:rgba(86,180,169,.5);background:#102723;color:#d9fff7;font-size:10px;font-weight:850;text-overflow:ellipsis}
   .iamccs-dte:not(.light) .iamccs-line-tags{background:rgba(109,141,183,.11);border-color:#303b4d}.iamccs-dte:not(.light) .iamccs-line-tag-row > span{color:#aebbd0}.iamccs-dte:not(.light) .iamccs-dte-card .iamccs-disclosure > summary{color:#c9d7ea}
   
   `;
@@ -1463,9 +1492,12 @@ function isVisualShotboardSegment(segment) {
 function isVisualShotboardRow(row) {
   return row && row.placeholder !== true;
 }
-function mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps = 24) {
+function mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps = 24, minimaxH3 = false) {
   const merged = existingTimeline && typeof existingTimeline === "object" ? JSON.parse(JSON.stringify(existingTimeline)) : {};
-  const promptEntries = (data.lines || []).map((line) => String(line.local_prompt || "").trim());
+  const minimaxContract = buildMinimaxDialogueContract(data);
+  const promptEntries = minimaxH3
+    ? minimaxContract.lines.map((line) => joinMiniMaxPrompt(line.local_prompt, line.dialogue_tag))
+    : (data.lines || []).map((line) => String(line.local_prompt || "").trim());
   const visualSegments = Array.isArray(merged.segments) ? merged.segments.filter(isVisualShotboardSegment) : [];
   const visualRows = Array.isArray(merged.rows) ? merged.rows.filter(isVisualShotboardRow) : [];
   const targetCount = Math.max(visualSegments.length, visualRows.length);
@@ -1473,11 +1505,12 @@ function mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps = 24) {
 
   merged.schema = merged.schema || "iamccs.cine.filmmaker_timeline";
   merged.schema_version = Math.max(2, Number(merged.schema_version || 2));
-  merged.global_prompt = String(data.global_prompt || "");
-  merged.prompt = String(data.global_prompt || "");
+  const globalTruth = minimaxH3 ? minimaxContract.global_truth : String(data.global_prompt || "");
+  merged.global_prompt = globalTruth;
+  merged.prompt = globalTruth;
   merged.frame_rate = Math.max(1, Number(merged.frame_rate || fps || 24));
   merged.dialogue = data;
-  merged.minimax_h3_dialogue = buildMinimaxDialogueContract(data);
+  merged.minimax_h3_dialogue = minimaxContract;
   merged.minimax_h3_dialogue_prompt = merged.minimax_h3_dialogue.prompt;
 
   visualSegments.forEach((segment, index) => {
@@ -1922,6 +1955,8 @@ function install(node, reason = "install") {
       ["<Subject 1>", "<Subject 1>"],
       ["(S1)", "(S1)"],
       ["<d> dialogue", "<d>[Language] ...</d>"],
+      ["Continue cut", "<scenetrans>"],
+      ["Cut off", "<cutoff>"],
     ].forEach(([label, token]) => {
       const tagButton = button(label, "");
       tagButton.title = "Insert into the last focused prompt field; if no prompt field is active, copy the tag.";
@@ -1936,6 +1971,10 @@ function install(node, reason = "install") {
     minimaxPreview.classList.add("iamccs-minimax-preview");
     minimaxPreview.readOnly = true;
     const minimaxCopy = button("Copy MiniMax Prompt", "gold");
+    const minimaxApply = button("APPLY MINIMAX TRUTH", "iamccs-minimax-apply");
+    minimaxApply.title = "Compile global and local dialogue prompts into the official MiniMax H3 contract. This never queues the workflow.";
+    const minimaxActions = document.createElement("div");
+    minimaxActions.className = "iamccs-minimax-actions";
     const minimaxCopyStatus = document.createElement("div");
     minimaxCopyStatus.className = "iamccs-minimax-note";
     minimaxCopyStatus.innerHTML = "<strong>Metadata only.</strong> Subject, speaker and &lt;d&gt; tags never enter the TTS speech string. Keep speech clear of independent chunk handoff beats.";
@@ -1944,6 +1983,23 @@ function install(node, reason = "install") {
       minimaxPreview.value = contract.prompt;
       minimaxPreview.dataset.lineCount = String(contract.dialogue_lines.length);
     };
+    minimaxApply.onclick = () => {
+      const contract = buildMinimaxDialogueContract(data);
+      data.settings ||= {};
+      data.settings.minimax_truth_enabled = true;
+      data.minimax_h3_truth = {
+        schema: "iamccs.minimax_h3.dialogue_truth",
+        schema_version: 1,
+        global_prompt: contract.global_truth,
+        local_prompts: contract.local_truth,
+        contract,
+      };
+      save();
+      minimaxCopyStatus.innerHTML = `<strong>MiniMax Truth applied.</strong> Global + ${contract.local_truth.filter(Boolean).length} local prompt(s) compiled. Queue was not started.`;
+      minimaxApply.classList.add("is-done");
+      window.clearTimeout(minimaxApply._iamccsDoneTimer);
+      minimaxApply._iamccsDoneTimer = window.setTimeout(() => minimaxApply.classList.remove("is-done"), 1800);
+    };
     minimaxCopy.onclick = async () => {
       refreshMinimaxPreview();
       const copied = await copyTextToClipboard(minimaxPreview.value);
@@ -1951,7 +2007,8 @@ function install(node, reason = "install") {
         ? "<strong>Copied.</strong> MiniMax prompt contract is ready for Prompter or Shotboard."
         : "<strong>Copy failed.</strong> Select the preview text and copy manually.";
     };
-    minimaxPanel.append(minimaxHead, minimaxTagGrid, minimaxPreview, minimaxCopy, minimaxCopyStatus);
+    minimaxActions.append(minimaxApply, minimaxCopy);
+    minimaxPanel.append(minimaxHead, minimaxTagGrid, minimaxPreview, minimaxActions, minimaxCopyStatus);
     refreshMinimaxPreview();
     generation.append(disclosure("MiniMax H3 prompt", minimaxPanel, true, "subject + dialogue tags"));
 
@@ -2171,15 +2228,28 @@ function install(node, reason = "install") {
         promptBox.style.fontSize = Math.round(12 * zoom) + "px";
         const lineMiniMaxPreview = document.createElement("div");
         lineMiniMaxPreview.className = "iamccs-minimax-line-preview";
+        const boundarySelect = select([
+          ["normal", "Normal dialogue"],
+          ["continues_across_cut", "Continues across cut · <scenetrans>"],
+          ["cutoff_at_end", "Interrupted at video end · <cutoff>"],
+        ], minimaxBoundaryMode(line.minimax_boundary_mode));
+        boundarySelect.className = "iamccs-minimax-boundary";
+        boundarySelect.title = "MiniMax dialogue boundary behavior for this line";
         const refreshLineMiniMaxPreview = () => {
           const speakerIndex = Math.max(0, speakerOptions.findIndex(([id]) => id === (speakerSel.value || line.speaker || "A")));
           const speaker = (data.speakers || [])[speakerIndex] || {};
           const subjectTag = minimaxSubjectTag(speaker.subject_tag, speakerIndex);
           const speakerTag = minimaxSpeakerTag(speaker.speaker_tag, speakerIndex);
           const languageLabel = minimaxLanguageLabel(line.language || speaker.language);
-          lineMiniMaxPreview.textContent = `${subjectTag} ${speakerTag}: <d>[${languageLabel}] ${minimaxDialogueText(textBox.value)}</d>`;
+          const marker = minimaxBoundaryMarker(boundarySelect.value);
+          lineMiniMaxPreview.textContent = `${subjectTag} ${speakerTag}: <d>[${languageLabel}] ${minimaxDialogueText(textBox.value)}${marker ? ` ${marker}` : ""}</d>`;
         };
         refreshLineMiniMaxPreview();
+        boundarySelect.onchange = () => {
+          line.minimax_boundary_mode = minimaxBoundaryMode(boundarySelect.value);
+          refreshLineMiniMaxPreview();
+          save();
+        };
 
         const syncMeta = (rerender = false) => {
           const speakerIndex = Math.max(0, speakerOptions.findIndex(([id]) => id === speakerSel.value));
@@ -2241,6 +2311,7 @@ function install(node, reason = "install") {
           head,
           labelledBox("Text", textBox),
           labelledBox("MiniMax dialogue tag", lineMiniMaxPreview),
+          labelledBox("Dialogue boundary", boundarySelect),
           primaryControls,
           lineTags,
           labelledBox("Local shot prompt", promptBox),
@@ -2343,7 +2414,7 @@ function tagPanel(title, values, makeToken, getFallbackTarget = null, onPick = n
 }
 // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
 function shotboardPlannersFor(node) {
-  const isPlanner = (candidate) => ["IAMCCS_CineShotboardPlannerV3", "IAMCCS_CineShotboardPlannerV4"].includes(nodeType(candidate));
+  const isPlanner = (candidate) => ["IAMCCS_CineShotboardPlannerV3", "IAMCCS_CineShotboardPlannerV4", "IAMCCS_MiniMaxH3ShotPlanner"].includes(nodeType(candidate));
   const connected = downstream(node, isPlanner);
   if (connected.length) return { planners: connected, source: "connected" };
   const all = (Array.isArray(app.graph?._nodes) ? app.graph._nodes : []).filter(isPlanner);
@@ -2355,12 +2426,14 @@ function syncPromptsToShotboard(node, data, fps) {
   let availableVisualShots = 0;
   const target = shotboardPlannersFor(node);
   target.planners.forEach((shotboard) => {
+    const minimaxH3 = nodeType(shotboard) === "IAMCCS_MiniMaxH3ShotPlanner";
+    const contract = minimaxH3 ? buildMinimaxDialogueContract(data) : null;
     const gp = widget(shotboard, "global_prompt");
     const td = widget(shotboard, "timeline_data");
-    if (gp) { gp.value = data.global_prompt || ""; try { gp.callback?.(gp.value); } catch {} }
+    if (gp) { gp.value = minimaxH3 ? contract.global_truth : (data.global_prompt || ""); try { gp.callback?.(gp.value); } catch {} }
     if (td) {
       const existingTimeline = safeJsonParse(td.value, {});
-      const merged = mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps);
+      const merged = mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps, minimaxH3);
       appliedPromptCount += merged.appliedPromptCount;
       availableVisualShots += merged.preservedVisualSegments;
       if (typeof shotboard._iamccsCineShotboardV3ApplyExternalTimeline === "function") {

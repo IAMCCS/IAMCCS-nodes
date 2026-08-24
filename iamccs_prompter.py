@@ -304,15 +304,68 @@ def _compose_prompt(project: dict[str, Any], task_mode: str, writing_mode: str, 
             assistant_fills.append(key)
         resolved[key] = value
 
+    def join_fields(keys: tuple[str, ...]) -> str:
+        return "\n".join(resolved.get(key, "").strip() for key in keys if resolved.get(key, "").strip())
+
     blocks: list[str] = []
-    for key, label in MODE_SECTIONS[mode]:
-        body = resolved.get(key, "").strip()
-        if not body:
-            continue
+    if any(resolved.values()):
         if mode == "ref2va":
-            blocks.append(f"{label}:\n{body}")
+            # MiniMax full-reference mode has six mandatory headings in this
+            # exact order. Blank authoring fields become an explicit N/A rather
+            # than silently changing the prompt grammar.
+            for key, label in MODE_SECTIONS[mode]:
+                body = resolved.get(key, "").strip() or "N/A"
+                if key == "summary" and body != "N/A" and not body.lower().startswith("[reference"):
+                    body = f"[reference generation] {body}"
+                blocks.append(f"{label}:\n{body}")
+        elif mode == "v2va_object_swap":
+            detail = join_fields(("v2va_interval_edits", "v2va_exclusions")) or "N/A"
+            summary = resolved.get("v2va_source_video_authority", "").strip() or "N/A"
+            if summary != "N/A" and not summary.lower().startswith("[reference"):
+                summary = f"[reference generation + video reference] {summary}"
+            blocks = [
+                f"subject_definitions:\n{resolved.get('v2va_subject_definitions', '').strip() or 'N/A'}",
+                f"summary:\n{summary}",
+                f"retention_analysis:\n{resolved.get('v2va_replacement_retention', '').strip() or 'N/A'}",
+                f"detailed_description:\n{detail}",
+                f"overall_soundscape:\n{resolved.get('v2va_sound_policy', '').strip() or 'N/A'}",
+                "non_diegetic_music:\nN/A",
+            ]
         else:
-            blocks.append(f"[{label}]\n{body}")
+            if mode == "t2va":
+                detail_keys = ("scene", "shot_list", "acting", "dialogue", "light_and_image", "camera", "negatives")
+                alignment = ""
+                sound = resolved.get("production_sound", "").strip()
+                music = resolved.get("non_diegetic_music", "").strip()
+            elif mode == "i2va":
+                detail_keys = ("reference_use", "identity_continuity_locks", "scene", "shot_list", "acting", "dialogue", "light_and_image", "camera", "negatives")
+                alignment = "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced."
+                sound = resolved.get("production_sound", "").strip()
+                music = resolved.get("non_diegetic_music", "").strip()
+            elif mode == "fl2va":
+                detail_keys = ("reference_use", "identity_continuity_locks", "action", "shot_list", "acting", "dialogue", "light_and_image", "camera", "negatives")
+                alignment = resolved.get("boundary_frames", "").strip()
+                sound = resolved.get("production_sound", "").strip()
+                music = resolved.get("non_diegetic_music", "").strip()
+            else:  # audio_driven
+                detail_keys = (
+                    "audio_drive_contract", "audio_subject_map", "audio_scene_intent",
+                    "audio_timed_performance", "audio_dialogue_map", "audio_visual_sync",
+                    "audio_camera_sync", "audio_continuity_locks",
+                )
+                alignment = ""
+                sound = resolved.get("audio_environment", "").strip()
+                music = "N/A"
+            detail = join_fields(detail_keys)
+            if detail and not re.match(r"^\s*\[Shot\s+1\]", detail, flags=re.I):
+                detail = f"[Shot 1] {detail}"
+            if alignment:
+                blocks.append(alignment)
+            blocks.extend([
+                f"integrated_multimodal_description:\n{detail or 'N/A'}",
+                f"overall_soundscape:\n{sound or 'N/A'}",
+                f"non_diegetic_music:\n{music or 'N/A'}",
+            ])
     prompt = "\n\n".join(blocks).strip()
     return prompt, {
         "task_mode": mode,
@@ -407,6 +460,8 @@ def _assistant_instruction(
         f"{allowed}. Return only the selected keys {selected}; never create a blank or unselected section. "
         "Write concise production-ready English optimized for MiniMax H3 audiovisual generation. Preserve exact identity facts, reference tags, requested timing, language and quoted dialogue unless the user explicitly asks to change them. "
         "Use chronological visible action, realistic body mechanics, stable screen geography and one coherent camera language. Prefer one motivated camera move over a list of conflicting moves. "
+        "Return only the content of each selected authoring field, never repeat its JSON key as a heading. The IAMCCS composer will assemble base modes into MiniMax's official integrated_multimodal_description, overall_soundscape and non_diegetic_music grammar, and full-reference modes into the official six-section grammar. "
+        "When rewriting shot_list, do not add a second [Shot 1] marker because the composer supplies it; mark only a real later cut as [Shot N] At MM:SS.mmm, and do not invent cuts merely to make the description longer. "
         "Separate diegetic ambience, dialogue and contact effects from non-diegetic score. Use <Subject N> consistently and keep dialogue inside <d>[Language] ...</d> with stable speaker labels such as (S1) when those tags are present. "
         f"Chunk-boundary sound rule: {AUDIO_HANDOFF_AUTHORING_RULE} "
         "Do not invent extra characters, products, dialogue, scene changes, cuts, subtitles or logos. Turn negative wishes into concrete continuity safeguards, not vague quality adjectives. "
@@ -473,6 +528,20 @@ def _http_get_json(url: str, timeout: float = 10.0) -> dict[str, Any]:
     return parsed
 
 
+def _ollama_native_base(value: Any) -> str:
+    """Return the Ollama native API root accepted by /api/chat and /api/tags.
+
+    Ollama also exposes an OpenAI-compatible ``/v1`` surface.  Users commonly
+    paste that URL after using another local client, but native endpoints must
+    be addressed from the server root.  Normalising here keeps model discovery
+    and rewrite requests on the same endpoint contract.
+    """
+    root = str(value or "http://127.0.0.1:11434").strip().rstrip("/")
+    if root.lower().endswith("/v1"):
+        root = root[:-3].rstrip("/")
+    return root or "http://127.0.0.1:11434"
+
+
 def _extract_json_object(text: str) -> dict[str, str]:
     clean = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", str(text or "").strip(), flags=re.I | re.S)
     start = clean.find("{")
@@ -517,7 +586,7 @@ def rewrite_sections_with_ai(
     content = ""
 
     if provider == "ollama":
-        root = str(base_url or "http://127.0.0.1:11434").rstrip("/")
+        root = _ollama_native_base(base_url)
         result = _http_json(
             f"{root}/api/chat",
             {
@@ -1102,7 +1171,7 @@ def _register_prompter_routes() -> None:
         @routes.get("/iamccs/prompter/ollama/models")
         async def iamccs_prompter_ollama_models(request):
             try:
-                base_url = str(request.query.get("base_url") or "http://127.0.0.1:11434").rstrip("/")
+                base_url = _ollama_native_base(request.query.get("base_url"))
                 payload = await asyncio.to_thread(_http_get_json, f"{base_url}/api/tags", 10.0)
                 models = []
                 for item in payload.get("models") if isinstance(payload.get("models"), list) else []:

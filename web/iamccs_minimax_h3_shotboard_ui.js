@@ -5,7 +5,7 @@ import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 
 console.info("[IAMCCS MiniMax H3] Dedicated Shotboard V3-parity UI loaded.");
-const CINE_VERSION = "2026-08-14-minimax-h3-r31-ref2vid-lipsync-face-detailer";
+const CINE_VERSION = "2026-08-23-minimax-h3-v20-lipsync-dual-edge-audio-magnet";
 const MINIMAX_CINE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX";
 const H3_AUDIO_MODE_ALIASES = Object.freeze({
     "": "h3_native_generated",
@@ -35,7 +35,7 @@ const H3_AUDIO_MODE_INFO = Object.freeze({
     },
     h3_custom_audio_drive: {
         status: "CUSTOM AUDIO DRIVES AV LATENT",
-        source: "Connect Cine Info H3 · Custom audio. The R21 atomic drive stage uses it before sampling; AudioBoard lanes are not selected automatically.",
+        source: "For standard modes connect Cine Info H3 Custom audio. In LongVid Guided Audio Drive, AudioBoard lanes are rebased automatically and locked before sampling.",
     },
     external_audio_post: {
         status: "POST AUDIO · NO VIDEO CONDITIONING",
@@ -115,8 +115,23 @@ function canonicalH3TaskMode(value) {
     if (["flf", "fflf", "fl2va"].includes(raw)) return "fl2va";
     if (["ref2va", "ref2va_audio", "ref2va_reference"].includes(raw)) return "ref2va";
     if (["ref2vid_lipsync", "lipsync_ref2vid", "ref2vid", "lipsync"].includes(raw)) return "ref2vid_lipsync";
+    if ([
+        "longvid_guided_lipsync", "longvid_audio_drive_lipsync",
+        "longvid_ref2vid_lipsync", "longvid_lipsync", "longvid_ref2va_lipsync",
+    ].includes(raw)) return "longvid_guided_lipsync";
     if (["longvid", "long_video_guides", "longvid_guides"].includes(raw)) return "longvid_guides";
     return raw === "v2va_object_swap" ? "v2va_object_swap" : "t2va";
+}
+function h3LipsyncTask(value) { return ["ref2vid_lipsync", "longvid_guided_lipsync"].includes(canonicalH3TaskMode(value)); }
+function h3TimelineAudioOwned(value) { return ["longvid_guides", "ref2vid_lipsync", "longvid_guided_lipsync"].includes(canonicalH3TaskMode(value)); }
+function h3RequiredAudioMode(value) {
+    const task = canonicalH3TaskMode(value);
+    return h3LipsyncTask(task) ? "h3_custom_audio_drive" : null;
+}
+function h3LipsyncInfo(value) {
+    return canonicalH3TaskMode(value) === "longvid_guided_lipsync"
+        ? "LONGVID GUIDED LIPSYNC · SAFE LOCKED AUDIOBOARD"
+        : "REF2VID LIPSYNC · LOCKED AUDIOBOARD";
 }
 function h3TaskUiCapabilities(value, audioValue = "h3_native_generated") {
     const task = canonicalH3TaskMode(value);
@@ -126,7 +141,7 @@ function h3TaskUiCapabilities(value, audioValue = "h3_native_generated") {
     // LongVid owns a positioned T2VA guide track. Its imported timeline audio
     // is injected by R31 itself, so an old REF2VA-audio choice must not steal
     // the mode or reveal unrelated reference-role controls.
-    const effectiveTask = task === "longvid_guides" || task === "ref2vid_lipsync"
+    const effectiveTask = h3TimelineAudioOwned(task)
         ? task
         : audioMode === "h3_ref2va_audio" ? "ref2va" : task;
     const auto = effectiveTask === "auto_from_timeline";
@@ -136,14 +151,16 @@ function h3TaskUiCapabilities(value, audioValue = "h3_native_generated") {
         flf: effectiveTask === "fl2va" || auto,
         roles: ["ref2va", "ref2vid_lipsync", "v2va_object_swap"].includes(effectiveTask),
         v2va: effectiveTask === "v2va_object_swap",
-        longvid: effectiveTask === "longvid_guides",
-        lipsync: effectiveTask === "ref2vid_lipsync",
+        longvid: ["longvid_guides", "longvid_guided_lipsync"].includes(effectiveTask),
+        lipsync: h3LipsyncTask(effectiveTask),
         flfHint: effectiveTask === "fl2va"
             ? "FL2VA uses authored adjacent keyframes; join and continuity controls are active."
             : auto
                 ? "Auto: these controls apply only when the timeline resolves to FL2VA (two or more image keyframes)."
                 : effectiveTask === "longvid_guides"
                     ? "LongVid pins main-timeline image and audio slots at their real global positions. FLF joins and native AV continuity do not apply."
+                    : effectiveTask === "longvid_guided_lipsync"
+                        ? "LongVid Guided LipSync keeps the proven positioned T2VA/AddGuide image path and locks the AudioBoard chunk into the AV latent. It never creates REF2VA reference blocks."
                     : effectiveTask === "ref2vid_lipsync"
                         ? "Ref2Vid LipSync uses one static reference image and each matching AudioBoard slot as <Audio 1>. Slots are independent hard cuts; FLF joins and continuity do not apply."
                     : `${effectiveTask.toUpperCase()} renders independent hard-cut/reference slots, so FL2VA join and continuity do not apply.`,
@@ -158,6 +175,7 @@ const H3_MODE_THEMES = Object.freeze({
     ref2vid_lipsync: { node: "#6B315B", bg: "#24111F", box: "#F093CE", border: "#B95497", panel: "rgba(90,29,73,.52)", text: "#FFC1E7", header: "rgba(240,147,206,.44)" },
     v2va_object_swap: { node: "#48386D", bg: "#171125", box: "#BBA1FF", border: "#765BB1", panel: "rgba(59,38,103,.52)", text: "#D6C5FF", header: "rgba(187,161,255,.42)" },
     longvid_guides: { node: "#57347C", bg: "#1B112A", box: "#C19AFF", border: "#B98AFF", panel: "rgba(54,31,85,.50)", text: "#DEC8FF", header: "rgba(196,151,255,.48)" },
+    longvid_guided_lipsync: { node: "#6F2A6B", bg: "#251025", box: "#F59BE7", border: "#D96CCF", panel: "rgba(97,25,91,.54)", text: "#FFD0F5", header: "rgba(245,155,231,.48)" },
 });
 function h3ModeTheme(value) {
     return H3_MODE_THEMES[canonicalH3TaskMode(value)] || H3_MODE_THEMES.auto_from_timeline;
@@ -739,7 +757,7 @@ function repairMiniMaxH3WidgetState(node, serialized = null) {
         sol_conditioning: "exact_kv_and_rows",
         spectrum_profile: "low_vram",
         rife_mode: "off",
-        text_encoder_device: "auto",
+        text_encoder_device: "gpu_auto",
         performance_profile: "low_vram_balanced",
         sampler_name: "res_multistep",
         scheduler: "simple",
@@ -753,13 +771,21 @@ function repairMiniMaxH3WidgetState(node, serialized = null) {
         flf_continuity_tail_frames: "22",
     };
     const textEncoderWidget = getWidget(node, "text_encoder_device");
-    if (String(textEncoderWidget?.value || "").toLowerCase() === "cpu_safe_12gb") {
-        assign("text_encoder_device", "auto", "legacy-cpu-mode-migrated-to-gpu-first");
+    const legacyTextEncoderMode = String(textEncoderWidget?.value || "").toLowerCase();
+    if (legacyTextEncoderMode === "auto") {
+        assign("text_encoder_device", "gpu_auto", "legacy-auto-mode-migrated");
+    } else if (legacyTextEncoderMode === "cpu_safe_12gb") {
+        assign("text_encoder_device", "cpu_direct", "legacy-cpu-mode-migrated-to-cpu-direct");
     }
     const audioModeWidget = getWidget(node, "audio_mode");
     const canonicalAudioMode = canonicalH3AudioMode(audioModeWidget?.value);
     if (audioModeWidget && String(audioModeWidget.value || "") !== canonicalAudioMode) {
         assign("audio_mode", canonicalAudioMode, "legacy-audio-route-migrated");
+    }
+    const taskModeWidget = getWidget(node, "task_mode");
+    const canonicalTaskMode = canonicalH3TaskMode(taskModeWidget?.value);
+    if (taskModeWidget && String(taskModeWidget.value || "") !== canonicalTaskMode && comboValues(taskModeWidget).includes(canonicalTaskMode)) {
+        assign("task_mode", canonicalTaskMode, "legacy-longvid-lipsync-migrated-to-safe-guided-route");
     }
     const joinModeWidget = getWidget(node, "flf_join_mode");
     const canonicalJoinMode = canonicalH3JoinMode(joinModeWidget?.value);
@@ -8821,6 +8847,11 @@ function renderShotboardV3(node) {
             };
         }
     };
+    // Assigned after the CineLinX origin has been resolved. Keeping this
+    // bridge next to the timeline writer makes every Shotboard edit (including
+    // duration/trim changes) publish the same named-setting truth back to the
+    // connected IAMCCS Settings node without adding serialized widgets.
+    let syncShotboardToExternalH3Settings = () => false;
     const writeTimeline = (options = {}) => {
         if (!options.skipDomSync) syncTimelineTextFromDom();
         neutralizeLegacyStepTransitions();
@@ -9089,7 +9120,7 @@ function renderShotboardV3(node) {
             flf_continuity_audio: Boolean(getWidget(node, "flf_continuity_audio")?.value ?? true),
             acceleration: String(getWidget(node, "acceleration")?.value || "low_vram_auto"),
             ref_image_size: String(getWidget(node, "ref_image_size")?.value || "match"),
-            text_encoder_device: "auto",
+            text_encoder_device: String(getWidget(node, "text_encoder_device")?.value || "gpu_auto"),
             reference_roles: [1, 2, 3, 4].map((index) => String(getWidget(node, `reference_role_${index}`)?.value || (index <= 2 ? "subject_identity" : index === 3 ? "composition" : "style"))),
             reference_video_role: String(getWidget(node, "reference_video_role")?.value || "off"),
             reference_audio_role: String(getWidget(node, "reference_audio_role")?.value || "off"),
@@ -9147,7 +9178,7 @@ function renderShotboardV3(node) {
                 atomic_task_model_conditioning: true,
                 acceleration: String(getWidget(node, "acceleration")?.value || "low_vram_auto"),
                 ref_image_size: String(getWidget(node, "ref_image_size")?.value || "match"),
-                text_encoder_device: "auto",
+                text_encoder_device: String(getWidget(node, "text_encoder_device")?.value || "gpu_auto"),
                 vram_clean_before_decode: Boolean(getWidget(node, "vram_clean_before_decode")?.value ?? true),
                 native_bridge_before_post: true,
                 lazy_upscale_enabled: Boolean(getWidget(node, "upscale_enabled")?.value ?? false),
@@ -9207,6 +9238,15 @@ function renderShotboardV3(node) {
         node.properties.iamccs_v3_timeline_revision = nextTruthRevision;
         node.properties.iamccs_v3_timeline_updated_at = truthUpdatedAt;
         commitTimelineJson(JSON.stringify(clean, null, 2), Boolean(options.force));
+        if (!options.skipSettingsSync) {
+            syncShotboardToExternalH3Settings("timeline_write", {
+                truthRevision: nextTruthRevision,
+                durationSeconds: effectiveDurationSeconds,
+                frameRate: fps,
+                visualSlots: visual.length,
+                audioClips: (timeline.audioSegments || []).filter((seg) => !seg?.placeholder).length,
+            });
+        }
     };
 
     const linkedH3SettingsNode = () => {
@@ -9230,6 +9270,53 @@ function renderShotboardV3(node) {
         try { return JSON.stringify(left) === JSON.stringify(right); } catch { return false; }
     };
     let syncingExternalH3Settings = false;
+    syncShotboardToExternalH3Settings = (reason = "shotboard", timelineSummary = null) => {
+        if (syncingExternalH3Settings) return false;
+        const target = linkedH3SettingsNode();
+        if (!target) return false;
+        node._iamccsH3SettingsSourceId = target.id;
+        const changed = [];
+        (node.widgets || []).forEach((sourceWidget) => {
+            const name = String(sourceWidget?.name || "");
+            if (!name || MINIMAX_H3_SAVED_SETTINGS_EXCLUSIONS.has(name)) return;
+            const targetWidget = getWidget(target, name);
+            if (!targetWidget || sameH3SettingsValue(targetWidget.value, sourceWidget.value)) return;
+            const value = sourceWidget.value && typeof sourceWidget.value === "object"
+                ? JSON.parse(JSON.stringify(sourceWidget.value))
+                : sourceWidget.value;
+            // Do not call the Settings widget callback here: that callback is
+            // the reverse Settings -> Shotboard bridge. Direct named-widget
+            // assignment avoids a feedback loop and positional widget drift.
+            targetWidget.value = value;
+            syncWidgetSerializedValue(target, targetWidget, value);
+            changed.push(name);
+        });
+        target.properties = target.properties || {};
+        const summary = timelineSummary || {
+            truthRevision: Number(node.properties?.iamccs_v3_timeline_revision || 0),
+            durationSeconds: Number(getWidget(node, "duration_seconds")?.value || timeline.duration_seconds || 0),
+            frameRate: Number(getWidget(node, "frame_rate")?.value || timeline.frame_rate || 24),
+            visualSlots: (timeline.segments || []).filter((seg) => !seg?.placeholder && String(seg?.type || "image") !== "audio").length,
+            audioClips: (timeline.audioSegments || []).filter((seg) => !seg?.placeholder).length,
+        };
+        target.properties.iamccs_h3_live_shotboard = {
+            source_node_id: node.id,
+            reason,
+            truth_revision: Number(summary.truthRevision || 0),
+            duration_seconds: Number(summary.durationSeconds || 0),
+            frame_rate: Number(summary.frameRate || 24),
+            visual_slots: Number(summary.visualSlots || 0),
+            audio_clips: Number(summary.audioClips || 0),
+        };
+        if (changed.length) {
+            target.widgets_values = serializedWidgetValues(target);
+            try { target.setDirtyCanvas?.(true, true); target.graph?.change?.(); app.graph?.setDirtyCanvas?.(true, true); app.graph?.change?.(); } catch {}
+            emitH3SettingsChanged(target, "__shotboard_sync__", { source_node_id: node.id, reason, changed });
+        }
+        try { target._iamccsReceiveShotboardSync?.({ shotboard: node, reason, changed, summary }); } catch {}
+        return changed.length > 0;
+    };
+    node._iamccsSyncShotboardToExternalH3Settings = syncShotboardToExternalH3Settings;
     const syncExternalH3Settings = (reason = "cine_linx") => {
         if (syncingExternalH3Settings) return false;
         const source = linkedH3SettingsNode();
@@ -9254,7 +9341,7 @@ function renderShotboardV3(node) {
             });
             if (changed) {
                 saveMiniMaxH3NamedSettings(node);
-                writeTimeline({ force: true });
+                writeTimeline({ force: true, skipSettingsSync: true });
                 try { refreshSettingsControls?.(); } catch {}
                 try { refreshPerformanceBand?.(); draw?.(); } catch {}
                 try { node.setDirtyCanvas?.(true, true); node.graph?.change?.(); app.graph?.setDirtyCanvas?.(true, true); app.graph?.change?.(); } catch {}
@@ -9262,6 +9349,10 @@ function renderShotboardV3(node) {
         } finally {
             syncingExternalH3Settings = false;
         }
+        // Duration is constrained by the real end of visual/audio slots. If a
+        // Settings-side value was shorter than that floor, publish the
+        // normalized Shotboard truth back so both panels show the same value.
+        if (changed) syncShotboardToExternalH3Settings(`settings_normalized:${reason}`);
         return changed;
     };
     node._iamccsSyncExternalH3Settings = syncExternalH3Settings;
@@ -10424,9 +10515,11 @@ function renderShotboardV3(node) {
     promptWrap.append(promptHeader, promptArea);
 
     const settings = document.createElement("section");
-    settings.style.cssText = `display:flex;flex-direction:column;gap:9px;margin:0;padding:10px;border:1px solid ${purple.border};border-radius:9px;background:linear-gradient(145deg,rgba(17,22,27,.96),rgba(30,25,18,.94));box-shadow:inset 0 1px 0 rgba(255,255,255,.055);`;
+    settings.className = "iamccs-h3-modal-settings";
+    settings.style.cssText = `display:flex;flex-direction:column;gap:11px;margin:0;padding:12px;border:1px solid ${purple.border};border-radius:11px;background:linear-gradient(145deg,rgba(17,22,27,.98),rgba(27,24,20,.97));box-shadow:inset 0 1px 0 rgba(255,255,255,.055);`;
     const settingsHead = document.createElement("div");
-    settingsHead.style.cssText = "display:flex;align-items:center;gap:10px;padding:0 2px 2px;";
+    settingsHead.className = "iamccs-h3-settings-overview";
+    settingsHead.style.cssText = "display:flex;align-items:center;gap:12px;padding:2px 3px 4px;";
     const settingsIdentity = document.createElement("div");
     settingsIdentity.innerHTML = `<div style="font:900 12px/1.2 Arial;color:#f2d79b;letter-spacing:.08em">H3 CONTROL DECK</div><div style="font:700 9px/1.35 Arial;color:#8fa3a7;margin-top:3px">One CineLinX cable carries the private H3 plan, conditioning, sampler and delivery controls.</div>`;
     const contractRail = document.createElement("div");
@@ -10439,10 +10532,12 @@ function renderShotboardV3(node) {
     });
     settingsHead.append(settingsIdentity, contractRail);
     const settingsDeck = document.createElement("div");
-    settingsDeck.style.cssText = "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;align-items:start;";
+    settingsDeck.className = "iamccs-h3-settings-deck";
+    settingsDeck.style.cssText = "display:grid;grid-template-columns:minmax(0,1fr);gap:12px;align-items:start;";
     const performanceBand = document.createElement("div");
-    performanceBand.style.cssText = "padding:7px 9px;border:1px solid rgba(111,146,151,.28);border-radius:6px;background:rgba(6,11,14,.42);color:#9db1b4;font:800 9px/1.45 Arial;";
-    settings.append(settingsHead, settingsDeck, performanceBand);
+    performanceBand.className = "iamccs-h3-settings-load-band";
+    performanceBand.style.cssText = "padding:8px 11px;border:1px solid rgba(111,146,151,.34);border-radius:7px;background:linear-gradient(90deg,rgba(9,18,22,.88),rgba(13,24,27,.72));color:#9db1b4;font:800 9px/1.45 Arial;";
+    settings.append(settingsHead, performanceBand, settingsDeck);
     settingsOverlay = document.createElement("div");
     settingsOverlay.tabIndex = -1;
     settingsOverlay.setAttribute("role", "dialog");
@@ -10456,7 +10551,7 @@ function renderShotboardV3(node) {
         `z-index:${CINE_FULLSCREEN_Z_INDEX + 120}`,
         "align-items:center",
         "justify-content:center",
-        "padding:20px",
+        "padding:12px",
         "box-sizing:border-box",
         "background:rgba(3,6,8,.76)",
         "backdrop-filter:blur(7px)",
@@ -10464,23 +10559,50 @@ function renderShotboardV3(node) {
     ].join(";");
     const settingsDialog = document.createElement("section");
     settingsDialog.style.cssText = [
-        "width:min(1320px,calc(100vw - 40px))",
-        "max-height:calc(100vh - 40px)",
+        "width:min(1480px,calc(100vw - 24px))",
+        "max-height:calc(100vh - 24px)",
         "display:flex",
         "flex-direction:column",
         "overflow:hidden",
         `border:1px solid ${purple.border}`,
-        "border-radius:12px",
-        "background:linear-gradient(145deg,#171d21,#201a14)",
+        "border-radius:14px",
+        "background:linear-gradient(145deg,#151b20,#1e1a16)",
         "box-shadow:0 26px 90px rgba(0,0,0,.64),inset 0 1px 0 rgba(255,255,255,.08)",
         `color:${purple.text}`,
         "font:12px Arial,sans-serif",
     ].join(";");
+    const settingsUiStyle = document.createElement("style");
+    settingsUiStyle.textContent = `
+        .iamccs-h3-settings-modal-head{min-height:62px;box-shadow:0 8px 24px rgba(0,0,0,.18)}
+        .iamccs-h3-settings-nav{display:flex;align-items:center;gap:7px;padding:8px 14px;border-bottom:1px solid rgba(255,255,255,.065);background:linear-gradient(90deg,rgba(8,13,17,.96),rgba(19,18,16,.96));overflow-x:auto;scrollbar-width:thin}
+        .iamccs-h3-settings-nav-label{flex:0 0 auto;margin-right:4px;color:#718388;font:900 8px Arial;letter-spacing:.14em;text-transform:uppercase}
+        .iamccs-h3-settings-nav button{flex:0 0 auto;height:28px;padding:0 11px;border:1px solid color-mix(in srgb,var(--nav-accent,#d8aa54) 55%,#293238);border-radius:999px;background:color-mix(in srgb,var(--nav-accent,#d8aa54) 12%,#11171b);color:color-mix(in srgb,var(--nav-accent,#d8aa54) 72%,#f3f5f3);font:900 8px Arial;letter-spacing:.065em;cursor:pointer;transition:transform .15s ease,border-color .15s ease,background .15s ease}
+        .iamccs-h3-settings-nav button:hover,.iamccs-h3-settings-nav button.active{transform:translateY(-1px);border-color:var(--nav-accent,#d8aa54);background:color-mix(in srgb,var(--nav-accent,#d8aa54) 22%,#11171b);color:#fff}
+        .iamccs-h3-settings-modal-body{background:radial-gradient(circle at 50% 0,rgba(58,69,72,.12),transparent 44%)}
+        .iamccs-h3-settings-deck{grid-template-columns:minmax(0,1fr)!important}
+        .iamccs-h3-settings-group{position:relative;grid-column:1/-1!important;border-color:color-mix(in srgb,var(--group-accent,#d8aa54) 38%,#2c3539)!important;border-radius:10px!important;background:linear-gradient(145deg,color-mix(in srgb,var(--group-accent,#d8aa54) 5%,#0b1013),#0c1114 62%)!important;box-shadow:inset 3px 0 0 color-mix(in srgb,var(--group-accent,#d8aa54) 78%,transparent),inset 0 1px 0 rgba(255,255,255,.035),0 8px 24px rgba(0,0,0,.14)}
+        .iamccs-h3-settings-group-heading{display:flex;align-items:center;gap:11px;min-height:58px;padding:9px 12px!important;border-bottom:1px solid color-mix(in srgb,var(--group-accent,#d8aa54) 23%,transparent)!important;background:linear-gradient(90deg,color-mix(in srgb,var(--group-accent,#d8aa54) 10%,transparent),transparent 46%)}
+        .iamccs-h3-settings-group-index{flex:0 0 auto;display:grid;place-items:center;min-width:31px;height:31px;padding:0 7px;border:1px solid color-mix(in srgb,var(--group-accent,#d8aa54) 65%,#273036);border-radius:8px;background:color-mix(in srgb,var(--group-accent,#d8aa54) 16%,#10161a);color:var(--group-accent,#d8aa54);font:900 9px Arial;letter-spacing:.08em}
+        .iamccs-h3-settings-group-copy{min-width:0}.iamccs-h3-settings-group-title{color:#f0f3f2;font:900 12px Arial;letter-spacing:.035em}.iamccs-h3-settings-group-description{max-width:920px;margin-top:3px;color:#86979b;font:700 9px/1.4 Arial}
+        .iamccs-h3-settings-group-grid{grid-template-columns:repeat(4,minmax(0,1fr))!important;gap:9px!important;padding:11px!important}
+        .iamccs-h3-settings-field{min-width:0;align-self:stretch;padding:8px!important;border:1px solid rgba(134,153,158,.17);border-radius:8px;background:linear-gradient(145deg,rgba(255,255,255,.032),rgba(0,0,0,.10));color:#91a2a6!important;text-align:left!important;transition:border-color .14s ease,background .14s ease,box-shadow .14s ease}
+        .iamccs-h3-settings-field:hover{border-color:color-mix(in srgb,var(--group-accent,#d8aa54) 42%,#344046);background:linear-gradient(145deg,color-mix(in srgb,var(--group-accent,#d8aa54) 5%,#151b1e),rgba(0,0,0,.08))}
+        .iamccs-h3-settings-field:focus-within{border-color:color-mix(in srgb,var(--group-accent,#d8aa54) 72%,#445158);box-shadow:0 0 0 2px color-mix(in srgb,var(--group-accent,#d8aa54) 14%,transparent)}
+        .iamccs-h3-settings-field>span{min-height:13px;color:#9eacaf;font:900 9px/1.25 Arial;letter-spacing:.035em;text-transform:uppercase;text-align:left}
+        .iamccs-h3-settings-field input,.iamccs-h3-settings-field select,.iamccs-h3-settings-field textarea{min-width:0;width:100%;font-size:11px!important}
+        .iamccs-h3-settings-note{grid-column:1/-1;padding:9px 11px!important;border-left:3px solid var(--group-accent,#d8aa54)!important;background:linear-gradient(90deg,color-mix(in srgb,var(--group-accent,#d8aa54) 8%,#10171b),#10171b)!important;text-align:left!important}
+        .iamccs-h3-settings-wide-action{grid-column:1/-1!important;min-height:40px!important}.iamccs-h3-settings-complex-panel{grid-column:1/-1!important}
+        .iamccs-h3-settings-advanced>summary{list-style:none}.iamccs-h3-settings-advanced>summary::-webkit-details-marker{display:none}.iamccs-h3-settings-advanced>summary:after{content:'EXPAND';margin-left:auto;padding:4px 7px;border:1px solid color-mix(in srgb,var(--group-accent,#59c2b0) 48%,#334046);border-radius:999px;color:var(--group-accent,#59c2b0);font:900 7px Arial;letter-spacing:.08em}.iamccs-h3-settings-advanced[open]>summary:after{content:'COLLAPSE'}
+        @media(max-width:1050px){.iamccs-h3-settings-group-grid{grid-template-columns:repeat(2,minmax(0,1fr))!important}.iamccs-h3-settings-complex-panel{grid-template-columns:minmax(0,1fr)!important}}
+        @media(max-width:680px){.iamccs-h3-settings-group-grid{grid-template-columns:minmax(0,1fr)!important}.iamccs-h3-settings-field{grid-column:1/-1!important}.iamccs-h3-settings-overview{align-items:flex-start!important;flex-direction:column}.iamccs-h3-settings-overview>div:last-child{margin-left:0!important;justify-content:flex-start!important}}
+    `;
+    settingsDialog.appendChild(settingsUiStyle);
     const settingsModalHead = document.createElement("header");
-    settingsModalHead.style.cssText = `display:flex;align-items:center;gap:12px;padding:12px 14px;border-bottom:1px solid ${purple.borderSoft};background:rgba(255,255,255,.035);`;
+    settingsModalHead.className = "iamccs-h3-settings-modal-head";
+    settingsModalHead.style.cssText = `display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid ${purple.borderSoft};background:linear-gradient(90deg,rgba(216,170,84,.075),rgba(255,255,255,.025) 38%,rgba(255,255,255,.015));`;
     const settingsModalTitle = document.createElement("div");
     settingsModalTitle.style.cssText = "min-width:0;flex:1;";
-    settingsModalTitle.innerHTML = `<div style="font:900 13px/1.2 Arial;color:#f2d79b;letter-spacing:.08em">MINIMAX H3 SETTINGS</div><div style="font:700 10px/1.35 Arial;color:#9aadb0;margin-top:3px">Generation, canvas, Turbo, acceleration, references and delivery controls.</div>`;
+    settingsModalTitle.innerHTML = `<div style="display:flex;align-items:center;gap:8px"><span style="display:inline-block;width:4px;height:26px;border-radius:3px;background:linear-gradient(#f0c66f,#8a612b)"></span><div><div style="font:900 14px/1.2 Arial;color:#f2d79b;letter-spacing:.085em">MINIMAX H3 SETTINGS</div><div style="font:700 10px/1.35 Arial;color:#9aadb0;margin-top:3px">Visible fields are generation truth · grouped for faster technical review.</div></div></div>`;
     const closeSettingsBtn = document.createElement("button");
     closeSettingsBtn.type = "button";
     closeSettingsBtn.textContent = "Close";
@@ -10503,10 +10625,41 @@ function renderShotboardV3(node) {
         persistSettings();
     };
     settingsModalHead.append(settingsModalTitle, saveSettingsBtn, closeSettingsBtn);
+    const settingsSaveFeedback = document.createElement("div");
+    settingsSaveFeedback.setAttribute("role", "status");
+    settingsSaveFeedback.setAttribute("aria-live", "polite");
+    settingsSaveFeedback.style.cssText = "display:none;margin:9px 12px 0;padding:8px 11px;border:1px solid rgba(98,199,169,.72);border-radius:7px;background:linear-gradient(145deg,rgba(35,86,72,.96),rgba(18,49,42,.96));box-shadow:0 0 0 1px rgba(98,199,169,.12),0 5px 18px rgba(0,0,0,.24);color:#eafff8;font:900 10px/1.35 Arial;letter-spacing:.025em;";
+    let settingsSaveFeedbackTimer = null;
+    const showSettingsSaveFeedback = () => {
+        if (settingsSaveFeedbackTimer) clearTimeout(settingsSaveFeedbackTimer);
+        const savedAt = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+        settingsSaveFeedback.textContent = `✓ SETTINGS SAVED · ${savedAt} · Shotboard + IAMCCS Settings synchronized`;
+        settingsSaveFeedback.style.display = "block";
+        saveSettingsBtn.textContent = "✓ Saved";
+        saveSettingsBtn.style.borderColor = "#b8ffe9";
+        saveSettingsBtn.style.background = "linear-gradient(145deg,#368b71,#205848)";
+        saveSettingsBtn.style.boxShadow = "0 0 0 2px rgba(98,199,169,.22),0 0 16px rgba(98,199,169,.32)";
+        settingsSaveFeedbackTimer = setTimeout(() => {
+            settingsSaveFeedback.style.display = "none";
+            saveSettingsBtn.textContent = "Save Settings";
+            saveSettingsBtn.style.borderColor = "#62c7a9";
+            saveSettingsBtn.style.background = "linear-gradient(145deg,#235648,#173c34)";
+            saveSettingsBtn.style.boxShadow = "none";
+            settingsSaveFeedbackTimer = null;
+        }, 3200);
+    };
+    const settingsSectionNav = document.createElement("nav");
+    settingsSectionNav.className = "iamccs-h3-settings-nav";
+    settingsSectionNav.setAttribute("aria-label", "MiniMax H3 settings sections");
+    const settingsSectionNavLabel = document.createElement("span");
+    settingsSectionNavLabel.className = "iamccs-h3-settings-nav-label";
+    settingsSectionNavLabel.textContent = "Jump to";
+    settingsSectionNav.appendChild(settingsSectionNavLabel);
     const settingsModalBody = document.createElement("div");
-    settingsModalBody.style.cssText = "display:flex;flex-direction:column;gap:10px;padding:12px;overflow:auto;scrollbar-gutter:stable;";
+    settingsModalBody.className = "iamccs-h3-settings-modal-body";
+    settingsModalBody.style.cssText = "display:flex;flex-direction:column;gap:10px;padding:12px 14px 16px;overflow:auto;scrollbar-gutter:stable;scroll-behavior:smooth;";
     settingsModalBody.append(settings);
-    settingsDialog.append(settingsModalHead, settingsModalBody);
+    settingsDialog.append(settingsModalHead, settingsSaveFeedback, settingsSectionNav, settingsModalBody);
     settingsOverlay.appendChild(settingsDialog);
     settingsOverlay.onclick = (event) => {
         if (event.target === settingsOverlay) setSettingsPanelOpen(false);
@@ -10536,25 +10689,56 @@ function renderShotboardV3(node) {
             : acceleration;
         performanceBand.textContent = `Low VRAM load preview: ${load.toFixed(2)}x versus 960x544 / 124f | ${width}x${height} / ~${alignedFrames} aligned frames | ${accelerationLabel}${risky ? " | HEAVY: shorten this box or use a smaller canvas, then upscale" : " | within the selected Low VRAM canvas envelope"}`;
     }
+    const settingsGroupPalette = {
+        "01": { accent: "#D9AA54", nav: "SHOT & CANVAS" },
+        "01V": { accent: "#C078D7", nav: "V2VA SOURCE" },
+        "02": { accent: "#6FA9DD", nav: "GENERATION" },
+        "02B": { accent: "#AA88E6", nav: "TURBO" },
+        "03": { accent: "#59C2B0", nav: "REFERENCES" },
+        "04": { accent: "#78B986", nav: "DELIVERY" },
+    };
+    const settingsSectionButtons = new Map();
     const makeSettingsGroup = (kicker, title, description, advanced = false) => {
         const shell = advanced ? document.createElement("details") : document.createElement("section");
-        shell.style.cssText = `min-width:0;border:1px solid ${purple.borderSoft};border-radius:8px;background:rgba(5,9,12,.34);overflow:hidden;`;
+        const palette = settingsGroupPalette[kicker] || { accent: "#D9AA54", nav: title };
+        shell.className = `iamccs-h3-settings-group${advanced ? " iamccs-h3-settings-advanced" : ""}`;
+        shell.dataset.iamccsH3SettingsGroup = kicker;
+        shell.style.setProperty("--group-accent", palette.accent);
+        shell.style.cssText += `min-width:0;border:1px solid ${purple.borderSoft};border-radius:8px;background:rgba(5,9,12,.34);overflow:hidden;--group-accent:${palette.accent};`;
         if (advanced) {
             const summary = document.createElement("summary");
+            summary.className = "iamccs-h3-settings-group-heading";
             summary.style.cssText = "cursor:pointer;list-style:none;padding:9px 10px;color:#d8c28e;font:900 10px Arial;letter-spacing:.045em;";
-            summary.textContent = `${kicker} / ${title} — advanced`;
+            summary.innerHTML = `<span class="iamccs-h3-settings-group-index">${kicker}</span><span class="iamccs-h3-settings-group-copy"><span class="iamccs-h3-settings-group-title">${title}</span><span class="iamccs-h3-settings-group-description" style="display:block">${description}</span></span>`;
             summary.title = description;
             shell.appendChild(summary);
         } else {
             const heading = document.createElement("div");
+            heading.className = "iamccs-h3-settings-group-heading";
             heading.style.cssText = "padding:8px 10px 7px;border-bottom:1px solid rgba(255,255,255,.055);";
-            heading.innerHTML = `<div style="color:#d8aa54;font:900 8px Arial;letter-spacing:.13em">${kicker}</div><div style="color:#edf1ef;font:900 11px Arial;margin-top:2px">${title}</div><div style="color:#7f9195;font:700 8px/1.35 Arial;margin-top:2px">${description}</div>`;
+            heading.innerHTML = `<span class="iamccs-h3-settings-group-index">${kicker}</span><span class="iamccs-h3-settings-group-copy"><span class="iamccs-h3-settings-group-title">${title}</span><span class="iamccs-h3-settings-group-description" style="display:block">${description}</span></span>`;
             shell.appendChild(heading);
         }
         const grid = document.createElement("div");
-        grid.style.cssText = "display:grid;grid-template-columns:repeat(4,minmax(92px,1fr));gap:8px;padding:9px;";
+        grid.className = "iamccs-h3-settings-group-grid";
+        grid.style.cssText = "display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:9px;padding:11px;";
         shell.appendChild(grid);
         settingsDeck.appendChild(shell);
+        const navButton = document.createElement("button");
+        navButton.type = "button";
+        navButton.textContent = palette.nav;
+        navButton.style.setProperty("--nav-accent", palette.accent);
+        navButton.onclick = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (advanced) shell.open = true;
+            settingsSectionButtons.forEach((button) => button.classList.remove("active"));
+            navButton.classList.add("active");
+            shell.scrollIntoView({ block: "start", behavior: "smooth" });
+            window.setTimeout(() => navButton.classList.remove("active"), 1400);
+        };
+        settingsSectionButtons.set(kicker, navButton);
+        settingsSectionNav.appendChild(navButton);
         return grid;
     };
     const shotSettings = makeSettingsGroup("01", "SHOT & CANVAS", "Timeline trim is the chunk authority. H3 keeps 24 fps and the 17k+5 frame grid.");
@@ -10562,13 +10746,16 @@ function renderShotboardV3(node) {
     const settingsControls = new Map();
     persistSettings = () => {
         bindExternalH3SettingsCallbacks();
-        syncExternalH3Settings("settings_save");
+        // SAVE means "persist what is visible in this Shotboard". All
+        // Settings-node edits already arrive through the live reverse bridge;
+        // pulling again here could overwrite a just-authored Shotboard value.
+        writeTimeline({ force: true });
         saveMiniMaxH3NamedSettings(node);
         node.properties = node.properties || {};
         node.properties.iamccs_minimax_h3_saved_settings_updated_at = new Date().toISOString();
         node.widgets_values = serializedWidgetValues(node);
-        writeTimeline({ force: true });
         try { node.setDirtyCanvas?.(true, true); node.graph?.change?.(); app.graph?.setDirtyCanvas?.(true, true); app.graph?.change?.(); } catch {}
+        showSettingsSaveFeedback();
         showTimelineNotice("Settings saved. These exact values are locked into the next generation and workflow save.", "ok");
     };
     refreshSettingsControls = () => {
@@ -10604,8 +10791,9 @@ function renderShotboardV3(node) {
         if (name === "flf_join_mode") value = canonicalH3JoinMode(value);
         if (name === "flf_continuity_mode") value = canonicalH3ContinuityMode(value);
         const activeTaskForWrite = canonicalH3TaskMode(getWidget(node, "task_mode")?.value);
-        if (name === "audio_mode" && ["longvid_guides", "ref2vid_lipsync"].includes(activeTaskForWrite)) {
-            value = "h3_native_generated";
+        const lockedAudioMode = h3RequiredAudioMode(activeTaskForWrite);
+        if (name === "audio_mode" && lockedAudioMode) {
+            value = lockedAudioMode;
         }
         setWidgetValue(node, name, value);
         const control = settingsControls.get(name);
@@ -10627,12 +10815,13 @@ function renderShotboardV3(node) {
             refreshH3TaskSettings();
             refreshV2VSettings();
             refreshLongvidTimelineTheme();
-            if (["longvid_guides", "ref2vid_lipsync"].includes(canonicalH3TaskMode(value)) && canonicalH3AudioMode(getWidget(node, "audio_mode")?.value) !== "h3_native_generated") {
-                setDeckValue("audio_mode", "h3_native_generated");
+            const requiredAudioMode = h3RequiredAudioMode(value);
+            if (requiredAudioMode && canonicalH3AudioMode(getWidget(node, "audio_mode")?.value) !== requiredAudioMode) {
+                setDeckValue("audio_mode", requiredAudioMode);
                 showTimelineNotice(
                     canonicalH3TaskMode(value) === "ref2vid_lipsync"
                         ? "Ref2Vid LipSync uses each matching main AudioBoard clip as <Audio 1>; additional audio routes are disabled."
-                        : "LongVid uses the main AudioBoard lane as positioned H3 audio guides; legacy external audio routes are disabled.",
+                        : "LongVid Guided LipSync keeps positioned image guides and locks the matching AudioBoard chunk. REF2VA hybrid routing is disabled.",
                     "info",
                 );
             }
@@ -10700,6 +10889,7 @@ function renderShotboardV3(node) {
         const widthName = isNative ? "width" : "upscale_width";
         const heightName = isNative ? "height" : "upscale_height";
         const wrap = document.createElement("label");
+        wrap.className = "iamccs-h3-settings-field";
         wrap.style.cssText = `grid-column:span 2;display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
         wrap.title = isNative
             ? "H3 native canvases are aligned to a 32-pixel grid. H = horizontal, V = vertical, SCOPE = cinema-wide. Custom remains available."
@@ -10761,6 +10951,7 @@ function renderShotboardV3(node) {
     const addSetting = (label, name, step, min, targetOverride = null, compact = false) => {
         const target = targetOverride || settingsTarget;
         const wrap = document.createElement("label");
+        if (!compact) wrap.className = "iamccs-h3-settings-field";
         wrap.style.cssText = compact
             ? "width:100%;display:flex;align-items:center;justify-content:flex-end;gap:7px;color:#FFE0A3;font-size:9px;font-weight:900;text-align:right;letter-spacing:.07em;"
             : `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
@@ -10814,6 +11005,7 @@ function renderShotboardV3(node) {
     };
     addSetting("DURATION", "duration_seconds", "1", "1", durationQuickSlot, true);
     const h3FpsWrap = document.createElement("label");
+    h3FpsWrap.className = "iamccs-h3-settings-field";
     h3FpsWrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
     const h3FpsLabel = document.createElement("span");
     h3FpsLabel.textContent = "H3 FPS";
@@ -10836,6 +11028,7 @@ function renderShotboardV3(node) {
     );
     const addSelectSetting = (label, name, options) => {
         const wrap = document.createElement("label");
+        wrap.className = "iamccs-h3-settings-field";
         wrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
         const span = document.createElement("span");
         span.textContent = label;
@@ -10852,6 +11045,7 @@ function renderShotboardV3(node) {
     };
     const addWidgetChoiceSetting = (label, name, choices, onSelect = null) => {
         const wrap = document.createElement("label");
+        wrap.className = "iamccs-h3-settings-field";
         wrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
         const span = document.createElement("span");
         span.textContent = label;
@@ -10870,6 +11064,7 @@ function renderShotboardV3(node) {
     };
     const addWidgetTextSetting = (label, name, placeholder = "") => {
         const wrap = document.createElement("label");
+        wrap.className = "iamccs-h3-settings-field";
         wrap.style.cssText = `grid-column:1 / -1;display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:left;`;
         const span = document.createElement("span");
         span.textContent = label;
@@ -10891,6 +11086,7 @@ function renderShotboardV3(node) {
     };
     const addWidgetBoolSetting = (label, name) => {
         const wrap = document.createElement("label");
+        wrap.className = "iamccs-h3-settings-field";
         wrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
         const span = document.createElement("span");
         span.textContent = label;
@@ -10911,6 +11107,7 @@ function renderShotboardV3(node) {
     };
     const addStaticH3Setting = (label, value, titleText) => {
         const wrap = document.createElement("label");
+        wrap.className = "iamccs-h3-settings-field";
         wrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
         const span = document.createElement("span");
         span.textContent = label;
@@ -10925,6 +11122,7 @@ function renderShotboardV3(node) {
     };
     const addTimelineChoiceSetting = (label, value, choices, onChange) => {
         const wrap = document.createElement("label");
+        wrap.className = "iamccs-h3-settings-field";
         wrap.style.cssText = `display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
         const span = document.createElement("span");
         span.textContent = label;
@@ -10950,23 +11148,32 @@ function renderShotboardV3(node) {
         { value: "ref2va", label: "REF2VA" },
         { value: "ref2vid_lipsync", label: "REF2VID LIPSYNC / static image + AudioBoard" },
         { value: "v2va_object_swap", label: "V2VA / Object Swap" },
-        { value: "longvid_guides", label: "LongVid / Timeline Guides" },
+        { value: "longvid_guides", label: "LongVid Guided / native audio" },
+        { value: "longvid_guided_lipsync", label: "LongVid Guided + LipSync / SAFE locked AudioBoard" },
     ], () => {
         const task = canonicalH3TaskMode(getWidget(node, "task_mode")?.value);
-        if (["longvid_guides", "ref2vid_lipsync"].includes(task) && canonicalH3AudioMode(getWidget(node, "audio_mode")?.value) !== "h3_native_generated") {
-            setDeckValue("audio_mode", "h3_native_generated");
+        const requiredAudioMode = h3RequiredAudioMode(task);
+        if (requiredAudioMode && canonicalH3AudioMode(getWidget(node, "audio_mode")?.value) !== requiredAudioMode) {
+            setDeckValue("audio_mode", requiredAudioMode);
             showTimelineNotice(
                 task === "ref2vid_lipsync"
                     ? "Ref2Vid LipSync uses each matching main AudioBoard clip as <Audio 1>; additional audio routes are disabled."
-                    : "LongVid uses the main AudioBoard lane as positioned H3 audio guides; legacy external audio routes are disabled.",
+                    : "LongVid Guided LipSync is active: positioned image guides remain T2VA/AddGuide and AudioBoard is locked into the AV latent. No REF2VA hybrid.",
                 "info",
+            );
+        }
+        if (task === "longvid_guided_lipsync" && getWidget(node, "text_encoder_device")?.value !== "cpu_direct") {
+            setDeckValue("text_encoder_device", "cpu_direct");
+            showTimelineNotice(
+                "LongVid Guided LipSync selected CPU Direct for Qwen conditioning on 12 GB. H3 sampling remains on GPU; GPU Auto can still be selected manually afterwards.",
+                "ok",
             );
         }
         refreshH3TaskSettings();
         refreshV2VSettings();
         refreshLongvidTimelineTheme();
     });
-    addStaticH3Setting("Chunk source", "Mode-aware timeline", "FL2VA/Auto uses adjacent keyframe bridges. I2VA keeps image boxes as hard-cut shots. REF2VID LIPSYNC uses a static CineInfoH3 reference image (or a slot image fallback) plus the matching AudioBoard slot as <Audio 1>; prompts stay under their own slots and never need lyrics. V2VA uses each box only for prompt, duration and source range. LongVid maps imported main-lane images and audio into positioned H3 guides on the global 24fps timeline.");
+    addStaticH3Setting("Chunk source", "Mode-aware timeline", "FL2VA/Auto uses adjacent keyframe bridges. I2VA keeps image boxes as hard-cut shots. REF2VID LIPSYNC uses a static CineInfoH3 reference image (or slot fallback) and sends the same AudioBoard chunk both as <Audio 1> and as the zero-denoise audio latent. For visible speech, write the exact user-supplied words inside <d>[Language] ...</d>. V2VA uses each box only for prompt, duration and source range.");
     addStaticH3Setting("H3 frames", "17k+5 / max 362", "The requested box length is aligned upward to H3's required 17k+5 temporal grid and must remain at or below 362 frames.");
     const v2vSettings = makeSettingsGroup("01V", "V2VA SOURCE CONTRACT", "Visible only for V2VA/Object Swap. Media sockets and true source FPS stay in CineInfoH3V2V.");
     const v2vSettingsShell = v2vSettings.parentElement;
@@ -11009,13 +11216,17 @@ function renderShotboardV3(node) {
     let audioRouteHelp = null;
     refreshAudioRouteSettings = (requestedMode = null) => {
         const task = canonicalH3TaskMode(getWidget(node, "task_mode")?.value);
-        const timelineAudioOwned = ["longvid_guides", "ref2vid_lipsync"].includes(task);
-        const mode = timelineAudioOwned ? "h3_native_generated" : canonicalH3AudioMode(requestedMode ?? getWidget(node, "audio_mode")?.value);
-        const info = task === "ref2vid_lipsync"
-            ? { status: "REF2VID LIPSYNC · AUDIOBOARD <AUDIO 1>", source: "Every performance slot receives its matching main AudioBoard clip as <Audio 1>. Do not put lyrics or a transcript in the prompt." }
-            : task === "longvid_guides"
-                ? { status: "LONGVID · POSITIONED AUDIO GUIDES", source: "Imported main AudioBoard slots are injected at their real timeline positions by R31." }
-                : H3_AUDIO_MODE_INFO[mode];
+        const timelineAudioOwned = h3TimelineAudioOwned(task);
+        const mode = h3RequiredAudioMode(task) || canonicalH3AudioMode(requestedMode ?? getWidget(node, "audio_mode")?.value);
+        const info = task === "longvid_guided_lipsync"
+            ? { status: h3LipsyncInfo(task), source: "v20 forced-audio path: positioned images use T2VA/AddGuide; audio is VAE-encoded, zero-masked and locked into the joint H3 latent without a second Audio AddGuide. Put verbatim user-supplied speech in <d>[Language] ...</d>." }
+            : task === "ref2vid_lipsync"
+                ? { status: h3LipsyncInfo(task), source: "v20 REF2VA path: the same AudioBoard chunk enters ReferenceToVideo as <Audio 1> and VAEEncodeAudio as a zero-denoise latent lock. Put exact user-supplied dialogue/lyrics in <d>[Language] ...</d>; never invent missing words." }
+            : task === "longvid_guides" && mode === "h3_custom_audio_drive"
+                ? { status: "LONGVID GUIDED · LOCKED AUDIO DRIVE", source: "Timeline image guides stay in T2VA/AddGuide. The rebased AudioBoard chunk is injected at its exact local time and locked into the H3 AV latent before sampling. No REF2VA reference is used." }
+                : task === "longvid_guides"
+                    ? { status: "LONGVID · POSITIONED AUDIO GUIDES", source: "Imported main AudioBoard slots are injected at their real timeline positions by R31. Select Audio Drive only when the AudioBoard must control lip motion." }
+                    : H3_AUDIO_MODE_INFO[mode];
         if (audioRouteStatusControl) {
             audioRouteStatusControl.value = info.status;
             audioRouteStatusControl.title = info.source;
@@ -11049,15 +11260,16 @@ function renderShotboardV3(node) {
         }
     };
     addWidgetChoiceSetting("H3 audio route", "audio_mode", [
-        { value: "h3_native_generated", label: "Native H3 generated" },
-        { value: "h3_ref2va_audio", label: "REF2VA audio reference" },
-        { value: "h3_custom_audio_drive", label: "Custom audio drive / AV latent" },
-        { value: "external_audio_post", label: "External audio post / no drive" },
+        { value: "h3_native_generated", label: "Native H3 generated · no exact LipSync" },
+        { value: "h3_ref2va_audio", label: "REF2VA voice reference · not exact copy" },
+        { value: "h3_custom_audio_drive", label: "Exact Audio Drive / LipSync · locked AudioBoard" },
+        { value: "external_audio_post", label: "Post audio only · does not drive lips" },
     ], (mode) => {
         const task = canonicalH3TaskMode(getWidget(node, "task_mode")?.value);
-        if (["longvid_guides", "ref2vid_lipsync"].includes(task) && mode !== "h3_native_generated") {
-            setDeckValue("audio_mode", "h3_native_generated");
-            showTimelineNotice(task === "ref2vid_lipsync" ? "Ref2Vid LipSync owns the AudioBoard source as <Audio 1>." : "LongVid owns AudioBoard as positioned H3 guides.", "info");
+        const requiredAudioMode = h3RequiredAudioMode(task);
+        if (requiredAudioMode && mode !== requiredAudioMode) {
+            setDeckValue("audio_mode", requiredAudioMode);
+            showTimelineNotice(h3LipsyncTask(task) ? "LipSync owns the AudioBoard route. For visible speech, put the exact user-supplied words in <d>[Language] ...</d>." : "LongVid owns AudioBoard as positioned H3 guides.", "info");
             return;
         }
         refreshAudioRouteSettings(mode);
@@ -11069,15 +11281,21 @@ function renderShotboardV3(node) {
         H3_AUDIO_MODE_INFO[canonicalH3AudioMode(getWidget(node, "audio_mode")?.value)].source,
     );
     audioRouteHelp = document.createElement("div");
+    audioRouteHelp.className = "iamccs-h3-settings-note";
     audioRouteHelp.style.cssText = `grid-column:1 / -1;padding:8px 10px;border:1px solid ${purple.border};border-radius:7px;background:#13191d;color:${purple.muted};font:700 10px/1.45 Arial;text-align:left;`;
     settingsTarget.appendChild(audioRouteHelp);
     refreshAudioRouteSettings();
+    addWidgetChoiceSetting("Qwen conditioning device", "text_encoder_device", [
+        { value: "gpu_auto", label: "GPU Auto · GPU-first + protected VRAM reserve" },
+        { value: "cpu_direct", label: "CPU Direct · Qwen on CPU; H3 sampler stays on GPU" },
+    ]);
     addWidgetChoiceSetting("Prompt source", "prompt_mapping", [
         { value: "global_plus_local", label: "Global + local" },
         { value: "local_only", label: "Local only" },
         { value: "global_only", label: "Global only" },
     ]);
     const joinDeck = document.createElement("section");
+    joinDeck.className = "iamccs-h3-settings-complex-panel";
     joinDeck.dataset.iamccsH3JoinDeck = "true";
     joinDeck.style.cssText = [
         "grid-column:1 / -1",
@@ -11201,6 +11419,7 @@ function renderShotboardV3(node) {
     refreshH3JoinSettings();
 
     const continuityDeck = document.createElement("section");
+    continuityDeck.className = "iamccs-h3-settings-complex-panel";
     continuityDeck.dataset.iamccsH3ContinuityDeck = "true";
     continuityDeck.style.cssText = [
         "grid-column:1 / -1",
@@ -11434,6 +11653,7 @@ function renderShotboardV3(node) {
         { value: "total_pixels", label: "Total pixels" },
     ]);
     const nativePreResizeButton = document.createElement("button");
+    nativePreResizeButton.className = "iamccs-h3-settings-wide-action";
     nativePreResizeButton.type = "button";
     nativePreResizeButton.style.cssText = "grid-column:1 / -1;min-height:38px;border-radius:7px;border:1px solid #58c7b1;background:linear-gradient(135deg,#173c39,#142b31);color:#eafffa;font:900 10px Arial;letter-spacing:.05em;cursor:pointer;box-shadow:0 0 0 1px rgba(88,199,177,.12) inset;";
     nativePreResizeButton.title = "OFF preserves the source image until MiniMax performs its single required Lanczos fit. ON enables the selected IAMCCS pre-resize policy before H3.";
@@ -11477,9 +11697,6 @@ function renderShotboardV3(node) {
     addWidgetChoiceSetting("Ref image size", "ref_image_size", [
         { value: "match", label: "Match canvas" },
         { value: "max", label: "Max / costly" },
-    ]);
-    addWidgetChoiceSetting("Text encoder", "text_encoder_device", [
-        { value: "auto", label: "Auto / GPU-first, CPU only after OOM" },
     ]);
     [1, 2, 3, 4].forEach((index) => addWidgetChoiceSetting(`Ref ${index} role`, `reference_role_${index}`, [
         { value: "subject_identity", label: "Subject" },
@@ -11833,6 +12050,9 @@ function renderShotboardV3(node) {
     let pendingMotionInsertFrame = null;
     let pendingAudioInsertFrame = null;
     let pendingAudioTrack = 0;
+    // True only for the lane-end + Audio control; this preserves an exact
+    // editorial append instead of forcing the new clip back to slot zero.
+    let pendingAudioAppendAtEnd = false;
     let playheadScrubState = null;
     let drawRaf = 0;
     let transitionAppliedStamp = 0;
@@ -11855,7 +12075,7 @@ function renderShotboardV3(node) {
         settingsBorder: settingsBtn?.style.borderColor || "",
     };
     refreshLongvidTimelineTheme = () => {
-        const active = canonicalH3TaskMode(getWidget(node, "task_mode")?.value) === "longvid_guides";
+        const active = ["longvid_guides", "longvid_guided_lipsync"].includes(canonicalH3TaskMode(getWidget(node, "task_mode")?.value));
         root.dataset.iamccsLongvid = active ? "true" : "false";
         longvidModeBadge.style.display = active ? "block" : "none";
         if (active) {
@@ -12358,6 +12578,7 @@ function renderShotboardV3(node) {
                 event.stopPropagation();
                 pendingAudioInsertFrame = null;
                 pendingAudioTrack = 0;
+                pendingAudioAppendAtEnd = false;
                 audioInput.click();
             };
             audioPlaybarControls.appendChild(protectControlDrag(empty));
@@ -12870,6 +13091,64 @@ function renderShotboardV3(node) {
         return items;
     }
 
+    function audioSnapTargetForFrame(frame, thresholdFrames = 6) {
+        const targetFrame = Math.max(0, Math.round(Number(frame || 0)));
+        let best = null;
+        let distance = Number.POSITIVE_INFINITY;
+        (timeline.segments || [])
+            .filter((item) => String(item.type || "image") !== "audio" && !item.placeholder)
+            .forEach((item) => {
+                const start = Math.max(0, Math.round(Number(item.start || 0)));
+                const nextDistance = Math.abs(start - targetFrame);
+                if (nextDistance < distance) {
+                    distance = nextDistance;
+                    best = { id: String(item.id || ""), frame: start };
+                }
+            });
+        return best && best.id && distance <= Math.max(0, Number(thresholdFrames || 0)) ? best : null;
+    }
+
+    function audioSnapTargetForClip(audio, thresholdFrames = 6) {
+        if (!audio) return null;
+        const total = Math.max(1, getTotalFrames());
+        const audioStart = Math.max(0, Math.round(Number(audio.start || 0)));
+        const audioLength = Math.max(1, Math.round(Number(audio.length || 1)));
+        const audioEnd = audioStart + audioLength;
+        const candidates = [];
+        (timeline.segments || [])
+            .filter((item) => String(item.type || "image") !== "audio" && !item.placeholder)
+            .forEach((item) => {
+                const visualStart = Math.max(0, Math.round(Number(item.start || 0)));
+                const visualEnd = Math.max(visualStart + 1, Math.round(visualStart + Number(item.length || 1)));
+                const id = String(item.id || "");
+                if (!id) return;
+                [
+                    { audioEdge: "start", visualEdge: "start", audioFrame: audioStart, frame: visualStart, priority: 0 },
+                    { audioEdge: "end", visualEdge: "end", audioFrame: audioEnd, frame: visualEnd, priority: 1 },
+                    { audioEdge: "start", visualEdge: "end", audioFrame: audioStart, frame: visualEnd, priority: 2 },
+                    { audioEdge: "end", visualEdge: "start", audioFrame: audioEnd, frame: visualStart, priority: 3 },
+                ].forEach((candidate) => {
+                    const snappedStart = candidate.audioEdge === "start"
+                        ? candidate.frame
+                        : candidate.frame - audioLength;
+                    if (snappedStart < 0 || snappedStart > Math.max(0, total - audioLength)) return;
+                    candidates.push({
+                        ...candidate,
+                        id,
+                        visualStart,
+                        visualEnd,
+                        snappedStart,
+                        relativeStartFrames: snappedStart - visualStart,
+                        distance: Math.abs(candidate.audioFrame - candidate.frame),
+                    });
+                });
+            });
+        const threshold = Math.max(0, Number(thresholdFrames || 0));
+        return candidates
+            .filter((candidate) => candidate.distance <= threshold)
+            .sort((a, b) => a.distance - b.distance || a.priority - b.priority)[0] || null;
+    }
+
     function motionDragPreview(initItems, targetId, dragDelta, edge, durationFrames) {
         const items = cloneSegments(initItems).sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
         const target = items.find((item) => item.id === targetId);
@@ -12921,6 +13200,7 @@ function renderShotboardV3(node) {
             startX,
             originalStart,
             initial: cloneSegments(isAudio ? timeline.audioSegments : isMotion ? timeline.motionSegments : timeline.segments),
+            initialAudio: cloneSegments(timeline.audioSegments || []),
         };
         event.currentTarget?.setPointerCapture?.(event.pointerId);
         const captureTarget = event.currentTarget;
@@ -12940,6 +13220,52 @@ function renderShotboardV3(node) {
             let next;
             if (isAudio) {
                 next = audioDragPreview(dragState.initial, dragState.targetId, deltaFrames, edge, getTotalFrames());
+                if (edge === "center") {
+                    const targetAudio = next.find((item) => item.id === dragState.targetId);
+                    const laneRect = audioTracks?.getBoundingClientRect?.();
+                    const laneCount = Math.max(1, Math.round(Number(timeline.audioTrackCount || 1)));
+                    const dropTrack = laneRect
+                        ? Math.max(0, Math.min(laneCount - 1, Math.floor((move.clientY - laneRect.top) / 90)))
+                        : Math.max(0, Math.round(Number(targetAudio?.track || 0)));
+                    if (targetAudio) {
+                        // Horizontal centre-drag now also moves the clip to the
+                        // lane under the pointer. Track is editorial metadata;
+                        // its source waveform and time stay intact.
+                        targetAudio.track = dropTrack;
+                        dragState.audioTargetTrack = dropTrack;
+                    }
+                    // Centre-drag uses a symmetric editorial magnet: either
+                    // edge of the audio clip can meet either edge of an image
+                    // slot. Start-to-start remains first priority, preserving
+                    // the established AudioBoard behaviour and backend offset.
+                    const snap = audioSnapTargetForClip(targetAudio, 6);
+                    if (targetAudio && snap) {
+                        targetAudio.start = snap.snappedStart;
+                        targetAudio.linkedVisualId = snap.id;
+                        targetAudio.linked_visual_id = snap.id;
+                        targetAudio.anchorMode = "visual_start";
+                        targetAudio.anchor_mode = "visual_start";
+                        targetAudio.relativeStartFrames = snap.relativeStartFrames;
+                        targetAudio.relative_start_frames = snap.relativeStartFrames;
+                        dragState.audioSnapFrame = snap.frame;
+                        dragState.audioSnapTargetId = snap.id;
+                        dragState.audioSnapAudioEdge = snap.audioEdge;
+                        dragState.audioSnapVisualEdge = snap.visualEdge;
+                        dragState.audioSnapKind = `${snap.audioEdge}_to_${snap.visualEdge}`;
+                    } else if (targetAudio) {
+                        targetAudio.linkedVisualId = "";
+                        targetAudio.linked_visual_id = "";
+                        targetAudio.anchorMode = "absolute_timeline";
+                        targetAudio.anchor_mode = "absolute_timeline";
+                        targetAudio.relativeStartFrames = 0;
+                        targetAudio.relative_start_frames = 0;
+                        delete dragState.audioSnapFrame;
+                        delete dragState.audioSnapTargetId;
+                        delete dragState.audioSnapAudioEdge;
+                        delete dragState.audioSnapVisualEdge;
+                        delete dragState.audioSnapKind;
+                    }
+                }
             } else if (isMotion) {
                 next = motionDragPreview(dragState.initial, dragState.targetId, deltaFrames, edge, getTotalFrames());
             } else if (edge === "center") {
@@ -13002,6 +13328,19 @@ function renderShotboardV3(node) {
             }
             if (!isAudio && !isMotion) {
                 const moved = (timeline.segments || []).find((item) => item.id === seg.id);
+                if (moved) {
+                    const movedStart = Math.max(0, Math.round(Number(moved.start || 0)));
+                    (timeline.audioSegments || []).forEach((audio) => {
+                        const linked = String(audio.linkedVisualId || audio.linked_visual_id || "");
+                        if (linked !== String(moved.id || "")) return;
+                        const relative = Math.round(Number(audio.relativeStartFrames ?? audio.relative_start_frames ?? 0) || 0);
+                        audio.start = Math.max(0, movedStart + relative);
+                        audio.anchorMode = "visual_start";
+                        audio.anchor_mode = "visual_start";
+                        audio.relativeStartFrames = relative;
+                        audio.relative_start_frames = relative;
+                    });
+                }
                 if (moved && isActionBridgeRelaySegment(moved)) syncActionBridgeSourceFromRelay(moved);
             }
             previewSegments = null;
@@ -14016,6 +14355,11 @@ function renderShotboardV3(node) {
         const innerRight = 8;
         const topRightSafe = isAudio ? innerRight : 42;
         const selected = selectedId === seg.id;
+        const isAudioSnapVisualTarget = Boolean(
+            !isAudio
+            && dragState?.isAudio
+            && String(dragState.audioSnapTargetId || "") === String(seg.id || ""),
+        );
         const showDragStripes = Boolean(dragState && !isAudio && dragState.targetId === seg.id && dragState.kind !== "center");
         const isVideoBlock = isTimelineVideoSegment(seg);
         const color = isAudio
@@ -14031,15 +14375,34 @@ function renderShotboardV3(node) {
             `top:${top}px`,
             `height:${height}px`,
             `background:${color}`,
-            (selected ? "border:2px solid #F9C859" : `border:1px solid ${isVideoBlock ? "#3F739A" : purple.borderSoft}`),
+            (selected
+                ? "border:2px solid #F9C859"
+                : isAudioSnapVisualTarget
+                    ? "border:2px solid #E0A8FF"
+                    : `border:1px solid ${isVideoBlock ? "#3F739A" : purple.borderSoft}`),
             "border-radius:4px",
             "box-sizing:border-box",
             "overflow:visible",
             "cursor:grab",
-            (selected ? "box-shadow:0 0 0 2px rgba(249,200,89,.35),0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(145,203,255,.13)" : (isVideoBlock ? "box-shadow:0 6px 16px rgba(0,0,0,.42),inset 0 1px 0 rgba(145,203,255,.14)" : "box-shadow:0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,190,120,.08)")),
+            (selected
+                ? "box-shadow:0 0 0 2px rgba(249,200,89,.35),0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(145,203,255,.13)"
+                : isAudioSnapVisualTarget
+                    ? "box-shadow:0 0 0 3px rgba(224,168,255,.28),0 0 22px rgba(218,157,255,.72),inset 0 0 18px rgba(136,66,178,.18)"
+                    : (isVideoBlock ? "box-shadow:0 6px 16px rgba(0,0,0,.42),inset 0 1px 0 rgba(145,203,255,.14)" : "box-shadow:0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,190,120,.08)")),
             "user-select:none",
-            `z-index:${isAudio ? 14 : (selected || (dragState && dragState.targetId === seg.id) ? 18 : 4)}`,
+            `z-index:${isAudio ? 14 : (isAudioSnapVisualTarget ? 20 : (selected || (dragState && dragState.targetId === seg.id) ? 18 : 4))}`,
         ].join(";");
+        if (isAudioSnapVisualTarget) {
+            const edge = dragState.audioSnapVisualEdge === "end" ? "right" : "left";
+            const snapEdge = document.createElement("div");
+            snapEdge.className = "iamccs-v3-audio-snap-slot-edge";
+            snapEdge.style.cssText = `position:absolute;${edge}:-3px;top:-2px;bottom:-2px;width:5px;border-radius:4px;z-index:55;background:#F0C2FF;box-shadow:0 0 0 1px rgba(75,28,105,.88),0 0 18px rgba(224,168,255,1);pointer-events:none;`;
+            const snapBadge = document.createElement("div");
+            snapBadge.textContent = `MAGNET · ${String(dragState.audioSnapAudioEdge || "start").toUpperCase()} → SLOT ${String(dragState.audioSnapVisualEdge || "start").toUpperCase()}`;
+            snapBadge.style.cssText = `position:absolute;${edge === "left" ? "left:7px" : "right:7px"};top:4px;max-width:170px;padding:3px 6px;border:1px solid rgba(224,168,255,.84);border-radius:999px;background:rgba(46,19,62,.94);color:#F7DFFF;font:900 8px/1 Arial;letter-spacing:.045em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 3px 12px rgba(0,0,0,.42);pointer-events:none;`;
+            snapEdge.appendChild(snapBadge);
+            block.appendChild(snapEdge);
+        }
         const content = document.createElement("div");
         content.style.cssText = isAudio
             ? "position:absolute;left:8px;right:8px;bottom:2px;height:14px;display:flex;align-items:center;justify-content:center;text-align:center;color:#FFF2E4;font-size:10px;font-weight:800;text-shadow:0 1px 2px rgba(0,0,0,.75);padding:0;box-sizing:border-box;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
@@ -16395,14 +16758,17 @@ function renderShotboardV3(node) {
         audioTracks.style.top = `${audioTrackTop}px`;
         for (let i = 0; i < Math.max(1, Number(timeline.audioTrackCount || 1)); i += 1) {
             const lane = document.createElement("div");
-            lane.style.cssText = `position:absolute;left:0;right:0;top:${i * 90}px;height:90px;border-bottom:1px solid ${purple.borderSoft};background:${i % 2 ? "rgba(255,255,255,.025)" : "transparent"};`;
+            const laneClips = audioSegmentsForDraw.filter((seg) => Number(seg?.track || 0) === i && audioSegmentHasMedia(seg) && !seg.placeholder);
+            const laneEndFrame = laneClips.reduce((end, seg) => Math.max(end, Number(seg.start || 0) + Number(seg.length || 1)), 0);
+            const laneEndPercent = Math.max(0, Math.min(100, (laneEndFrame / Math.max(1, getTotalFrames())) * 100));
+            const dropTarget = Boolean(dragState?.isAudio && Number(dragState.audioTargetTrack) === i);
+            lane.style.cssText = `position:absolute;left:0;right:0;top:${i * 90}px;height:90px;border-bottom:1px solid ${dropTarget ? "rgba(224,168,255,.92)" : purple.borderSoft};background:${dropTarget ? "linear-gradient(90deg,rgba(120,67,151,.28),rgba(224,168,255,.10),rgba(120,67,151,.18))" : (i % 2 ? "rgba(255,255,255,.025)" : "transparent")};box-shadow:${dropTarget ? "inset 0 0 0 1px rgba(224,168,255,.42),0 0 14px rgba(190,111,237,.22)" : "none"};`;
             const plus = document.createElement("button");
             plus.type = "button";
             plus.innerHTML = `<span>+</span><b>Audio</b>`;
             plus.title = "Import audio into this track";
             plus.style.cssText = [
-                "position:sticky",
-                "left:8px",
+                "position:absolute",
                 "top:27px",
                 "width:118px",
                 "height:35px",
@@ -16429,15 +16795,22 @@ function renderShotboardV3(node) {
             if (plusIcon) plusIcon.style.cssText = "display:flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:999px;background:#1B1713;color:#F4EFE7;font-size:18px;font-weight:900;";
             const plusText = plus.querySelector("b");
             if (plusText) plusText.style.cssText = "display:block;justify-self:start;text-transform:uppercase;font-size:10px;letter-spacing:0;color:#181512;";
+            plus.style.left = laneClips.length
+                ? `min(calc(${laneEndPercent}% + 8px), calc(100% - 126px))`
+                : "8px";
+            plus.title = laneClips.length
+                ? `Append audio at ${Math.round(laneEndFrame)}f on lane ${i + 1}`
+                : `Import first audio clip on lane ${i + 1}`;
             plus.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
             plus.onclick = (event) => {
                 event.preventDefault();
                 event.stopPropagation();
                 pendingAudioTrack = i;
-                pendingAudioInsertFrame = 0;
+                pendingAudioInsertFrame = Math.max(0, Math.round(laneEndFrame));
+                pendingAudioAppendAtEnd = true;
                 audioInput.click();
             };
-            if (!trackHasRealAudio(i)) lane.appendChild(plus);
+            lane.appendChild(plus);
             audioTracks.appendChild(lane);
         }
         visualSegments.forEach((seg) => imageTrack.appendChild(makeBlock(seg, false)));
@@ -16446,6 +16819,14 @@ function renderShotboardV3(node) {
         drawVisualEdgeHandles(visualSegments);
         drawIcLoraTrack(motionSegmentsForDraw);
         audioSegmentsForDraw.forEach((seg) => audioTracks.appendChild(makeBlock(seg, true)));
+        timelineBox.querySelectorAll(".iamccs-v3-audio-snap-guide").forEach((item) => item.remove());
+        if (dragState && Number.isFinite(Number(dragState.audioSnapFrame))) {
+            const snapGuide = document.createElement("div");
+            snapGuide.className = "iamccs-v3-audio-snap-guide";
+            const left = (Number(dragState.audioSnapFrame) / Math.max(1, getTotalFrames())) * 100;
+            snapGuide.style.cssText = `position:absolute;left:${left}%;top:0;bottom:0;width:2px;z-index:96;background:#E0A8FF;box-shadow:0 0 0 1px rgba(97,42,139,.65),0 0 14px rgba(218,157,255,.95);pointer-events:none;`;
+            timelineBox.appendChild(snapGuide);
+        }
         timelineBox.querySelectorAll(".iamccs-v3-playhead").forEach((item) => item.remove());
         const playhead = document.createElement("div");
         playhead.className = "iamccs-v3-playhead";
@@ -16828,13 +17209,13 @@ function renderShotboardV3(node) {
         return String(visual[targetIndex]?.id || nearestId || "");
     }
 
-    async function uploadAudioFiles(files, targetFrameStart = null, targetTrack = 0) {
+    async function uploadAudioFiles(files, targetFrameStart = null, targetTrack = 0, options = {}) {
         const audioFiles = Array.from(files || []).filter((file) => String(file.type || "").startsWith("audio/"));
         const track = Math.max(0, Math.round(Number(targetTrack || 0)));
+        const preserveTimelinePosition = Boolean(options?.preserveTimelinePosition);
         let cursor = targetFrameStart == null
             ? endOfSegments((timeline.audioSegments || []).filter((item) => Number(item.track || 0) === track && audioSegmentHasMedia(item) && !item.placeholder))
             : Math.max(0, Math.round(Number(targetFrameStart || 0)));
-        const existingAudioCount = (timeline.audioSegments || []).filter((item) => audioSegmentHasMedia(item) && !item.placeholder).length;
         for (const [fileIndex, file] of audioFiles.entries()) {
             try {
                 const body = new FormData();
@@ -16846,13 +17227,27 @@ function renderShotboardV3(node) {
                 const subfolder = data?.subfolder || "";
                 const audioFile = subfolder ? `${subfolder}/${filename}` : filename;
                 const info = await decodeAudioInfo(file);
-                const room = Math.max(1, getTotalFrames() - cursor);
+                // A lane-end append is literal: it starts where the previous
+                // audio clip ends. It only becomes visual-anchored when that
+                // exact frame already is a shot boundary.
+                const exactSnap = preserveTimelinePosition ? audioSnapTargetForFrame(cursor, 0) : null;
+                const linkedVisualId = exactSnap?.id || (preserveTimelinePosition ? "" : visualSegmentIdByAudioIndex(cursor, fileIndex));
+                const linkedVisual = (timeline.segments || []).find((item) => String(item.id || "") === linkedVisualId);
+                const placementStart = linkedVisual
+                    ? Math.max(0, Math.round(Number(linkedVisual.start || 0)))
+                    : cursor;
+                const room = linkedVisual
+                    ? Math.max(1, Math.min(
+                        getTotalFrames() - placementStart,
+                        Math.round(Number(linkedVisual.length || 1)),
+                    ))
+                    : Math.max(1, getTotalFrames() - placementStart);
                 const length = Math.min(Math.max(1, info.durationFrames), room);
-                removeEmptyAudioPlaceholdersInRange(track, cursor, length);
+                removeEmptyAudioPlaceholdersInRange(track, placementStart, length);
                 const seg = {
                     id: newId("aud"),
                     type: "audio",
-                    start: cursor,
+                    start: placementStart,
                     length,
                     track,
                     trimStart: 0,
@@ -16868,10 +17263,15 @@ function renderShotboardV3(node) {
                     fadeInFrames: 0,
                     fadeOutFrames: 0,
                     normalizeAudio: false,
-                    linkedVisualId: visualSegmentIdByAudioIndex(cursor, existingAudioCount + fileIndex),
+                    linkedVisualId,
+                    linked_visual_id: linkedVisualId,
+                    anchorMode: linkedVisualId ? "visual_start" : "absolute_timeline",
+                    anchor_mode: linkedVisualId ? "visual_start" : "absolute_timeline",
+                    relativeStartFrames: 0,
+                    relative_start_frames: 0,
                 };
                 timeline.audioSegments.push(seg);
-                cursor += length;
+                cursor = placementStart + length;
             } catch (err) {
                 console.error("[IAMCCS Cine Shotboard V3] audio upload failed", err);
             }
@@ -16983,9 +17383,13 @@ function renderShotboardV3(node) {
     }
 
     audioInput.onchange = async (event) => {
-        await uploadAudioFiles(event.target.files || [], pendingAudioInsertFrame, pendingAudioTrack);
+        const appendAtEnd = pendingAudioAppendAtEnd;
+        await uploadAudioFiles(event.target.files || [], pendingAudioInsertFrame, pendingAudioTrack, {
+            preserveTimelinePosition: appendAtEnd,
+        });
         pendingAudioInsertFrame = null;
         pendingAudioTrack = 0;
+        pendingAudioAppendAtEnd = false;
         audioInput.value = "";
     };
     motionInput.onchange = async (event) => {
@@ -17003,6 +17407,7 @@ function renderShotboardV3(node) {
     addAudioBtn.onclick = () => {
         pendingAudioInsertFrame = null;
         pendingAudioTrack = 0;
+        pendingAudioAppendAtEnd = false;
         audioInput.click();
     };
     addTrackBtn.onclick = () => { timeline.audioTrackCount = Math.max(1, Number(timeline.audioTrackCount || 1)) + 1; draw(); };
@@ -17020,6 +17425,7 @@ function renderShotboardV3(node) {
         } else if (y >= audioTrackTop) {
             pendingAudioInsertFrame = frame;
             pendingAudioTrack = Math.max(0, Math.min(Math.max(1, Number(timeline.audioTrackCount || 1)) - 1, Math.floor((y - audioTrackTop) / 90)));
+            pendingAudioAppendAtEnd = false;
             audioInput.click();
         } else {
             if (isShotboardV4) {
@@ -19214,7 +19620,43 @@ function renderShotboardH3Settings(node) {
     const grid = document.createElement("div");
     grid.style.cssText = "display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;padding:9px;align-content:start;";
     body.append(bodyHead, grid);
-    root.append(header, presetBand, tabBar, body);
+    const conditioningDeviceBand = document.createElement("section");
+    conditioningDeviceBand.style.cssText = "display:grid;grid-template-columns:minmax(210px,.8fr) repeat(2,minmax(0,1fr));gap:5px;align-items:stretch;margin:8px 0;padding:7px;border:1px solid #5B6E73;background:linear-gradient(135deg,#152124,#11181A);";
+    const conditioningDeviceLabel = document.createElement("div");
+    conditioningDeviceLabel.innerHTML = "<div style=\"color:#F5D18A;font-size:9px;font-weight:900;letter-spacing:.08em\">QWEN CONDITIONING DEVICE</div><div style=\"margin-top:3px;color:#AEBBBC;font-size:9px\">H3 sampling remains on GPU in both modes</div>";
+    const conditioningDeviceButtons = new Map();
+    [
+        { value: "gpu_auto", label: "GPU AUTO", title: "GPU-first Qwen conditioning with the protected dynamic VRAM reserve; CPU is used only after a real CUDA OOM." },
+        { value: "cpu_direct", label: "CPU DIRECT", title: "Run Qwen conditioning directly on CPU. The MiniMax H3 denoiser/sampler still runs on GPU." },
+    ].forEach((entry) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = entry.label;
+        button.style.cssText = "height:34px;border:1px solid #52656A;border-radius:2px;background:#202B2E;color:#C5D0D0;font-size:9px;font-weight:900;letter-spacing:.065em;cursor:pointer;padding:0 4px;";
+        button.title = entry.title;
+        button.onclick = () => {
+            if (!setWidgetValue(node, "text_encoder_device", entry.value)) return;
+            status.textContent = `LIVE · QWEN ${entry.label}`;
+            emitH3SettingsChanged(node, "text_encoder_device", entry.value);
+            refreshConditioningDeviceButtons();
+            window.setTimeout(() => node._iamccsRefreshH3SettingsUi?.(), 0);
+        };
+        conditioningDeviceButtons.set(entry.value, button);
+        conditioningDeviceBand.appendChild(button);
+    });
+    const refreshConditioningDeviceButtons = () => {
+        const selected = String(getWidget(node, "text_encoder_device")?.value || "gpu_auto");
+        conditioningDeviceButtons.forEach((button, value) => {
+            const active = value === selected;
+            button.style.borderColor = active ? "#F0C66E" : "#52656A";
+            button.style.background = active ? "linear-gradient(145deg,#74501F,#3C2A17)" : "#202B2E";
+            button.style.color = active ? "#FFF4D3" : "#C5D0D0";
+            button.style.boxShadow = active ? "0 0 0 2px rgba(240,198,110,.28),0 0 14px rgba(225,157,42,.20)" : "none";
+        });
+    };
+    conditioningDeviceBand.prepend(conditioningDeviceLabel);
+    refreshConditioningDeviceButtons();
+    root.append(header, presetBand, conditioningDeviceBand, tabBar, body);
 
     const h3SettingsSnapshot = () => {
         const settings = {};
@@ -19255,7 +19697,7 @@ function renderShotboardH3Settings(node) {
     importSettingsButton.onclick = () => settingsFileInput.click();
 
     const tabButtons = new Map();
-    let activeGroup = H3_SETTINGS_UI_GROUPS.find((group) => group.id === node.properties?.iamccs_h3_settings_tab) || H3_SETTINGS_UI_GROUPS.find((group) => group.id === "continuity");
+    let activeGroup = H3_SETTINGS_UI_GROUPS.find((group) => group.id === node.properties?.iamccs_h3_settings_tab) || H3_SETTINGS_UI_GROUPS.find((group) => group.id === "generation");
     const availableSettingsGroups = () => {
         const capabilities = h3TaskUiCapabilities(
             getWidget(node, "task_mode")?.value,
@@ -19284,7 +19726,8 @@ function renderShotboardH3Settings(node) {
     };
     const refreshOperatingPresets = () => {
         const activeTask = canonicalH3TaskMode(getWidget(node, "task_mode")?.value);
-        const timelineAudioOwned = ["longvid_guides", "ref2vid_lipsync"].includes(activeTask);
+        const timelineAudioOwned = h3TimelineAudioOwned(activeTask);
+        const lockedAudioMode = h3RequiredAudioMode(activeTask);
         const activeEntries = Object.entries(presetCategories)
             .map(([category, meta]) => {
                 const id = String(node.properties?.[meta.property] || "");
@@ -19300,24 +19743,30 @@ function renderShotboardH3Settings(node) {
         activePresetReadout.style.color = activeEntries.length ? "#FFF0C5" : "#BEECD2";
         presetControls.forEach((entry) => {
             const selected = String(node.properties?.[entry.property] || "") === entry.id;
-            const longvid = entry.category === "mode" && entry.id === "longvid";
-            // LongVid/Ref2Vid own the AudioBoard lane, but native H3 AV is
-            // still valid and should be visibly selectable. Only a second,
-            // incompatible audio source is prevented here.
-            const disabledForTimelineAudio = timelineAudioOwned && entry.category === "audio" && entry.id !== "native";
+            const longvid = entry.category === "mode" && entry.id.startsWith("longvid");
+            // Ordinary LongVid allows Native or the explicit safe Audio Drive.
+            // LipSync tasks lock Audio Drive; incompatible post routes are
+            // disabled without changing any serialized widget position.
+            const disabledForTimelineAudio = entry.category === "audio" && (
+                lockedAudioMode
+                    ? entry.id !== "audio_driven"
+                    : activeTask === "longvid_guides" && !["native", "audio_driven"].includes(entry.id)
+            );
             entry.button.disabled = disabledForTimelineAudio;
             entry.button.style.cursor = disabledForTimelineAudio ? "not-allowed" : "pointer";
             entry.button.style.opacity = disabledForTimelineAudio ? ".42" : "1";
-            if (entry.category === "audio" && timelineAudioOwned && entry.id === "native") {
-                entry.button.title = activeTask === "ref2vid_lipsync"
-                    ? "Active: the matching AudioBoard clip is <Audio 1>; H3 samples performance audio and video together."
-                    : "Active: AudioBoard clips are positioned guides; H3 still performs joint native audio-video sampling.";
+            if (entry.category === "audio" && activeTask === "longvid_guides" && entry.id === "native") {
+                entry.button.title = "LongVid Native: AudioBoard clips remain positioned guides while H3 samples its native soundtrack; exact lip motion is not guaranteed.";
+            } else if (entry.category === "audio" && activeTask === "longvid_guides" && entry.id === "audio_driven") {
+                entry.button.title = "LongVid Safe LipSync: lock each rebased AudioBoard chunk in the joint AV latent while keeping the existing positioned image-guide path.";
             } else if (disabledForTimelineAudio) {
                 entry.button.title = activeTask === "ref2vid_lipsync"
                     ? "Ref2Vid LipSync already owns the main AudioBoard clip as <Audio 1>."
-                    : "LongVid already owns imported AudioBoard slots as positioned H3 guides; a second audio route would conflict.";
+                    : activeTask === "longvid_guided_lipsync"
+                        ? "LongVid Guided LipSync requires Exact Audio Drive; other audio routes would disable lip synchronization."
+                        : "This route is incompatible with positioned LongVid audio guides.";
             }
-            const lipsync = entry.category === "mode" && entry.id === "ref2vid_lipsync";
+            const lipsync = entry.category === "mode" && ["ref2vid_lipsync", "longvid_guided_lipsync"].includes(entry.id);
             entry.button.style.borderColor = selected ? (lipsync ? "#FFC1E7" : (longvid ? "#DCC4FF" : "#FFD470")) : (lipsync ? "#9C527E" : (longvid ? "#8960BA" : "#52656A"));
             entry.button.style.background = selected
                 ? (lipsync ? "linear-gradient(145deg,#A53D80,#54213F)" : (longvid ? "linear-gradient(145deg,#7443AE,#38205E)" : "linear-gradient(145deg,#A66B1E,#5D3914)"))
@@ -19357,8 +19806,9 @@ function renderShotboardH3Settings(node) {
     const applyBulkValues = (title, values) => {
         const effectiveValues = { ...values };
         const effectiveTask = canonicalH3TaskMode(effectiveValues.task_mode ?? getWidget(node, "task_mode")?.value);
-        if (["longvid_guides", "ref2vid_lipsync"].includes(effectiveTask) && effectiveValues.audio_mode && effectiveValues.audio_mode !== "h3_native_generated") {
-            effectiveValues.audio_mode = "h3_native_generated";
+        const requiredAudioMode = h3RequiredAudioMode(effectiveTask);
+        if (requiredAudioMode && effectiveValues.audio_mode && effectiveValues.audio_mode !== requiredAudioMode) {
+            effectiveValues.audio_mode = requiredAudioMode;
         }
         const changed = [];
         Object.entries(effectiveValues).forEach(([name, value]) => {
@@ -19477,13 +19927,21 @@ function renderShotboardH3Settings(node) {
     addOperatingPreset(modePresetButtons, "mode", "ref2va_audio", "REF2VA AUDIO", "VOICE / RHYTHM", "Reference-audio conditioning with voice-timbre semantics.", {
         task_mode: "ref2va", audio_mode: "h3_ref2va_audio", reference_audio_role: "voice_timbre",
     });
-    addOperatingPreset(modePresetButtons, "mode", "ref2vid_lipsync", "REF2VID LIPSYNC", "STATIC IMAGE + AUDIOBOARD", "One static reference image plus each matching main AudioBoard clip. No lyrics or transcript in the prompt; audio is the timing source.", () => ({
-        task_mode: "ref2vid_lipsync", audio_mode: "h3_native_generated", performance_profile: "low_vram_turbo",
+    addOperatingPreset(modePresetButtons, "mode", "ref2vid_lipsync", "REF2VID LIPSYNC", "STATIC IMAGE + AUDIOBOARD", "v20 parity: the same AudioBoard chunk is <Audio 1> and the locked latent. Put verbatim user-supplied speech in <d>[Language] ...</d>.", () => ({
+        task_mode: "ref2vid_lipsync", audio_mode: "h3_custom_audio_drive", performance_profile: "low_vram_turbo",
         width: 960, height: 544, image_width: 960, image_height: 544, steps: 6,
         acceleration: "h3_sage", turbo_mode: "ckpt500_6_8", turbo_lora_name: currentH3TurboLora("ref2v"),
         turbo_strength: 0.75, turbo_sampler_mode: "audio_fixed", sampler_name: "res_multistep", scheduler: "simple",
         shift_video: 12, shift_audio: 3, reference_audio_role: "rhythm_timing", flf_continuity_mode: "stable_keyframes",
         face_detailer_enabled: false,
+    }));
+    addOperatingPreset(modePresetButtons, "mode", "longvid_guided_lipsync", "LONGVID + LIPSYNC", "SAFE GUIDES + LOCKED AUDIO", "Recommended LongVid lip-sync: preserves the working positioned T2VA/AddGuide image path and locks the rebased AudioBoard chunk. No REF2VA hybrid and no duplicated reference image.", () => ({
+        task_mode: "longvid_guided_lipsync", audio_mode: "h3_custom_audio_drive", performance_profile: "low_vram_balanced",
+        width: 960, height: 544, image_width: 960, image_height: 544, steps: 12,
+        acceleration: "h3_sage", turbo_mode: "off", turbo_lora_name: "",
+        turbo_strength: 0.75, turbo_sampler_mode: "audio_fixed", sampler_name: "res_multistep", scheduler: "beta",
+        shift_video: 12, shift_audio: 3, text_encoder_device: "cpu_direct",
+        reference_audio_role: "off", flf_continuity_mode: "stable_keyframes",
     }));
     addOperatingPreset(modePresetButtons, "mode", "v2va_edit", "V2VA EDIT", "SOURCE VIDEO", "Object swap/source-video edit with the safe V2VA source contract.", {
         task_mode: "v2va_object_swap", v2v_guide_mode: "raw_only", v2v_source_range_policy: "timeline_segment",
@@ -19493,7 +19951,7 @@ function renderShotboardH3Settings(node) {
     addOperatingPreset(audioPresetButtons, "audio", "native", "NATIVE AV", "H3 GENERATED", "H3 jointly generates its own soundtrack; no external AUDIO is required.", {
         audio_mode: "h3_native_generated",
     });
-    addOperatingPreset(audioPresetButtons, "audio", "audio_driven", "AUDIO DRIVE", "CUSTOM AV LATENT", "Audio-driven route: connect Cine Info H3 Custom audio for pre-sampler AV-latent drive.", {
+    addOperatingPreset(audioPresetButtons, "audio", "audio_driven", "AUDIO DRIVE", "CUSTOM AV LATENT", "Audio-driven route: locks Cine Info H3 Custom audio in standard modes, or automatically uses the rebased AudioBoard chunk in LongVid Guided mode.", {
         audio_mode: "h3_custom_audio_drive",
     });
     addOperatingPreset(audioPresetButtons, "audio", "post", "POST AUDIO", "NO VIDEO DRIVE", "External post mix only. Audio does not condition video, acting or motion.", {
@@ -19524,6 +19982,7 @@ function renderShotboardH3Settings(node) {
         t2va: ["t2va"],
         i2va: ["i2va"],
         longvid_guides: ["longvid"],
+        longvid_guided_lipsync: ["longvid_guided_lipsync"],
         fl2va: ["fl2va_stable", "fl2va_film"],
         ref2va: ["ref2va_audio"],
         ref2vid_lipsync: ["ref2vid_lipsync"],
@@ -19564,14 +20023,17 @@ function renderShotboardH3Settings(node) {
     });
     const writeValue = (name, value) => {
         const task = canonicalH3TaskMode(name === "task_mode" ? value : getWidget(node, "task_mode")?.value);
-        const timelineAudioOwned = ["longvid_guides", "ref2vid_lipsync"].includes(task);
-        if (timelineAudioOwned && name === "audio_mode" && value !== "h3_native_generated") {
-            status.textContent = task === "ref2vid_lipsync" ? "LIPSYNC · AUDIOBOARD <AUDIO 1>" : "LONGVID · AUDIO GUIDES";
+        const requiredAudioMode = h3RequiredAudioMode(task);
+        if (requiredAudioMode && name === "audio_mode" && value !== requiredAudioMode) {
+            status.textContent = task === "ref2vid_lipsync" ? "REF2VID LIPSYNC · LOCKED AUDIOBOARD" : "LONGVID LIPSYNC · SAFE LOCKED AUDIOBOARD";
             return;
         }
         if (!setWidgetValue(node, name, value)) return;
-        if (name === "task_mode" && timelineAudioOwned && getWidget(node, "audio_mode")?.value !== "h3_native_generated") {
-            setWidgetValue(node, "audio_mode", "h3_native_generated");
+        if (name === "task_mode" && requiredAudioMode && getWidget(node, "audio_mode")?.value !== requiredAudioMode) {
+            setWidgetValue(node, "audio_mode", requiredAudioMode);
+        }
+        if (name === "task_mode" && task === "longvid_guided_lipsync" && getWidget(node, "text_encoder_device")?.value !== "cpu_direct") {
+            setWidgetValue(node, "text_encoder_device", "cpu_direct");
         }
         if (name === "task_mode") syncModePresetForTask(value);
         status.textContent = `LIVE · ${h3SettingsUiLabel(name).toUpperCase()}`;
@@ -19611,7 +20073,7 @@ function renderShotboardH3Settings(node) {
         const widget = getWidget(node, name);
         if (!widget) return null;
         const activeTask = canonicalH3TaskMode(getWidget(node, "task_mode")?.value);
-        const timelineAudioInactive = name === "audio_mode" && ["longvid_guides", "ref2vid_lipsync"].includes(activeTask);
+        const timelineAudioInactive = name === "audio_mode" && Boolean(h3RequiredAudioMode(activeTask));
         const nativeAvContinuity = canonicalH3ContinuityMode(getWidget(node, "flf_continuity_mode")?.value) === "native_av_context";
         const continuityTailInactive = ["flf_continuity_tail_frames", "flf_continuity_audio"].includes(name) && !nativeAvContinuity;
         const overlapInactive = name === "flf_overlap_frames"
@@ -19620,7 +20082,7 @@ function renderShotboardH3Settings(node) {
         const disabledHint = timelineAudioInactive
             ? (activeTask === "ref2vid_lipsync"
                 ? "Ref2Vid LipSync takes the matching main AudioBoard slot as <Audio 1>. Do not select an additional audio route."
-                : "LongVid injects imported main AudioBoard slots directly as positioned H3 audio guides. External audio routes are not combined with this mode.")
+                : "LongVid Guided LipSync uses T2VA/AddGuide for positioned images and the v20 zero-mask latent lock for AudioBoard; audio is not duplicated as AddGuide.")
             : continuityTailInactive
             ? "Disabled while Stable Keyframes is selected. Select Native AV Continuity to enable this control."
             : overlapInactive
@@ -19628,10 +20090,14 @@ function renderShotboardH3Settings(node) {
                 : "";
         const field = document.createElement("label");
         field.style.cssText = `display:flex;min-width:0;flex-direction:column;gap:4px;padding:7px;border:1px solid ${readOnly ? "#5E4741" : "#40545A"};background:${readOnly ? "rgba(45,28,24,.45)" : "rgba(20,30,33,.74)"};opacity:${continuityTailInactive || overlapInactive ? ".52" : "1"};`;
-        if (name === "flf_continuity_mode" || name === "reference_resize_policy") field.style.gridColumn = "span 2";
+        if (name === "flf_continuity_mode" || name === "reference_resize_policy" || name === "text_encoder_device") field.style.gridColumn = "span 2";
         if (disabledHint) field.title = disabledHint;
         const label = document.createElement("span");
-        label.textContent = name === "flf_continuity_mode" ? "FL2VA HANDOFF STRATEGY" : h3SettingsUiLabel(name);
+        label.textContent = name === "flf_continuity_mode"
+            ? "FL2VA HANDOFF STRATEGY"
+            : name === "text_encoder_device"
+                ? "QWEN CONDITIONING DEVICE · H3 SAMPLER REMAINS GPU"
+                : h3SettingsUiLabel(name);
         label.style.cssText = `min-height:12px;color:${readOnly ? "#C69F91" : "#B9C7C7"};font-size:9px;font-weight:800;letter-spacing:.035em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;`;
         field.appendChild(label);
         const value = widget.value;
@@ -19652,6 +20118,22 @@ function renderShotboardH3Settings(node) {
                 modeGrid.appendChild(button);
             });
             field.appendChild(modeGrid);
+        } else if (name === "text_encoder_device") {
+            const selectedDevice = String(value || "gpu_auto");
+            const deviceGrid = document.createElement("div");
+            deviceGrid.style.cssText = "display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:5px;";
+            [
+                { value: "gpu_auto", label: "GPU AUTO", note: "GPU-first Qwen with protected dynamic reserve; CPU retry only after a real OOM." },
+                { value: "cpu_direct", label: "CPU DIRECT", note: "Qwen runs on CPU; MiniMax H3 denoise and sampling stay on GPU." },
+            ].forEach((device) => {
+                const active = selectedDevice === device.value;
+                const button = squareButton(device.label, active);
+                button.style.cssText += `height:40px;border-color:${active ? "#F0C66E" : "#64767A"};background:${active ? "#704A1D" : "#182326"};color:${active ? "#FFF1CC" : "#D8E0DE"};`;
+                button.title = device.note;
+                button.onclick = () => writeValue(name, device.value);
+                deviceGrid.appendChild(button);
+            });
+            field.appendChild(deviceGrid);
         } else if (name === "reference_resize_policy") {
             const selectedPolicy = String(value || "off");
             const preResizeGrid = document.createElement("div");
@@ -19779,10 +20261,11 @@ function renderShotboardH3Settings(node) {
     };
     const renderGroup = (group) => {
         const task = canonicalH3TaskMode(getWidget(node, "task_mode")?.value);
-        const timelineAudioOwned = ["longvid_guides", "ref2vid_lipsync"].includes(task);
+        const timelineAudioOwned = h3TimelineAudioOwned(task);
         const theme = h3ModeTheme(task);
-        if (timelineAudioOwned && getWidget(node, "audio_mode")?.value !== "h3_native_generated") {
-            setWidgetValue(node, "audio_mode", "h3_native_generated");
+        const requiredAudioMode = h3RequiredAudioMode(task);
+        if (timelineAudioOwned && requiredAudioMode && getWidget(node, "audio_mode")?.value !== requiredAudioMode) {
+            setWidgetValue(node, "audio_mode", requiredAudioMode);
         }
         node.color = theme.node;
         node.bgcolor = theme.bg;
@@ -19804,6 +20287,7 @@ function renderShotboardH3Settings(node) {
         node.properties.iamccs_h3_settings_tab = group.id;
         bodyTitle.textContent = group.title;
         bodyNote.textContent = group.note;
+        refreshConditioningDeviceButtons();
         grid.replaceChildren();
         group.names.forEach((name) => {
             const field = makeField(name);
@@ -19829,6 +20313,20 @@ function renderShotboardH3Settings(node) {
     });
     renderGroup(activeGroup);
     node._iamccsRefreshH3SettingsUi = () => renderGroup(activeGroup);
+    node._iamccsReceiveShotboardSync = ({ shotboard, changed = [], summary = {} } = {}) => {
+        const duration = Number(summary.durationSeconds || getWidget(node, "duration_seconds")?.value || 0);
+        const slots = Number(summary.visualSlots || 0);
+        const audio = Number(summary.audioClips || 0);
+        status.textContent = changed.length
+            ? `SYNC · ${duration.toFixed(2)}s · ${changed.length} VALUES`
+            : `SHOTBOARD · ${duration.toFixed(2)}s · ${slots}V/${audio}A`;
+        status.title = `Live from Shotboard ${shotboard?.id ?? ""}: ${slots} visual slots, ${audio} audio clips. Named settings are synchronized bidirectionally.`;
+        refreshConditioningDeviceButtons();
+        if (changed.length) {
+            window.clearTimeout(node._iamccsH3ShotboardSyncRefreshTimer);
+            node._iamccsH3ShotboardSyncRefreshTimer = window.setTimeout(() => renderGroup(activeGroup), 70);
+        }
+    };
     const domWidget = node.addDOMWidget("H3 Settings CineLinX", "iamccs_h3_settings_panel", root, { serialize: false });
     // The preset deck and the active tab must live inside the DOM-widget area.
     // Keep a small internal scrollbar as a safety net for future groups, rather

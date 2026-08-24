@@ -10,6 +10,7 @@ acceleration and delivery routing agree for each chunk.
 
 from __future__ import annotations
 
+import functools
 import gc
 import json
 import logging
@@ -198,6 +199,60 @@ def _chunk(cine_linx: dict[str, Any], segment_index: int) -> dict[str, Any]:
     if index < 0 or index >= len(chunks):
         raise IndexError(f"segment_index={index} outside 0..{len(chunks) - 1}")
     return chunks[index]
+
+
+def _audit_lipsync_audio_lock(shotplan: dict[str, Any], latent: Any, chunk_index: int) -> str:
+    """Fail before sampling when an explicit LipSync plan lost its audio lock.
+
+    Stock MiniMax H3 preserves exact source audio through the joint nested AV
+    latent: video stays generative while the audio denoise mask is all zero.
+    AddGuide audio alone is positional conditioning and is not this contract.
+    """
+    contract = shotplan.get("lipsync") if isinstance(shotplan.get("lipsync"), dict) else {}
+    if not bool(contract.get("enabled", False)):
+        return "not_requested"
+    if str(shotplan.get("audio_mode", "") or "").strip().lower() != "h3_custom_audio_drive":
+        raise RuntimeError(
+            "MiniMax H3 LipSync contract is active but audio_mode is not h3_custom_audio_drive. "
+            "Select 'LongVid Guided + LipSync / SAFE locked AudioBoard' in Shotboard or IAMCCS H3 Settings."
+        )
+    if not isinstance(latent, dict):
+        raise RuntimeError("MiniMax H3 LipSync requires the locked LATENT output from IAMCCS Audio Drive.")
+    samples = latent.get("samples")
+    noise_mask = latent.get("noise_mask")
+    if not bool(getattr(samples, "is_nested", False)) or not bool(getattr(noise_mask, "is_nested", False)):
+        raise RuntimeError(
+            "MiniMax H3 LipSync audio lock is missing before sampling. Connect IAMCCS Audio Drive's locked LATENT "
+            "output to the Generation Backend; AddGuide conditioning alone does not guarantee lip synchronization."
+        )
+    sample_streams = samples.unbind()
+    mask_streams = noise_mask.unbind()
+    if len(sample_streams) != 2 or len(mask_streams) != 2:
+        raise RuntimeError("MiniMax H3 LipSync expected exactly two nested streams: video + audio.")
+    audio_samples = sample_streams[1]
+    audio_mask = mask_streams[1]
+    if tuple(audio_mask.shape) != tuple(audio_samples.shape):
+        raise RuntimeError(
+            "MiniMax H3 LipSync audio mask shape does not match its audio latent: "
+            f"{tuple(audio_mask.shape)} != {tuple(audio_samples.shape)}"
+        )
+    unlocked = int(torch.count_nonzero(audio_mask > 0).item())
+    total = int(audio_mask.numel())
+    if unlocked:
+        raise RuntimeError(
+            "MiniMax H3 LipSync audio lock is incomplete: "
+            f"{unlocked}/{total} audio latent values are still generative. Refusing a false LipSync render."
+        )
+    report = f"verified_zero_audio_mask:{total}_values"
+    LOG.info(
+        "MiniMax H3 exact LipSync audio lock verified | chunk=%d/%d | audio_latent=%s | locked=%d/%d",
+        int(chunk_index) + 1,
+        len(shotplan.get("chunks", [])),
+        tuple(audio_samples.shape),
+        total,
+        total,
+    )
+    return report
 
 
 def _task_family(task: str) -> str:
@@ -451,23 +506,38 @@ def _reference_header(items: list[dict[str, str]], prompt: str) -> str:
     return "\n".join(lines) + "\n\n" + str(prompt or "").strip()
 
 
+def _select_cpu_text_encoder(clip):
+    """Return a real CPU clone of the H3 Qwen encoder, or fail explicitly."""
+    from comfy_extras.nodes_multigpu import SelectCLIPDeviceNode
+
+    cpu_clip = SelectCLIPDeviceNode.execute(clip=clip, device="cpu")[0]
+    load_device = getattr(getattr(cpu_clip, "patcher", None), "load_device", None)
+    if getattr(load_device, "type", str(load_device)) != "cpu":
+        raise RuntimeError(
+            "MiniMax H3 could not activate CPU Direct for its text encoder. "
+            "Update ComfyUI and retry."
+        )
+    return cpu_clip
+
+
 def _place_text_encoder(clip, shotplan: dict[str, Any]):
-    """Keep Qwen3-VL on ComfyUI's automatic GPU-first placement.
+    """Select Qwen3-VL placement requested by the Shotboard.
 
-    ``cpu_safe_12gb`` is retained only as a legacy workflow value.  It no
-    longer pins the encoder to CPU because doing so turns prompt encoding into
-    the dominant runtime cost.  A CPU clone is created only by the OOM retry
-    path below, after a real CUDA allocation failure.
+    gpu_auto keeps the existing GPU-first path and one-time CPU fallback after
+    a real CUDA OOM. cpu_direct chooses CPU before Qwen is staged on GPU.
+    Old saved values stay accepted without changing widget order.
     """
-    mode = str(shotplan.get("text_encoder_device", "auto") or "auto").lower()
-    if mode not in {"auto", "cpu_safe_12gb"}:
-        raise ValueError(f"Unsupported MiniMax H3 text encoder device mode: {mode}")
-    if mode == "cpu_safe_12gb":
-        return clip, "auto(gpu-first; migrated legacy cpu_safe_12gb)"
-    return clip, "auto(gpu-first)"
+    requested = str(shotplan.get("text_encoder_device", "gpu_auto") or "gpu_auto").lower()
+    mode = {"auto": "gpu_auto", "cpu_safe_12gb": "cpu_direct"}.get(requested, requested)
+    if mode not in {"gpu_auto", "cpu_direct"}:
+        raise ValueError(f"Unsupported MiniMax H3 text encoder device mode: {requested}")
+    if mode == "cpu_direct":
+        LOG.info("MiniMax H3 text conditioning selected CPU Direct; skipping GPU-first Qwen allocation")
+        return _select_cpu_text_encoder(clip), "cpu_direct(preselected)"
+    return clip, "gpu_auto(gpu-first)"
 
 
-def _text_encoder_dynamic_reserve_mb(clip) -> int:
+def _text_encoder_dynamic_reserve_mb(clip, shotplan: dict[str, Any] | None = None) -> int:
     """Leave activation headroom when the 32B multimodal encoder uses a small GPU.
 
     ComfyUI's generic CLIP loader has no MiniMax-H3-specific activation estimate.
@@ -485,8 +555,21 @@ def _text_encoder_dynamic_reserve_mb(clip) -> int:
         total_gib = torch.cuda.get_device_properties(device).total_memory / (1024 ** 3)
     except Exception:
         return 0
+    plan = shotplan if isinstance(shotplan, dict) else {}
+    task_mode = str(plan.get("task_mode", "") or "").strip().lower()
+    audio_mode = str(plan.get("audio_mode", "") or "").strip().lower()
+    # Positioned guides, Ref2VA blocks and a pre-sampler audio latent add
+    # conditioning allocations around Qwen.  On a 12 GB card a 3584 MB
+    # reserve still allowed ~8.4 GB of the 9.6 GB encoder to remain resident,
+    # which reproduced a CUDA OOM even for a five-second 960x544 LongVid.
+    # Stream more Qwen weights from CPU in these pressure-heavy modes while
+    # retaining GPU execution.  CPU Direct remains the deterministic option.
+    high_pressure = (
+        task_mode in {"longvid_guides", "longvid_guided_lipsync", "longvid_ref2vid_lipsync", "ref2va", "ref2vid_lipsync"}
+        or audio_mode == "h3_custom_audio_drive"
+    )
     if total_gib <= 13.0:
-        return 3584
+        return 5120 if high_pressure else 4096
     if total_gib <= 17.0:
         return 2560
     return 0
@@ -569,7 +652,7 @@ def _clear_conditioning_cuda_after_oom() -> str:
 def _run_h3_conditioning_with_cpu_fallback(clip, shotplan: dict[str, Any], execute_fn):
     """Encode GPU-first with activation headroom; retry on CPU only after CUDA OOM."""
     active_clip, placement_report = _place_text_encoder(clip, shotplan)
-    reserve_mb = _text_encoder_dynamic_reserve_mb(active_clip)
+    reserve_mb = _text_encoder_dynamic_reserve_mb(active_clip, shotplan)
     restore_estimate = _install_text_encoder_memory_estimate(active_clip, reserve_mb)
     if reserve_mb:
         placement_report += f"+dynamic_reserve={reserve_mb}MB"
@@ -593,16 +676,34 @@ def _run_h3_conditioning_with_cpu_fallback(clip, shotplan: dict[str, Any], execu
             cleanup_report,
         )
 
-    from comfy_extras.nodes_multigpu import SelectCLIPDeviceNode
-
-    cpu_clip = SelectCLIPDeviceNode.execute(clip=clip, device="cpu")[0]
-    load_device = getattr(getattr(cpu_clip, "patcher", None), "load_device", None)
-    if getattr(load_device, "type", str(load_device)) != "cpu":
+    try:
+        cpu_clip = _select_cpu_text_encoder(clip)
+    except RuntimeError as cpu_exc:
         raise RuntimeError(
             "MiniMax H3 could not activate its CPU fallback after a CUDA OOM. "
             "Update ComfyUI and retry."
-        ) from oom_exc
-    return execute_fn(cpu_clip), f"auto->cpu_fallback(cuda_oom; {cleanup_report})"
+        ) from cpu_exc
+    return execute_fn(cpu_clip), f"gpu_auto->cpu_fallback(cuda_oom; {cleanup_report})"
+
+
+@functools.lru_cache(maxsize=1)
+def _h3_sage_triton_compiler_status() -> tuple[bool, str]:
+    """Detect whether KJ SageAttention can JIT a fresh Triton kernel."""
+    try:
+        from triton.runtime.build import get_cc
+
+        return True, str(get_cc())
+    except Exception as exc:
+        return False, f"{type(exc).__name__}: {exc}"
+
+
+def _apply_h3_sage_or_exact_low_vram(model, label: str):
+    available, detail = _h3_sage_triton_compiler_status()
+    if not available:
+        # Existing IAMCCS safe path: preserves sampler, AV shifts, prompts and
+        # audio; it only omits a JIT accelerator that this host cannot run.
+        return _apply_h3_low_vram_exact(model), f"{label} -> exact Low VRAM (Sage/Triton unavailable: {detail})"
+    return _apply_h3_sage_low_vram(model), f"{label} (Triton compiler: {detail})"
 
 
 def _apply_h3_memory_efficient_sage(model):
@@ -753,8 +854,14 @@ def _turbo_sampler(shotplan: dict[str, Any]):
 def _accelerate(model, shotplan: dict[str, Any]):
     mode = str(shotplan.get("acceleration", "native") or "native").lower()
     if mode in {"auto_3060", "low_vram_auto"}:
+        triton_ready, triton_detail = _h3_sage_triton_compiler_status()
+        if not triton_ready:
+            try:
+                return _apply_h3_low_vram_exact(model), f"Low VRAM Auto -> exact Low VRAM (Sage/Triton unavailable: {triton_detail})"
+            except Exception as low_vram_exc:
+                return model, f"Low VRAM Auto -> native (exact Low VRAM unavailable: {low_vram_exc})"
         try:
-            return _apply_h3_sage_low_vram(model), "Low VRAM Auto -> H3 Sage + exact attention/FFN chunks"
+            return _apply_h3_sage_low_vram(model), f"Low VRAM Auto -> H3 Sage + exact attention/FFN chunks (Triton compiler: {triton_detail})"
         except Exception as h3_exc:
             try:
                 return _apply_h3_memory_efficient_sage(model), f"Low VRAM Auto -> H3 Sage (exact chunks unavailable: {h3_exc})"
@@ -763,7 +870,7 @@ def _accelerate(model, shotplan: dict[str, Any]):
     if mode == "native":
         return model, "native"
     if mode in {"sage", "h3_sage"}:
-        return _apply_h3_sage_low_vram(model), "MiniMax H3 Sage + exact attention/FFN chunks"
+        return _apply_h3_sage_or_exact_low_vram(model, "MiniMax H3 Sage + exact attention/FFN chunks")
     if mode in {"sage_sol", "sol_low_vram"}:
         patched = _apply_h3_low_vram_exact(model)
         patched = _apply_sol(patched, str(shotplan.get("sol_conditioning", "exact_kv")))
@@ -781,8 +888,8 @@ def _accelerate(model, shotplan: dict[str, Any]):
         return _apply_spectrum(model, profile), f"Spectrum({profile},system_ram)"
     if mode == "sage_spectrum":
         profile = str(shotplan.get("spectrum_profile", "low_vram"))
-        sage_model = _apply_h3_sage_low_vram(model)
-        return _apply_spectrum(sage_model, profile), f"SageAttention + Spectrum({profile},system_ram)"
+        sage_model, sage_report = _apply_h3_sage_or_exact_low_vram(model, "SageAttention")
+        return _apply_spectrum(sage_model, profile), f"{sage_report} + Spectrum({profile},system_ram)"
     raise ValueError(f"Unknown MiniMax H3 acceleration mode: {mode}")
 
 
@@ -1138,19 +1245,24 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                         {"label": "<Picture 2>", "role": "final_keyframe"},
                     ])
         elif task.startswith("ref2va"):
-            lipsync_mode = str(shotplan.get("task_mode", "")).strip().lower() in {
-                "ref2vid_lipsync", "lipsync_ref2vid",
-            }
+            shotboard_ref_mode = str(shotplan.get("task_mode", "")).strip().lower()
+            slot_lipsync_mode = shotboard_ref_mode in {"ref2vid_lipsync", "lipsync_ref2vid"}
+            longvid_lipsync_mode = shotboard_ref_mode == "longvid_ref2vid_lipsync"
+            lipsync_mode = slot_lipsync_mode or longvid_lipsync_mode
             roles = _reference_roles(shotplan)
             # In Ref2Vid LipSync an external CineInfoH3 image remains the
             # first-priority reference. A main Shotboard image on the current
             # performance slot is the fallback, even when an older CineInfo
             # node still says `cine_info_h3_only`.
-            if lipsync_mode:
+            if slot_lipsync_mode:
                 plan_paths = []
                 slot_image = str(chunk.get("first_image", "") or "").strip()
                 if slot_image:
                     plan_paths.append(slot_image)
+            elif longvid_lipsync_mode:
+                # External CineInfoH3 ref_image_1 wins; a timeline image guide
+                # is only the safe identity fallback.
+                plan_paths = _unique_plan_image_paths(shotplan)
             else:
                 plan_paths = [] if str(h3_info.get("reference_source", "")) == "cine_info_h3_only" else _unique_plan_image_paths(shotplan)
             refs: dict[str, torch.Tensor] = {}
@@ -1178,36 +1290,63 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 ref_video, resized = _resize_reference_image(ref_video, shotplan, "ref_video")
                 resize_reports.append(resized)
                 ref_videos = {"ref_video_1": ref_video}
-                if isinstance(ref_video_audio, dict):
+                if isinstance(ref_video_audio, dict) and not slot_lipsync_mode:
                     ref_video_audios = {"ref_video_audio_1": ref_video_audio}
                     manifest.append({"label": "<Audio 1>", "role": "synchronized_video_audio"})
+                elif isinstance(ref_video_audio, dict) and slot_lipsync_mode:
+                    LOG.info(
+                        "MiniMax H3 Ref2Vid LipSync ignored reference-video soundtrack so the AudioBoard performance remains <Audio 1>"
+                    )
                 manifest.append({"label": "<Video 1>", "role": video_role})
 
             ref_audios = None
             active_audio = ref_audio
             voice_pairing_note = ""
-            if lipsync_mode:
+            if slot_lipsync_mode:
                 lipsync_audio = chunk.get("lipsync_audio")
                 if not isinstance(lipsync_audio, dict):
                     raise ValueError("Ref2Vid LipSync chunk has no AudioBoard performance source")
-                source_path = str(lipsync_audio.get("source_path", "") or "").strip()
-                active_audio = _load_timeline_audio(source_path)
-                if active_audio is None:
-                    raise ValueError(f"Ref2Vid LipSync AudioBoard source not found: {source_path or 'empty path'}")
-                active_audio = _audio_slice(
-                    active_audio,
-                    max(0.0, float(lipsync_audio.get("source_offset_frames", 0)) / H3_FPS),
-                    max(1.0 / H3_FPS, float(lipsync_audio.get("duration_frames", frames)) / H3_FPS),
-                )
+                # v20 parity: the *same* already mixed/rebased AudioBoard
+                # object feeds ReferenceToVideo.ref_audio_0 and the later
+                # VAEEncodeAudio -> zero-mask -> AV-concat lock. Re-reading a
+                # path here could lose lane mixes, trims, gain and silence.
+                timeline_chunk_audio = h3_resources.get("iamccs_minimax_h3_chunk_audio")
+                timeline_chunk_meta = timeline_chunk_audio.get("_iamccs") if isinstance(timeline_chunk_audio, dict) else None
+                if (
+                    isinstance(timeline_chunk_audio, dict)
+                    and torch.is_tensor(timeline_chunk_audio.get("waveform"))
+                    and bool(timeline_chunk_audio.get("iamccs_pre_sliced", False))
+                    and isinstance(timeline_chunk_meta, dict)
+                    and int(timeline_chunk_meta.get("chunk_index", -1)) == int(segment_index)
+                ):
+                    active_audio = timeline_chunk_audio
+                    LOG.info(
+                        "MiniMax H3 REF2VA LipSync uses shared AudioBoard chunk | segment=%d/%d | source=iamccs_minimax_h3_chunk_audio",
+                        int(segment_index) + 1,
+                        len(shotplan.get("chunks", [])),
+                    )
+                else:
+                    source_path = str(lipsync_audio.get("source_path", "") or "").strip()
+                    active_audio = _load_timeline_audio(source_path)
+                    if active_audio is None:
+                        raise ValueError(f"Ref2Vid LipSync AudioBoard source not found: {source_path or 'empty path'}")
+                    active_audio = _audio_slice(
+                        active_audio,
+                        max(0.0, float(lipsync_audio.get("source_offset_frames", 0)) / H3_FPS),
+                        max(1.0 / H3_FPS, float(lipsync_audio.get("duration_frames", frames)) / H3_FPS),
+                    )
+                    LOG.warning(
+                        "MiniMax H3 REF2VA LipSync shared chunk resource was unavailable; using the timeline-file compatibility fallback"
+                    )
             if active_audio is None and isinstance(ref_video_audio, dict) and video_role == "off":
                 active_audio = ref_video_audio
             if isinstance(active_audio, dict) and (
-                lipsync_mode or audio_role != "off" or str(shotplan.get("audio_mode", "")) == "h3_ref2va_audio"
+                slot_lipsync_mode or audio_role != "off" or str(shotplan.get("audio_mode", "")) == "h3_ref2va_audio"
             ):
                 # A timeline source was already trimmed to this performance
                 # slot above. CineInfoH3 reference audio remains a longer
                 # clip and is sliced on the planned global time as before.
-                sliced = active_audio if lipsync_mode else _audio_slice(
+                sliced = active_audio if slot_lipsync_mode else _audio_slice(
                     active_audio,
                     float(chunk.get("timeline_start_seconds", 0.0)),
                     float(chunk.get("duration_seconds", frames / H3_FPS)),
@@ -1217,7 +1356,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 audio_label = f"<Audio {audio_ordinal}>"
                 manifest.append({
                     "label": audio_label,
-                    "role": "lipsync_timing_source" if lipsync_mode else (audio_role if audio_role != "off" else "driven_audio"),
+                    "role": "lipsync_timing_source" if slot_lipsync_mode else (audio_role if audio_role != "off" else "driven_audio"),
                 })
                 voice_picture_index = int(shotplan.get("voice_reference_picture_index", 0) or 0)
                 if voice_picture_index > 0:
@@ -1265,6 +1404,22 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             raise ValueError(f"Unsupported atomic H3 task: {task}")
 
         positive, latent = result[0], result[1]
+        if task.startswith("ref2va"):
+            meta = positive[0][1] if (
+                isinstance(positive, (list, tuple)) and positive and isinstance(positive[0], (list, tuple))
+                and len(positive[0]) > 1 and isinstance(positive[0][1], dict)
+            ) else {}
+            refs = meta.get("minimax_refs") if isinstance(meta, dict) else None
+            if not isinstance(refs, list) or not refs:
+                raise RuntimeError("REF2VA conditioning did not materialize minimax_refs. Check CineInfoH3 ref_image_1 or the LongVid image guide; refusing an unconditioned fallback.")
+            audio_ref_blocks = [item for item in refs if isinstance(item, dict) and str(item.get("kind", "")).lower() in {"audio", "video_audio"}]
+            if slot_lipsync_mode and not audio_ref_blocks:
+                raise RuntimeError(
+                    "Ref2Vid LipSync did not materialize <Audio 1> inside MiniMaxH3ReferenceToVideo. "
+                    "The same AudioBoard chunk must condition REF2VA and feed the locked audio latent."
+                )
+            LOG.info("MiniMax H3 REF2VA references materialized | segment=%d/%d | blocks=%d | audio_blocks=%d | longvid_lipsync=%s",
+                     int(segment_index) + 1, len(shotplan.get("chunks", [])), len(refs), len(audio_ref_blocks), longvid_lipsync_mode)
         motion_report = "planned_fl2va_keyframes"
         if isinstance(native_av_context, dict):
             from .iamccs_minimax_h3_continuity import apply_native_av_context
@@ -1287,7 +1442,8 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
         # the global 24fps timeline into local positions for this legal H3
         # chunk.  Using ComfyUI's stock AddGuide node here keeps the exact H3
         # latent encoding, resizing and audio-crop semantics in one place.
-        guide_events = chunk.get("guides") if str(shotplan.get("task_mode", "")).lower() == "longvid_guides" else []
+        shotboard_task = str(shotplan.get("task_mode", "") or "").lower()
+        guide_events = chunk.get("guides") if shotboard_task in {"longvid_guides", "longvid_ref2vid_lipsync"} else []
         applied_guides: list[str] = []
         if isinstance(guide_events, list):
             native_context_frames = int(native_av_context.get("context_frames", 0)) if isinstance(native_av_context, dict) else 0
@@ -1311,6 +1467,13 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                     )[0]
                     applied_guides.append(f"image:{guide_id}@{local_frame}")
                 elif kind == "audio":
+                    if shotboard_task == "longvid_guides" and str(shotplan.get("audio_mode", "")) == "h3_custom_audio_drive":
+                        # v20 forced-audio parity: T2VA/I2VA receive source
+                        # audio only through VAEEncodeAudio -> zero noise mask
+                        # -> AV concat. Audio AddGuide is a different
+                        # conditioning mechanism and must not be doubled.
+                        applied_guides.append(f"audio-lock-only:{guide_id}@{local_frame}")
+                        continue
                     audio = _load_timeline_audio(source_path)
                     if audio is None:
                         raise ValueError(f"LongVid audio guide '{guide_id}' has no source audio")
@@ -1340,10 +1503,15 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
         if motion_state["active"] and motion_state.get("strategy") == "reference_motion_carry":
             motion_tail = int(motion_state["carry"]["ref_video"].shape[0])
             motion_report = f"decoded_frame_reference_motion_carry motion_tail={motion_tail}f"
-        shotboard_task = str(shotplan.get("task_mode", "") or "").lower()
         execution_task = task
         if shotboard_task == "longvid_guides" and task == "t2va":
-            execution_task = "t2va (LongVid positioned guides)"
+            execution_task = (
+                "t2va (LongVid positioned guides + locked AudioBoard AV)"
+                if str(shotplan.get("audio_mode", "")) == "h3_custom_audio_drive"
+                else "t2va (LongVid positioned guides)"
+            )
+        elif shotboard_task == "longvid_ref2vid_lipsync" and task.startswith("ref2va"):
+            execution_task = "ref2va (LongVid positioned guides + locked AudioBoard LipSync)"
         LOG.info(
             "MiniMax H3 conditioning complete | task=%s | shotboard_mode=%s | text_encoder=%s | pre-sampler unload barrier is next",
             execution_task,
@@ -1454,6 +1622,7 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
 
         shotplan = _resolve_shotplan(cine_linx)
         chunk = _chunk(shotplan, chunk_index)
+        lipsync_lock_report = _audit_lipsync_audio_lock(shotplan, latent, int(chunk_index))
         sampling = shotplan.get("sampling") if isinstance(shotplan.get("sampling"), dict) else {}
         # Shotboard schema v3 owns the sampling contract.  The node widgets are
         # retained only so older workflow JSON files remain executable.
@@ -1589,6 +1758,7 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
             f"task={chunk.get('task_mode')} | seed={actual_seed} ({seed_contract}) | {steps} steps | "
             f"{sampler_report}+{scheduler} | turbo={turbo_report} | acceleration={acceleration_report} | "
             f"controls={sampling_source} | shifts={shift_video:.2f}/{shift_audio:.2f} | denoise={denoise:.2f} | "
+            f"lipsync_lock={lipsync_lock_report} | "
             f"pre_sample_cleanup={conditioning_cleanup} | "
             f"pre_decode_cleanup={cleanup_report} | native_last_frame=captured | "
             f"motion_context={'on' if isinstance(motion_state, dict) and motion_state.get('active') else 'off'}"

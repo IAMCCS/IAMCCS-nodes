@@ -1,5 +1,7 @@
 __pycache__/
 *.py[cod]
 _backups/
+backups/
+iamccs_backups/
 *.bak
 *.bak_*

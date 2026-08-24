@@ -166,6 +166,7 @@ def _minimax_dialogue_text(value: Any) -> str:
         text = re.sub(r"^\s*\[[^\]]+\]\s*", "", text)
     text = re.sub(r"^\s*<Subject\s+[1-9][0-9]*>\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"^\s*\(S[1-9][0-9]*\)\s*:?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"<\/?(?:scenetrans|cutoff)>", " ", text, flags=re.IGNORECASE)
     if had_wrapper:
         text = re.sub(r"^\s*\[[^\]]+\]\s*", "", text)
     return _clean_text(text)
@@ -176,6 +177,29 @@ def _strip_minimax_prompt_tags_for_speech(value: Any) -> str:
     text = re.sub(r"<Subject\s+[1-9][0-9]*>", " ", text, flags=re.IGNORECASE)
     text = re.sub(r"\(S[1-9][0-9]*\)\s*:?", " ", text, flags=re.IGNORECASE)
     return _clean_text(text)
+
+
+def _minimax_boundary_mode(value: Any) -> str:
+    """Normalize the three official dialogue-boundary authoring choices."""
+    mode = str(value or "normal").strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "continue": "continues_across_cut",
+        "continues": "continues_across_cut",
+        "scene_transition": "continues_across_cut",
+        "scenetrans": "continues_across_cut",
+        "cutoff": "cutoff_at_end",
+        "cut_off": "cutoff_at_end",
+        "interrupted": "cutoff_at_end",
+    }
+    mode = aliases.get(mode, mode)
+    return mode if mode in {"normal", "continues_across_cut", "cutoff_at_end"} else "normal"
+
+
+def _minimax_boundary_marker(mode: Any) -> str:
+    return {
+        "continues_across_cut": "<scenetrans>",
+        "cutoff_at_end": "<cutoff>",
+    }.get(_minimax_boundary_mode(mode), "")
 
 
 def _build_minimax_dialogue_contract(
@@ -217,7 +241,14 @@ def _build_minimax_dialogue_contract(
         spoken = _minimax_dialogue_text(line.get("spoken_text") or line.get("text"))
         if not spoken:
             continue
-        formatted = f"{subject_tag} {speaker_tag}: <d>[{language}] {spoken}</d>"
+        boundary_mode = _minimax_boundary_mode(
+            line.get("minimax_boundary_mode")
+            or line.get("dialogue_boundary_mode")
+            or line.get("boundary_mode")
+        )
+        boundary_marker = _minimax_boundary_marker(boundary_mode)
+        marker_suffix = f" {boundary_marker}" if boundary_marker else ""
+        formatted = f"{subject_tag} {speaker_tag}: <d>[{language}] {spoken}{marker_suffix}</d>"
         dialogue_rows.append(formatted)
         local_prompt = _clean_text(line.get("local_prompt") or line.get("shot_prompt"))
         if local_prompt:
@@ -230,6 +261,8 @@ def _build_minimax_dialogue_contract(
             "language": language,
             "dialogue_tag": formatted,
             "local_prompt": local_prompt,
+            "boundary_mode": boundary_mode,
+            "boundary_marker": boundary_marker,
         })
 
     sections: List[str] = []
@@ -243,17 +276,153 @@ def _build_minimax_dialogue_contract(
         sections.extend(["[VISIBLE PERFORMANCE / SHOT RELAY]", "\n".join(performance_rows)])
     return {
         "schema": "iamccs.minimax_h3.dialogue_contract",
-        "schema_version": 1,
+        "schema_version": 2,
         "speakers": speaker_contracts,
         "lines": line_contracts,
         "subject_speaker_map": speaker_rows,
         "dialogue_lines": dialogue_rows,
         "performance_lines": performance_rows,
         "prompt": "\n\n".join(sections).strip(),
+        "scene_direction": str(global_prompt or "").strip(),
+        "global_truth": "\n\n".join(sections).strip(),
+        "local_truth": [
+            "\n".join(part for part in (item.get("local_prompt", ""), item.get("dialogue_tag", "")) if part).strip()
+            for item in line_contracts
+        ],
         "dialogue_syntax": "<Subject N> (SN): <d>[Language] user-authored transcript</d>",
+        "boundary_syntax": {
+            "normal": "No boundary token",
+            "continues_across_cut": "<scenetrans>",
+            "cutoff_at_end": "<cutoff>",
+        },
         "chunk_boundary_guidance": "For independently rendered chunks, keep speech out of the final handoff beat and the opening handoff beat of the next chunk.",
         "tts_isolation": "MiniMax prompt tags are metadata only and are never injected into TTS speech text.",
     }
+
+
+def _minimax_join_prompt(*parts: Any) -> str:
+    """Join prompt fragments once while preserving user-authored ordering."""
+    result: List[str] = []
+    seen = set()
+    for part in parts:
+        text = str(part or "").strip()
+        key = re.sub(r"\s+", " ", text).strip().lower()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        result.append(text)
+    return "\n\n".join(result)
+
+
+def _minimax_contract_from_linx(cine_linx: Any) -> Dict[str, Any]:
+    if not isinstance(cine_linx, dict):
+        return {}
+    resources = cine_linx.get("resources") if isinstance(cine_linx.get("resources"), dict) else {}
+    outputs = cine_linx.get("outputs") if isinstance(cine_linx.get("outputs"), dict) else {}
+    payload = resources.get("cine_payload") if isinstance(resources.get("cine_payload"), dict) else {}
+    for candidate in (
+        resources.get("iamccs_minimax_h3_dialogue_contract"),
+        outputs.get("iamccs_minimax_h3_dialogue_contract"),
+        payload.get("minimax_h3_dialogue"),
+        payload.get("iamccs_minimax_h3_dialogue_contract"),
+    ):
+        if isinstance(candidate, dict) and isinstance(candidate.get("lines"), list):
+            return copy.deepcopy(candidate)
+    return {}
+
+
+def apply_dialogue_to_minimax(
+    cine_linx: Any,
+    global_prompt: str,
+    timeline_data: Any,
+) -> Tuple[str, str, Dict[str, Any]]:
+    """Compile DialogueTagEditor metadata into the H3 prompt truth by name.
+
+    This is deliberately independent of widget positions.  Visual/image slots,
+    timing and audio lanes remain owned by the H3 Shotboard; only prompt fields
+    and the dialogue contract are merged.
+    """
+    contract = _minimax_contract_from_linx(cine_linx)
+    if not contract:
+        return str(global_prompt or ""), str(timeline_data or ""), {
+            "applied": False,
+            "source": "none",
+            "actual_target": "none",
+        }
+
+    if isinstance(timeline_data, dict):
+        timeline = copy.deepcopy(timeline_data)
+    else:
+        try:
+            parsed = json.loads(str(timeline_data or "{}"))
+        except (TypeError, ValueError, json.JSONDecodeError):
+            parsed = {}
+        timeline = parsed if isinstance(parsed, dict) else {}
+
+    scene_direction = str(contract.get("scene_direction") or "").strip()
+    contract_prompt = str(contract.get("global_truth") or contract.get("prompt") or "").strip()
+    current_global = str(global_prompt or timeline.get("global_prompt") or timeline.get("prompt") or "").strip()
+    final_global = contract_prompt if not current_global or current_global == scene_direction else _minimax_join_prompt(current_global, contract_prompt)
+
+    lines = [item for item in contract.get("lines", []) if isinstance(item, dict)]
+    visual_segments = [
+        item for item in timeline.get("segments", [])
+        if isinstance(item, dict)
+        and str(item.get("type", "image")).lower() != "audio"
+        and not bool(item.get("placeholder", False))
+    ] if isinstance(timeline.get("segments"), list) else []
+    visual_rows = [
+        item for item in timeline.get("rows", [])
+        if isinstance(item, dict) and not bool(item.get("placeholder", False))
+    ] if isinstance(timeline.get("rows"), list) else []
+
+    local_truth: List[str] = []
+    for line in lines:
+        local = _minimax_join_prompt(line.get("local_prompt"), line.get("dialogue_tag"))
+        local_truth.append(local)
+    applied_indexes = set()
+    for collection in (visual_segments, visual_rows):
+        for index, item in enumerate(collection):
+            if index >= len(local_truth) or not local_truth[index]:
+                continue
+            existing = item.get("relay_prompt") or item.get("local_prompt") or item.get("prompt")
+            merged = _minimax_join_prompt(existing, local_truth[index])
+            item["prompt"] = merged
+            item["relay_prompt"] = merged
+            item["local_prompt"] = merged
+            item["use_prompt"] = True
+            applied_indexes.add(index)
+
+    applied_prompts = [local_truth[index] for index in sorted(applied_indexes) if index < len(local_truth) and local_truth[index]]
+    timeline["global_prompt"] = final_global
+    timeline["prompt"] = final_global
+    timeline["minimax_h3_dialogue"] = copy.deepcopy(contract)
+    timeline["minimax_h3_dialogue_prompt"] = contract_prompt
+    timeline["minimax_h3_truth"] = {
+        "schema": "iamccs.minimax_h3.dialogue_truth",
+        "schema_version": 1,
+        "global_prompt": final_global,
+        "local_prompts": copy.deepcopy(local_truth),
+        "source": "IAMCCS_DialogueTagEditor",
+    }
+    if applied_prompts:
+        timeline["director_local_prompts"] = " | ".join(applied_prompts)
+        timeline["local_prompts"] = " | ".join(applied_prompts)
+        timeline["promptrelay_enabled"] = True
+
+    report = {
+        "applied": True,
+        "source": "IAMCCS_DialogueTagEditor",
+        "actual_target": "global_plus_local",
+        "global_truth_chars": len(final_global),
+        "dialogue_lines": len(lines),
+        "local_slots_applied": len(applied_indexes),
+        "boundary_tokens": {
+            "scenetrans": sum(1 for item in lines if item.get("boundary_marker") == "<scenetrans>"),
+            "cutoff": sum(1 for item in lines if item.get("boundary_marker") == "<cutoff>"),
+        },
+    }
+    return final_global, json.dumps(timeline, ensure_ascii=False), report
 
 
 def _srt_time(seconds: float) -> str:
@@ -831,6 +1000,15 @@ class IAMCCS_DialogueTagEditor:
         segment_lengths = payload.get("segment_lengths") if isinstance(payload.get("segment_lengths"), list) else []
         minimax_dialogue = payload.get("minimax_h3_dialogue") if isinstance(payload.get("minimax_h3_dialogue"), dict) else {}
         minimax_prompt = str(minimax_dialogue.get("prompt") or payload.get("minimax_h3_prompt") or "")
+        minimax_injection = {
+            "schema": "iamccs.minimax_h3.prompt_injection",
+            "schema_version": 1,
+            "source": "IAMCCS_DialogueTagEditor",
+            "merge_policy": "append_without_replacing_visual_direction",
+            "global_prompt": minimax_prompt,
+            "local_prompts": copy.deepcopy(minimax_dialogue.get("local_truth", [])),
+            "contract": copy.deepcopy(minimax_dialogue),
+        }
         master_srt = str(payload.get("master_srt") or "")
         tagged_text = str(payload.get("tagged_text") or "")
         timeline_json = json.dumps(shotboard_timeline, ensure_ascii=False, indent=2)
@@ -856,6 +1034,7 @@ class IAMCCS_DialogueTagEditor:
             "cine_board_timeline_data": timeline_json,
             "iamccs_minimax_h3_dialogue_contract": minimax_dialogue,
             "iamccs_minimax_h3_dialogue_prompt": minimax_prompt,
+            "iamccs_minimax_h3_prompt_injection": minimax_injection,
             "cine_minimax_h3_dialogue_prompt": minimax_prompt,
         })
         outputs.update({
@@ -870,6 +1049,7 @@ class IAMCCS_DialogueTagEditor:
             "local_prompts": " | ".join(str(item) for item in local_prompts),
             "segment_lengths": ",".join(str(item) for item in segment_lengths),
             "minimax_h3_dialogue_prompt": minimax_prompt,
+            "iamccs_minimax_h3_prompt_injection": minimax_injection,
         })
         cine_payload.update({
             "dialogue_tag_editor": True,
@@ -878,6 +1058,7 @@ class IAMCCS_DialogueTagEditor:
             "timeline_data": outputs["timeline_data"],
             "minimax_h3_dialogue": minimax_dialogue,
             "minimax_h3_dialogue_prompt": minimax_prompt,
+            "iamccs_minimax_h3_prompt_injection": minimax_injection,
         })
         out_linx.setdefault("chain", []).append({"role": "dialogue_tag_editor", "name": "IAMCCS_DialogueTagEditor"})
         _dialogue_refresh_linx(out_linx)

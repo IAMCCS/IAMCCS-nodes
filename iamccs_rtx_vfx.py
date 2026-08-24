@@ -50,7 +50,7 @@ RTX_QUALITY_LEVELS = [
 ]
 
 RTX_RESIZE_TYPES = ["Scale", "Keep Ratio", "Manual", "Preset Ratio", "Same Size"]
-RTX_DIVISIBLE_BY_VALUES = ["1", "8", "16", "32", "64", "128"]
+RTX_DIVISIBLE_BY_VALUES = ["8", "16", "32", "64", "128"]
 RTX_RESIZE_METHODS = ["Center Crop (Fill)", "Fit (Letterbox/Pillarbox)"]
 RTX_COMMON_RATIOS = [
     "1:1", "4:5", "5:4", "3:4", "4:3", "2:3", "3:2", "16:9", "9:16",
@@ -68,7 +68,11 @@ def _safe_divisible_by(value) -> int:
         return int(RTX_DEFAULT_DIVISIBLE_BY)
     if str(value) not in RTX_DIVISIBLE_BY_VALUES:
         return int(RTX_DEFAULT_DIVISIBLE_BY)
-    return value
+    # NVIDIA Video Super Resolution can accept an unaligned output size
+    # without raising, yet return a stride-corrupted RGB surface (diagonal
+    # colour bands).  Eight pixels is the minimum verified alignment for the
+    # released RTX VFX runtime; legacy serialized value ``1`` migrates here.
+    return max(8, value)
 
 
 def _round_up(value: float, multiple: int) -> int:

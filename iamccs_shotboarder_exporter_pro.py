@@ -846,7 +846,16 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
             sample_rate = int(direct_asset.get("sampleRate") or direct_asset.get("sample_rate") or 0)
         else:
             if audio is None:
-                raise ValueError(f"{NODE_ID}: audio_input selected but no AUDIO input is connected.")
+                # VIDEO objects produced by the IAMCCS Video Editor carry the
+                # edited slot soundtrack in their components.  An explicit
+                # AUDIO socket remains authoritative when connected, while
+                # this fallback lets the manual editor render/export branch
+                # preserve per-slot audio without requiring a master track.
+                audio = getattr(components, "audio", None)
+            if audio is None:
+                raise ValueError(
+                    f"{NODE_ID}: audio_input selected but neither an AUDIO input nor embedded VIDEO audio is available."
+                )
             waveform, sample_rate = _as_audio_waveform(audio)
             waveform = _align_audio(waveform, sample_rate, frame_count, fps, str(audio_sync or "trim_to_video"))
         audio_channels = int(waveform.shape[0]) if waveform is not None else int(direct_asset.get("channels") or direct_asset.get("channel_count") or 0)

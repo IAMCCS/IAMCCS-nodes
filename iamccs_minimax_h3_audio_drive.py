@@ -505,6 +505,18 @@ class IAMCCS_MiniMaxH3AtomicAudioDrive:
         shotplan, chunk, index = _resolve_chunk(cine_linx, segment_index)
         behavior, plan_behavior, migrated = _resolve_behavior(cine_linx, audio_behavior)
         task = _effective_task(cine_linx, chunk)
+        shotboard_mode = str(shotplan.get("task_mode", "") or "").strip().lower()
+        lipsync_contract = shotplan.get("lipsync") if isinstance(shotplan.get("lipsync"), dict) else {}
+        lipsync_requested = bool(lipsync_contract.get("enabled", False)) or shotboard_mode in {
+            "ref2vid_lipsync", "lipsync_ref2vid", "longvid_ref2vid_lipsync",
+            "longvid_guided_lipsync", "longvid_audio_drive_lipsync",
+        }
+        if lipsync_requested and behavior != BEHAVIOR_LOCKED:
+            raise ValueError(
+                "MiniMax H3 LipSync requires h3_custom_audio_drive so the AudioBoard chunk is the exact pre-sampler audio authority. "
+                "Select the LipSync mode from IAMCCS settings; it sets this route automatically."
+            )
+        guided_audio_drive = shotboard_mode == "longvid_guides" and behavior == BEHAVIOR_LOCKED
         start_seconds, duration_seconds, fps = _chunk_timing(shotplan, chunk)
 
         report: dict[str, Any] = {
@@ -513,6 +525,9 @@ class IAMCCS_MiniMaxH3AtomicAudioDrive:
             "plan_behavior": plan_behavior,
             "legacy_native_override": migrated,
             "task": task,
+            "shotboard_mode": shotboard_mode,
+            "lipsync_audio_authority": lipsync_requested or guided_audio_drive,
+            "guided_audio_drive": guided_audio_drive,
             "segment_index": index,
             "segment_number": index + 1,
             "total_segments": len(shotplan.get("chunks", [])),

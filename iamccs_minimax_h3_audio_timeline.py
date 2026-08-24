@@ -137,6 +137,12 @@ def _is_audio(value: Any) -> bool:
     )
 
 
+def _bus_audio_sources(cine_linx: Any) -> list[Any]:
+    """Read native clip-addressed AUDIO values published by Cine H3 Audio Bus."""
+    candidate = _resources(cine_linx).get("iamccs_cine_h3_audio_bus_audio_lanes")
+    return list(candidate) if isinstance(candidate, (list, tuple)) else []
+
+
 def _resample(waveform: torch.Tensor, source_rate: int, target_rate: int) -> torch.Tensor:
     if source_rate == target_rate:
         return waveform
@@ -301,9 +307,21 @@ def mix_audio_timeline(
     selected_index = int(segment_index)
     if selected_index < 0 or selected_index >= len(chunks):
         raise IndexError(f"segment_index={selected_index} outside 0..{len(chunks) - 1}")
-    sources = [value if _is_audio(value) else None for value in audio_inputs[:MAX_AUDIO_INPUTS]]
+    socket_sources = [value if _is_audio(value) else None for value in audio_inputs[:MAX_AUDIO_INPUTS]]
+    bus_sources = _bus_audio_sources(cine_linx)
+    # Manual AUDIO sockets remain supported and take precedence. Missing
+    # sockets transparently fall back to the clip-addressed sources carried by
+    # Cine H3 Audio Bus in cine_linx, so adding a third clip never requires a
+    # user to rewire audio_3/audio_4 by hand.
+    source_count = max(MAX_AUDIO_INPUTS, len(bus_sources))
+    sources = [
+        socket_sources[index]
+        if index < len(socket_sources) and socket_sources[index] is not None
+        else (bus_sources[index] if index < len(bus_sources) and _is_audio(bus_sources[index]) else None)
+        for index in range(source_count)
+    ]
     if not any(sources):
-        raise ValueError("Connect at least one valid ComfyUI AUDIO input")
+        raise ValueError("Connect Cine H3 Audio Bus or at least one valid ComfyUI AUDIO input")
     rate = max(8000, min(192000, int(target_sample_rate)))
     segments, contract = _audio_contract(cine_linx)
     contract = copy.deepcopy(contract)
