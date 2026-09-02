@@ -406,7 +406,7 @@ def _merge_nextframe_widgets(
     return json.dumps(injected, ensure_ascii=False), json.dumps(merged_paths, ensure_ascii=False)
 
 
-def _cine_change_fingerprint(payload: Dict[str, Any]) -> str:
+def _cine_change_fingerprint(payload: Dict[str, Any]) -> str:  # non-secret fingerprint; NOT for password hashing
     try:
         encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
     except Exception:
@@ -443,7 +443,7 @@ def _cine_linx_change_signature(cine_linx: Any) -> Dict[str, Any]:
         raw = repr(resources.get(key))
         helper_sig[key] = {
             "type": type(resources.get(key)).__name__,
-            "hash": hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()[:12],
+            "hash": hashlib.sha256(raw.encode("utf-8", errors="replace")).hexdigest()[:12],
             "length": len(raw),
         }
     return {
@@ -913,7 +913,7 @@ class IAMCCS_CineLTXSequencer:
         pixel_frame_count = min(requested_pixel_frames, latent_pixel_frames)
         max_frame = max(0, pixel_frame_count - 1 - int(tail_safety_frames))
         keyframes = cls._parse_timeline(timeline_data, float(duration_seconds), int(frame_rate), int(fallback_num_images), float(fallback_strength))
-        timeline_hash = hashlib.sha1(str(timeline_data or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
+        timeline_hash = hashlib.sha256(str(timeline_data or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
         image_shape = [int(v) for v in multi_input.shape] if multi_input is not None and torch.is_tensor(multi_input) else []
         latent_shape = [int(v) for v in latent_image.shape] if torch.is_tensor(latent_image) else []
         _cine_debug(
@@ -1645,7 +1645,7 @@ class IAMCCS_CineShotboardTimelinePro:
 
     @staticmethod
     def _log_text_hash(text: Any) -> str:
-        return hashlib.sha1(str(text or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
+        return hashlib.sha256(str(text or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
 
     @classmethod
     def _log_promptrelay_state(
@@ -3323,7 +3323,7 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
                 f"mode={flfreal_mode}"
             )
             if verbose_log and promptrelay_requested and local_parts:
-                local_hash = hashlib.sha1(str(resources.get("cine_local_prompts", "") or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
+                local_hash = hashlib.sha256(str(resources.get("cine_local_prompts", "") or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
                 print(
                     "[IAMCCS FLFReal] "
                     f"LOCAL_PROMPTS_USED source=shotboard_v3_timeline "
@@ -3721,8 +3721,8 @@ class IAMCCS_CineInfo:
 
         local_parts = [part.strip() for part in str(local_prompts or "").split("|") if part.strip()]
         length_parts = [part for part in re.split(r"[,;\s]+", str(segment_lengths or "")) if part.strip()]
-        global_hash = hashlib.sha1(str(global_prompt or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
-        local_hash = hashlib.sha1(str(local_prompts or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
+        global_hash = hashlib.sha256(str(global_prompt or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
+        local_hash = hashlib.sha256(str(local_prompts or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
         relay_prompt_log = []
         for idx, prompt in enumerate(local_parts):
             relay_prompt_log.append({
@@ -3730,7 +3730,7 @@ class IAMCCS_CineInfo:
                 "segment_length": length_parts[idx] if idx < len(length_parts) else "<missing>",
                 "prompt": prompt,
             })
-        flf_hash = hashlib.sha1(str(flf_timeline or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
+        flf_hash = hashlib.sha256(str(flf_timeline or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
         image_shape = [int(v) for v in multi_output.shape] if torch.is_tensor(multi_output) else []
         _cine_debug(
             "[IAMCCS CineDebug:CineInfo] "
@@ -4956,7 +4956,7 @@ class IAMCCS_CineFilmmakerBackend:
                         "[IAMCCS FilmmakerBackend] "
                         f"PROMPT_RELAY_LOCAL_PROMPTS_USED source=cine_linx "
                         f"count={len(local_parts)} segments={len(length_parts)} "
-                        f"global_hash={hashlib.sha1(str(global_prompt or '').encode('utf-8', errors='ignore')).hexdigest()[:12]} "
+                        f"global_hash={hashlib.sha256(str(global_prompt or '').encode('utf-8', errors='ignore')).hexdigest()[:12]} "
                         f"local_hash={local_hash}"
                     )
                     for item in relay_prompt_log[:50]:
@@ -5887,7 +5887,7 @@ class IAMCCS_CinePromptRelaySafeEncode:
 
     @staticmethod
     def _short_hash(text: str) -> str:
-        return hashlib.sha1(str(text or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
+        return hashlib.sha256(str(text or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
 
     @staticmethod
     def _latent_shape(latent: Any) -> List[int]:
