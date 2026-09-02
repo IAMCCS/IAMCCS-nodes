@@ -542,7 +542,7 @@ def _ollama_native_base(value: Any) -> str:
     return root or "http://127.0.0.1:11434"
 
 
-def _extract_json_object(text: str) -> dict[str, str]:
+def _extract_json_payload(text: str) -> dict[str, Any]:
     clean = re.sub(r"^\s*```(?:json)?\s*|\s*```\s*$", "", str(text or "").strip(), flags=re.I | re.S)
     start = clean.find("{")
     end = clean.rfind("}")
@@ -554,6 +554,11 @@ def _extract_json_object(text: str) -> dict[str, str]:
         raise RuntimeError(f"The AI response JSON is invalid: {exc}") from exc
     if not isinstance(value, dict):
         raise RuntimeError("The AI response must be a JSON object")
+    return value
+
+
+def _extract_json_object(text: str) -> dict[str, str]:
+    value = _extract_json_payload(text)
     return {str(key): str(item or "").strip() for key, item in value.items() if isinstance(item, (str, int, float))}
 
 
@@ -710,6 +715,241 @@ def rewrite_sections_with_ai(
         ],
         "system_prompt_characters": len(system),
         "audio_handoff_authoring_rule": AUDIO_HANDOFF_AUTHORING_RULE,
+    }
+
+
+NEXTFRAME_ASSISTANT_SYSTEM_PROMPT = """You are IAMCCS NextFrame Prompt Director, a specialist in Qwen-Image-Edit-2511 and the Next Scene LoRA.
+Return JSON only, with exactly this shape: {\"prompt\":\"...\"}.
+
+Write one production-ready English image-edit prompt of roughly 70-140 words. It MUST begin exactly with the LoRA trigger `Next Scene:`. Preserve the user's intent and describe only the immediately following visible storyboard beat.
+
+Use this order:
+1. camera movement;
+2. shot size, angle, and composition;
+3. one clear subject action or environmental change;
+4. continuity locks for Image 1: exact identity, face, hairstyle, wardrobe, body proportions, props, location geometry, spatial relationships, color palette, and cinematic style;
+5. lighting direction, atmosphere, depth, and physically plausible detail.
+
+Be direct, specific, concise, and visually observable. Treat Image 1 as the primary source frame. Do not invent new people, dialogue, captions, logos, or unrelated events. Do not include a negative prompt, Markdown, notes, alternatives, explanations, or camera metadata outside the prompt."""
+
+
+def rewrite_nextframe_prompt_with_ai(
+    provider: str,
+    base_url: str,
+    model: str,
+    api_key: str,
+    user_prompt: str,
+    current_prompt: str = "",
+    temperature: float = 0.25,
+    timeout: float = 120.0,
+) -> tuple[str, dict[str, Any]]:
+    """Turn a rough scene direction into a Qwen 2511 Next Scene prompt."""
+    provider = str(provider or "ollama").strip().lower()
+    model = str(model or "").strip()
+    if not model:
+        raise ValueError("Select an AI model before using AI Assistance")
+    api_key = str(api_key or "").strip()
+    if not api_key:
+        api_key = {
+            "openai_compatible": os.environ.get("OPENAI_API_KEY", ""),
+            "anthropic": os.environ.get("ANTHROPIC_API_KEY", ""),
+        }.get(provider, "")
+    direction = str(user_prompt or current_prompt or "").strip()
+    if not direction:
+        raise ValueError("Write a rough next-scene direction first")
+    current = str(current_prompt or "").strip()
+    user = (
+        "Transform this user direction into the final prompt.\n"
+        f"USER DIRECTION:\n{direction}\n\n"
+        f"CURRENT DRAFT (use only when helpful):\n{current or '[none]'}"
+    )
+    content = ""
+
+    if provider == "ollama":
+        root = _ollama_native_base(base_url)
+        result = _http_json(
+            f"{root}/api/chat",
+            {
+                "model": model,
+                "stream": False,
+                "format": "json",
+                "messages": [
+                    {"role": "system", "content": NEXTFRAME_ASSISTANT_SYSTEM_PROMPT},
+                    {"role": "user", "content": user},
+                ],
+                "options": {"temperature": float(temperature)},
+            },
+            {},
+            timeout,
+        )
+        content = str((result.get("message") or {}).get("content") or "")
+    elif provider == "openai_compatible":
+        root = str(base_url or "https://api.openai.com/v1").rstrip("/")
+        url = root if root.endswith("/chat/completions") else f"{root}/chat/completions"
+        result = _http_json(
+            url,
+            {
+                "model": model,
+                "temperature": float(temperature),
+                "response_format": {"type": "json_object"},
+                "messages": [
+                    {"role": "system", "content": NEXTFRAME_ASSISTANT_SYSTEM_PROMPT},
+                    {"role": "user", "content": user},
+                ],
+            },
+            {"Authorization": f"Bearer {api_key}"} if api_key else {},
+            timeout,
+        )
+        choices = result.get("choices") or []
+        content = str(((choices[0] if choices else {}).get("message") or {}).get("content") or "")
+    elif provider == "anthropic":
+        root = str(base_url or "https://api.anthropic.com/v1").rstrip("/")
+        url = root if root.endswith("/messages") else f"{root}/messages"
+        if not api_key:
+            raise ValueError("Claude requires an API key or ANTHROPIC_API_KEY")
+        result = _http_json(
+            url,
+            {
+                "model": model,
+                "max_tokens": 900,
+                "temperature": float(temperature),
+                "system": NEXTFRAME_ASSISTANT_SYSTEM_PROMPT,
+                "messages": [{"role": "user", "content": user}],
+            },
+            {"x-api-key": api_key, "anthropic-version": "2023-06-01"},
+            timeout,
+        )
+        content = "".join(
+            str(item.get("text") or "")
+            for item in (result.get("content") or [])
+            if isinstance(item, dict)
+        )
+    else:
+        raise ValueError(f"Unsupported AI provider: {provider}")
+
+    prompt = str(_extract_json_object(content).get("prompt", "") or "").strip()
+    prompt = re.sub(r"^next\s+scene\s*:\s*", "", prompt, flags=re.I).strip()
+    if not prompt:
+        raise RuntimeError("The AI did not return a usable Next Scene prompt")
+    prompt = f"Next Scene: {prompt}"
+    return prompt, {
+        "provider": provider,
+        "model": model,
+        "trigger": "Next Scene:",
+        "system_prompt_characters": len(NEXTFRAME_ASSISTANT_SYSTEM_PROMPT),
+    }
+
+
+NEXTFRAME_IDEA_SYSTEM_PROMPT = """You are IAMCCS Story Idea Director, a visual storyteller for Qwen-Image-Edit-2511 storyboard continuation.
+Return JSON only, with exactly this shape:
+{"ideas":[{"title":"...","beat":"...","prompt":"Next Scene: ..."}]}
+
+Invent the requested number of distinct, plausible immediately-following storyboard frames. The LOG_LINE is the long-range story direction, not permission to jump to the ending. Read the supplied images when available: Image 1 is the current-frame continuity authority; additional images contribute only the roles stated in the reference map. Preserve identities, wardrobe, props, screen geography, visual style and lighting continuity unless the logline explicitly requires a visible change.
+
+Each idea must:
+- advance the story by one clear, filmable visual beat;
+- vary action, camera movement, shot size or composition meaningfully;
+- avoid dialogue, captions, logos, montage, cuts and events that cannot be shown in one frame;
+- use no more than one newly invented story element;
+- include a short title, a one-sentence beat, and a 70-140 word English Qwen edit prompt;
+- begin its prompt exactly with `Next Scene:`.
+
+Do not repeat ideas, explain your reasoning, or return Markdown. Surprise the user while remaining causally coherent with the logline and visible references."""
+
+
+def invent_nextframe_ideas_with_ai(
+    provider: str, base_url: str, model: str, api_key: str, logline: str,
+    current_prompt: str = "", reference_context: str = "", count: int = 4,
+    temperature: float = 0.9, timeout: float = 120.0, images: Any = None,
+    nonce: str = "",
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
+    """Invent several next-frame alternatives from a story logline and visual references."""
+    provider = str(provider or "ollama").strip().lower()
+    model = str(model or "").strip()
+    if not model:
+        raise ValueError("Select an AI model before using Idea AI")
+    story = str(logline or "").strip()
+    if not story:
+        raise ValueError("Write the story logline before using Idea AI")
+    count = max(2, min(6, int(count or 4)))
+    temperature = max(0.4, min(1.2, float(temperature)))
+    timeout = max(10.0, min(300.0, float(timeout)))
+    visual_inputs = _normalise_ai_images(images)
+    api_key = str(api_key or "").strip()
+    if not api_key:
+        api_key = {"openai_compatible": os.environ.get("OPENAI_API_KEY", ""), "anthropic": os.environ.get("ANTHROPIC_API_KEY", "")}.get(provider, "")
+    user = (
+        f"Create exactly {count} alternative next-frame ideas.\nLOG_LINE:\n{story}\n\n"
+        f"CURRENT NEXT-SCENE DRAFT (context only):\n{str(current_prompt or '').strip() or '[none]'}\n\n"
+        f"REFERENCE MAP:\n{str(reference_context or '').strip() or 'Image 1 is the current frame.'}\n\n"
+        f"RANDOMIZATION NONCE: {str(nonce or '')}"
+    )
+    content = ""
+    if provider == "ollama":
+        root = _ollama_native_base(base_url)
+        result = _http_json(f"{root}/api/chat", {
+            "model": model, "stream": False, "format": "json",
+            "messages": [
+                {"role": "system", "content": NEXTFRAME_IDEA_SYSTEM_PROMPT},
+                {"role": "user", "content": user, **({"images": [item["data"] for item in visual_inputs]} if visual_inputs else {})},
+            ], "options": {"temperature": temperature},
+        }, {}, timeout)
+        content = str((result.get("message") or {}).get("content") or "")
+    elif provider == "openai_compatible":
+        root = str(base_url or "https://api.openai.com/v1").rstrip("/")
+        url = root if root.endswith("/chat/completions") else f"{root}/chat/completions"
+        openai_user: Any = user
+        if visual_inputs:
+            openai_user = [{"type": "text", "text": user}] + [
+                {"type": "image_url", "image_url": {"url": f"data:{item['mime_type']};base64,{item['data']}"}}
+                for item in visual_inputs
+            ]
+        result = _http_json(url, {
+            "model": model, "temperature": temperature, "response_format": {"type": "json_object"},
+            "messages": [{"role": "system", "content": NEXTFRAME_IDEA_SYSTEM_PROMPT}, {"role": "user", "content": openai_user}],
+        }, {"Authorization": f"Bearer {api_key}"} if api_key else {}, timeout)
+        choices = result.get("choices") or []
+        content = str(((choices[0] if choices else {}).get("message") or {}).get("content") or "")
+    elif provider == "anthropic":
+        root = str(base_url or "https://api.anthropic.com/v1").rstrip("/")
+        url = root if root.endswith("/messages") else f"{root}/messages"
+        if not api_key:
+            raise ValueError("Claude requires an API key or ANTHROPIC_API_KEY")
+        anthropic_user: Any = user
+        if visual_inputs:
+            anthropic_user = [
+                {"type": "image", "source": {"type": "base64", "media_type": item["mime_type"], "data": item["data"]}}
+                for item in visual_inputs
+            ] + [{"type": "text", "text": user}]
+        result = _http_json(url, {
+            "model": model, "max_tokens": 3600, "temperature": temperature,
+            "system": NEXTFRAME_IDEA_SYSTEM_PROMPT, "messages": [{"role": "user", "content": anthropic_user}],
+        }, {"x-api-key": api_key, "anthropic-version": "2023-06-01"}, timeout)
+        content = "".join(str(item.get("text") or "") for item in (result.get("content") or []) if isinstance(item, dict))
+    else:
+        raise ValueError(f"Unsupported AI provider: {provider}")
+
+    raw_ideas = _extract_json_payload(content).get("ideas")
+    if not isinstance(raw_ideas, list):
+        raise RuntimeError("Idea AI did not return an ideas list")
+    ideas: list[dict[str, str]] = []
+    for index, item in enumerate(raw_ideas[:count]):
+        if not isinstance(item, dict):
+            continue
+        prompt = re.sub(r"^next\s+scene\s*:\s*", "", str(item.get("prompt") or "").strip(), flags=re.I).strip()
+        if not prompt:
+            continue
+        ideas.append({
+            "title": str(item.get("title") or f"Scene idea {index + 1}").strip()[:120],
+            "beat": str(item.get("beat") or "").strip()[:500],
+            "prompt": f"Next Scene: {prompt}",
+        })
+    if not ideas:
+        raise RuntimeError("Idea AI did not return any usable scene idea")
+    return ideas, {
+        "provider": provider, "model": model, "requested": count, "returned": len(ideas),
+        "visual_references": len(visual_inputs), "temperature": temperature,
+        "system_prompt_characters": len(NEXTFRAME_IDEA_SYSTEM_PROMPT),
     }
 
 
@@ -881,7 +1121,9 @@ def _apply_one_prompter_request(
 
     rows: list[dict[str, Any]] | None = None
     row_key = ""
-    for candidate in ("segments", "rows", "slots", "shots"):
+    # Match the Shotboard planner: live editor rows are Queue truth, while the
+    # segments field is only a legacy mirror that may contain deleted prompts.
+    for candidate in ("rows", "segments", "slots", "shots"):
         value = timeline.get(candidate)
         if isinstance(value, list):
             rows = value
@@ -1216,6 +1458,52 @@ def _register_prompter_routes() -> None:
                     r"\1=[redacted]",
                     str(exc),
                 )
+                return web.json_response({"ok": False, "error": safe_error}, status=400)
+
+        @routes.post("/iamccs/nextframe/assist")
+        async def iamccs_nextframe_assist(request):
+            try:
+                payload = await request.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("Request body must be a JSON object")
+                prompt, report = await asyncio.to_thread(
+                    rewrite_nextframe_prompt_with_ai,
+                    str(payload.get("provider", "ollama")),
+                    str(payload.get("base_url", "")),
+                    str(payload.get("model", "")),
+                    str(payload.get("api_key", "")),
+                    str(payload.get("user_prompt", "")),
+                    str(payload.get("current_prompt", "")),
+                    float(payload.get("temperature", 0.25)),
+                    float(payload.get("timeout", 120.0)),
+                )
+                return web.json_response({"ok": True, "prompt": prompt, "report": report})
+            except Exception as exc:
+                safe_error = re.sub(
+                    r"(?i)(api[_ -]?key|authorization)[^,;\n]*",
+                    r"\1=[redacted]",
+                    str(exc),
+                )
+                return web.json_response({"ok": False, "error": safe_error}, status=400)
+
+        @routes.post("/iamccs/nextframe/ideas")
+        async def iamccs_nextframe_ideas(request):
+            try:
+                payload = await request.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("Request body must be a JSON object")
+                ideas, report = await asyncio.to_thread(
+                    invent_nextframe_ideas_with_ai,
+                    str(payload.get("provider", "ollama")), str(payload.get("base_url", "")),
+                    str(payload.get("model", "")), str(payload.get("api_key", "")),
+                    str(payload.get("logline", "")), str(payload.get("current_prompt", "")),
+                    str(payload.get("reference_context", "")), int(payload.get("count", 4)),
+                    float(payload.get("temperature", 0.9)), float(payload.get("timeout", 120.0)),
+                    payload.get("images"), str(payload.get("nonce", "")),
+                )
+                return web.json_response({"ok": True, "ideas": ideas, "report": report})
+            except Exception as exc:
+                safe_error = re.sub(r"(?i)(api[_ -]?key|authorization)[^,;\n]*", r"\1=[redacted]", str(exc))
                 return web.json_response({"ok": False, "error": safe_error}, status=400)
     except Exception:
         # Schema discovery and headless tests can import before PromptServer.

@@ -668,11 +668,35 @@ class IAMCCS_MiniMaxH3AudioOutputPolicyR21:
 
         source_name = "h3_generated_audio"
         selected = h3_audio
+        delivery_head_trim_frames = 0
+        delivery_head_trim_samples = 0
         if behavior == BEHAVIOR_LOCKED:
             if not _is_audio(locked_audio_slice):
                 raise ValueError("Custom audio drive is active but locked_audio_slice is not connected")
             selected = locked_audio_slice
             source_name = "original_custom_audio_slice"
+            # R37 Motion Context continuation chunks deliberately prepend the
+            # previous AV tail to the locked AudioBoard slice.  The variant
+            # trims that pinned head from decoded picture/audio, but this
+            # output policy replaces decoded sound with the pristine source
+            # slice.  Trim the same head here before fitting it to the visible
+            # frames; otherwise every chunk after the first is delivered with
+            # audio early by motion_context_trim_frames / fps.
+            motion_contract = shotplan.get("motion_context_auto_chain")
+            planned_trim = max(0, int(chunk.get("motion_context_trim_frames", 0) or 0))
+            if isinstance(motion_contract, dict) and bool(motion_contract.get("enabled")) and planned_trim:
+                sample_rate = max(1, int(selected.get("sample_rate", 32000) or 32000))
+                cut = max(0, int(round(planned_trim / float(fps) * sample_rate)))
+                waveform = selected["waveform"]
+                if cut >= int(waveform.shape[-1]):
+                    raise ValueError(
+                        "R37 Motion Context audio delivery trim would remove the complete locked slice: "
+                        f"trim={planned_trim}f, samples={int(waveform.shape[-1])}, sample_rate={sample_rate}"
+                    )
+                selected = dict(selected)
+                selected["waveform"] = waveform[..., cut:]
+                delivery_head_trim_frames = planned_trim
+                delivery_head_trim_samples = cut
         elif behavior == BEHAVIOR_EXTERNAL:
             if not _is_audio(external_post_audio):
                 raise ValueError("External audio post is active but external_post_audio is not connected")
@@ -689,6 +713,8 @@ class IAMCCS_MiniMaxH3AudioOutputPolicyR21:
             "video_frames": int(video_frames.shape[0]),
             "fps": fps,
             "fit": fit_report,
+            "motion_context_delivery_head_trim_frames": delivery_head_trim_frames,
+            "motion_context_delivery_head_trim_samples": delivery_head_trim_samples,
             "note": (
                 "REF2VA reference audio remains generative; custom-drive/external-post save the original source slice"
             ),

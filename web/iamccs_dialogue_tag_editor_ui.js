@@ -1,4 +1,6 @@
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
+import { beginAiBusy, createModeHelper } from "./iamccs_h3_authoring_helpers.js";
 
 const STYLE_ID = "iamccs-dialogue-tag-editor-style";
 const TYPE = "IAMCCS_DialogueTagEditor";
@@ -58,7 +60,7 @@ function defaultData() {
     schema: "iamccs.dialogue_scene",
     schema_version: 4,
     global_prompt: "cinematic field and reverse-field dialogue, hard cut coverage, one dominant speaking face per shot, visible mouth movement, natural audio-driven performance, silent listener reaction, stable identities, coherent eyelines",
-    settings: { editor_profile: "dialogue", engine_profile: "tts_audio_suite_chatterbox", output_mode: "speaker_stems_for_overlap", audio_lane_mode: "speaker_stems_timeline", tts_generation_mode: "double_stem_ab", speaker_stems_zero_start: false, speaker_stem_srt_local_zero: false, inline_edit_mode: "metadata_only", emotion_routing: "clean_metadata", default_gap_seconds: 0.12, text_theme: "light_boxes", font_zoom: 1 },
+    settings: { editor_profile: "dialogue", engine_profile: "tts_audio_suite_chatterbox", output_mode: "speaker_stems_for_overlap", audio_lane_mode: "speaker_stems_timeline", tts_generation_mode: "double_stem_ab", speaker_stems_zero_start: false, speaker_stem_srt_local_zero: false, inline_edit_mode: "metadata_only", emotion_routing: "clean_metadata", default_gap_seconds: 0.12, text_theme: "light_boxes", font_zoom: 1, minimax_truth_enabled: true, prompt_profile: "minimax_h3", minimax_mode: "multi_shot_lipsync" },
     speakers: [
       { id: "A", name: "Man A", voice: "speaker_a_low_tense", reference_text: "Keep your voice low. We do not know who is listening.", language: "en", subject_tag: "<Subject 1>", speaker_tag: "(S1)", voice_design: { gender: "male", age: "adult", pitch: "low", style: "tense", accent: "", dialect: "", instruct: "male, adult, low pitch, tense" } },
       { id: "B", name: "Man B", voice: "speaker_b_controlled_whisper", reference_text: "Good. Now we finally have something worth protecting.", language: "en", subject_tag: "<Subject 2>", speaker_tag: "(S2)", voice_design: { gender: "male", age: "adult", pitch: "medium", style: "controlled whisper", accent: "", dialect: "", instruct: "male, adult, medium pitch, controlled whisper" } },
@@ -159,6 +161,24 @@ function stripMiniMaxPromptTagsForSpeech(value) {
     .replace(/\s+/g, " ")
     .trim();
 }
+function applyMultiShotLipSyncDemo(data) {
+  const next = ensureDialogueDefaults(data);
+  next.settings.minimax_truth_enabled = true;
+  next.settings.prompt_profile = "minimax_h3";
+  next.settings.minimax_mode = "multi_shot_lipsync";
+  next.settings.dialogue_template = "dialogue_abab";
+  next.global_prompt = "A tense cinematic field-and-reverse-field exchange in one coherent abandoned observatory. Each Shotboard image starts a distinct editorial shot; preserve identity, wardrobe, screen direction and eyelines while the connected AudioBoard dialogue remains continuous across the hard cuts.";
+  next.speakers = [
+    { id: "A", name: "Mara", voice: "speaker_a_low_tense", reference_text: "We cannot stay here.", language: "en", subject_tag: "<Subject 1>", speaker_tag: "(S1)", voice_design: { gender: "female", age: "adult", pitch: "low", style: "tense", accent: "", dialect: "", instruct: "female, adult, low pitch, tense" } },
+    { id: "B", name: "Elias", voice: "speaker_b_controlled", reference_text: "Then stop looking back.", language: "en", subject_tag: "<Subject 2>", speaker_tag: "(S2)", voice_design: { gender: "male", age: "adult", pitch: "medium", style: "controlled", accent: "", dialect: "", instruct: "male, adult, medium pitch, controlled" } },
+  ];
+  next.lines = [
+    { id: "line_001", speaker: "A", text: "We cannot stay here.", spoken_text: "We cannot stay here.", emotion: "tense", style: "low", paralinguistic: "Breathing", overlap_after: 0.08, ref: 1, track: 0, minimax_boundary_mode: "normal", local_prompt: "Hard cut to <Picture 1>. <Subject 1> dominates a tight close-up, speaks with clearly visible mouth articulation, and holds a fixed eyeline toward <Subject 2>; <Subject 2> listens silently off camera." },
+    { id: "line_002", speaker: "B", text: "Then stop looking back.", spoken_text: "Then stop looking back.", emotion: "serious", style: "authority", paralinguistic: "none", overlap_after: 0.08, ref: 2, track: 1, minimax_boundary_mode: "normal", local_prompt: "Hard cut to <Picture 2>. <Subject 2> answers in a controlled close-up with readable lips and stable reverse eyeline; <Subject 1> remains silent off camera." },
+    { id: "line_003", speaker: "A", text: "I heard it move behind the glass.", spoken_text: "I heard it move behind the glass.", emotion: "fearful", style: "whisper", paralinguistic: "Breathing", overlap_after: 0, ref: 3, track: 0, minimax_boundary_mode: "normal", local_prompt: "Hard cut to <Picture 3>. <Subject 1> returns in a tighter reaction shot, whispers with precise visible articulation, then holds still through the final breath. Preserve the same room, wardrobe and screen direction; do not morph from the previous guide." },
+  ];
+  return ensureDialogueDefaults(next);
+}
 function minimaxBoundaryMode(value) {
   const mode = String(value || "normal").trim().toLowerCase().replace(/[\s-]+/g, "_");
   const aliases = { continue: "continues_across_cut", continues: "continues_across_cut", scenetrans: "continues_across_cut", scene_transition: "continues_across_cut", cutoff: "cutoff_at_end", cut_off: "cutoff_at_end", interrupted: "cutoff_at_end" };
@@ -214,17 +234,25 @@ function buildMinimaxDialogueContract(data) {
   if (speakerRows.length) sections.push("[SUBJECT / SPEAKER MAP]", speakerRows.join("\n"));
   if (dialogueRows.length) sections.push("[DIALOGUE]", dialogueRows.join("\n"));
   if (performanceRows.length) sections.push("[VISIBLE PERFORMANCE / SHOT RELAY]", performanceRows.join("\n"));
+  const integratedBody = sections.join("\n\n").trim() || "N/A";
+  const globalTruth = `integrated_multimodal_description:\n[Shot 1] ${integratedBody}\n\noverall_soundscape:\nTreat the connected AudioBoard dialogue as immutable timing authority across every guided shot. Preserve exact words, order, pauses and breaths; maintain coherent room tone beneath intentional hard editorial cuts.\n\nnon_diegetic_music:\nN/A`;
+  const localTruth = lineContracts.map((line) => {
+    const localBody = joinMiniMaxPrompt(line.local_prompt, line.dialogue_tag) || "N/A";
+    return `integrated_multimodal_description:\n[Shot 1] ${localBody}\n\noverall_soundscape:\nUse the connected custom audio as exact lip-sync timing authority for this shot; do not invent, remove or reorder speech.\n\nnon_diegetic_music:\nN/A`;
+  });
   return {
     schema: "iamccs.minimax_h3.dialogue_contract",
-    schema_version: 2,
+    schema_version: 3,
+    enabled: data?.settings?.minimax_truth_enabled !== false,
+    task_mode: String(data?.settings?.minimax_mode || "multi_shot_lipsync"),
     subject_speaker_map: speakerRows,
     dialogue_lines: dialogueRows,
     performance_lines: performanceRows,
     lines: lineContracts,
-    prompt: sections.join("\n\n").trim(),
+    prompt: globalTruth,
     scene_direction: globalPrompt,
-    global_truth: sections.join("\n\n").trim(),
-    local_truth: lineContracts.map((line) => joinMiniMaxPrompt(line.local_prompt, line.dialogue_tag)),
+    global_truth: globalTruth,
+    local_truth: localTruth,
     boundary_syntax: { normal: "No boundary token", continues_across_cut: "<scenetrans>", cutoff_at_end: "<cutoff>" },
   };
 }
@@ -1376,6 +1404,8 @@ function ensureStyle() {
   .iamccs-minimax-note{color:#9bb9b5;font-size:9px;font-weight:750;line-height:1.4}.iamccs-minimax-note strong{color:#efd092}
   .iamccs-minimax-line-preview{padding:8px 9px;border:1px solid rgba(86,180,169,.3);border-radius:6px;background:rgba(16,45,41,.72);color:#cceee9;font:700 9px/1.4 "Courier New",monospace;white-space:pre-wrap;word-break:break-word}
   .iamccs-dte select.iamccs-minimax-boundary{width:100%;height:34px;margin:0;padding:4px 9px;border-color:rgba(86,180,169,.5);background:#102723;color:#d9fff7;font-size:10px;font-weight:850;text-overflow:ellipsis}
+  .iamccs-dte button.iamccs-minimax-mode,.iamccs-dte button.iamccs-multishot-mode{border-color:#4ba99d;background:#17322f;color:#d9fff7}.iamccs-dte button.iamccs-minimax-mode[aria-pressed="true"],.iamccs-dte button.iamccs-multishot-mode[aria-pressed="true"]{outline:2px solid rgba(90,224,189,.62);background:linear-gradient(180deg,#3b9d8c,#21665d);border-color:#8fe1d4;color:#effffc;box-shadow:0 0 0 3px rgba(64,185,163,.16),0 0 15px rgba(64,185,163,.24)}
+  .iamccs-minimax-ai{display:grid;gap:8px;padding:10px;border:1px solid rgba(109,159,201,.42);border-radius:7px;background:#101d28}.iamccs-minimax-ai-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}.iamccs-minimax-ai label{display:grid;gap:4px;color:#9fc5e4;font-size:9px;font-weight:850;text-transform:uppercase;letter-spacing:.045em}.iamccs-minimax-ai input,.iamccs-minimax-ai select{margin:0!important;min-width:0;width:100%;height:31px!important;background:#111b25!important;border-color:#36546d!important;color:#e5f3ff!important}.iamccs-minimax-ai-modelrow{display:grid;grid-template-columns:minmax(0,1fr) 34px;gap:5px}.iamccs-minimax-ai-modelrow button{height:31px;padding:0}.iamccs-minimax-ai-status{min-height:30px;padding:7px 8px;border-radius:5px;background:#0b141c;color:#9fb3c5;font-size:9px;line-height:1.35}.iamccs-minimax-ai-status.ok{background:#123024;color:#a8e8bd}.iamccs-minimax-ai-status.error{background:#32191b;color:#ffb9b9}.iamccs-minimax-field-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.iamccs-minimax-field-ai{flex:0 0 auto;min-width:58px;height:26px!important;padding:0 8px!important;background:#203b55!important;border-color:#5f91bd!important;color:#dcefff!important}
   .iamccs-dte:not(.light) .iamccs-line-tags{background:rgba(109,141,183,.11);border-color:#303b4d}.iamccs-dte:not(.light) .iamccs-line-tag-row > span{color:#aebbd0}.iamccs-dte:not(.light) .iamccs-dte-card .iamccs-disclosure > summary{color:#c9d7ea}
   
   `;
@@ -1496,7 +1526,7 @@ function mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps = 24, min
   const merged = existingTimeline && typeof existingTimeline === "object" ? JSON.parse(JSON.stringify(existingTimeline)) : {};
   const minimaxContract = buildMinimaxDialogueContract(data);
   const promptEntries = minimaxH3
-    ? minimaxContract.lines.map((line) => joinMiniMaxPrompt(line.local_prompt, line.dialogue_tag))
+    ? minimaxContract.local_truth
     : (data.lines || []).map((line) => String(line.local_prompt || "").trim());
   const visualSegments = Array.isArray(merged.segments) ? merged.segments.filter(isVisualShotboardSegment) : [];
   const visualRows = Array.isArray(merged.rows) ? merged.rows.filter(isVisualShotboardRow) : [];
@@ -1749,13 +1779,19 @@ function install(node, reason = "install") {
     const addB = button("Add reply", "");
     const injectBtn = button("Inject All", "gold iamccs-inject-btn");
     injectBtn.title = "Invia la timeline provvisoria all'AudioBoard e aggiorna i prompt dello Shotboard";
-    const shotboardBtn = button("Send prompts to Shotboard", "iamccs-shotboard-btn");
-    shotboardBtn.title = "Aggiorna solo prompt globale e prompt locali sugli shot visuali esistenti";
+    const shotboardBtn = button("Inject Shotboard", "iamccs-shotboard-btn");
+    shotboardBtn.title = "Inject the global and local prompt truth into existing Shotboard visual slots without starting Queue";
+    const minimaxModeBtn = button("MiniMax H3", "iamccs-minimax-mode");
+    minimaxModeBtn.title = "Enable MiniMax H3 grammar for global and local Shotboard prompt truth. This never queues the workflow.";
+    minimaxModeBtn.setAttribute("aria-pressed", data.settings?.minimax_truth_enabled !== false ? "true" : "false");
+    const multiShotModeBtn = button("Multi-Shot LipSync", "iamccs-multishot-mode");
+    multiShotModeBtn.title = "Load the editable guided-cuts + continuous AudioBoard lip-sync demo and enable MiniMax H3 prompt truth.";
+    multiShotModeBtn.setAttribute("aria-pressed", data.settings?.minimax_mode === "multi_shot_lipsync" ? "true" : "false");
     const boldBtn = button("Bold", "");
     const lightBtn = button(light ? "Dark" : "Light", light ? "" : "active");
     const zOut = button("A-", "");
     const zIn = button("A+", "");
-    actions.append(addA, addB, boldBtn, injectBtn, shotboardBtn, lightBtn, zOut, zIn);
+    actions.append(multiShotModeBtn, minimaxModeBtn, addA, addB, boldBtn, injectBtn, shotboardBtn, lightBtn, zOut, zIn);
     head.append(title, actions);
 
     const main = document.createElement("div");
@@ -1949,6 +1985,146 @@ function install(node, reason = "install") {
     const minimaxHead = document.createElement("div");
     minimaxHead.className = "iamccs-minimax-contract-head";
     minimaxHead.innerHTML = "<strong>MINIMAX H3 DIALOGUE</strong><span>Prompter-compatible contract</span>";
+    const aiDefaults = {
+      ollama: { base_url: "http://127.0.0.1:11434", model: "" },
+      openai_compatible: { base_url: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
+      gemini: { base_url: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-2.5-flash" },
+      anthropic: { base_url: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5" },
+    };
+    node.properties ||= {};
+    const savedAI = node.properties.iamccs_prompter_ai || {};
+    const aiPanel = document.createElement("div");
+    aiPanel.className = "iamccs-minimax-ai";
+    const aiGrid = document.createElement("div");
+    aiGrid.className = "iamccs-minimax-ai-grid";
+    const aiProvider = select([
+      ["ollama", "Ollama / local"],
+      ["openai_compatible", "OpenAI-compatible"],
+      ["gemini", "Google Gemini"],
+      ["anthropic", "Anthropic"],
+    ], String(savedAI.provider || "ollama"));
+    const aiBaseUrl = input(String(savedAI.base_url || aiDefaults[aiProvider.value].base_url), "Provider URL");
+    const aiModel = input(String(savedAI.model || aiDefaults[aiProvider.value].model), "Model name");
+    const aiApiKey = input("", "API key (session only)");
+    aiApiKey.type = "password";
+    const aiTemperature = input(String(savedAI.temperature ?? 0.35));
+    aiTemperature.type = "number"; aiTemperature.min = "0"; aiTemperature.max = "2"; aiTemperature.step = "0.05";
+    const aiModelList = document.createElement("datalist");
+    aiModelList.id = `iamccs-dte-ai-models-${node.id || Math.random().toString(16).slice(2)}`;
+    aiModel.setAttribute("list", aiModelList.id);
+    const aiRefresh = button("↻", "");
+    aiRefresh.title = "Connect to Ollama and list installed models";
+    const aiModelRow = document.createElement("div");
+    aiModelRow.className = "iamccs-minimax-ai-modelrow";
+    aiModelRow.append(aiModel, aiRefresh, aiModelList);
+    const aiStatus = document.createElement("div");
+    aiStatus.className = "iamccs-minimax-ai-status";
+    aiStatus.textContent = "AI edits only the selected prompt box and never starts the ComfyUI queue.";
+    const aiLabel = (text, control) => { const label = document.createElement("label"); label.textContent = text; label.append(control); return label; };
+    aiGrid.append(aiLabel("Provider", aiProvider), aiLabel("Model", aiModelRow), aiLabel("Base URL", aiBaseUrl), aiLabel("Temperature", aiTemperature), aiLabel("API key", aiApiKey));
+    aiPanel.append(aiGrid, aiStatus);
+    const persistAI = () => {
+      node.properties.iamccs_prompter_ai = {
+        provider: aiProvider.value,
+        base_url: aiBaseUrl.value.trim(),
+        model: aiModel.value.trim(),
+        temperature: Number(aiTemperature.value || 0.35),
+      };
+      node.setDirtyCanvas?.(true, true);
+      app.graph?.setDirtyCanvas?.(true, true);
+    };
+    const loadOllamaModels = async () => {
+      if (aiProvider.value !== "ollama") {
+        aiStatus.className = "iamccs-minimax-ai-status";
+        aiStatus.textContent = "Enter the external provider model name and API key.";
+        return;
+      }
+      aiRefresh.disabled = true;
+      aiStatus.className = "iamccs-minimax-ai-status";
+      aiStatus.textContent = "Reading installed Ollama models…";
+      try {
+        const response = await api.fetchApi(`/iamccs/prompter/ollama/models?base_url=${encodeURIComponent(aiBaseUrl.value.trim() || "http://127.0.0.1:11434")}`);
+        const payload = await response.json();
+        if (!response.ok || !payload?.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
+        const names = (payload.models || []).map((item) => String(item.name || "")).filter(Boolean);
+        aiModelList.replaceChildren(...names.map((name) => { const option = document.createElement("option"); option.value = name; return option; }));
+        if (!aiModel.value && names.length) aiModel.value = names[0];
+        persistAI();
+        aiStatus.className = "iamccs-minimax-ai-status ok";
+        aiStatus.textContent = names.length ? `${names.length} Ollama model(s) found. Selected: ${aiModel.value}.` : "Ollama is reachable but no model is installed.";
+      } catch (error) {
+        aiStatus.className = "iamccs-minimax-ai-status error";
+        aiStatus.textContent = `Ollama connection failed: ${error?.message || error}`;
+      } finally {
+        aiRefresh.disabled = false;
+      }
+    };
+    aiProvider.onchange = () => {
+      const defaults = aiDefaults[aiProvider.value] || aiDefaults.ollama;
+      aiBaseUrl.value = defaults.base_url;
+      aiModel.value = defaults.model;
+      persistAI();
+      aiStatus.className = "iamccs-minimax-ai-status";
+      aiStatus.textContent = aiProvider.value === "ollama" ? "Press ↻ to connect and list local models." : "Enter the provider model name and API key.";
+    };
+    [aiBaseUrl, aiModel, aiTemperature].forEach((control) => control.onchange = persistAI);
+    aiRefresh.onclick = loadOllamaModels;
+    const runMiniMaxAIRewrite = async ({ key, text, context = "", apply, trigger, readCurrent = null }) => {
+      if (node._iamccsPromptAiBusy) { aiStatus.textContent = "An AI rewrite is already running. Wait for the spinner."; return; }
+      const rough = String(text || "").trim();
+      if (!rough) {
+        aiStatus.className = "iamccs-minimax-ai-status error";
+        aiStatus.textContent = "Write a rough idea in this prompt box before pressing ✦ AI.";
+        return;
+      }
+      if (!aiModel.value.trim()) {
+        aiStatus.className = "iamccs-minimax-ai-status error";
+        aiStatus.textContent = "Select an AI model first.";
+        return;
+      }
+      persistAI();
+      const authoringMode = data.settings?.minimax_assist_mode || "multi_shot_lipsync";
+      const taskMode = authoringMode === "longvid_guides" ? "t2va" : authoringMode;
+      const local = key !== "multishot_global_direction";
+      const targetKey = taskMode === "multi_shot_lipsync" ? key : ({ref2va:local?"detailed_description":"summary",v2va_object_swap:local?"v2va_interval_edits":"v2va_replacement_retention",audio_driven:local?"audio_timed_performance":"audio_scene_intent"})[taskMode] || (local?"acting":"scene");
+      node._iamccsPromptAiBusy = true;
+      const finishBusy = beginAiBusy(trigger);
+      aiStatus.className = "iamccs-minimax-ai-status";
+      aiStatus.textContent = `Rewriting ${key} with ${aiProvider.options[aiProvider.selectedIndex]?.text || aiProvider.value}…`;
+      try {
+        const response = await api.fetchApi("/iamccs/prompter/rewrite", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            provider: aiProvider.value,
+            base_url: aiBaseUrl.value.trim(),
+            model: aiModel.value.trim(),
+            api_key: aiApiKey.value,
+            task_mode: taskMode,
+            sections: { [targetKey]: rough },
+            target_keys: [targetKey],
+            user_direction: `Authoring mode: ${authoringMode}. ${String(context || "")}`,
+            temperature: Number(aiTemperature.value || 0.35),
+            timeout: 180,
+          }),
+        });
+        const payload = await response.json();
+        if (!response.ok || !payload?.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
+        const rewritten = String(payload.sections?.[targetKey] || "").trim();
+        if (!rewritten) throw new Error("The model returned no usable text for this field");
+        if ((data.settings?.minimax_assist_mode || "multi_shot_lipsync") !== authoringMode || (readCurrent && String(readCurrent()).trim() !== rough)) throw new Error("The mode or box changed while AI was working; your edit was kept.");
+        apply(rewritten);
+        aiStatus.className = "iamccs-minimax-ai-status ok";
+        aiStatus.textContent = `Improved ${key}. Review the editable box before Inject Shotboard.`;
+      } catch (error) {
+        aiStatus.className = "iamccs-minimax-ai-status error";
+        aiStatus.textContent = `AI rewrite failed: ${error?.message || error}`;
+      } finally {
+        aiApiKey.value = "";
+        node._iamccsPromptAiBusy = false;
+        finishBusy();
+      }
+    };
     const minimaxTagGrid = document.createElement("div");
     minimaxTagGrid.className = "iamccs-minimax-tag-grid";
     [
@@ -2008,7 +2184,20 @@ function install(node, reason = "install") {
         : "<strong>Copy failed.</strong> Select the preview text and copy manually.";
     };
     minimaxActions.append(minimaxApply, minimaxCopy);
-    minimaxPanel.append(minimaxHead, minimaxTagGrid, minimaxPreview, minimaxActions, minimaxCopyStatus);
+    const assistMode = select([["multi_shot_lipsync","Multi-Shot LipSync"],["i2va","I2VA"],["t2va","T2VA"],["fl2va","FL2VA"],["ref2va","REF2VA / LipSync"],["longvid_guides","LongVid guides"],["audio_driven","Audio Driven"],["v2va_object_swap","V2VA"]], data.settings?.minimax_assist_mode || "multi_shot_lipsync");
+    const helperHost = document.createElement("div");
+    helperHost.append(createModeHelper(assistMode.value));
+    assistMode.onchange = () => { data.settings.minimax_assist_mode = assistMode.value; save(); helperHost.replaceChildren(createModeHelper(assistMode.value)); };
+    const requestPanel = document.createElement("section");
+    requestPanel.style.cssText = "border:2px solid #a077cf;background:#271c3c;padding:12px;margin:10px 0;display:grid;gap:8px;min-width:0";
+    const requestBox = textarea(data.settings.minimax_request || "", "REQUEST: describe your scene naturally. Who speaks, what happens, camera and mood. Supplied dialogue is never invented or replaced.");
+    requestBox.oninput = () => { data.settings.minimax_request = requestBox.value; save(); };
+    const requestAI = button("✦ REQUEST → GLOBAL", "iamccs-minimax-field-ai");
+    requestAI.onclick = () => { const previousGlobal = global.value; return runMiniMaxAIRewrite({key:"multishot_global_direction",text:requestBox.value,readCurrent:()=>requestBox.value,
+      context:"Turn this narrative REQUEST into the shared MiniMax global direction. Do not rewrite existing speech lines or invent dialogue. The compiled MiniMax Truth adds the existing speaker/dialogue contract.",trigger:requestAI,
+      apply:value=>{if(global.value !== previousGlobal) throw new Error("Global was edited while AI was working; your edit was kept.");global.value=value;data.global_prompt=value;save();refreshMinimaxPreview();}}); };
+    requestPanel.append(fieldLabel("REQUEST · narrative brief", "AI writes the Global box; review before injecting"), requestBox, requestAI);
+    minimaxPanel.append(minimaxHead, fieldLabel("AI WRITING MODE", "Does not change the Shotboard generation mode"), assistMode, helperHost, requestPanel, aiPanel, minimaxTagGrid, minimaxPreview, minimaxActions, minimaxCopyStatus);
     refreshMinimaxPreview();
     generation.append(disclosure("MiniMax H3 prompt", minimaxPanel, true, "subject + dialogue tags"));
 
@@ -2024,7 +2213,20 @@ function install(node, reason = "install") {
     global.style.fontSize = Math.round(13 * zoom) + "px";
     global.oninput = () => { data.global_prompt = global.value; save(); };
     global.classList.add("iamccs-global");
-    globalSection.append(fieldLabel("Global shot prompt", "Shotboard"), global);
+    const globalHead = document.createElement("div");
+    globalHead.className = "iamccs-minimax-field-head";
+    const globalAI = button("✦ AI", "iamccs-minimax-field-ai");
+    globalAI.title = "Rewrite only the global direction using the MiniMax H3 Multi-Shot LipSync schema. No Queue.";
+    globalAI.onclick = () => runMiniMaxAIRewrite({
+      key: "multishot_global_direction",
+      text: global.value,
+      readCurrent: () => global.value,
+      context: "Preserve the user's story, subject identities and requested continuity or cut intent. This is the global direction shared by all Shotboard slots.",
+      trigger: globalAI,
+      apply: (value) => { global.value = value; data.global_prompt = value; save(); refreshMinimaxPreview(); },
+    });
+    globalHead.append(fieldLabel("Global shot prompt", "MiniMax H3 / Shotboard"), globalAI);
+    globalSection.append(globalHead, global);
     const scriptSection = document.createElement("div");
     scriptSection.className = "iamccs-dte-section";
     scriptArea.className = "iamccs-dte-script iamccs-rich-editor";
@@ -2147,7 +2349,7 @@ function install(node, reason = "install") {
     main.append(side, center, generation);
     const foot = document.createElement("div");
     foot.className = "iamccs-dte-foot";
-    foot.innerHTML = "<span>Inject All updates AudioBoard and Shotboard. Send prompts to Shotboard changes only visual prompts.</span><span>The selected track mode controls placement.</span>";
+    foot.innerHTML = "<span>Inject All updates AudioBoard + Shotboard. Inject Shotboard changes only global/local prompt truth and never starts Queue.</span><span>MiniMax H3 uses the canonical global/local grammar when lit.</span>";
     root.append(head, main, foot);
     renderCards(cardsGrid);
 
@@ -2157,6 +2359,19 @@ function install(node, reason = "install") {
     lightBtn.onclick = () => { light = !light; save(); render(); };
     zOut.onclick = () => { zoom = Math.max(0.8, zoom - 0.1); save(); render(); };
     zIn.onclick = () => { zoom = Math.min(1.8, zoom + 0.1); save(); render(); };
+    minimaxModeBtn.onclick = () => {
+      data.settings ||= {};
+      data.settings.minimax_truth_enabled = data.settings.minimax_truth_enabled === false;
+      data.settings.prompt_profile = data.settings.minimax_truth_enabled ? "minimax_h3" : "plain";
+      save();
+      render();
+    };
+    multiShotModeBtn.onclick = () => {
+      data = applyMultiShotLipSyncDemo(data);
+      scriptText = linesToText(data);
+      save();
+      render();
+    };
     injectBtn.onclick = () => injectVisibleWidgets(node, data, status, injectBtn, foot);
     shotboardBtn.onclick = () => injectShotboardPrompts(node, data, status, shotboardBtn, foot);
 
@@ -2284,6 +2499,26 @@ function install(node, reason = "install") {
           line.local_prompt = promptBox.value;
           save();
         };
+        const localPromptWrap = document.createElement("div");
+        localPromptWrap.className = "iamccs-field-wrap";
+        const localPromptHead = document.createElement("div");
+        localPromptHead.className = "iamccs-minimax-field-head";
+        const localAI = button("✦ AI", "iamccs-minimax-field-ai");
+        localAI.title = "Rewrite only this local shot direction using MiniMax H3 Multi-Shot LipSync prompting. No Queue.";
+        localAI.onclick = () => {
+          const speakerIndex = Math.max(0, speakerOptions.findIndex(([id]) => id === (speakerSel.value || line.speaker || "A")));
+          const speaker = (data.speakers || [])[speakerIndex] || {};
+          runMiniMaxAIRewrite({
+            key: "multishot_shot_plan",
+            text: promptBox.value,
+            readCurrent: () => promptBox.value,
+            context: `This is local Shotboard slot ${index + 1}. Preserve the exact spoken line and speaker mapping: ${minimaxSubjectTag(speaker.subject_tag, speakerIndex)} ${minimaxSpeakerTag(speaker.speaker_tag, speakerIndex)} says ${JSON.stringify(minimaxDialogueText(textBox.value))}. Keep the active mouth visible. Follow the selected mode's cut or continuity semantics.`,
+            trigger: localAI,
+            apply: (value) => { promptBox.value = value; line.local_prompt = value; save(); refreshMinimaxPreview(); },
+          });
+        };
+        localPromptHead.append(fieldLabel("Local shot prompt", "MiniMax H3"), localAI);
+        localPromptWrap.append(localPromptHead, promptBox);
 
         const lineTags = document.createElement("div");
         lineTags.className = "iamccs-line-tags";
@@ -2314,7 +2549,7 @@ function install(node, reason = "install") {
           labelledBox("Dialogue boundary", boundarySelect),
           primaryControls,
           lineTags,
-          labelledBox("Local shot prompt", promptBox),
+          localPromptWrap,
           disclosure("Timing", advancedLine, false, "optional")
         );
         container.append(card);
@@ -2426,7 +2661,7 @@ function syncPromptsToShotboard(node, data, fps) {
   let availableVisualShots = 0;
   const target = shotboardPlannersFor(node);
   target.planners.forEach((shotboard) => {
-    const minimaxH3 = nodeType(shotboard) === "IAMCCS_MiniMaxH3ShotPlanner";
+    const minimaxH3 = nodeType(shotboard) === "IAMCCS_MiniMaxH3ShotPlanner" && data.settings?.minimax_truth_enabled !== false;
     const contract = minimaxH3 ? buildMinimaxDialogueContract(data) : null;
     const gp = widget(shotboard, "global_prompt");
     const td = widget(shotboard, "timeline_data");
@@ -2467,7 +2702,7 @@ function injectShotboardPrompts(node, data, status, buttonEl, foot) {
     buttonEl.disabled = false;
     buttonEl.textContent = "Prompts sent";
     if (buttonEl._iamccsResetTimer) window.clearTimeout(buttonEl._iamccsResetTimer);
-    buttonEl._iamccsResetTimer = window.setTimeout(() => { buttonEl.textContent = "Send prompts to Shotboard"; }, 1800);
+    buttonEl._iamccsResetTimer = window.setTimeout(() => { buttonEl.textContent = "Inject Shotboard"; }, 1800);
   }
   app.graph?.setDirtyCanvas?.(true, true);
 }

@@ -1,7 +1,7 @@
 [project]
 name = "iamccs-wan-lora-fixer-stack"
-version = "1.5.2"
-description = "IAMCCS nodes for ComfyUI: Shotboard multigen pipeline, Shotboard Editor, AudioBoard, multi-LoRA stack, WAN/LTX tools, AutoLink and Frame Designer."
+version = "1.5.3"
+description = "IAMCCS nodes for ComfyUI: Shotboard multigen pipeline, Shotboard Editor, AudioBoard, multi-LoRA stack, Krea 2, Minimax H3 WAN/LTX tools, AutoLink and Frame Designer."
 license = { text = "MIT" }
 authors = [
   { name = "Carmine Cristallo Scalzi (IAMCCS)", email = "info@carminecristalloscalzi.com" }

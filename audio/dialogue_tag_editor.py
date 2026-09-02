@@ -22,6 +22,9 @@ DEFAULT_DIALOGUE = {
         "speaker_stem_srt_local_zero": False,
         "inline_edit_mode": "metadata_only",
         "default_gap_seconds": 0.12,
+        "minimax_truth_enabled": True,
+        "prompt_profile": "minimax_h3",
+        "minimax_mode": "multi_shot_lipsync",
     },
     "speakers": [
         {
@@ -206,6 +209,8 @@ def _build_minimax_dialogue_contract(
     global_prompt: str,
     speakers: List[Dict[str, Any]],
     lines: List[Dict[str, Any]],
+    enabled: bool = True,
+    minimax_mode: str = "multi_shot_lipsync",
 ) -> Dict[str, Any]:
     lookup = _speaker_lookup(speakers)
     speaker_rows: List[str] = []
@@ -274,21 +279,36 @@ def _build_minimax_dialogue_contract(
         sections.extend(["[DIALOGUE]", "\n".join(dialogue_rows)])
     if performance_rows:
         sections.extend(["[VISIBLE PERFORMANCE / SHOT RELAY]", "\n".join(performance_rows)])
+    integrated_body = "\n\n".join(sections).strip() or "N/A"
+    global_truth = (
+        f"integrated_multimodal_description:\n[Shot 1] {integrated_body}\n\n"
+        "overall_soundscape:\nTreat the connected AudioBoard dialogue as immutable timing authority across every guided shot. "
+        "Preserve exact words, order, pauses and breaths; maintain coherent room tone beneath intentional hard editorial cuts.\n\n"
+        "non_diegetic_music:\nN/A"
+    )
+    local_truth = []
+    for item in line_contracts:
+        local_body = _minimax_join_prompt(item.get("local_prompt", ""), item.get("dialogue_tag", "")) or "N/A"
+        local_truth.append(
+            f"integrated_multimodal_description:\n[Shot 1] {local_body}\n\n"
+            "overall_soundscape:\nUse the connected custom audio as exact lip-sync timing authority for this shot; "
+            "do not invent, remove or reorder speech.\n\n"
+            "non_diegetic_music:\nN/A"
+        )
     return {
         "schema": "iamccs.minimax_h3.dialogue_contract",
-        "schema_version": 2,
+        "schema_version": 3,
+        "enabled": bool(enabled),
+        "task_mode": str(minimax_mode or "multi_shot_lipsync"),
         "speakers": speaker_contracts,
         "lines": line_contracts,
         "subject_speaker_map": speaker_rows,
         "dialogue_lines": dialogue_rows,
         "performance_lines": performance_rows,
-        "prompt": "\n\n".join(sections).strip(),
+        "prompt": global_truth,
         "scene_direction": str(global_prompt or "").strip(),
-        "global_truth": "\n\n".join(sections).strip(),
-        "local_truth": [
-            "\n".join(part for part in (item.get("local_prompt", ""), item.get("dialogue_tag", "")) if part).strip()
-            for item in line_contracts
-        ],
+        "global_truth": global_truth,
+        "local_truth": local_truth,
         "dialogue_syntax": "<Subject N> (SN): <d>[Language] user-authored transcript</d>",
         "boundary_syntax": {
             "normal": "No boundary token",
@@ -343,7 +363,7 @@ def apply_dialogue_to_minimax(
     and the dialogue contract are merged.
     """
     contract = _minimax_contract_from_linx(cine_linx)
-    if not contract:
+    if not contract or contract.get("enabled") is False:
         return str(global_prompt or ""), str(timeline_data or ""), {
             "applied": False,
             "source": "none",
@@ -376,17 +396,30 @@ def apply_dialogue_to_minimax(
         if isinstance(item, dict) and not bool(item.get("placeholder", False))
     ] if isinstance(timeline.get("rows"), list) else []
 
-    local_truth: List[str] = []
-    for line in lines:
-        local = _minimax_join_prompt(line.get("local_prompt"), line.get("dialogue_tag"))
-        local_truth.append(local)
+    compiled_local = contract.get("local_truth")
+    if isinstance(compiled_local, list) and compiled_local:
+        # The Dialogue Editor is the prompt-truth owner when MiniMax H3 is
+        # enabled.  Use the same canonical grammar shown in its preview for
+        # Shotboard injection instead of rebuilding a reduced/raw prompt here.
+        local_truth = [str(item or "").strip() for item in compiled_local]
+    else:
+        # Backward compatibility for contracts saved before schema v3.
+        local_truth = [
+            _minimax_join_prompt(line.get("local_prompt"), line.get("dialogue_tag"))
+            for line in lines
+        ]
     applied_indexes = set()
     for collection in (visual_segments, visual_rows):
         for index, item in enumerate(collection):
             if index >= len(local_truth) or not local_truth[index]:
                 continue
             existing = item.get("relay_prompt") or item.get("local_prompt") or item.get("prompt")
-            merged = _minimax_join_prompt(existing, local_truth[index])
+            canonical = local_truth[index]
+            existing_text = str(existing or "").strip()
+            # Canonical v3 locals already contain the authored local prompt.
+            # Preserve unrelated Shotboard direction, but never duplicate the
+            # source text merely because it is now wrapped in H3 headings.
+            merged = canonical if not existing_text or existing_text in canonical else _minimax_join_prompt(existing_text, canonical)
             item["prompt"] = merged
             item["relay_prompt"] = merged
             item["local_prompt"] = merged
@@ -871,7 +904,14 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
     duration_seconds = float(total_frames) / max(1.0, float(frame_rate)) if total_frames else 0.0
     local_prompt_parts = [str(seg.get("prompt") or "").strip() for seg in shotboard_segments if isinstance(seg, dict) and str(seg.get("prompt") or "").strip()]
     segment_length_parts = [str(int(seg.get("length", 1))) for seg in shotboard_segments if isinstance(seg, dict)]
-    minimax_dialogue = _build_minimax_dialogue_contract(global_prompt, speakers, export_lines)
+    dialogue_settings = data.get("settings") if isinstance(data.get("settings"), dict) else {}
+    minimax_dialogue = _build_minimax_dialogue_contract(
+        global_prompt,
+        speakers,
+        export_lines,
+        bool(dialogue_settings.get("minimax_truth_enabled", True)),
+        str(dialogue_settings.get("minimax_mode") or "multi_shot_lipsync"),
+    )
     output_track_count = 1 if single_track_mode else max(1, len(ordered_keys))
     # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     visual_timeline = {

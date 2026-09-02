@@ -645,6 +645,28 @@ def _output_preview_descriptor(path: Path, fps: float, frames: int, width: int, 
     }
 
 
+def _resolve_profile_compatibility(video_key: str, audio_key: str) -> Tuple[str, str]:
+    """Return a mux-safe audio profile and an explicit compatibility note.
+
+    Old workflows can serialize H.264/H.265 MP4 together with the historical
+    PCM default.  Rejecting that pair after grain/render has already completed
+    wastes the whole queue.  Preserve the requested video/container contract
+    and select the closest interoperable audio codec, while reporting the
+    effective profile in logs, metadata and the node UI.
+    """
+    video = VIDEO_PROFILES[video_key]
+    audio = AUDIO_PROFILES[audio_key]
+    extension = str(video["extension"]).lower()
+    codec = str(audio["codec"]).lower()
+    if codec == "copy":
+        return audio_key, ""
+    if extension == "mp4" and codec not in {"aac", "alac"}:
+        return "aac_320", f"{audio_key} is not MP4-safe; using AAC 320 kb/s"
+    if extension == "mov" and codec == "flac":
+        return "alac", "FLAC is not a reliable MOV profile; using lossless ALAC"
+    return audio_key, ""
+
+
 def _validate_profiles(video_key: str, audio_key: str) -> None:
     video = VIDEO_PROFILES[video_key]
     audio = AUDIO_PROFILES[audio_key]
@@ -653,9 +675,9 @@ def _validate_profiles(video_key: str, audio_key: str) -> None:
     if codec == "copy":
         return
     if extension == "mp4" and codec not in {"aac", "alac"}:
-        raise ValueError("PCM/FLAC non e compatibile con il profilo MP4 selezionato. Usa MOV o MKV per audio lossless.")
+        raise ValueError("PCM/FLAC is not compatible with the selected MP4 profile. Use MOV/MKV for lossless audio, or AAC for MP4.")
     if extension == "mov" and codec == "flac":
-        raise ValueError("FLAC non e un profilo audio MOV affidabile. Usa PCM/ALAC o il profilo MKV lossless.")
+        raise ValueError("FLAC is not a reliable MOV audio profile. Use PCM/ALAC, or the lossless MKV profile.")
 
 
 def _align_audio(waveform: torch.Tensor, sample_rate: int, frames: int, fps: float, policy: str) -> torch.Tensor:
@@ -774,6 +796,16 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
             video_key = "prores_422_hq_mov"
         if audio_key not in AUDIO_PROFILES:
             audio_key = "pcm_s16le"
+        requested_audio_key = audio_key
+        audio_key, profile_compatibility_note = _resolve_profile_compatibility(video_key, audio_key)
+        if profile_compatibility_note:
+            _log.warning(
+                "IAMCCS Exporter profile compatibility | video=%s | requested_audio=%s | effective_audio=%s | %s",
+                video_key,
+                requested_audio_key,
+                audio_key,
+                profile_compatibility_note,
+            )
         _validate_profiles(video_key, audio_key)
 
         profile = VIDEO_PROFILES[video_key]
@@ -868,9 +900,11 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
             "node": NODE_ID,
             "video_profile": video_key,
             "video_profile_label": profile["label"],
-            "audio_profile": audio_key,
-            "audio_profile_label": audio_config["label"],
+            "audio_profile": requested_audio_key,
+            "audio_profile_label": AUDIO_PROFILES[requested_audio_key]["label"],
             "audio_profile_effective": effective_audio_profile,
+            "audio_profile_effective_label": audio_config["label"],
+            "profile_compatibility_note": profile_compatibility_note,
             "fps": fps,
             "frames": frame_count,
             "width": width,
@@ -1034,6 +1068,7 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
                 raise RuntimeError(f"{NODE_ID}: FFmpeg export failed: {detail[-4000:]}")
 
         metadata["audio_profile_effective"] = effective_audio_profile
+        metadata["audio_profile_effective_label"] = AUDIO_PROFILES[effective_audio_profile]["label"]
         metadata["audio_lossless_codec"] = effective_audio_lossless
 
         sidecar_path = output_path.with_suffix(".metadata.json")
@@ -1045,8 +1080,9 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
             "output_path": str(output_path),
             "sidecar_path": str(sidecar_path) if bool(write_sidecar) else "",
             "video_profile": video_key,
-            "audio_profile": audio_key,
+            "audio_profile": requested_audio_key,
             "audio_profile_effective": effective_audio_profile,
+            "profile_compatibility_note": profile_compatibility_note,
             "audio_edl_active": direct_audio_edl_active,
             "audio_edl_status": direct_audio_edl_status,
             "visual_roll_dedup_active": roll_visual_dedup_active,

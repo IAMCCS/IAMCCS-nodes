@@ -5,6 +5,7 @@
 import logging
 import os
 import shutil
+import sys
 from pathlib import Path
 
 
@@ -16,7 +17,8 @@ def _iamccs_expose_ffmpeg():
         ffmpeg_path = Path(imageio_ffmpeg.get_ffmpeg_exe())
         if not ffmpeg_path.exists():
             return
-        shim_dir = Path(os.environ.get("IAMCCS_FFMPEG_SHIM_DIR", r"D:\ComfyUI\python_embeded\ffmpeg-bin"))
+        fallback_dir = Path(sys.executable).parent / "ffmpeg-bin"
+        shim_dir = Path(os.environ.get("IAMCCS_FFMPEG_SHIM_DIR", fallback_dir))
         shim_dir.mkdir(parents=True, exist_ok=True)
         shim_path = shim_dir / "ffmpeg.exe"
         if not shim_path.exists():
@@ -179,6 +181,10 @@ from .iamccs_minimax_h3_shotboard import (
 from .iamccs_prompter import (
     NODE_CLASS_MAPPINGS as IAMCCS_PROMPTER_NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as IAMCCS_PROMPTER_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .cine_nodes import (
+    NODE_CLASS_MAPPINGS as IAMCCS_CINE_NODES_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as IAMCCS_CINE_NODES_NODE_DISPLAY_NAME_MAPPINGS,
 )
 from .iamccs_cine_h3_vision_info import (
     NODE_CLASS_MAPPINGS as IAMCCS_CINE_H3_VISION_NODE_CLASS_MAPPINGS,
@@ -827,6 +833,9 @@ NODE_CLASS_MAPPINGS = {
     # Structured MiniMax H3 prompt authoring (isolated Python + JS files)
     **IAMCCS_PROMPTER_NODE_CLASS_MAPPINGS,
 
+    # Native IAMCCS cinema finishing nodes (isolated from generation backends)
+    **IAMCCS_CINE_NODES_NODE_CLASS_MAPPINGS,
+
     # Local VLM visual continuity analysis transported through CineLinX
     **IAMCCS_CINE_H3_VISION_NODE_CLASS_MAPPINGS,
 
@@ -1141,6 +1150,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     **IAMCCS_MINIMAX_H3_NODE_DISPLAY_NAME_MAPPINGS,
 
     **IAMCCS_PROMPTER_NODE_DISPLAY_NAME_MAPPINGS,
+    **IAMCCS_CINE_NODES_NODE_DISPLAY_NAME_MAPPINGS,
     **IAMCCS_CINE_H3_VISION_NODE_DISPLAY_NAME_MAPPINGS,
 
 }
@@ -2526,6 +2536,31 @@ try:
     NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_SHOTBOARD_V4_RETAKE_R2_NODE_DISPLAY_NAME_MAPPINGS)
 except Exception as e:
     logging.getLogger("IAMCCS").warning("IAMCCS Shotboard V4 Retake R2 nodes unavailable: %r", e)
+
+# LTX-2.5 Shotboard V3B is isolated from the production V3/V4 implementations.
+# A missing optional dependency therefore never prevents existing IAMCCS nodes
+# from loading; runtime dependency checks happen only when its backend executes.
+try:
+    from .iamccs_ltx25_shotboard_v3b import (
+        NODE_CLASS_MAPPINGS as _IAMCCS_LTX25_V3B_NODE_CLASS_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as _IAMCCS_LTX25_V3B_NODE_DISPLAY_NAME_MAPPINGS,
+    )
+    NODE_CLASS_MAPPINGS.update(_IAMCCS_LTX25_V3B_NODE_CLASS_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_LTX25_V3B_NODE_DISPLAY_NAME_MAPPINGS)
+except Exception as e:
+    logging.getLogger("IAMCCS").warning("IAMCCS LTX-2.5 Shotboard V3B nodes unavailable: %r", e)
+
+# NextFrameBuilder is isolated so an optional Qwen/GGUF dependency cannot stop
+# the rest of IAMCCS-nodes from registering at ComfyUI startup.
+try:
+    from .iamccs_next_frame_builder import (
+        NODE_CLASS_MAPPINGS as _IAMCCS_NEXT_FRAME_BUILDER_NODE_CLASS_MAPPINGS,
+        NODE_DISPLAY_NAME_MAPPINGS as _IAMCCS_NEXT_FRAME_BUILDER_NODE_DISPLAY_NAME_MAPPINGS,
+    )
+    NODE_CLASS_MAPPINGS.update(_IAMCCS_NEXT_FRAME_BUILDER_NODE_CLASS_MAPPINGS)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_IAMCCS_NEXT_FRAME_BUILDER_NODE_DISPLAY_NAME_MAPPINGS)
+except Exception as e:
+    logging.getLogger("IAMCCS").warning("IAMCCS NextFrameBuilder nodes unavailable: %r", e)
 
 # Setup API routes when extension loads
 setup_api_routes()

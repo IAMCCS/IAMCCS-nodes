@@ -3356,7 +3356,14 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
         **kwargs,
     ):
         plan = _h3_editor_shotplan(cine_linx)
-        longvid = str(plan.get("task_mode", "") or "").strip().lower().startswith("longvid")
+        per_shot_ltx = (
+            bool(plan.get("upscale_enabled", False))
+            and str(plan.get("upscale_mode", "off") or "off").strip().lower() == "ltx23_per_chunk"
+        )
+        longvid = (
+            str(plan.get("task_mode", "") or "").strip().lower().startswith("longvid")
+            and not per_shot_ltx
+        )
         if not longvid:
             missing = []
             if slot_frames is None:
@@ -3396,7 +3403,11 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
         total = max(1, _safe_int(total_segments, len(chunks) or 1))
         frame_rate = max(1.0, _safe_float(fps, plan.get("fps", 24.0)))
         task_mode = str(plan.get("task_mode", "") or "").strip().lower()
-        longvid = task_mode.startswith("longvid")
+        per_shot_ltx = (
+            bool(plan.get("upscale_enabled", False))
+            and str(plan.get("upscale_mode", "off") or "off").strip().lower() == "ltx23_per_chunk"
+        )
+        longvid = task_mode.startswith("longvid") and not per_shot_ltx
         selected_identity = _shotboard_timeline_identity_from_linx(cine_linx) or _active_identity_from_linx(cine_linx)
         selected_timeline = max(1, min(5, _safe_int(selected_identity.get("take_index"), 1)))
         take_index = selected_timeline
@@ -4748,6 +4759,92 @@ def _apply_goya_suite_clip_edit(images: torch.Tensor, clip: Dict[str, Any]) -> t
     return work.clamp(0.0, 1.0).permute(0, 2, 3, 1).to(dtype=source_dtype).contiguous()
 
 
+def _editor_transition(clip: Dict[str, Any], side: str) -> Dict[str, Any]:
+    suite_edit = clip.get("suite_edit") if isinstance(clip.get("suite_edit"), dict) else {}
+    transitions = suite_edit.get("transitions") if isinstance(suite_edit.get("transitions"), dict) else clip.get("transitions") if isinstance(clip.get("transitions"), dict) else {}
+    value = transitions.get(side) if isinstance(transitions.get(side), dict) else {}
+    return value
+
+
+def _assemble_editor_timeline_frames(entries: List[Tuple[Dict[str, Any], Any]], fps: float) -> Tuple[torch.Tensor, int]:
+    """Place edited clips at manifest time and render declared cross dissolves."""
+    canvas = None
+    cross_dissolves = 0
+    for clip, comp in entries:
+        images = comp.images
+        if not torch.is_tensor(images) or images.ndim != 4 or int(images.shape[0]) <= 0:
+            continue
+        start = max(0, int(round(_safe_float(clip.get("startTime"), 0.0) * max(1.0, fps))))
+        end = start + int(images.shape[0])
+        if canvas is None:
+            previous_length = 0
+            canvas = torch.zeros((end, *images.shape[1:]), dtype=images.dtype, device=images.device)
+        else:
+            previous_length = int(canvas.shape[0])
+            if tuple(images.shape[1:]) != tuple(canvas.shape[1:]):
+                raise ValueError("IAMCCS ShotboardVideoEditorRenderV1: all parked clips must share width/height for V1 assembly.")
+            images = images.to(device=canvas.device, dtype=canvas.dtype)
+            if end > int(canvas.shape[0]):
+                canvas = torch.cat((canvas, torch.zeros((end - int(canvas.shape[0]), *canvas.shape[1:]), dtype=canvas.dtype, device=canvas.device)), dim=0)
+        occupied_end = min(previous_length, start + int(images.shape[0]))
+        overlap = max(0, min(int(images.shape[0]), occupied_end - start))
+        incoming = _editor_transition(clip, "in")
+        dissolve = str(incoming.get("type") or "cut") == "dissolve" and overlap > 0
+        if dissolve:
+            requested = max(1, int(round(_safe_float(incoming.get("duration"), overlap / max(1.0, fps)) * max(1.0, fps))))
+            blend_count = min(overlap, requested)
+            if blend_count > 0:
+                blend_start = start
+                alpha = torch.linspace(0.0, 1.0, blend_count, device=canvas.device, dtype=torch.float32).view(-1, 1, 1, 1).to(canvas.dtype)
+                canvas[blend_start:blend_start + blend_count] = canvas[blend_start:blend_start + blend_count] * (1.0 - alpha) + images[:blend_count] * alpha
+                if overlap > blend_count:
+                    canvas[blend_start + blend_count:blend_start + overlap] = images[blend_count:overlap]
+                cross_dissolves += 1
+        elif overlap > 0:
+            canvas[start:start + overlap] = images[:overlap]
+        if int(images.shape[0]) > overlap:
+            canvas[start + overlap:end] = images[overlap:]
+    if canvas is None:
+        raise ValueError("IAMCCS ShotboardVideoEditorRenderV1: no readable video frames found in editor manifest.")
+    return canvas.contiguous(), cross_dissolves
+
+
+def _mix_editor_video_audio(entries: List[Tuple[Dict[str, Any], Any]], frame_count: int, fps: float) -> Dict[str, Any] | None:
+    audio_entries = []
+    target_rate = 0
+    target_channels = 1
+    for clip, comp in entries:
+        waveform, sample_rate = _audio_waveform(comp.audio)
+        if waveform is None:
+            continue
+        target_rate = target_rate or sample_rate
+        target_channels = max(target_channels, int(waveform.shape[-2]))
+        audio_entries.append((clip, waveform, sample_rate))
+    if not audio_entries:
+        return None
+    target_samples = max(1, int(round(frame_count / max(1.0, fps) * target_rate)))
+    mixed = torch.zeros((1, target_channels, target_samples), dtype=torch.float32)
+    for clip, waveform, sample_rate in audio_entries:
+        if sample_rate != target_rate:
+            waveform = torchaudio.functional.resample(waveform, sample_rate, target_rate)
+        waveform = _normalize_audio_channels(waveform, target_channels).to(dtype=torch.float32, device=mixed.device)
+        destination = max(0, int(round(_safe_float(clip.get("startTime"), 0.0) * target_rate)))
+        count = min(int(waveform.shape[-1]), target_samples - destination)
+        if count <= 0:
+            continue
+        piece = waveform[..., :count].clone()
+        incoming = _editor_transition(clip, "in")
+        if str(incoming.get("type") or "cut") == "dissolve":
+            fade_samples = min(count, max(1, int(round(_safe_float(incoming.get("duration"), 0.0) * target_rate))))
+            piece[..., :fade_samples] *= torch.linspace(0.0, 1.0, fade_samples, dtype=piece.dtype, device=piece.device)
+        outgoing = _editor_transition(clip, "out")
+        if str(outgoing.get("type") or "cut") == "dissolve":
+            fade_samples = min(count, max(1, int(round(_safe_float(outgoing.get("duration"), 0.0) * target_rate))))
+            piece[..., count - fade_samples:count] *= torch.linspace(1.0, 0.0, fade_samples, dtype=piece.dtype, device=piece.device)
+        mixed[..., destination:destination + count] += piece
+    return {"waveform": mixed.clamp(-1.0, 1.0), "sample_rate": int(target_rate)}
+
+
 class IAMCCS_ShotboardVideoEditorRenderV1:
     """Render a manifest-based editor assembly back to a Comfy VIDEO."""
 
@@ -4873,6 +4970,7 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
             return None
 
         comps = []
+        comp_entries = []
         for clip in clips:
             asset = assets.get(str(clip.get("assetId"))) if isinstance(assets.get(str(clip.get("assetId"))), dict) else {}
             parked = _load_parked_video_clip(asset)
@@ -4905,18 +5003,16 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
                 # not leak through when the user has explicitly soloed a lane.
                 audio = None
             images = _apply_goya_suite_clip_edit(images, clip)
-            comps.append(Types.VideoComponents(images=images, audio=audio, frame_rate=comp.frame_rate))
+            edited_comp = Types.VideoComponents(images=images, audio=audio, frame_rate=comp.frame_rate)
+            comps.append(edited_comp)
+            comp_entries.append((clip, edited_comp))
         first = comps[0]
         first_shape = tuple(first.images.shape[1:3])
-        frame_batches = []
-        audio_items = []
         for comp in comps:
             if tuple(comp.images.shape[1:3]) != first_shape:
                 raise ValueError("IAMCCS ShotboardVideoEditorRenderV1: all parked clips must share width/height for V1 assembly.")
-            frame_batches.append(comp.images.to(first.images.device))
-            audio_items.append((comp.audio, int(comp.images.shape[0]), float(comp.frame_rate or manifest.get("fps") or 24.0)))
-        frames = torch.cat(frame_batches, dim=0)
         fps = float(override_fps) if str(fps_mode) == "override_fps" else _safe_float(manifest.get("fps"), float(first.frame_rate or 24.0))
+        frames, cross_dissolve_count = _assemble_editor_timeline_frames(comp_entries, fps)
         audio = None
         master_audio_source = ""
         effective_audio_policy = str(audio_policy)
@@ -4962,7 +5058,7 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
         elif effective_audio_policy == "first_video_audio":
             audio = first.audio
         elif effective_audio_policy == "concat_clip_audio":
-            audio = _concat_audio(audio_items)
+            audio = _mix_editor_video_audio(comp_entries, int(frames.shape[0]), fps)
             manual_audio_items = []
             for clip in manifest.get("clips", []):
                 if not isinstance(clip, dict) or str(clip.get("type")) != "audio":
@@ -4997,6 +5093,8 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
             "tail_trim_source": "render_widget" if max(0, _safe_int(tail_trim_frames_per_clip, 0)) > 0 else "editor_manifest",
             "has_audio": audio is not None,
             "editor_audio_solo_active": bool(editor_solo_active),
+            "cross_dissolve_count": int(cross_dissolve_count),
+            "timeline_placement": "manifest_start_time",
             "editor_muted_audio_tracks": sorted(
                 track_id for track_id, track in tracks_by_id.items()
                 if str(track_id).upper().startswith("A") and bool(track.get("muted", track.get("mute", False)))

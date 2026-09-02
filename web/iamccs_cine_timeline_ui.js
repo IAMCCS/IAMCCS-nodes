@@ -9324,7 +9324,8 @@ function renderShotboardV3(node) {
     if (addVideoBtn) topActions.append(addVideoBtn);
     topActions.append(addTextBtn);
     if (addIcLoraBtn) topActions.append(addIcLoraBtn);
-    topActions.append(addAudioBtn, addTrackBtn, collapseBtn, openEditorBtn, importBoardBtn, saveBtn, savePackageBtn, saveMultiPackageBtn, clearBtn);
+    topActions.append(addAudioBtn, addTrackBtn, collapseBtn, openEditorBtn);
+    topActions.append(importBoardBtn, saveBtn, savePackageBtn, saveMultiPackageBtn, clearBtn);
     head.append(topActions);
     root.addEventListener("iamccs:cine-fullscreen", (event) => {
         openEditorBtn.textContent = event.detail?.open ? "Close Editor" : "Open Editor";
@@ -10361,7 +10362,6 @@ function renderShotboardV3(node) {
         if (options.draw === "schedule") scheduleDraw();
         else draw();
     }
-
     function setPlayFrameFromMeterEvent(event, meterElement, options = {}) {
         if (!meterElement) return;
         event?.preventDefault?.();

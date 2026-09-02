@@ -3,7 +3,7 @@ import { api } from "../../scripts/api.js";
 
 const TYPE = "IAMCCS_shotboarder_aud+vid_exporter_PRO";
 const STYLE_ID = "iamccs-shotboarder-exporter-pro-style";
-const UI_VERSION = "20260824-rtx-safe-alignment";
+const UI_VERSION = "20260830-profile-compatibility";
 const NODE_SIZE = [680, 940];
 const HIDDEN_FIELDS = [
   "filename_prefix",
@@ -50,6 +50,24 @@ const AUDIO_OPTIONS = [
   ["flac", "FLAC lossless"],
   ["alac", "Apple Lossless / ALAC"],
 ];
+
+function compatibleAudioProfile(videoProfile, audioProfile) {
+  const video = String(videoProfile || "");
+  const audio = String(audioProfile || "");
+  if (video.endsWith("_mp4") && ["pcm_s16le", "pcm_s24le", "pcm_s32le", "flac"].includes(audio)) {
+    return {
+      value: "aac_320",
+      note: "MP4 cannot carry the selected PCM/FLAC profile reliably. Audio changed to AAC 320 kb/s. Choose a MOV or MKV video profile to keep lossless audio.",
+    };
+  }
+  if (video.endsWith("_mov") && audio === "flac") {
+    return {
+      value: "alac",
+      note: "FLAC is not a reliable MOV profile. Audio changed to lossless ALAC. Choose FFV1/MKV to keep FLAC.",
+    };
+  }
+  return { value: audio, note: "" };
+}
 const RTX_MODE_OPTIONS = [
   ["VSR Medium", "VSR Medium"],
   ["VSR High", "VSR High"],
@@ -246,6 +264,7 @@ function install(node) {
       <div class="control wide"><label>Output prefix</label><input data-field="filename_prefix" type="text" spellcheck="false"></div>
       <div class="control wide"><label>Metadata</label><div class="checkrow"><label><input data-field="embed_metadata" type="checkbox"> embed</label><label><input data-field="write_sidecar" type="checkbox"> sidecar .metadata.json</label><span class="meta" data-meta></span></div></div>
     </div>
+    <div data-profile-compat style="display:none;margin-top:8px;padding:7px 9px;border:1px solid #d2a754;background:#3a2b13;color:#ffe5ad;font-size:10px;font-weight:800;line-height:1.35"></div>
     <div class="rtx-panel">
       <div class="rtx-head"><label class="rtx-toggle"><input data-field="rtx_enabled" type="checkbox"><span>ENABLE RTX VIDEO SUPER RESOLUTION</span></label><span class="rtx-note" data-rtx-status>native optional module / bypassed</span></div>
       <div class="rtx-controls">
@@ -314,12 +333,33 @@ function install(node) {
     refresh();
   });
 
+  let compatibilityTimer = null;
+  const showCompatibility = (message) => {
+    const banner = root.querySelector("[data-profile-compat]");
+    if (!banner || !message) return;
+    banner.textContent = message;
+    banner.style.display = "block";
+    if (compatibilityTimer) window.clearTimeout(compatibilityTimer);
+    compatibilityTimer = window.setTimeout(() => { banner.style.display = "none"; }, 9000);
+  };
+
   function refresh() {
     const videoValue = String(read(node, "video_profile", "prores_422_hq_mov"));
-    const audioValue = String(read(node, "audio_profile", "pcm_s16le"));
+    let audioValue = String(read(node, "audio_profile", "pcm_s16le"));
+    const compatible = compatibleAudioProfile(videoValue, audioValue);
+    if (compatible.value !== audioValue) {
+      write(node, "audio_profile", compatible.value);
+      audioValue = compatible.value;
+      showCompatibility(compatible.note);
+    }
     const sourceValue = String(read(node, "audio_source_mode", "audio_input"));
     if (videoSelect.value !== videoValue) videoSelect.value = videoValue;
     if (audioSelect.value !== audioValue) audioSelect.value = audioValue;
+    Array.from(audioSelect.options).forEach((option) => {
+      const value = String(option.value || "");
+      option.disabled = (videoValue.endsWith("_mp4") && ["pcm_s16le", "pcm_s24le", "pcm_s32le", "flac"].includes(value))
+        || (videoValue.endsWith("_mov") && value === "flac");
+    });
     const sourceSelect = root.querySelector('[data-field="audio_source_mode"]');
     if (sourceSelect && sourceSelect.value !== sourceValue) sourceSelect.value = sourceValue;
     const sourceStatus = root.querySelector("[data-source-status]");

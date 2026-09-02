@@ -131,6 +131,10 @@ class IAMCCS_QwenMultiGen:
                 }),
             },
             "optional": {
+                "negative_prompt": ("STRING", {
+                    "default": "",
+                    "multiline": True,
+                }),
                 "separator": ("STRING", {
                     "default": "\\n",
                     "multiline": False,
@@ -148,6 +152,7 @@ class IAMCCS_QwenMultiGen:
         self,
         model, clip, vae, image, multi_prompt,
         seed, steps, cfg, sampler_name, scheduler, denoise=1.0,
+        negative_prompt="",
         separator="\\n",
         reference_latents_method="index_timestep_zero",
         output_prefix="qwen_multi",
@@ -160,7 +165,7 @@ class IAMCCS_QwenMultiGen:
             blank = torch.zeros((1, image.shape[1], image.shape[2], 3))
             return (blank, 0)
 
-        neg_cond = _encode_qwen(clip, vae, image, "")
+        neg_cond = _encode_qwen(clip, vae, image, str(negative_prompt or ""))
         neg_cond = _apply_ref_method(neg_cond, reference_latents_method)
         latent_base = vae.encode(image[:, :, :, :3])
 

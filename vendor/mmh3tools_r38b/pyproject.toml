@@ -1,0 +1,15 @@
+[project]
+name = "mmh3tools"
+description = "MiniMax H3 latent tooling for ComfyUI: latent-domain reference and keyframe conditioning, overlap seeding with nested noise masks, and correct AV latent splicing for chained long-form generation."
+version = "0.88.0"
+license = { text = "MIT" }
+dependencies = []
+requires-python = ">=3.10"
+
+[project.urls]
+Repository = "https://github.com/ckinpdx/ComfyUI-MMH3Tools"
+
+[tool.comfy]
+PublisherId = "ckinpdx"
+DisplayName = "MMH3Tools"
+Icon = ""

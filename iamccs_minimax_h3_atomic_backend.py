@@ -267,6 +267,134 @@ def _cine_info_h3(cine_linx: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     return (config if isinstance(config, dict) else {}), resources
 
 
+def _h3_control_temporal_window(
+    frames: torch.Tensor | None,
+    *,
+    source_fps: float,
+    target_fps: float,
+    start_seconds: float,
+    target_frames: int,
+    frame_scope: str,
+    end_policy: str,
+    label: str,
+    prefix_frames: int = 0,
+) -> torch.Tensor | None:
+    """Map one source frame batch to the exact current H3 chunk clock."""
+    if not torch.is_tensor(frames):
+        return None
+    if frames.ndim not in {3, 4} or int(frames.shape[0]) < 1:
+        raise ValueError(f"H3 Fun Control {label} is not a non-empty frame batch")
+    target_frames = max(1, int(target_frames))
+    prefix_frames = max(0, min(int(prefix_frames), target_frames - 1))
+    body_frames = target_frames - prefix_frames
+    source_fps = max(0.001, float(source_fps))
+    target_fps = max(0.001, float(target_fps))
+    scope = str(frame_scope or "timeline_segment").lower()
+    source_start = 0.0 if scope == "repeat_each_chunk" else max(0.0, float(start_seconds)) * source_fps
+    positions = source_start + torch.arange(body_frames, dtype=torch.float64) * (source_fps / target_fps)
+    indices = torch.floor(positions + 1e-9).to(torch.long)
+    source_count = int(frames.shape[0])
+    required_last = int(indices[-1]) if indices.numel() else 0
+    if required_last >= source_count and str(end_policy or "strict_match").lower() == "strict_match":
+        required_seconds = (required_last + 1) / source_fps
+        available_seconds = source_count / source_fps
+        raise ValueError(
+            f"H3 Fun Control {label} is too short for this Shotboard chunk: "
+            f"needs source frame {required_last + 1} ({required_seconds:.3f}s), "
+            f"has {source_count} frames ({available_seconds:.3f}s). "
+            "Use a matching-duration source, timeline_segment/repeat_each_chunk as intended, "
+            "or explicitly select hold_last."
+        )
+    indices.clamp_(0, source_count - 1)
+    selected = frames[indices]
+    if prefix_frames:
+        prefix = selected[:1].expand((prefix_frames, *selected.shape[1:]))
+        selected = torch.cat((prefix, selected), dim=0)
+    return selected
+
+
+def _apply_h3_fun_controlnet(
+    positive,
+    *,
+    cine_linx: Any,
+    shotplan: dict[str, Any],
+    chunk: dict[str, Any],
+    video_vae,
+    target_frames: int,
+    prefix_frames: int = 0,
+):
+    config = shotplan.get("fun_controlnet") if isinstance(shotplan.get("fun_controlnet"), dict) else {}
+    if not bool(config.get("enabled", False)):
+        return positive, "off"
+
+    control_name = str(config.get("control_net_name", "") or "").strip()
+    if not control_name:
+        raise ValueError("H3 Fun ControlNet is enabled but no control_net model is selected in IAMCCS Settings")
+    control_path = folder_paths.get_full_path("controlnet", control_name)
+    if not control_path:
+        raise FileNotFoundError(
+            f"H3 Fun ControlNet model is not available: {control_name}. "
+            "Place the Kijai checkpoint in models/controlnet and refresh/restart ComfyUI."
+        )
+
+    _info, resources = _cine_info_h3(cine_linx)
+    control_video = resources.get("iamccs_minimax_h3_control_video")
+    control_mask = resources.get("iamccs_minimax_h3_control_mask")
+    source_video = resources.get("iamccs_minimax_h3_control_source_video")
+    media_meta = resources.get("iamccs_minimax_h3_control_video_meta")
+    media_meta = media_meta if isinstance(media_meta, dict) else {}
+    kind = str(config.get("kind", "pose_dwpose") or "pose_dwpose").lower()
+    if not torch.is_tensor(control_video) and kind != "inpaint":
+        raise ValueError(
+            "H3 Fun ControlNet is enabled but CineLinX has no preprocessed control video. "
+            "Connect IAMCCS Cine H3 Fun Control Input after CineH3Input and before the Shotboard."
+        )
+    if kind == "inpaint" and not torch.is_tensor(control_mask):
+        raise ValueError("H3 Fun ControlNet inpaint mode requires a MASK batch from IAMCCS Cine H3 Fun Control Input")
+
+    source_fps = max(0.001, float(media_meta.get("source_fps", H3_FPS) or H3_FPS))
+    target_fps = max(1.0, float(shotplan.get("fps", H3_FPS) or H3_FPS))
+    start_seconds = float(
+        chunk.get("timeline_start_seconds", chunk.get("start_seconds", 0.0)) or 0.0
+    )
+    window_args = {
+        "source_fps": source_fps,
+        "target_fps": target_fps,
+        "start_seconds": start_seconds,
+        "target_frames": int(target_frames),
+        "frame_scope": str(config.get("frame_scope", "timeline_segment")),
+        "end_policy": str(config.get("end_policy", "strict_match")),
+        "prefix_frames": int(prefix_frames),
+    }
+    control_window = _h3_control_temporal_window(control_video, label="control_video", **window_args)
+    mask_window = _h3_control_temporal_window(control_mask, label="mask", **window_args)
+    source_window = _h3_control_temporal_window(source_video, label="source_video", **window_args)
+
+    from comfy_extras.nodes_minimax_h3 import MiniMaxH3FunControlNetApply
+
+    loader_cls = _node_class("ControlNetLoader")
+    control_net = loader_cls().load_controlnet(control_name)[0]
+    applied = MiniMaxH3FunControlNetApply.execute(
+        positive=positive,
+        control_net=control_net,
+        vae=video_vae,
+        strength=float(config.get("strength", 1.0)),
+        start_percent=float(config.get("start_percent", 0.0)),
+        end_percent=float(config.get("end_percent", 1.0)),
+        control_video=control_window,
+        mask=mask_window,
+        source_video=source_window,
+    )
+    conditioned = applied.result[0] if hasattr(applied, "result") else applied[0]
+    report = (
+        f"{kind}:{control_name} | {int(target_frames)}f @ {target_fps:.3f}fps | "
+        f"scope={config.get('frame_scope')} | strength={float(config.get('strength', 1.0)):.3f} | "
+        f"steps={float(config.get('start_percent', 0.0)):.3f}-{float(config.get('end_percent', 1.0)):.3f}"
+    )
+    LOG.info("MiniMax H3 Fun ControlNet applied | %s", report)
+    return conditioned, report
+
+
 def _effective_task(cine_linx: Any, chunk: dict[str, Any]) -> str:
     config, _ = _cine_info_h3(cine_linx)
     override = str(config.get("task_override", "from_shotboard") or "from_shotboard").lower()
@@ -776,6 +904,253 @@ def _turbo_settings(shotplan: dict[str, Any]) -> dict[str, Any]:
     return settings if isinstance(settings, dict) else {"mode": "off", "enabled": False}
 
 
+def _pdd_settings(shotplan: dict[str, Any]) -> dict[str, Any]:
+    settings = shotplan.get("pdd")
+    return settings if isinstance(settings, dict) else {"requested": False, "enabled": False}
+
+
+def _fasth3_settings(shotplan: dict[str, Any]) -> dict[str, Any]:
+    settings = shotplan.get("fasth3")
+    return settings if isinstance(settings, dict) else {"requested": False, "enabled": False}
+
+
+@functools.lru_cache(maxsize=32)
+def _classify_h3_pdd_file(path_text: str, mtime_ns: int) -> tuple[bool, str]:
+    del mtime_ns
+    try:
+        from safetensors import safe_open
+
+        with safe_open(path_text, framework="pt", device="cpu") as handle:
+            keys = [str(key).lower() for key in handle.keys()]
+            metadata = {str(key).lower(): str(value) for key, value in (handle.metadata() or {}).items()}
+    except Exception as exc:
+        return False, f"unreadable safetensors header ({type(exc).__name__}: {exc})"
+
+    has_video_bank = any("final_layer.video_out" in key and ("reshape_weight" in key or "set_weight" in key) for key in keys)
+    has_audio_bank = any("final_layer.audio_out" in key and ("reshape_weight" in key or "set_weight" in key) for key in keys)
+    if not has_video_bank or not has_audio_bank:
+        legacy_bank = (
+            any(key in {"proj_out.weight", "proj_out.bias"} for key in keys)
+            and any(key in {"audio_proj_out.weight", "audio_proj_out.bias"} for key in keys)
+        )
+        if legacy_bank or metadata.get("format", "").startswith("minimax_h3_pdd_acc_comfyui"):
+            return False, (
+                "legacy aptech/Jalen pdd_acc layout detected; native ComfyUI requires a Kijai "
+                "*_Acc-8Step*_comfy.safetensors LoRA in models/loras (or use the legacy companion node explicitly)"
+            )
+        return False, "not a converted MiniMax H3 PDD LoRA with video and audio head banks"
+    if not any(".lora_" in key or ".lora_down" in key or ".lora_up" in key for key in keys):
+        return False, "PDD head bank is present but the trunk LoRA is missing"
+    return True, "native ComfyUI MiniMax H3 PDD LoRA"
+
+
+def _apply_pdd_lora(model, shotplan: dict[str, Any]):
+    settings = _pdd_settings(shotplan)
+    if not bool(settings.get("requested", False)):
+        return model, "off"
+
+    lora_name = str(settings.get("lora_name", "") or "").strip()
+    if not lora_name:
+        raise ValueError("PDD Native 8-Step requires a converted PDD LoRA selected in IAMCCS H3 Settings")
+    try:
+        lora_path = folder_paths.get_full_path("loras", lora_name)
+    except Exception:
+        lora_path = None
+    if not lora_path:
+        raise ValueError(f"PDD LoRA not found in models/loras: {lora_name}")
+
+    try:
+        mtime_ns = Path(lora_path).stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    compatible, detail = _classify_h3_pdd_file(str(lora_path), int(mtime_ns))
+    if not compatible:
+        raise ValueError(f"Invalid PDD selection '{lora_name}': {detail}")
+
+    try:
+        import comfy.ldm.minimax.model as minimax_model
+    except ImportError as exc:
+        raise RuntimeError("PDD Native 8-Step requires ComfyUI commit 2504e68 or newer") from exc
+    if not hasattr(minimax_model, "_pdd_head"):
+        raise RuntimeError("PDD Native 8-Step requires ComfyUI commit 2504e68 or newer")
+
+    sampling = shotplan.get("sampling") if isinstance(shotplan.get("sampling"), dict) else {}
+    problems = []
+    if int(sampling.get("steps", 0) or 0) != 8:
+        problems.append("steps=8")
+    if str(sampling.get("sampler_name", "") or "").lower() != "euler":
+        problems.append("sampler=euler")
+    if str(sampling.get("scheduler", "") or "").lower() != "simple":
+        problems.append("scheduler=simple")
+    if abs(float(sampling.get("denoise", 1.0) or 0.0) - 1.0) > 1e-6:
+        problems.append("denoise=1.0")
+    if abs(float(sampling.get("shift_video", 0.0) or 0.0) - 12.0) > 1e-6:
+        problems.append("video shift=12")
+    if abs(float(sampling.get("shift_audio", 0.0) or 0.0) - 3.0) > 1e-6:
+        problems.append("audio shift=3")
+    turbo = _turbo_settings(shotplan)
+    if str(turbo.get("mode", "off") or "off").lower() != "off" and bool(turbo.get("enabled", True)):
+        problems.append("Turbo mode=off")
+    if problems:
+        raise ValueError(
+            "PDD Native 8-Step settings mismatch. Set the visible IAMCCS boxes to: "
+            + ", ".join(problems)
+        )
+
+    strength = float(settings.get("strength", 1.0))
+    if not math.isclose(strength, 1.0, abs_tol=1e-6):
+        raise ValueError(
+            f"PDD Native 8-Step requires pdd_strength=1.0 for its shape-changing head bank; received {strength:g}"
+        )
+    import nodes as comfy_nodes
+
+    patched = comfy_nodes.LoraLoaderModelOnly().load_lora_model_only(
+        model=model,
+        lora_name=lora_name,
+        strength_model=strength,
+    )[0]
+    return patched, f"native PDD {lora_name}@{strength:.2f} (8/euler/simple, shifts 12/3)"
+
+
+@functools.lru_cache(maxsize=64)
+def _classify_fasth3_dense_file(path_text: str, mtime_ns: int) -> tuple[bool, str]:
+    """Fail closed unless this is a native fused-QKV FastH3 converter output."""
+    del mtime_ns
+    try:
+        from safetensors import safe_open
+
+        with safe_open(path_text, framework="pt", device="cpu") as handle:
+            keys = [str(key).lower() for key in handle.keys()]
+            metadata = {str(key).lower(): str(value) for key, value in (handle.metadata() or {}).items()}
+    except Exception as exc:
+        return False, f"unreadable safetensors header ({type(exc).__name__}: {exc})"
+
+    if metadata.get("converted_by", "").strip().lower() != "lora_convert_h3":
+        return False, "not a FastH3 adapter converted for native ComfyUI (converter metadata missing)"
+    adaln_mode = metadata.get("adaln_mode", "").strip().lower()
+    if adaln_mode != "drop":
+        return False, f"AdaLN mode '{adaln_mode or 'unknown'}' is not production-safe; reconvert with --adaln drop"
+    native_lora = any(
+        key.startswith("diffusion_model.blocks.") and (".lora_a." in key or ".lora_b." in key)
+        for key in keys
+    )
+    fused_qkv = any(".attn.qkv_proj.lora_a." in key for key in keys) and any(
+        ".attn.qkv_proj.lora_b." in key for key in keys
+    )
+    if not native_lora or not fused_qkv:
+        return False, "converted metadata exists, but native fused-QKV H3 LoRA tensors are incomplete"
+    return True, "FastH3 Dense native ComfyUI adapter"
+
+
+def _apply_fasth3_dense_lora(model, shotplan: dict[str, Any]):
+    settings = _fasth3_settings(shotplan)
+    if not bool(settings.get("requested", False)):
+        return model, "off"
+
+    lora_name = str(settings.get("lora_name", "") or "").strip()
+    if not lora_name:
+        raise ValueError(
+            "FastH3 Dense 6-Step requires a converted FastH3 LoRA selected in the H3 LoRA box"
+        )
+    try:
+        lora_path = folder_paths.get_full_path("loras", lora_name)
+    except Exception:
+        lora_path = None
+    if not lora_path:
+        raise ValueError(f"FastH3 Dense LoRA not found in ComfyUI's models/loras paths: {lora_name}")
+    try:
+        mtime_ns = Path(lora_path).stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    compatible, detail = _classify_fasth3_dense_file(str(lora_path), int(mtime_ns))
+    if not compatible:
+        raise ValueError(f"Invalid FastH3 Dense selection '{lora_name}': {detail}")
+
+    sampling = shotplan.get("sampling") if isinstance(shotplan.get("sampling"), dict) else {}
+    problems = []
+    if int(sampling.get("steps", 0) or 0) != 6:
+        problems.append("steps=6")
+    turbo = _turbo_settings(shotplan)
+    if str(turbo.get("mode", "off") or "off").lower() != "off" and bool(turbo.get("enabled", True)):
+        problems.append("Turbo mode=off")
+    pdd = _pdd_settings(shotplan)
+    if bool(pdd.get("requested", False)):
+        problems.append("PDD=off")
+    if problems:
+        raise ValueError(
+            "FastH3 Dense 6-Step settings mismatch. Set the visible IAMCCS boxes to: "
+            + ", ".join(problems)
+        )
+
+    strength = float(settings.get("strength", 1.0) or 1.0)
+    if not math.isclose(strength, 1.0, abs_tol=1e-6):
+        raise ValueError(f"FastH3 Dense 6-Step requires LoRA strength=1.0; received {strength:g}")
+
+    import nodes as comfy_nodes
+
+    patched = comfy_nodes.LoraLoaderModelOnly().load_lora_model_only(
+        model=model,
+        lora_name=lora_name,
+        strength_model=strength,
+    )[0]
+    return patched, f"FastH3 Dense {lora_name}@{strength:.2f} (6-step distilled, native model-only loader)"
+
+
+@functools.lru_cache(maxsize=64)
+def _classify_h3_lora_file(path_text: str, mtime_ns: int) -> tuple[bool, str]:
+    """Inspect only a safetensors header and reject H3 files we cannot patch.
+
+    Native ComfyUI MiniMax H3 uses ``blocks.*`` module names.  Some community
+    downloads are Diffusers adapters for ``transformer_blocks.*`` (and some are
+    complete diffusion checkpoints placed in the LoRA folder).  Passing either
+    through Comfy's generic loader emits hundreds of missing-key warnings and
+    retains a cloned model, which is especially harmful on 12 GiB cards.
+    """
+    del mtime_ns  # part of the cache key; the value itself is not otherwise used
+    try:
+        from safetensors import safe_open
+
+        with safe_open(path_text, framework="pt", device="cpu") as handle:
+            keys = list(handle.keys())
+    except Exception as exc:
+        return False, f"unreadable safetensors header ({type(exc).__name__}: {exc})"
+
+    lowered = [str(key).lower() for key in keys]
+    lora_markers = (".lora_a.", ".lora_b.", ".lora_down", ".lora_up", ".dora_scale")
+    lora_keys = [key for key in lowered if any(marker in key for marker in lora_markers)]
+    if not lora_keys:
+        return False, "full checkpoint/delta weights, not a LoRA adapter"
+
+    native_h3 = any(
+        key.startswith("blocks.")
+        or key.startswith("diffusion_model.blocks.")
+        or ".blocks." in key and "transformer_blocks." not in key and "refiner_blocks." not in key
+        for key in lora_keys
+    )
+    if native_h3:
+        return True, "native Comfy MiniMax H3 LoRA"
+    if any("transformer_blocks." in key or "token_refiner.refiner_blocks." in key for key in lora_keys):
+        return False, "Diffusers MiniMax H3 LoRA; a Comfy/native H3 conversion is required"
+    return False, "LoRA module names do not match the native Comfy MiniMax H3 model"
+
+
+def _h3_lora_compatibility(lora_name: Any) -> tuple[bool, str]:
+    name = str(lora_name or "").strip()
+    if not name:
+        return False, "no LoRA selected"
+    try:
+        path = folder_paths.get_full_path("loras", name)
+    except Exception:
+        path = None
+    if not path:
+        return False, f"file not found: {name}"
+    try:
+        mtime_ns = Path(path).stat().st_mtime_ns
+    except OSError:
+        mtime_ns = 0
+    return _classify_h3_lora_file(str(path), int(mtime_ns))
+
+
 def _apply_turbo_lora(model, shotplan: dict[str, Any]):
     settings = _turbo_settings(shotplan)
     mode = str(settings.get("mode", "off") or "off").lower()
@@ -790,6 +1165,9 @@ def _apply_turbo_lora(model, shotplan: dict[str, Any]):
         lora_path = None
     if not lora_path:
         return model, f"base H3 fallback (optional Turbo LoRA missing: {lora_name})"
+    compatible, compatibility_report = _h3_lora_compatibility(lora_name)
+    if not compatible:
+        return model, f"base H3 fallback ({lora_name}: {compatibility_report})"
     strength = float(settings.get("strength", 1.0) or 1.0)
 
     # Kijai's Lightx2v conversion is a standard Comfy model-only LoRA.  Do not
@@ -822,8 +1200,22 @@ def _apply_turbo_lora(model, shotplan: dict[str, Any]):
 
     try:
         turbo_cls = _node_class("MiniMaxH3TurboLoRA")
-        patched = turbo_cls().apply_lora(model=model, lora_name=lora_name, strength=strength)[0]
-        return patched, f"Larry Turbo LoRA {lora_name}@{strength:.2f}"
+        performance_profile = str(shotplan.get("performance_profile", "") or "").lower()
+        acceleration = str(shotplan.get("acceleration", "") or "").lower()
+        low_vram_merge = (
+            "low_vram" in performance_profile
+            or "3060" in performance_profile
+            or acceleration in {"auto_3060", "low_vram_auto", "comfy_kitchen"}
+            or acceleration.startswith("iamccs_progressive_")
+        )
+        patched = turbo_cls().apply_lora(
+            model=model,
+            lora_name=lora_name,
+            strength=strength,
+            low_vram=low_vram_merge,
+        )[0]
+        route = "low-VRAM merge" if low_vram_merge else "runtime bypass"
+        return patched, f"Larry Turbo LoRA {lora_name}@{strength:.2f} ({route})"
     except Exception as custom_exc:
         try:
             import nodes as comfy_nodes
@@ -841,6 +1233,57 @@ def _apply_turbo_lora(model, shotplan: dict[str, Any]):
             ) from custom_exc
 
 
+def _secondary_lora_settings(shotplan: dict[str, Any]) -> dict[str, Any]:
+    settings = shotplan.get("secondary_lora")
+    return settings if isinstance(settings, dict) else {"enabled": False}
+
+
+def _apply_secondary_lora(model, shotplan: dict[str, Any]):
+    """Apply an independent model-only H3 LoRA without changing sampling.
+
+    The second slot is deliberately separate from Turbo. It never selects a
+    sampler, changes steps, or alters H3 audio/video shifts. Older plans have
+    no secondary_lora block and therefore remain byte-for-byte on the old path.
+    """
+    settings = _secondary_lora_settings(shotplan)
+    if not bool(settings.get("enabled", False)):
+        if bool(settings.get("duplicate_of_turbo", False)):
+            return model, "off (same file as active Turbo LoRA)"
+        if bool(settings.get("requested", False)) and not bool(settings.get("available", False)):
+            missing = str(settings.get("lora_name", "") or "not selected")
+            return model, f"off (optional H3 LoRA unavailable: {missing})"
+        return model, "off"
+
+    lora_name = str(settings.get("lora_name", "") or "").strip()
+    strength = float(settings.get("strength", 0.0) or 0.0)
+    if not lora_name or abs(strength) <= 1e-8:
+        return model, "off"
+    try:
+        lora_path = folder_paths.get_full_path("loras", lora_name)
+    except Exception:
+        lora_path = None
+    if not lora_path:
+        return model, f"off (optional H3 LoRA unavailable: {lora_name})"
+    compatible, compatibility_report = _h3_lora_compatibility(lora_name)
+    if not compatible:
+        return model, f"off ({lora_name}: {compatibility_report})"
+
+    try:
+        import nodes as comfy_nodes
+
+        patched = comfy_nodes.LoraLoaderModelOnly().load_lora_model_only(
+            model=model,
+            lora_name=lora_name,
+            strength_model=strength,
+        )[0]
+    except Exception as exc:
+        raise RuntimeError(
+            f"Could not apply secondary MiniMax H3 LoRA '{lora_name}'. "
+            "Verify that it is compatible with the selected FL2VA/REF2VA base model."
+        ) from exc
+    return patched, f"native model-only H3 LoRA {lora_name}@{strength:.2f}"
+
+
 def _turbo_sampler(shotplan: dict[str, Any]):
     settings = _turbo_settings(shotplan)
     mode = str(settings.get("sampler_mode", "audio_fixed") or "audio_fixed").lower()
@@ -853,6 +1296,83 @@ def _turbo_sampler(shotplan: dict[str, Any]):
 
 def _accelerate(model, shotplan: dict[str, Any]):
     mode = str(shotplan.get("acceleration", "native") or "native").lower()
+    if mode == "fasth3_dense_6step":
+        # The converter's measured 8 GB reference path explicitly uses Sage
+        # attention plus chunked feed-forward. FastH3 reduces denoising steps,
+        # but it does not reduce first-forward activation memory; leaving this
+        # branch on stock attention can saturate a 12 GB card before step 1.
+        # Reuse IAMCCS' established H3 Sage + exact-chunk route. The helper
+        # falls back to exact low-VRAM attention/FFN when Sage/Triton is not
+        # available. No Spectrum/EasyCache approximation is stacked here.
+        patched, memory_report = _apply_h3_sage_or_exact_low_vram(
+            model,
+            "FastH3 Dense + H3 Sage attention / chunked feed-forward",
+        )
+        return patched, f"FastH3 Dense 6-step + {memory_report} (no cache approximation)"
+    if mode == "pdd_native_8step":
+        return model, "PDD native core head-bank integration"
+    if mode in {
+        "iamccs_progressive_2stage",
+        "iamccs_progressive_3stage",
+        "iamccs_progressive_pdd_2stage",
+    }:
+        # Progressive Spatial changes the sampling geometry, but a reduced
+        # early latent does not make the final full-resolution attention step
+        # safe by itself.  Compose the IAMCCS exact low-VRAM block/attention
+        # policy here so a saved Progressive preset cannot silently fall back
+        # to stock PyTorch SDPA at the full H3 canvas (the former 12 GB OOM).
+        # This remains isolated to explicitly selected Progressive profiles;
+        # Native/PDD/Sage workflows are unchanged.
+        try:
+            patched = _apply_h3_low_vram_exact(model)
+            memory_route = " + exact low-VRAM attention/FFN"
+        except Exception as exact_exc:
+            try:
+                patched = _apply_h3_memory_efficient_sage(model)
+                memory_route = f" + H3 memory-efficient attention (exact unavailable: {exact_exc})"
+            except Exception as sage_exc:
+                raise RuntimeError(
+                    "IAMCCS Progressive Spatial requires a working low-VRAM H3 attention path. "
+                    "Neither H3 exact memory optimization nor H3 memory-efficient attention could be applied; "
+                    "refusing to start a stock-SDPA pass that is likely to OOM."
+                ) from sage_exc
+        suffix = " + PDD native head bank" if mode.endswith("pdd_2stage") else ""
+        return patched, f"IAMCCS Progressive Spatial sampler{suffix}{memory_route}"
+    if mode == "h3_exact":
+        # Opt-in production path backed by H3-Optimizations.  Existing
+        # acceleration modes are deliberately left untouched: old workflows
+        # never enter this branch unless the new dropdown value is selected.
+        exact = shotplan.get("h3_exact_optimization")
+        exact = exact if isinstance(exact, dict) else {}
+        try:
+            from h3_optimizations.memory_migration_node import H3MemoryOptimization
+        except Exception as exc:
+            raise RuntimeError(
+                "H3 Exact requires custom_nodes/H3-Optimizations. "
+                "The historical IAMCCS acceleration paths remain available."
+            ) from exc
+
+        precision_mode = str(exact.get("precision_mode", "Preserve native") or "Preserve native")
+        qkv_streaming = str(exact.get("qkv_streaming", "Auto") or "Auto")
+        attention_memory = str(exact.get("attention_memory", "Standard") or "Standard")
+        chunk_rows = max(256, min(65536, int(exact.get("chunk_rows", 2048) or 2048)))
+        result = H3MemoryOptimization.execute(
+            model=model,
+            fused_qkv="Auto",
+            mlp_memory="Auto",
+            chunk_rows=chunk_rows,
+            preserve_precision=True,
+            precision_mode=precision_mode,
+            qkv_streaming_mode=qkv_streaming,
+            embedding_memory_mode="Auto",
+            kitchen_v_memory_mode=attention_memory,
+        )
+        patched = result.result[0]
+        return patched, (
+            "H3 Memory Optimization exact "
+            f"(precision={precision_mode}, qkv={qkv_streaming}, "
+            f"chunk_rows={chunk_rows}, attention_memory={attention_memory})"
+        )
     if mode in {"auto_3060", "low_vram_auto"}:
         triton_ready, triton_detail = _h3_sage_triton_compiler_status()
         if not triton_ready:
@@ -867,21 +1387,32 @@ def _accelerate(model, shotplan: dict[str, Any]):
                 return _apply_h3_memory_efficient_sage(model), f"Low VRAM Auto -> H3 Sage (exact chunks unavailable: {h3_exc})"
             except Exception as sage_exc:
                 return model, f"Low VRAM Auto -> native (H3 stack: {h3_exc}; H3 Sage: {sage_exc})"
+    if mode == "comfy_kitchen":
+        # ComfyKitchen is selected by ComfyUI's quantized ops at model-load
+        # time.  It is not an attention patch and must not be stacked with Sol.
+        return model, "ComfyKitchen native quantized ops (no extra attention patch)"
     if mode == "native":
         return model, "native"
     if mode in {"sage", "h3_sage"}:
         return _apply_h3_sage_or_exact_low_vram(model, "MiniMax H3 Sage + exact attention/FFN chunks")
     if mode in {"sage_sol", "sol_low_vram"}:
         patched = _apply_h3_low_vram_exact(model)
+        triton_ready, triton_detail = _h3_sage_triton_compiler_status()
+        if not triton_ready:
+            return patched, f"Sol skipped -> exact Low VRAM (Triton/C compiler unavailable: {triton_detail})"
         patched = _apply_sol(patched, str(shotplan.get("sol_conditioning", "exact_kv")))
         return patched, f"Sol({shotplan.get('sol_conditioning', 'exact_kv')}) + exact Low VRAM chunks"
     if mode in {"adaptive_safe", "sol_adaptive_safe", "sol_adaptive_balanced"}:
         patched = _apply_h3_low_vram_exact(model)
         if mode.startswith("sol_"):
-            patched = _apply_sol(patched, str(shotplan.get("sol_conditioning", "exact_kv_and_rows")))
+            triton_ready, triton_detail = _h3_sage_triton_compiler_status()
+            if triton_ready:
+                patched = _apply_sol(patched, str(shotplan.get("sol_conditioning", "exact_kv_and_rows")))
+            else:
+                LOG.warning("MiniMax H3 Sol skipped before patching: %s", triton_detail)
         preset = "balanced" if mode.endswith("balanced") else "safe"
         patched = _apply_adaptive_cache(patched, preset)
-        prefix = "Sol + " if mode.startswith("sol_") else ""
+        prefix = "Sol + " if mode.startswith("sol_") and triton_ready else ("Sol skipped + " if mode.startswith("sol_") else "")
         return patched, f"{prefix}Adaptive Cache {preset} + exact Low VRAM chunks"
     if mode == "spectrum":
         profile = str(shotplan.get("spectrum_profile", "low_vram"))
@@ -1498,6 +2029,16 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                     len(shotplan.get("chunks", [])),
                     ", ".join(applied_guides),
                 )
+        control_prefix_frames = int(native_av_context.get("context_frames", 0)) if isinstance(native_av_context, dict) else 0
+        positive, controlnet_report = _apply_h3_fun_controlnet(
+            positive,
+            cine_linx=cine_linx,
+            shotplan=shotplan,
+            chunk=chunk,
+            video_vae=video_vae,
+            target_frames=frames,
+            prefix_frames=control_prefix_frames,
+        )
         if legacy_actual_output_bridge:
             motion_report += "; legacy_actual_output_bridge_ignored"
         if motion_state["active"] and motion_state.get("strategy") == "reference_motion_carry":
@@ -1526,7 +2067,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             f"ref_size={shotplan.get('ref_image_size', 'match')} | "
             f"ref_source={shotplan.get('reference_source', 'backend_sockets_or_legacy_timeline')} | "
             f"pre_resize={';'.join(resize_reports) if resize_reports else 'none'} | "
-            f"text_encoder={text_encoder_report} | motion_context={motion_report}"
+            f"text_encoder={text_encoder_report} | motion_context={motion_report} | controlnet={controlnet_report}"
         )
         return (
             model,
@@ -1646,11 +2187,12 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
             turbo_file_available = bool(turbo_lora_name and folder_paths.get_full_path("loras", turbo_lora_name))
         except Exception:
             turbo_file_available = False
-        turbo_enabled = turbo_requested and turbo_file_available
-        if turbo_requested and not turbo_file_available:
+        turbo_compatible, turbo_compatibility_report = _h3_lora_compatibility(turbo_lora_name)
+        turbo_enabled = turbo_requested and turbo_file_available and turbo_compatible
+        if turbo_requested and not turbo_enabled:
             LOG.warning(
-                "MiniMax H3 Turbo LoRA unavailable (%s); retaining the authored %d sampling steps on base H3",
-                turbo_lora_name or "no LoRA selected",
+                "MiniMax H3 Turbo disabled before model cloning (%s: %s); retaining the authored %d sampling steps on base H3",
+                turbo_lora_name or "no LoRA selected", turbo_compatibility_report,
                 int(steps),
             )
         if turbo_enabled:
@@ -1665,12 +2207,15 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
                     turbo_lora_name,
                 )
         turbo_model, turbo_report = _apply_turbo_lora(model, shotplan)
+        fasth3_model, fasth3_report = _apply_fasth3_dense_lora(turbo_model, shotplan)
+        pdd_model, pdd_report = _apply_pdd_lora(fasth3_model, shotplan)
+        lora_model, secondary_lora_report = _apply_secondary_lora(pdd_model, shotplan)
         if turbo_enabled:
             # Apply the selected Turbo LoRA without silently replacing any
             # authored sampler, scheduler or AV shift.  Presets populate those
             # settings for convenience, but the visible Settings values remain
             # the execution truth after a user changes them.
-            accelerated, acceleration_report = _accelerate(turbo_model, shotplan)
+            accelerated, acceleration_report = _accelerate(lora_model, shotplan)
             turbo_sampler_mode = str(turbo.get("sampler_mode", "audio_fixed") or "audio_fixed").lower()
             LOG.info(
                 "MiniMax H3 Turbo active | profile=%s | authored sampler=%s+%s | authored shifts=%.3f/%.3f",
@@ -1687,11 +2232,19 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
             )[0]
         else:
             shifted = MiniMaxH3SigmaShift.execute(
-                model=turbo_model,
+                model=lora_model,
                 shift_video=float(shift_video),
                 shift_audio=float(shift_audio),
             )[0]
             active_model, acceleration_report = _accelerate(shifted, shotplan)
+
+        LOG.info(
+            "MiniMax H3 runtime profile | acceleration=%s | fasth3=%s | pdd=%s | turbo=%s",
+            acceleration_report,
+            fasth3_report,
+            pdd_report,
+            turbo_report,
+        )
 
         noise = RandomNoise.execute(noise_seed=actual_seed)[0]
         guider = BasicGuider.execute(model=active_model, conditioning=positive)[0]
@@ -1706,13 +2259,30 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
             steps=int(steps),
             denoise=float(denoise),
         )[0]
-        sampled = SamplerCustomAdvanced.execute(
-            noise=noise,
-            guider=guider,
-            sampler=sampler,
-            sigmas=sigmas,
-            latent_image=latent,
-        )[0]
+        acceleration_mode = str(shotplan.get("acceleration", "native") or "native").lower()
+        if acceleration_mode.startswith("iamccs_progressive_"):
+            from .iamccs_minimax_h3_progressive_spatial import sample_progressive_spatial
+            import comfy.utils
+
+            sampled_payload, progressive_report = sample_progressive_spatial(
+                noise=noise,
+                guider=guider,
+                sigmas=sigmas,
+                latent=latent,
+                acceleration_mode=acceleration_mode,
+                seed=actual_seed,
+                disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
+            )
+            sampled = sampled_payload["samples"]
+            sampler_report = progressive_report
+        else:
+            sampled = SamplerCustomAdvanced.execute(
+                noise=noise,
+                guider=guider,
+                sampler=sampler,
+                sigmas=sigmas,
+                latent_image=latent,
+            )[0]
 
         cleanup_report = "disabled"
         if bool(shotplan.get("vram_clean_before_decode", True)):
@@ -1751,16 +2321,43 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
             )
         if not torch.is_tensor(native_frames) or native_frames.ndim != 4 or native_frames.shape[0] < 1:
             raise RuntimeError("MiniMax H3 video VAE returned no frames")
+        expected_width = max(1, int(shotplan.get("width", native_frames.shape[2]) or native_frames.shape[2]))
+        expected_height = max(1, int(shotplan.get("height", native_frames.shape[1]) or native_frames.shape[1]))
+        decoded_width = int(native_frames.shape[2])
+        decoded_height = int(native_frames.shape[1])
+        resolution_contract = (
+            f"requested={expected_width}x{expected_height};decoded={decoded_width}x{decoded_height}"
+        )
+        if decoded_width != expected_width or decoded_height != expected_height:
+            LOG.warning(
+                "MiniMax H3 native resolution mismatch | requested=%dx%d | decoded=%dx%d | no implicit IAMCCS resize was applied",
+                expected_width,
+                expected_height,
+                decoded_width,
+                decoded_height,
+            )
+        else:
+            delivery_enabled = bool(shotplan.get("upscale_enabled", False))
+            delivery_route = str(shotplan.get("upscale_mode", "off") or "off") if delivery_enabled else "off"
+            LOG.info(
+                "MiniMax H3 native resolution verified | requested=%dx%d | decoded=%dx%d | native stage preserved | delivery=%s",
+                expected_width,
+                expected_height,
+                decoded_width,
+                decoded_height,
+                delivery_route,
+            )
         bridge_last_frame = native_frames[-1:].detach().clone()
 
         report = (
             f"Atomic H3 generation | chunk={int(chunk_index) + 1}/{len(shotplan['chunks'])} | "
             f"task={chunk.get('task_mode')} | seed={actual_seed} ({seed_contract}) | {steps} steps | "
-            f"{sampler_report}+{scheduler} | turbo={turbo_report} | acceleration={acceleration_report} | "
+            f"{sampler_report}+{scheduler} | turbo={turbo_report} | fasth3={fasth3_report} | pdd={pdd_report} | secondary_lora={secondary_lora_report} | acceleration={acceleration_report} | "
             f"controls={sampling_source} | shifts={shift_video:.2f}/{shift_audio:.2f} | denoise={denoise:.2f} | "
             f"lipsync_lock={lipsync_lock_report} | "
             f"pre_sample_cleanup={conditioning_cleanup} | "
             f"pre_decode_cleanup={cleanup_report} | native_last_frame=captured | "
+            f"resolution={resolution_contract} | "
             f"motion_context={'on' if isinstance(motion_state, dict) and motion_state.get('active') else 'off'}"
         )
         return native_frames, native_audio, bridge_last_frame, sampled, H3_FPS, report
@@ -2299,8 +2896,13 @@ class IAMCCS_MiniMaxH3PostUpscaleControlV2:
         if not isinstance(settings, dict):
             settings = {}
 
+        raw_mode = str(shotplan.get("upscale_mode", "off") or "off").lower()
+        per_chunk_ltx = raw_mode == "ltx23_per_chunk"
         enabled = bool(shotplan.get("upscale_enabled", False)) and bool(master_ready)
-        selected_mode = str(shotplan.get("upscale_mode", "off") or "off").lower() if enabled else "off"
+        # The physical LTX graph still receives its established `ltx23`
+        # selector.  `ltx23_per_chunk` changes source, save and queue policy,
+        # not the actual LTX model contract.
+        selected_mode = "ltx23" if enabled and per_chunk_ltx else (raw_mode if enabled else "off")
         if selected_mode not in {"off", "ltx23", "wan22_5b"}:
             raise ValueError(f"Unknown MiniMax H3 post-upscale mode: {selected_mode}")
 
@@ -2324,22 +2926,23 @@ class IAMCCS_MiniMaxH3PostUpscaleControlV2:
             ltx_4k_resolution_report = "LTX path not selected"
         prompt_source = (
             settings.get("prompt")
-            or (shotplan.get("global_prompt") if bool(master_ready) else chunk.get("prompt"))
+            or (chunk.get("prompt") if per_chunk_ltx else (shotplan.get("global_prompt") if bool(master_ready) else chunk.get("prompt")))
             or shotplan.get("global_prompt")
             or "high quality cinematic video"
         )
         prompt = str(prompt_source).strip()
+        native_duration_seconds = max(1, int(native_frames.shape[0])) / H3_FPS
         duration_seconds = (
-            max(1, int(native_frames.shape[0])) / H3_FPS
-            if bool(master_ready)
-            else float(chunk.get("duration_seconds") or (max(1, int(native_frames.shape[0])) / H3_FPS))
+            native_duration_seconds
+            if per_chunk_ltx or bool(master_ready)
+            else float(chunk.get("duration_seconds") or native_duration_seconds)
         )
         sampling = shotplan.get("sampling") if isinstance(shotplan.get("sampling"), dict) else {}
         base_seed = int(sampling.get("seed", 0) or 0)
         seed_stride = int(sampling.get("seed_stride", 1) or 1)
         seed_offset = int(settings.get("seed_offset", 10000) or 0)
         upscale_seed = (
-            base_seed + (0 if bool(master_ready) else index * seed_stride) + seed_offset
+            base_seed + (0 if bool(master_ready) and not per_chunk_ltx else index * seed_stride) + seed_offset
         ) & 0xFFFFFFFFFFFFFFFF
         sage_enabled = bool(settings.get("sage", True))
         wan_denoise = min(1.0, max(0.0, float(settings.get("wan_denoise", 0.2) or 0.0)))
@@ -2371,7 +2974,7 @@ class IAMCCS_MiniMaxH3PostUpscaleControlV2:
         looper_available = False
         report = (
             f"H3 post-upscale control | selected={selected_mode} | "
-            f"source={'native_full_master' if bool(master_ready) else f'chunk_{index + 1}'} | "
+            f"source={'native_full_master' if bool(master_ready) and not per_chunk_ltx else f'chunk_{index + 1}'} | "
             f"native={native_width}x{native_height} -> LTX stage={stage_target_width}x{stage_target_height} "
             f"-> delivery={delivery_target_width}x{delivery_target_height} | "
             f"duration={duration_seconds:.3f}s | seed={upscale_seed} | sage={'on' if sage_enabled else 'off'} | "

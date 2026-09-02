@@ -1,0 +1,9 @@
+Source: https://github.com/ckinpdx/ComfyUI-MMH3Tools
+Commit: a8eaf6bf3c7991d2777fe77d4c8de96849cd10a9
+License declared by upstream pyproject.toml: MIT
+
+Immutable upstream source snapshot for IAMCCS R38B.
+Only specific modules are loaded in a private namespace when R38B executes.
+Neither package __init__.py is executed: no global tokenizer/guide patches,
+node registration, web routes or extra dependencies are installed.
+The RTX frame adapter uses IAMCCS's existing NVIDIA runtime and RGB layout.

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import functools
 import gc
 import json
 import logging
@@ -24,7 +25,13 @@ from PIL import Image, ImageOps
 
 import folder_paths
 
-from .iamccs_minimax_h3_shotboard_core import H3_FPS, build_shotplan, plan_json
+from .iamccs_minimax_h3_shotboard_core import (
+    H3_FPS,
+    H3_MAX_TRAINED_FRAMES,
+    H3_MIN_TRAINED_FRAMES,
+    build_shotplan,
+    plan_json,
+)
 from .iamccs_prompter import SUPERNODE_LINX_TYPE, apply_prompter_to_minimax
 from .audio.dialogue_tag_editor import apply_dialogue_to_minimax
 from .iamccs_supernodes_linx import build_stage_linx_payload
@@ -37,6 +44,51 @@ LOG = logging.getLogger("IAMCCS.MiniMaxH3.Standalone")
 H3_DIMENSION_MULTIPLE = 32
 H3_MIN_DIMENSION = 256
 H3_MAX_DIMENSION = 5760
+
+
+@functools.lru_cache(maxsize=512)
+def _classify_fasth3_dense_lora_header(path_text: str, mtime_ns: int) -> tuple[bool, str]:
+    """Identify converted FastH3 Dense adapters without relying on filenames."""
+    del mtime_ns  # retained in the cache key so replacing a file invalidates the result
+    try:
+        from safetensors import safe_open
+
+        with safe_open(path_text, framework="pt", device="cpu") as handle:
+            keys = [str(key).lower() for key in handle.keys()]
+            metadata = {str(key).lower(): str(value) for key, value in (handle.metadata() or {}).items()}
+    except Exception as exc:
+        return False, f"unreadable safetensors header ({type(exc).__name__}: {exc})"
+
+    converted_by = metadata.get("converted_by", "").strip().lower()
+    adaln_mode = metadata.get("adaln_mode", "").strip().lower()
+    native_lora = any(
+        key.startswith("diffusion_model.blocks.") and (".lora_a." in key or ".lora_b." in key)
+        for key in keys
+    )
+    fused_qkv = any(".attn.qkv_proj.lora_a." in key for key in keys) and any(
+        ".attn.qkv_proj.lora_b." in key for key in keys
+    )
+    if converted_by != "lora_convert_h3":
+        return False, "missing FastH3 converter metadata"
+    if not native_lora or not fused_qkv:
+        return False, "FastH3 metadata found, but native fused-QKV H3 LoRA tensors are incomplete"
+    if adaln_mode != "drop":
+        return False, f"unsupported FastH3 AdaLN conversion mode '{adaln_mode or 'unknown'}'; use --adaln drop"
+    return True, "FastH3 Dense native ComfyUI adapter"
+
+
+def _discover_fasth3_dense_loras(names: list[str]) -> list[str]:
+    """Return compatible converted adapters from ComfyUI's complete LoRA registry."""
+    found: list[str] = []
+    for name in names:
+        try:
+            path = folder_paths.get_full_path("loras", name)
+            mtime_ns = Path(path).stat().st_mtime_ns if path else 0
+        except (OSError, TypeError, ValueError):
+            continue
+        if path and _classify_fasth3_dense_lora_header(str(path), int(mtime_ns))[0]:
+            found.append(name)
+    return sorted(found, key=str.lower)
 
 # R21 keeps every value that shipped in previous workflows and adds one new,
 # deliberately distinct route for the v16-style pre-sampler audio latent.
@@ -185,6 +237,51 @@ _H3_SETTINGS_NODE_GROUPS = (
         "face_detailer_enabled", "face_detailer_profile", "face_detailer_use_sam_mask",
     )),
 )
+
+# R38 controls exist only on the external Settings node.  The Shotboard keeps
+# its historical widget array byte-for-byte stable and carries the selected
+# route through the existing upscale_mode/width/height fields.
+_H3_LATENT_UPRES_SETTINGS_NODE_FIELDS = (
+    "h3_upres_model_name", "h3_upres_precision", "h3_upres_device",
+    "h3_upres_keep_models_resident", "h3_upres_steps", "h3_upres_denoise",
+    "h3_upres_sampler", "h3_upres_scheduler", "h3_upres_temporal_chunk",
+    "h3_upres_temporal_overlap", "h3_upres_anchor_strength", "h3_upres_tile_width",
+    "h3_upres_tile_height", "h3_upres_overlap_width", "h3_upres_overlap_height",
+    "h3_upres_fade_width", "h3_upres_fade_height", "h3_upres_min_tile_size",
+    "h3_upres_overlap_mode", "h3_upres_overlap_blend", "h3_upres_rtx_enabled",
+    "h3_upres_rtx_quality",
+    "h3_upres_pixel_groups", "h3_upres_window_frames", "h3_upres_window_overlap", "h3_upres_pixel_method",
+)
+
+# Appended only after the existing R38 fields on IAMCCS_ShotboardH3Settings.
+# Keeping these outside the historical groups preserves every serialized
+# widget index in already-saved Settings nodes.
+_H3_SECONDARY_LORA_SETTINGS_NODE_FIELDS = (
+    "secondary_lora_enabled", "secondary_lora_name", "secondary_lora_strength",
+)
+# Native PDD controls are appended after every historical Settings widget.
+# They stay out of the automatic planner grouping so adding them cannot shift
+# the persisted R38/R39/R40 fields.
+_H3_PDD_SETTINGS_NODE_FIELDS = (
+    "pdd_lora_name", "pdd_strength",
+)
+# Native Fun ControlNet fields are append-only after PDD.  They stay outside
+# the historical grouping pass so no pre-R41 Settings widget index moves.
+_H3_FUN_CONTROLNET_SETTINGS_NODE_FIELDS = (
+    "h3_controlnet_enabled", "h3_controlnet_name", "h3_controlnet_kind",
+    "h3_controlnet_strength", "h3_controlnet_start_percent", "h3_controlnet_end_percent",
+    "h3_controlnet_frame_scope", "h3_controlnet_end_policy",
+)
+# R40 Stage-1 scout controls are appended after every R39 field.  Candidate
+# selection and the Stage-2 reroll seed deliberately live on the downstream
+# R40 Shot Lab Control node, otherwise ComfyUI would invalidate the cached
+# first pass whenever either value changes.
+_H3_R40_SCOUT_SETTINGS_NODE_FIELDS = (
+    "h3_r40_seed_scout_enabled", "h3_r40_candidate_count", "h3_r40_seed_stride",
+    "h3_r40_preview_max_frames", "h3_r40_sparse_enabled",
+    "h3_r40_sparse_video_budget", "h3_r40_sparse_denser_edges",
+)
+_H3_SETTINGS_SEED_CONTROL_COMPAT_FIELD = "seed_control_after_generate_compat"
 _H3_SETTINGS_NODE_EXCLUDED_FIELDS = frozenset(("global_prompt", "timeline_data", "image_paths"))
 # These are editor/legacy compatibility widgets rather than MiniMax H3
 # generation controls.  Keep their hidden inputs on the node for positional
@@ -193,6 +290,7 @@ _H3_SETTINGS_CINELINX_OMITTED_FIELDS = frozenset((
     "frame_rate", "guide_policy", "min_guide_gap_seconds", "max_guides", "default_force",
     "promptrelay_epsilon", "ltx_round_mode", "image_width", "image_height",
     "image_resize_method", "image_multiple_of", "img_compression",
+    _H3_SETTINGS_SEED_CONTROL_COMPAT_FIELD,
 ))
 _H3_SETTINGS_LINX_SCHEMA = "iamccs.minimax_h3.settings_cine_linx"
 
@@ -268,6 +366,77 @@ def _timeline_dict(timeline_data: Any) -> dict[str, Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _nextframe_injection_from_linx(cine_linx: Any) -> dict[str, Any]:
+    """Resolve the explicit NextFrame storyboard injection from CineLinX."""
+    if not isinstance(cine_linx, dict):
+        return {}
+    resources = cine_linx.get("resources") if isinstance(cine_linx.get("resources"), dict) else {}
+    outputs = cine_linx.get("outputs") if isinstance(cine_linx.get("outputs"), dict) else {}
+    payload = resources.get("cine_payload") if isinstance(resources.get("cine_payload"), dict) else {}
+    for candidate in (
+        resources.get("iamccs_next_frame_injection"),
+        outputs.get("next_frame_injection"),
+        payload.get("next_frame_injection"),
+    ):
+        if isinstance(candidate, dict) and str(candidate.get("schema", "")).startswith(
+            "iamccs.next_frame_builder.cine_linx"
+        ):
+            return copy.deepcopy(candidate)
+    return {}
+
+
+def _merge_nextframe_injection(
+    timeline_data: Any,
+    image_paths: Any,
+    injection: dict[str, Any],
+) -> tuple[str, str]:
+    start_slot = max(0, int(injection.get("start_slot", 0) or 0))
+    existing = _timeline_dict(timeline_data)
+    injected = _timeline_dict(injection.get("timeline_data"))
+    if injected:
+        for key in ("segments", "rows"):
+            prefix = existing.get(key) if isinstance(existing.get(key), list) else []
+            replacement = injected.get(key) if isinstance(injected.get(key), list) else []
+            injected[key] = copy.deepcopy(prefix[:start_slot]) + copy.deepcopy(replacement)
+        injected["duration_seconds"] = max(
+            float(existing.get("duration_seconds", 0) or 0),
+            float(injected.get("duration_seconds", 0) or 0),
+        )
+    else:
+        injected = existing
+
+    old_paths: list[str] = []
+    try:
+        parsed_paths = json.loads(str(image_paths or "[]"))
+        if isinstance(parsed_paths, list):
+            old_paths = [str(path) for path in parsed_paths if str(path).strip()]
+    except (TypeError, ValueError, json.JSONDecodeError):
+        old_paths = [item.strip() for item in re.split(r"[\r\n,;]+", str(image_paths or "")) if item.strip()]
+    selected = injection.get("selected_paths")
+    selected_paths = [str(path) for path in selected] if isinstance(selected, list) else []
+    return (
+        json.dumps(injected, ensure_ascii=False),
+        json.dumps(old_paths[:start_slot] + selected_paths, ensure_ascii=False),
+    )
+
+
+def _nextframe_image_from_linx(cine_linx: Any, index: int = 0) -> torch.Tensor | None:
+    injection = _nextframe_injection_from_linx(cine_linx)
+    if not injection:
+        return None
+    resources = cine_linx.get("resources") if isinstance(cine_linx.get("resources"), dict) else {}
+    image_batch = resources.get("cine_multi_input", resources.get("multi_input"))
+    selected_index = int(index) - max(0, int(injection.get("start_slot", 0) or 0))
+    if selected_index < 0:
+        return None
+    if torch.is_tensor(image_batch) and image_batch.ndim == 4 and 0 <= selected_index < int(image_batch.shape[0]):
+        return image_batch[selected_index : selected_index + 1]
+    paths = injection.get("selected_paths")
+    if isinstance(paths, list) and 0 <= selected_index < len(paths):
+        return _load_image(str(paths[selected_index]))
+    return None
 
 
 def _apply_audioboard_to_minimax(cine_linx: Any, timeline_data: Any) -> tuple[str, dict[str, Any]]:
@@ -1107,6 +1276,64 @@ def _decode_video_master(
     return frames.contiguous(), audio
 
 
+def _resolve_native_master_path(expected: Path, render_id: str, total_segments: int) -> Path:
+    """Find the checkpoint asset identified by the stable render id.
+
+    Prefix and stage label are editable widgets.  A downstream master loader
+    must therefore not assume that another node kept its own defaults.  Prefer
+    a completed native ``*_full.mp4``; a single encoded segment is a valid
+    fallback only when the plan genuinely contains one segment.
+    """
+    if expected.is_file():
+        return expected
+
+    safe_render_id = _safe_name(str(render_id or "").strip(), "minimax_h3_render")
+    output_root = Path(folder_paths.get_output_directory())
+    search_roots: list[Path] = []
+    if expected.parent.exists():
+        search_roots.append(expected.parent)
+    if output_root not in search_roots:
+        search_roots.append(output_root)
+
+    def find(suffix: str) -> list[Path]:
+        matches: dict[str, Path] = {}
+        pattern = f"*{safe_render_id}*{suffix}"
+        for root in search_roots:
+            try:
+                for path in root.rglob(pattern):
+                    if path.is_file():
+                        matches[str(path.resolve()).lower()] = path
+            except OSError:
+                continue
+
+        def rank(path: Path) -> tuple[int, int, float]:
+            text = str(path).lower()
+            return (
+                1 if "native" in path.name.lower() else 0,
+                1 if "native_segment" in text else 0,
+                path.stat().st_mtime,
+            )
+
+        return sorted(matches.values(), key=rank, reverse=True)
+
+    full = find("_full.mp4")
+    if full:
+        LOG.warning(
+            "MiniMax H3 native master path reconciled | expected=%s | actual=%s",
+            expected, full[0],
+        )
+        return full[0]
+    if max(1, int(total_segments)) == 1:
+        single = find("_seg_0001.mp4")
+        if single:
+            LOG.warning(
+                "MiniMax H3 single native segment promoted to master | expected=%s | actual=%s",
+                expected, single[0],
+            )
+            return single[0]
+    return expected
+
+
 def _next_numbered_render_id(output_folder: Path, base_name: str, requested_render_id: str) -> str:
     """Return a never-reused render id with a monotonically increasing suffix.
 
@@ -1354,16 +1581,40 @@ class IAMCCS_MiniMaxH3ShotPlanner:
 
         samplers = list(comfy.samplers.SAMPLER_NAMES)
         schedulers = list(comfy.samplers.SCHEDULER_NAMES)
-        installed_turbo_loras = [
-            name for name in folder_paths.get_filename_list("loras")
-            if "minimax" in name.lower() and "h3" in name.lower() and "turbo" in name.lower()
-        ]
+        # Discover every installed H3 LoRA by its filename or relative folder.
+        # Community releases do not consistently include "minimax" or
+        # "turbo" in the basename, so those tokens must not be a second,
+        # hardcoded allow-list.
+        all_installed_loras = list(folder_paths.get_filename_list("loras"))
+        installed_fasth3_loras = _discover_fasth3_dense_loras(all_installed_loras)
+        installed_turbo_loras = sorted(
+            (
+                name for name in all_installed_loras
+                if "h3" in name.lower() or name in installed_fasth3_loras
+            ),
+            key=str.lower,
+        )
+        installed_pdd_loras = sorted(
+            (
+                name for name in installed_turbo_loras
+                if (
+                    ("pdd" in name.lower() and "acc" in name.lower())
+                    or ("h3" in name.lower() and "acc" in name.lower() and "8step" in name.lower())
+                )
+                # Native ComfyUI PDD head-bank files are the converted
+                # *_comfy safetensors.  Legacy companion-loader files may use
+                # the same Acc-8Step name but have an incompatible tensor
+                # layout, so do not advertise them in the native dropdown.
+                and "comfy" in name.lower()
+            ),
+            key=str.lower,
+        )
         # The LTX finishing slot intentionally exposes the complete ComfyUI
         # LoRA registry. Some useful LTX LoRAs (including community Crisp
         # variants) do not carry reliable "ltx/detail/enhance" tokens in the
         # filename or parent folder. Runtime compatibility remains the user's
         # choice; keeping the historical field name preserves old workflows.
-        installed_ltx_detailer_loras = list(folder_paths.get_filename_list("loras"))
+        installed_ltx_detailer_loras = all_installed_loras
         crisp_ltx_loras = sorted(
             (
                 name for name in installed_ltx_detailer_loras
@@ -1378,7 +1629,27 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         # Only expose files that really exist. The web migration converts old
         # saved missing filenames to the empty/Base-H3 choice before validation.
         turbo_loras = list(dict.fromkeys(("", *installed_turbo_loras)))
+        pdd_loras = list(dict.fromkeys(("", *installed_pdd_loras)))
+        # Default to a real installed native PDD file when one exists.  The
+        # value is discovered from ComfyUI's LoRA registry at startup, never a
+        # hardcoded community filename; empty remains the safe fallback.
+        default_pdd_lora = installed_pdd_loras[0] if installed_pdd_loras else ""
+        default_acceleration = "pdd_native_8step" if default_pdd_lora else "low_vram_auto"
+        default_native_steps = 8 if default_pdd_lora else 16
+        default_native_sampler = "euler" if default_pdd_lora and "euler" in samplers else (samplers[0] if samplers else "euler")
+        default_native_scheduler = "simple" if "simple" in schedulers else (schedulers[0] if schedulers else "simple")
         ltx_detailer_loras = list(dict.fromkeys(("", *installed_ltx_detailer_loras)))
+        installed_h3_controlnets = sorted(
+            (
+                name for name in folder_paths.get_filename_list("controlnet")
+                if (
+                    ("minimax" in name.lower() and "h3" in name.lower() and "control" in name.lower())
+                    or ("h3" in name.lower() and "fun" in name.lower() and "control" in name.lower())
+                )
+            ),
+            key=str.lower,
+        )
+        h3_controlnets = list(dict.fromkeys(("", *installed_h3_controlnets)))
         if "res_multistep" in samplers:
             samplers.remove("res_multistep")
             samplers.insert(0, "res_multistep")
@@ -1393,11 +1664,14 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "task_mode": ([
                     "auto_from_timeline", "t2va", "i2va", "fl2va", "ref2va",
                     "v2va_object_swap", "longvid_guides", "longvid_guided_lipsync",
-                    "ref2vid_lipsync", "longvid_ref2vid_lipsync",
+                    "ref2vid_lipsync", "longvid_ref2vid_lipsync", "longvid_motion_context",
                 ], {"default": "auto_from_timeline"}),
                 "audio_mode": (list(H3_AUDIO_MODES), {"default": "h3_native_generated"}),
                 "prompt_mapping": (["global_plus_local", "local_only", "global_only"], {"default": "global_plus_local"}),
-                "upscale_mode": (["off", "ltx23", "wan22_5b"], {"default": "off"}),
+                "upscale_mode": ([
+                    "off", "rtx_final", "h3_fast_latent_2pass", "h3_pixel_refine",
+                    "h3_latent_upres", "ltx23", "ltx23_per_chunk", "wan22_5b",
+                ], {"default": "off"}),
                 # 0.5 MP / 16:9 is the practical Dynamic-VRAM default used by
                 # the proven H3 reference pipeline on a 12 GiB card.  The UI
                 # still lets the user choose any valid H3 resolution.
@@ -1423,8 +1697,9 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "acceleration": ([
                     "low_vram_auto", "native", "h3_sage", "sol_low_vram", "sol_adaptive_safe",
                     "sol_adaptive_balanced", "adaptive_safe", "spectrum", "sage_spectrum",
-                    "auto_3060", "sage", "sage_sol",
-                ], {"default": "low_vram_auto"}),
+                    "auto_3060", "sage", "sage_sol", "comfy_kitchen", "h3_exact", "pdd_native_8step", "fasth3_dense_6step",
+                    "iamccs_progressive_2stage", "iamccs_progressive_3stage", "iamccs_progressive_pdd_2stage",
+                ], {"default": default_acceleration}),
                 "ref_image_size": (["match", "max"], {"default": "match"}),
                 "reference_role_1": (["subject_identity", "keyframe", "composition", "style", "disabled"], {"default": "subject_identity"}),
                 "reference_role_2": (["subject_identity", "keyframe", "composition", "style", "disabled"], {"default": "subject_identity"}),
@@ -1454,21 +1729,22 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 # generation node keeps legacy widgets only as a compatibility
                 # fallback for shotplans created before schema v3.
                 "performance_profile": ([
+                    "rtx_xx60_safe", "rtx_xx70_balanced", "rtx_xx80_quality", "rtx_xx90_max",
                     "low_vram_draft", "low_vram_balanced", "low_vram_turbo", "h3_turbo_quality", "h3_native_quality", "custom",
                     "rtx3060_draft", "rtx3060_balanced", "rtx3060_turbo",
                 ], {"default": "low_vram_balanced"}),
                 "seed": ("INT", {"default": 42, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "control_after_generate": True}),
                 "seed_stride": ("INT", {"default": 1, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "step": 1}),
-                "steps": ("INT", {"default": 16, "min": 1, "max": 100, "step": 1}),
-                "sampler_name": (samplers,),
-                "scheduler": (schedulers,),
+                "steps": ("INT", {"default": default_native_steps, "min": 1, "max": 100, "step": 1}),
+                "sampler_name": (samplers, {"default": default_native_sampler}),
+                "scheduler": (schedulers, {"default": default_native_scheduler}),
                 "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "shift_video": ("FLOAT", {"default": 12.0, "min": 0.01, "max": 100.0, "step": 0.01}),
                 "shift_audio": ("FLOAT", {"default": 3.0, "min": 0.01, "max": 100.0, "step": 0.01}),
                 # Turbo is kept inside the typed shotplan so the selected LoRA,
                 # effective sampler and audio policy cannot drift apart.
                 "turbo_mode": (["off", "early_8_10", "ckpt500_6_8"], {"default": "off"}),
-                "turbo_lora_name": (turbo_loras, {"default": ""}),
+                "turbo_lora_name": (turbo_loras, {"default": "", "iamccs_fasth3_values": installed_fasth3_loras}),
                 "turbo_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.05}),
                 "turbo_sampler_mode": (["audio_fixed", "res_multistep_stock"], {"default": "audio_fixed"}),
                 # Preserve source pixels by default. The native H3 conditioner
@@ -1506,7 +1782,8 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 # existing planner settings.  ComfyUI serializes optional widgets
                 # before later required widgets; keeping them optional therefore
                 # shifts every LTX field in saved boards and invalidates prompts.
-                # `cine_linx` remains the only optional socket below.
+                # Optional sockets are appended and never alter the serialized
+                # required-widget block used by existing Shotboards.
                 "v2v_guide_mode": (["", "raw_only", "raw_pose", "raw_depth", "raw_depth_pose"], {"default": "raw_only"}),
                 "v2v_source_range_policy": (["", "timeline_segment", "sequential_requested", "repeat_from_offset"], {"default": "timeline_segment"}),
                 "v2v_source_offset_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 86400.0, "step": 0.01}),
@@ -1530,12 +1807,36 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "face_detailer_enabled": ("BOOLEAN", {"default": False}),
                 "face_detailer_profile": (["balanced", "small_faces", "gentle", "sam_face_mask"], {"default": "balanced"}),
                 "face_detailer_use_sam_mask": ("BOOLEAN", {"default": False}),
+                # Optional creative/style H3 LoRA. It is model-only and never
+                # changes the authored H3 sampling controls. These fields are
+                # appended to preserve older Shotboard widget arrays.
+                "secondary_lora_enabled": ("BOOLEAN", {"default": False}),
+                "secondary_lora_name": (turbo_loras, {"default": ""}),
+                "secondary_lora_strength": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.05}),
+                # Append-only native PDD controls. Converted PDD files use the
+                # stock ComfyUI LoRA registry but never share the Turbo route.
+                "pdd_lora_name": (pdd_loras, {"default": default_pdd_lora}),
+                "pdd_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
+                # Append-only native Fun ControlNet controls. Media is injected
+                # through IAMCCS Cine H3 Fun Control Input; these visible boxes
+                # remain the Queue-time authority for model and timing.
+                "h3_controlnet_enabled": ("BOOLEAN", {"default": False}),
+                "h3_controlnet_name": (h3_controlnets, {"default": ""}),
+                "h3_controlnet_kind": (["pose_dwpose", "depth", "canny", "hed", "mlsd", "inpaint"], {"default": "pose_dwpose"}),
+                "h3_controlnet_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
+                "h3_controlnet_start_percent": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "h3_controlnet_end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "h3_controlnet_frame_scope": (["timeline_segment", "repeat_each_chunk"], {"default": "timeline_segment"}),
+                "h3_controlnet_end_policy": (["strict_match", "hold_last"], {"default": "strict_match"}),
             },
             "optional": {
                 "cine_linx": (
                     SUPERNODE_LINX_TYPE,
                     {
-                        "tooltip": "Connect IAMCCS_Prompter here. Its target is resolved against this Shotboard's real timeline slots.",
+                        "tooltip": (
+                            "Connect IAMCCS CineH3Input here to combine Settings, Prompter, Dialogue Tag Editor, "
+                            "AudioBoard Arranger and other CineLinX modules through the historical single input."
+                        ),
                     },
                 ),
             },
@@ -1635,8 +1936,37 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         face_detailer_enabled=False,
         face_detailer_profile="balanced",
         face_detailer_use_sam_mask=False,
+        secondary_lora_enabled=False,
+        secondary_lora_name="",
+        secondary_lora_strength=0.0,
+        pdd_lora_name="",
+        pdd_strength=1.0,
+        h3_controlnet_enabled=False,
+        h3_controlnet_name="",
+        h3_controlnet_kind="pose_dwpose",
+        h3_controlnet_strength=1.0,
+        h3_controlnet_start_percent=0.0,
+        h3_controlnet_end_percent=1.0,
+        h3_controlnet_frame_scope="timeline_segment",
+        h3_controlnet_end_policy="strict_match",
         cine_linx=None,
     ):
+        # Settings-less legacy workflows retain the original full H3 window.
+        # The external Settings node can override this with a 12 GB-safe value
+        # without appending another widget to the Shotboard itself.
+        motion_context_window_frames = H3_MAX_TRAINED_FRAMES
+        nextframe_injection = _nextframe_injection_from_linx(cine_linx)
+        if nextframe_injection:
+            timeline_data, image_paths = _merge_nextframe_injection(
+                timeline_data, image_paths, nextframe_injection
+            )
+            timeline_meta = _timeline_dict(timeline_data)
+            if timeline_meta:
+                duration_seconds = timeline_meta.get("duration_seconds", duration_seconds)
+                frame_rate = timeline_meta.get("frame_rate", timeline_meta.get("fps", frame_rate))
+            injected_prompt = str(nextframe_injection.get("prompt", "") or "").strip()
+            if injected_prompt and not str(global_prompt or "").strip():
+                global_prompt = injected_prompt
         global_prompt, timeline_data, prompter_injection = apply_prompter_to_minimax(
             cine_linx,
             global_prompt,
@@ -1744,6 +2074,22 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             face_detailer_enabled = saved_settings.get("face_detailer_enabled", face_detailer_enabled)
             face_detailer_profile = saved_settings.get("face_detailer_profile", face_detailer_profile)
             face_detailer_use_sam_mask = saved_settings.get("face_detailer_use_sam_mask", face_detailer_use_sam_mask)
+            secondary_lora_enabled = saved_settings.get("secondary_lora_enabled", secondary_lora_enabled)
+            secondary_lora_name = saved_settings.get("secondary_lora_name", secondary_lora_name)
+            secondary_lora_strength = saved_settings.get("secondary_lora_strength", secondary_lora_strength)
+            pdd_lora_name = saved_settings.get("pdd_lora_name", pdd_lora_name)
+            pdd_strength = saved_settings.get("pdd_strength", pdd_strength)
+            h3_controlnet_enabled = saved_settings.get("h3_controlnet_enabled", h3_controlnet_enabled)
+            h3_controlnet_name = saved_settings.get("h3_controlnet_name", h3_controlnet_name)
+            h3_controlnet_kind = saved_settings.get("h3_controlnet_kind", h3_controlnet_kind)
+            h3_controlnet_strength = saved_settings.get("h3_controlnet_strength", h3_controlnet_strength)
+            h3_controlnet_start_percent = saved_settings.get("h3_controlnet_start_percent", h3_controlnet_start_percent)
+            h3_controlnet_end_percent = saved_settings.get("h3_controlnet_end_percent", h3_controlnet_end_percent)
+            h3_controlnet_frame_scope = saved_settings.get("h3_controlnet_frame_scope", h3_controlnet_frame_scope)
+            h3_controlnet_end_policy = saved_settings.get("h3_controlnet_end_policy", h3_controlnet_end_policy)
+            motion_context_window_frames = saved_settings.get(
+                "motion_context_window_frames", motion_context_window_frames
+            )
         requested_text_encoder_device = str(text_encoder_device or "gpu_auto").strip().lower()
         text_encoder_device = {
             "auto": "gpu_auto",
@@ -1761,7 +2107,10 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "longvid_guided_lipsync", "longvid_audio_drive_lipsync",
             "longvid_ref2vid_lipsync", "longvid_lipsync", "longvid_ref2va_lipsync",
         }
-        longvid_requested = requested_task_key in {"longvid_guides", "longvid", "long_video_guides"} or longvid_lipsync_requested
+        motion_context_requested = requested_task_key in {
+            "longvid_motion_context", "longvid_motion_context_auto_chain", "motion_context_auto_chain",
+        }
+        longvid_requested = requested_task_key in {"longvid_guides", "longvid", "long_video_guides"} or longvid_lipsync_requested or motion_context_requested
         lipsync_requested = requested_task_key in {"ref2vid_lipsync", "lipsync_ref2vid"} or longvid_lipsync_requested
         requested_legacy_audio_mode = audio_mode
         # LipSync uses one actual AudioBoard source in two compatible stock-H3
@@ -1820,7 +2169,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         effective_ltx_4k = (
             ltx_4k_requested
             and bool(upscale_enabled)
-            and str(upscale_mode) == "ltx23"
+            and str(upscale_mode) in {"ltx23", "ltx23_per_chunk"}
             and true_4k_target
         )
         ltx_4k_quality = str(ltx_4k_quality or "ULTRA").upper()
@@ -1832,9 +2181,50 @@ class IAMCCS_MiniMaxH3ShotPlanner:
 
         requested_turbo_mode = str(turbo_mode or "off")
         selected_turbo_lora = str(turbo_lora_name or "").strip()
+        fasth3_requested = str(acceleration or "").lower() == "fasth3_dense_6step"
+        if fasth3_requested and requested_turbo_mode != "off":
+            raise ValueError("FastH3 Dense 6-Step is a complete distilled native sampling profile; set Turbo mode to off")
         turbo_requested = requested_turbo_mode != "off"
         turbo_available = _model_file_available("loras", selected_turbo_lora)
         effective_turbo_mode = requested_turbo_mode if turbo_requested and turbo_available else "off"
+        selected_secondary_lora = str(secondary_lora_name or "").strip()
+        secondary_strength = _finite_float(secondary_lora_strength, 0.0, -2.0, 2.0)
+        secondary_lora_requested = bool(secondary_lora_enabled) and bool(selected_secondary_lora) and abs(secondary_strength) > 1e-8
+        secondary_lora_available = _model_file_available("loras", selected_secondary_lora)
+        secondary_lora_duplicate = bool(
+            secondary_lora_requested
+            and (effective_turbo_mode != "off" or fasth3_requested)
+            and selected_secondary_lora.casefold() == selected_turbo_lora.casefold()
+        )
+        selected_pdd_lora = str(pdd_lora_name or "").strip()
+        pdd_strength_value = _finite_float(pdd_strength, 1.0, 0.0, 2.0)
+        pdd_requested = str(acceleration or "").lower() in {
+            "pdd_native_8step", "iamccs_progressive_pdd_2stage",
+        }
+        pdd_available = _model_file_available("loras", selected_pdd_lora)
+        selected_controlnet = str(h3_controlnet_name or "").strip()
+        controlnet_requested = bool(h3_controlnet_enabled)
+        controlnet_available = _model_file_available("controlnet", selected_controlnet)
+        controlnet_kind = str(h3_controlnet_kind or "pose_dwpose").strip().lower()
+        if controlnet_kind not in {"pose_dwpose", "depth", "canny", "hed", "mlsd", "inpaint"}:
+            controlnet_kind = "pose_dwpose"
+        controlnet_strength = _finite_float(h3_controlnet_strength, 1.0, 0.0, 2.0)
+        controlnet_start = _finite_float(h3_controlnet_start_percent, 0.0, 0.0, 1.0)
+        controlnet_end = _finite_float(h3_controlnet_end_percent, 1.0, 0.0, 1.0)
+        # Stale/legacy widget values must not block workflows that are not
+        # using H3 Fun ControlNet.  The interval is meaningful only while the
+        # feature is explicitly enabled; keep the strict validation in that
+        # case so an active ControlNet can never receive an empty range.
+        if controlnet_requested and controlnet_end <= controlnet_start:
+            raise ValueError("H3 Fun ControlNet end percent must be greater than start percent")
+        if not controlnet_requested:
+            controlnet_start, controlnet_end = 0.0, 1.0
+        controlnet_scope = str(h3_controlnet_frame_scope or "timeline_segment").strip().lower()
+        if controlnet_scope not in {"timeline_segment", "repeat_each_chunk"}:
+            controlnet_scope = "timeline_segment"
+        controlnet_end_policy = str(h3_controlnet_end_policy or "strict_match").strip().lower()
+        if controlnet_end_policy not in {"strict_match", "hold_last"}:
+            controlnet_end_policy = "strict_match"
         requested_steps = max(1, int(_finite_float(steps, 16, 1, 100)))
         # The settings box is the single source of truth.  Turbo profiles are
         # recommendations, not hidden sampling contracts: an authored 8-step
@@ -1865,6 +2255,9 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             rife_mode=rife_mode,
             upscale_enabled=upscale_enabled,
             voice_reference_picture_index=voice_reference_picture_index,
+            motion_context_tail_frames=flf_continuity_tail_frames,
+            motion_context_audio=bool(flf_continuity_audio),
+            motion_context_window_frames=motion_context_window_frames,
         )
         continuity_requested = flf_continuity_mode == "native_av_context"
         # Native AV tail injection is implemented only for true FL2VA chunks.
@@ -1890,7 +2283,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         plan["dialogue_injection"] = dialogue_injection
         plan["audioboard_injection"] = audioboard_injection
         plan["audio_mode"] = audio_mode
-        longvid_active = str(plan.get("task_mode", "")).lower() in {"longvid_guides", "longvid_ref2vid_lipsync"}
+        longvid_active = str(plan.get("task_mode", "")).lower() in {"longvid_guides", "longvid_ref2vid_lipsync", "longvid_motion_context"}
         longvid_lipsync_active = bool(longvid_active and longvid_guided_audio_drive)
         if longvid_lipsync_active:
             timeline_audio_contract = (
@@ -1974,6 +2367,162 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "model_family": "ref2va",
             "source": "shotboard",
         }
+        plan["fasth3"] = {
+            "schema": "iamccs.minimax_h3.fasth3_dense",
+            "schema_version": 1,
+            "profile": "dense_6step_distilled",
+            "enabled": bool(fasth3_requested),
+            "requested": bool(fasth3_requested),
+            "lora_name": selected_turbo_lora,
+            "strength": float(turbo_strength),
+            "steps": 6,
+            "loader": "ComfyUI LoraLoaderModelOnly",
+            "source": "shotboard",
+        }
+        plan["secondary_lora"] = {
+            "enabled": bool(secondary_lora_requested and secondary_lora_available and not secondary_lora_duplicate),
+            "requested": bool(secondary_lora_requested),
+            "available": bool(secondary_lora_available),
+            "fallback_to_base": bool(secondary_lora_requested and not secondary_lora_available),
+            "duplicate_of_turbo": bool(secondary_lora_duplicate),
+            "lora_name": selected_secondary_lora,
+            "strength": float(secondary_strength),
+            "loader": "ComfyUI LoraLoaderModelOnly",
+            "source": "shotboard",
+        }
+        plan["pdd"] = {
+            "schema": "iamccs.minimax_h3.pdd_native",
+            "schema_version": 1,
+            "mode": "native_8step",
+            "enabled": bool(pdd_requested and pdd_available),
+            "requested": bool(pdd_requested),
+            "available": bool(pdd_available),
+            "lora_name": selected_pdd_lora,
+            "strength": float(pdd_strength_value),
+            "loader": "ComfyUI LoraLoaderModelOnly",
+            "source": "shotboard",
+        }
+        plan["fun_controlnet"] = {
+            "schema": "iamccs.minimax_h3.fun_controlnet",
+            "schema_version": 1,
+            "enabled": bool(controlnet_requested),
+            "requested": bool(controlnet_requested),
+            "available": bool(controlnet_available),
+            "control_net_name": selected_controlnet,
+            "kind": controlnet_kind,
+            "strength": float(controlnet_strength),
+            "start_percent": float(controlnet_start),
+            "end_percent": float(controlnet_end),
+            "frame_scope": controlnet_scope,
+            "end_policy": controlnet_end_policy,
+            "media_resource": "iamccs_minimax_h3_control_video",
+            "loader": "ComfyUI ControlNetLoader + MiniMaxH3FunControlNetApply",
+            "source": "shotboard",
+        }
+        # Append-only Settings fields control this opt-in path.  The profile is
+        # descriptive; the visible box values below remain the execution truth.
+        # Historical Shotboards have no such fields and therefore keep their
+        # previous acceleration and 32B/GGUF CLIP route unchanged.
+        exact_precision = str(saved_settings.get("h3_exact_precision_mode", "Preserve native") or "Preserve native")
+        if exact_precision not in {"Auto", "BF16", "Preserve native", "Force quant"}:
+            exact_precision = "Preserve native"
+        exact_qkv = str(saved_settings.get("h3_exact_qkv_streaming", "Auto") or "Auto")
+        if exact_qkv not in {"Off", "Auto", "Forced"}:
+            exact_qkv = "Auto"
+        exact_attention_memory = str(saved_settings.get("h3_exact_attention_memory", "Standard") or "Standard")
+        if exact_attention_memory not in {"Standard", "Lower VRAM (slower)"}:
+            exact_attention_memory = "Standard"
+        clipproj_profile = str(saved_settings.get("h3_clipproj_profile", "4b_v3.1") or "4b_v3.1").lower()
+        if clipproj_profile not in {"off", "4b_v3.1", "8b_v3.1"}:
+            clipproj_profile = "4b_v3.1"
+        clipproj_load_mode = str(saved_settings.get("h3_clipproj_load_mode", "dynamic") or "dynamic").lower()
+        if clipproj_load_mode not in {"dynamic", "streaming"}:
+            clipproj_load_mode = "dynamic"
+        plan["h3_exact_optimization"] = {
+            "schema": "iamccs.minimax_h3.exact_optimization",
+            "schema_version": 1,
+            "enabled": str(acceleration).lower() == "h3_exact",
+            "profile": str(saved_settings.get("h3_exact_profile", "rtx_xx60_8_12gb_124") or "rtx_xx60_8_12gb_124"),
+            "precision_mode": exact_precision,
+            "qkv_streaming": exact_qkv,
+            "chunk_rows": max(256, min(65536, int(_finite_float(saved_settings.get("h3_exact_chunk_rows", 2048), 2048, 256, 65536)))),
+            "attention_memory": exact_attention_memory,
+            "clipproj_profile": clipproj_profile,
+            "clipproj_load_mode": clipproj_load_mode,
+            "window_frames": int(motion_context_window_frames),
+            "turbo_steps_are_authored": int(effective_steps),
+            "source": "IAMCCS H3 Settings box values",
+        }
+        # R40-only plan data. R39 and every earlier backend ignore this block.
+        plan["seed_scout_settings"] = {
+            "schema": "iamccs.minimax_h3.seed_scout.r40",
+            "enabled": bool(saved_settings.get("h3_r40_seed_scout_enabled", False)),
+            "candidate_count": max(1, min(4, int(_finite_float(saved_settings.get("h3_r40_candidate_count", 1), 1, 1, 4)))),
+            "seed_stride": max(1, int(_finite_float(saved_settings.get("h3_r40_seed_stride", 1000003), 1000003, 1, 0xFFFFFFFFFFFFFFFF))),
+            "preview_max_frames": max(1, min(209, int(_finite_float(saved_settings.get("h3_r40_preview_max_frames", 49), 49, 1, 209)))),
+            "sparse_enabled": bool(saved_settings.get("h3_r40_sparse_enabled", False)),
+            "sparse_video_budget": float(_finite_float(saved_settings.get("h3_r40_sparse_video_budget", 0.30), 0.30, 0.05, 1.0)),
+            "sparse_denser_edges": bool(saved_settings.get("h3_r40_sparse_denser_edges", True)),
+            "source": "IAMCCS H3 Settings box values",
+        }
+        installed_h3_upres_models = [
+            name for name in folder_paths.get_filename_list("latent_upscale_models")
+            if all(token in name.lower() for token in ("minimax", "h3", "upscaler", "3d"))
+        ]
+        installed_h3_upres_models = sorted(
+            installed_h3_upres_models,
+            key=lambda name: (0 if "fp16" in name.lower() else 1, name.lower()),
+        )
+        default_h3_upres_model = installed_h3_upres_models[0] if installed_h3_upres_models else ""
+        h3_upres_model_name = str(saved_settings.get("h3_upres_model_name", "") or "").strip() or default_h3_upres_model
+        h3_upres_precision = str(saved_settings.get("h3_upres_precision", "fp16") or "fp16").lower()
+        if h3_upres_precision not in {"fp16", "bf16", "fp32"}:
+            h3_upres_precision = "fp16"
+        h3_upres_device = str(saved_settings.get("h3_upres_device", "cuda") or "cuda").lower()
+        if h3_upres_device not in {"cuda", "cpu"}:
+            h3_upres_device = "cuda"
+        h3_upres_temporal_chunk = max(17, int(_finite_float(saved_settings.get("h3_upres_temporal_chunk", 85), 85, 17, 1700)))
+        h3_upres_temporal_chunk = max(17, round(h3_upres_temporal_chunk / 17) * 17)
+        h3_upres_temporal_overlap = max(0, int(_finite_float(saved_settings.get("h3_upres_temporal_overlap", 17), 17, 0, 850)))
+        h3_upres_temporal_overlap = max(0, round(h3_upres_temporal_overlap / 17) * 17)
+        h3_upres_temporal_overlap = min(h3_upres_temporal_overlap, h3_upres_temporal_chunk - 17)
+
+        def h3_upres_grid_setting(name, default, low=0, high=4096):
+            value = int(_finite_float(saved_settings.get(name, default), default, low, high))
+            return max(low, round(value / 32) * 32)
+
+        h3_upres_settings = {
+            "schema": "iamccs.minimax_h3.latent_upres.r38",
+            "schema_version": 1,
+            "model_name": h3_upres_model_name,
+            "model_available": _model_file_available("latent_upscale_models", h3_upres_model_name),
+            "precision": h3_upres_precision,
+            "device": h3_upres_device,
+            "keep_models_resident": bool(saved_settings.get("h3_upres_keep_models_resident", False)),
+            "steps": max(1, int(_finite_float(saved_settings.get("h3_upres_steps", 1), 1, 1, 20))),
+            "denoise": float(_finite_float(saved_settings.get("h3_upres_denoise", 0.2), 0.2, 0.0, 1.0)),
+            "sampler": str(saved_settings.get("h3_upres_sampler", "sa_solver") or "sa_solver"),
+            "scheduler": str(saved_settings.get("h3_upres_scheduler", "simple") or "simple"),
+            "temporal_chunk": h3_upres_temporal_chunk,
+            "temporal_overlap": h3_upres_temporal_overlap,
+            "anchor_strength": float(_finite_float(saved_settings.get("h3_upres_anchor_strength", 0.999), 0.999, 0.0, 1.0)),
+            "tile_width": h3_upres_grid_setting("h3_upres_tile_width", 864, 32),
+            "tile_height": h3_upres_grid_setting("h3_upres_tile_height", 480, 32),
+            "overlap_width": h3_upres_grid_setting("h3_upres_overlap_width", 128),
+            "overlap_height": h3_upres_grid_setting("h3_upres_overlap_height", 128),
+            "fade_width": h3_upres_grid_setting("h3_upres_fade_width", 32),
+            "fade_height": h3_upres_grid_setting("h3_upres_fade_height", 32),
+            "min_tile_size": h3_upres_grid_setting("h3_upres_min_tile_size", 256),
+            "overlap_mode": str(saved_settings.get("h3_upres_overlap_mode", "earlier") or "earlier"),
+            "overlap_blend": str(saved_settings.get("h3_upres_overlap_blend", "linear") or "linear"),
+            "rtx_requested": bool(saved_settings.get("h3_upres_rtx_enabled", False)),
+            "rtx_quality": str(saved_settings.get("h3_upres_rtx_quality", "ULTRA") or "ULTRA").upper(),
+            "pixel_groups": int(_finite_float(saved_settings.get("h3_upres_pixel_groups", 1), 1, 1, 16)),
+            "window_frames": int(_finite_float(saved_settings.get("h3_upres_window_frames", 136), 136, 34, 510)),
+            "window_overlap": int(_finite_float(saved_settings.get("h3_upres_window_overlap", 22), 22, 0, 170)),
+            "pixel_method": str(saved_settings.get("h3_upres_pixel_method", "rtx_vsr") or "rtx_vsr"),
+            "source": "IAMCCS_ShotboardH3Settings" if _h3_settings_from_cine_linx(cine_linx) else "r38_defaults",
+        }
         plan["upscale_settings"] = {
             "target_width": upscale_target_width,
             "target_height": upscale_target_height,
@@ -2008,6 +2557,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "spatial_overlap": max(1, min(8, int(ltx_looper_spatial_overlap))),
                 "source": "shotboard",
             },
+            "h3_latent_upres": h3_upres_settings,
             "source": "shotboard",
         }
         plan["face_detailer_settings"] = {
@@ -2064,11 +2614,15 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             warnings.append(f"Unknown text encoder setting '{requested_text_encoder_device}' mapped to GPU Auto")
         if text_encoder_device == "cpu_direct":
             warnings.append("CPU Direct selected: Qwen never attempts a GPU allocation; Ref2VA/FL2VA conditioning is slower but avoids a GPU-OOM retry")
-        low_vram_profile = str(performance_profile).startswith(("low_vram", "rtx3060"))
+        low_vram_profile = str(performance_profile).startswith(("low_vram", "rtx3060", "rtx_xx60"))
         if low_vram_profile and max_chunk_frames > 124:
             warnings.append("Low VRAM: trim this timeline box to 124 frames or less; use a following box for continuation")
         if low_vram_profile and int(width) * int(height) > 960 * 544:
             warnings.append("Low VRAM: generate at 960x544 or below, then upscale for a 1280-class delivery")
+        if str(acceleration).lower() == "h3_exact" and clipproj_profile == "8b_v3.1":
+            warnings.append("H3 Exact 8B ClipProj is selectable but heavy on 12 GB VRAM; 4B v3.1 is the recommended 8–12 GB route")
+        if str(acceleration).lower() == "h3_exact" and int(motion_context_window_frames) >= 209:
+            warnings.append("H3 Exact 209-frame window is an opt-in long window; use 124 frames if the 12 GB card approaches OOM")
         if str(acceleration) in {"sage_sol", "sol_low_vram", "sol_adaptive_safe", "sol_adaptive_balanced"}:
             warnings.append("Sol-Attn is experimental, has a slower first compile, and is not validated for every Low VRAM configuration")
         if str(acceleration) in {"spectrum", "sage_spectrum"} and effective_steps < 14:
@@ -2077,6 +2631,10 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         if turbo_requested and not turbo_available:
             missing_name = selected_turbo_lora or "no LoRA selected"
             warnings.append(f"Optional Turbo LoRA unavailable ({missing_name}); using base H3 at the authored {effective_steps} steps")
+        if secondary_lora_requested and not secondary_lora_available:
+            warnings.append(f"Optional secondary H3 LoRA unavailable ({selected_secondary_lora}); continuing without it")
+        if secondary_lora_duplicate:
+            warnings.append("Secondary H3 LoRA matches the active Turbo LoRA; duplicate application was skipped")
         lightx2v_turbo = "lightx2v" in selected_turbo_lora.lower()
         if turbo_enabled and lightx2v_turbo and not 0.6 <= float(turbo_strength) <= 1.0:
             warnings.append("Lightx2v Turbo strength is outside its tested 0.6-1.0 quality range")
@@ -2101,7 +2659,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         plan["control_contract"] = {
             "model_route": ["task_mode", "reference roles", "V2VA Object Swap -> REF2VA"],
             "conditioning": ["width", "height", "timeline trim", "prompt mapping", "references", "four-way audio route"],
-            "sampling": ["seed", "steps", "sampler", "scheduler", "denoise", "H3 shifts", "acceleration", "Turbo LoRA", "Turbo audio sampler"],
+            "sampling": ["seed", "steps", "sampler", "scheduler", "denoise", "H3 shifts", "acceleration", "H3 exact memory policy", "Turbo LoRA", "secondary model-only H3 LoRA", "Turbo audio sampler"],
             "reference_preprocess": ["resize policy", "target megapixels", "filter", "multiple of 32"],
             "delivery": ["FLF join mode", "FLF overlap frames", "native AV continuity mode", "native AV continuity tail", "VRAM clean", "RIFE", "upscale enabled", "upscale mode", "upscale target", "upscale prompt", "upscale seed", "LTX seam-safe VAE", "LTX detailer LoRA", "optional RTX VSR 4K"],
             "audio": {
@@ -2153,8 +2711,13 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             f"audio={audio_mode} | resolution={width}x{height} | performance={performance_profile} "
             f"load={native_load:.2f}x | sampler={effective_steps}x{sampler_name}+{scheduler} | acceleration={acceleration} | "
             f"turbo={effective_turbo_mode}:{selected_turbo_lora or 'none'}@{float(turbo_strength):.2f}/{turbo_sampler_mode} | "
+            f"secondary_lora={'on' if plan['secondary_lora']['enabled'] else 'off'}:"
+            f"{selected_secondary_lora or 'none'}@{float(secondary_strength):.2f} | "
             f"ref_resize={reference_resize_policy}:{reference_resize_megapixels:.2f}MP/{reference_resize_filter} | "
             f"ref_size={ref_image_size} | text_encoder={plan.get('text_encoder_device', 'auto')} | "
+            f"h3_exact={'on' if str(acceleration).lower() == 'h3_exact' else 'off'}:"
+            f"{clipproj_profile}/{exact_precision}/{exact_qkv}/{plan['h3_exact_optimization']['chunk_rows']}rows/"
+            f"{int(motion_context_window_frames)}f | "
             f"RIFE={rife_mode} | upscale={'on' if upscale_enabled else 'off'}:{plan['upscale_mode']} "
             f"->{upscale_target_width}x{upscale_target_height} sage={'on' if upscale_sage else 'off'} "
             f"ltx_detailer={'on' if effective_ltx_detailer else 'off'}:{selected_ltx_detailer or 'none'}@{float(ltx_detailer_strength):.2f} "
@@ -2573,7 +3136,18 @@ class IAMCCS_MiniMaxH3BridgeLoad:
                 "segment_index": ("INT", {"default": 0, "min": 0, "max": 1000000, "step": 1}),
                 "render_id": ("STRING", {"default": "minimax_h3_render"}),
             },
-            "optional": {"fallback_image": ("IMAGE",)},
+            "optional": {
+                "fallback_image": ("IMAGE",),
+                "cine_linx": (
+                    SUPERNODE_LINX_TYPE,
+                    {
+                        "tooltip": (
+                            "Connect IAMCCS NextFrameBuilder: selected storyboard frames become "
+                            "the initial/slot bridge images."
+                        )
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("IMAGE", "INT", "STRING")
@@ -2581,13 +3155,20 @@ class IAMCCS_MiniMaxH3BridgeLoad:
     FUNCTION = "load"
     CATEGORY = CATEGORY
 
-    def load(self, segment_index, render_id, fallback_image=None):
+    def load(self, segment_index, render_id, fallback_image=None, cine_linx=None):
+        nextframe_image = _nextframe_image_from_linx(cine_linx, int(segment_index))
         if int(segment_index) <= 0:
+            if torch.is_tensor(nextframe_image):
+                return nextframe_image[:1], 1, "MiniMax H3 bridge: first frame da IAMCCS NextFrameBuilder CineLinX"
             if torch.is_tensor(fallback_image):
                 return fallback_image[:1], 0, "MiniMax H3 bridge: segmento iniziale, uso fallback_image"
             return _black_image(), 0, "MiniMax H3 bridge: segmento iniziale senza first frame forzato"
 
         bridge_path = _bridge_path(str(render_id))
+        if torch.is_tensor(nextframe_image):
+            return nextframe_image[:1], 1, (
+                f"MiniMax H3 bridge: override esplicito NextFrame slot {int(segment_index) + 1}"
+            )
         if bridge_path.is_file():
             return _load_frame(bridge_path), 1, f"MiniMax H3 bridge caricato: {bridge_path.name}"
         if torch.is_tensor(fallback_image):
@@ -2901,6 +3482,10 @@ class IAMCCS_MiniMaxH3NativeMasterLoad:
             "optional": {
                 "filename_prefix": ("STRING", {"default": "IAMCCS/MiniMaxH3/segment"}),
                 "stage_label": ("STRING", {"default": "native"}),
+                # Append-only route input.  When LTX per-shot is selected the
+                # current checkpointed chunk is the delivery source; the
+                # existing one-film LTX contract remains unchanged.
+                "cine_linx": (SUPERNODE_LINX_TYPE,),
             },
         }
 
@@ -2930,20 +3515,42 @@ class IAMCCS_MiniMaxH3NativeMasterLoad:
         fps,
         filename_prefix="IAMCCS/MiniMaxH3/segment",
         stage_label="native",
+        cine_linx=None,
     ):
         current_segment = int(current_segment)
         total_segments = max(1, int(total_segments))
         active_render_id = _safe_name(str(resolved_render_id or "").strip(), "minimax_h3_render")
+        route = "off"
+        if cine_linx is not None:
+            plan = _resolve_shotplan(cine_linx)
+            if bool(plan.get("upscale_enabled", False)):
+                route = str(plan.get("upscale_mode", "off") or "off").strip().lower()
+        if route == "ltx23_per_chunk":
+            report = (
+                f"Native chunk ready for LTX per-shot | segment={current_segment + 1}/{total_segments} | "
+                "audio=segment locked | master concat bypassed"
+            )
+            LOG.info(
+                "MiniMax H3 LTX per-shot source ready | native=%d/%d | current chunk only | audio locked",
+                current_segment + 1,
+                total_segments,
+            )
+            return current_frames, current_audio, True, "", active_render_id, report
         if current_segment + 1 < total_segments:
             report = (
                 f"Native master waiting | completed={current_segment + 1}/{total_segments} | "
                 "upscale branch locked"
+            )
+            LOG.info(
+                "MiniMax H3 one-film delivery waiting | native=%d/%d | LTX has not started yet",
+                current_segment + 1, total_segments,
             )
             return current_frames, current_audio, False, "", active_render_id, report
 
         output_folder, base_name = _output_location(filename_prefix)
         safe_stage = _safe_name(str(stage_label or "native").strip(), "native")
         master_path = output_folder / f"{base_name}_{active_render_id}_{safe_stage}_full.mp4"
+        master_path = _resolve_native_master_path(master_path, active_render_id, total_segments)
         master_frames, master_audio = _decode_video_master(
             master_path,
             fps=max(1, int(fps)),
@@ -3381,11 +3988,31 @@ class IAMCCS_ShotboardH3Settings:
                     grouped.append((group_name, name))
                     known.add(name)
         for name in planner_inputs:
-            if name not in known and name not in _H3_SETTINGS_NODE_EXCLUDED_FIELDS:
+            if (
+                name not in known
+                and name not in _H3_SETTINGS_NODE_EXCLUDED_FIELDS
+                and name not in _H3_SECONDARY_LORA_SETTINGS_NODE_FIELDS
+                and name not in _H3_PDD_SETTINGS_NODE_FIELDS
+                and name not in _H3_FUN_CONTROLNET_SETTINGS_NODE_FIELDS
+            ):
                 grouped.append(("08 · ADVANCED COMPATIBILITY", name))
 
         required = {}
         for group_name, name in grouped:
+            # Older Settings nodes serialized ComfyUI's auxiliary seed-control
+            # widget between ``seed`` and ``seed_stride``.  Removing that slot
+            # shifts every later widget (steps becomes the old seed stride,
+            # sampler becomes steps, and so on).  Preserve one hidden string
+            # slot at the historical position; it is never published into the
+            # named CineLinX settings payload.
+            if name == "seed_stride":
+                required[_H3_SETTINGS_SEED_CONTROL_COMPAT_FIELD] = (
+                    "STRING",
+                    {
+                        "default": "fixed",
+                        "display_name": "legacy seed control (hidden compatibility)",
+                    },
+                )
             source_spec = copy.deepcopy(planner_inputs[name])
             value_type = source_spec[0]
             source_options = source_spec[1] if len(source_spec) > 1 else {}
@@ -3394,6 +4021,250 @@ class IAMCCS_ShotboardH3Settings:
             # never create a second auto-seed control widget beside `seed`.
             options.pop("control_after_generate", None)
             options["display_name"] = f"{group_name} · {name.replace('_', ' ')}"
+            required[name] = (value_type, options)
+
+        import comfy.samplers
+
+        upres_models = [
+            name for name in folder_paths.get_filename_list("latent_upscale_models")
+            if all(token in name.lower() for token in ("minimax", "h3", "upscaler", "3d"))
+        ]
+        upres_models = sorted(upres_models, key=lambda name: (0 if "fp16" in name.lower() else 1, name.lower()))
+        # Empty is an explicit Auto choice and keeps pre-R38/native workflows
+        # valid when their old non-serialized DOM widget occupied this position.
+        model_options = [""] + upres_models
+        samplers = list(comfy.samplers.SAMPLER_NAMES)
+        schedulers = list(comfy.samplers.SCHEDULER_NAMES)
+        preferred_sampler = "sa_solver" if "sa_solver" in samplers else ("euler" if "euler" in samplers else samplers[0])
+        preferred_scheduler = "simple" if "simple" in schedulers else schedulers[0]
+        upres_specs = {
+            "h3_upres_model_name": (model_options, {"default": upres_models[0] if upres_models else "", "tooltip": "Choose an installed H3 3D latent upscaler. Auto uses an installed FP16 checkpoint first; no model is downloaded."}),
+            "h3_upres_precision": (["fp16", "bf16", "fp32"], {"default": "fp16"}),
+            "h3_upres_device": (["cuda", "cpu"], {"default": "cuda"}),
+            "h3_upres_keep_models_resident": ("BOOLEAN", {"default": False}),
+            "h3_upres_steps": ("INT", {"default": 1, "min": 1, "max": 20, "step": 1}),
+            "h3_upres_denoise": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01}),
+            "h3_upres_sampler": (samplers, {"default": preferred_sampler}),
+            "h3_upres_scheduler": (schedulers, {"default": preferred_scheduler}),
+            "h3_upres_temporal_chunk": ("INT", {"default": 85, "min": 17, "max": 1700, "step": 17}),
+            "h3_upres_temporal_overlap": ("INT", {"default": 17, "min": 0, "max": 850, "step": 17}),
+            "h3_upres_anchor_strength": ("FLOAT", {"default": 0.999, "min": 0.0, "max": 1.0, "step": 0.001}),
+            "h3_upres_tile_width": ("INT", {"default": 864, "min": 32, "max": 4096, "step": 32}),
+            "h3_upres_tile_height": ("INT", {"default": 480, "min": 32, "max": 4096, "step": 32}),
+            "h3_upres_overlap_width": ("INT", {"default": 128, "min": 0, "max": 2048, "step": 32}),
+            "h3_upres_overlap_height": ("INT", {"default": 128, "min": 0, "max": 2048, "step": 32}),
+            "h3_upres_fade_width": ("INT", {"default": 32, "min": 0, "max": 2048, "step": 32}),
+            "h3_upres_fade_height": ("INT", {"default": 32, "min": 0, "max": 2048, "step": 32}),
+            "h3_upres_min_tile_size": ("INT", {"default": 256, "min": 0, "max": 4096, "step": 32}),
+            "h3_upres_overlap_mode": (["earlier", "later"], {"default": "earlier"}),
+            "h3_upres_overlap_blend": (["linear", "smoothstep", "overwrite", "midpoint"], {"default": "linear"}),
+            "h3_upres_rtx_enabled": ("BOOLEAN", {"default": False}),
+            "h3_upres_rtx_quality": (["ULTRA", "HIGH", "MEDIUM", "LOW"], {"default": "ULTRA"}),
+            "h3_upres_pixel_groups": ("INT", {"default": 1, "min": 1, "max": 16, "step": 1}),
+            "h3_upres_window_frames": ("INT", {"default": 136, "min": 34, "max": 510, "step": 1}),
+            "h3_upres_window_overlap": ("INT", {"default": 22, "min": 0, "max": 170, "step": 1}),
+            "h3_upres_pixel_method": (["rtx_vsr", "lanczos-ish bicubic", "bilinear", "nearest-exact"], {"default": "rtx_vsr"}),
+        }
+        for name in _H3_LATENT_UPRES_SETTINGS_NODE_FIELDS:
+            value_type, source_options = copy.deepcopy(upres_specs[name])
+            options = dict(source_options) if isinstance(source_options, dict) else {}
+            options["display_name"] = f"07 · H3 DELIVERY UPRES · {name.replace('h3_upres_', '').replace('_', ' ')}"
+            required[name] = (value_type, options)
+        for name in _H3_SECONDARY_LORA_SETTINGS_NODE_FIELDS:
+            value_type, source_options = copy.deepcopy(planner_inputs[name])
+            options = dict(source_options) if isinstance(source_options, dict) else {}
+            options["display_name"] = f"09 · SECONDARY H3 LORA · {name.replace('secondary_lora_', '').replace('_', ' ')}"
+            required[name] = (value_type, options)
+        # Append-only: existing serialized Settings widget indexes stay valid.
+        required["motion_context_window_frames"] = (
+            "INT",
+            {
+                "default": H3_MIN_TRAINED_FRAMES,
+                "min": 56,
+                "max": H3_MAX_TRAINED_FRAMES,
+                "step": 17,
+                "display_name": "10 · MOTION CONTEXT · native H3 window frames",
+                "tooltip": (
+                    "Maximum native H3 sample window including the carried AV tail. "
+                    "124 is safe for 8–12 GB VRAM; 209 or 362 reduces chunk count on larger VRAM classes."
+                ),
+            },
+        )
+        # Append-only R39 exact stack.  These widgets exist only on the
+        # external Settings node, after every historical slot, so old workflow
+        # arrays and the Shotboard's internal widget order cannot shift.
+        required["h3_exact_profile"] = (
+            [
+                "rtx_xx60_8_12gb_124",
+                "rtx_xx70_12_16gb_209",
+                "rtx_xx80_16_24gb_294",
+                "rtx_xx90_24gb_362",
+                # Legacy labels stay valid for already saved R39 workflows.
+                "rtx3060_12gb_124",
+                "rtx3060_12gb_209",
+                "custom",
+            ],
+            {
+                "default": "rtx_xx60_8_12gb_124",
+                "display_name": "11 · H3 EXACT · preset label (boxes remain truth)",
+                "tooltip": (
+                    "Editable hardware-class baseline: xx60 124f/5.17s, xx70 209f/8.71s, "
+                    "xx80 294f/12.25s, xx90 362f/15.08s. It never overrides the visible "
+                    "window, memory, ClipProj or sampling boxes."
+                ),
+            },
+        )
+        required["h3_exact_chunk_rows"] = (
+            "INT",
+            {
+                "default": 2048,
+                "min": 256,
+                "max": 65536,
+                "step": 256,
+                "display_name": "11 · H3 EXACT · activation chunk rows",
+                "tooltip": "2048 is the conservative 8–12 GB value. Larger values can be faster but use more activation memory.",
+            },
+        )
+        required["h3_exact_precision_mode"] = (
+            ["Preserve native", "Auto", "BF16", "Force quant"],
+            {
+                "default": "Preserve native",
+                "display_name": "11 · H3 EXACT · precision",
+                "tooltip": "Preserve native keeps INT8/W4A8 checkpoints in their released precision without an implicit conversion.",
+            },
+        )
+        required["h3_exact_qkv_streaming"] = (
+            ["Auto", "Forced", "Off"],
+            {
+                "default": "Auto",
+                "display_name": "11 · H3 EXACT · QKV streaming",
+                "tooltip": "Auto preserves the current dense attention backend and adds bounded Q/K/V carriers only where compatible.",
+            },
+        )
+        required["h3_exact_attention_memory"] = (
+            ["Standard", "Lower VRAM (slower)"],
+            {
+                "default": "Standard",
+                "display_name": "11 · H3 EXACT · attention memory",
+                "tooltip": "Lower VRAM performs extra exact attention work. It is a safety fallback, not an approximate cache.",
+            },
+        )
+        required["h3_clipproj_profile"] = (
+            ["4b_v3.1", "8b_v3.1", "off"],
+            {
+                "default": "4b_v3.1",
+                "display_name": "11 · H3 EXACT · ClipProj encoder",
+                "tooltip": (
+                    "4B v3.1 is the default lower-memory conditioning encoder. 8B is larger and "
+                    "heavier. Off uses the connected workflow fallback CLIP. This choice does not "
+                    "replace the MiniMax H3 denoiser model."
+                ),
+            },
+        )
+        required["h3_clipproj_load_mode"] = (
+            ["dynamic", "streaming"],
+            {
+                "default": "dynamic",
+                "display_name": "11 · H3 EXACT · ClipProj load mode",
+                "tooltip": "Dynamic uses ComfyUI-managed offload. Streaming lowers the peak further at a speed cost.",
+            },
+        )
+        r40_specs = {
+            "h3_r40_seed_scout_enabled": (
+                "BOOLEAN",
+                {
+                    "default": False,
+                    "display_name": "12 · SHOT SCOUT · enable candidate scout",
+                    "tooltip": "Candidate-scout workflows only. Samples low-resolution candidates before one selected take enters delivery; ordinary generation workflows ignore this field.",
+                },
+            ),
+            "h3_r40_candidate_count": (
+                "INT",
+                {
+                    "default": 3, "min": 1, "max": 4, "step": 1,
+                    "display_name": "12 · SHOT SCOUT · candidate count",
+                    "tooltip": "1 keeps normal cost; 2-4 create independent cacheable seed candidates. Use 3 for hero-shot scouting, not for every automatic LongVid chunk.",
+                },
+            ),
+            "h3_r40_seed_stride": (
+                "INT",
+                {
+                    "default": 1000003, "min": 1, "max": 0xFFFFFFFFFFFFFFFF, "step": 1,
+                    "display_name": "12 · SHOT SCOUT · candidate seed stride",
+                    "tooltip": "Candidate N uses base seed + N × stride. 1,000,003 provides widely separated deterministic candidates without a hidden prompt or model override.",
+                },
+            ),
+            "h3_r40_preview_max_frames": (
+                "INT",
+                {
+                    "default": 49, "min": 1, "max": 209, "step": 1,
+                    "display_name": "12 · SHOT SCOUT · preview frames",
+                    "tooltip": "Limits each candidate preview batch only; it never shortens or changes the generated AV latent.",
+                },
+            ),
+            "h3_r40_sparse_enabled": (
+                "BOOLEAN",
+                {
+                    "default": False,
+                    "display_name": "12 · SHOT SCOUT · Stage-1 sparse attention",
+                    "tooltip": "Optional current H3SparseAttention. Faster/lower VRAM can change motion, detail or prompt adherence; Off is the quality-safe default.",
+                },
+            ),
+            "h3_r40_sparse_video_budget": (
+                "FLOAT",
+                {
+                    "default": 0.30, "min": 0.05, "max": 1.0, "step": 0.05,
+                    "display_name": "12 · SHOT SCOUT · sparse video budget",
+                    "tooltip": "Fraction of video KV attention retained. 1.0 is dense-equivalent routing; 0.30 is faster but is not lossless.",
+                },
+            ),
+            "h3_r40_sparse_denser_edges": (
+                "BOOLEAN",
+                {
+                    "default": True,
+                    "display_name": "12 · SHOT SCOUT · denser early/late steps",
+                    "tooltip": "Adds attention budget to the first and last sampling steps to protect layout, prompt adherence and final detail.",
+                },
+            ),
+        }
+        for name in _H3_R40_SCOUT_SETTINGS_NODE_FIELDS:
+            required[name] = copy.deepcopy(r40_specs[name])
+        pdd_specs = {
+            "pdd_lora_name": (
+                copy.deepcopy(planner_inputs["pdd_lora_name"]),
+                "13 · PDD NATIVE · converted acceleration LoRA",
+                "Select a native Kijai *_Acc-8Step*_comfy LoRA from models/loras and match FL2VA/Ref2VA to the loaded trunk. Legacy aptech pdd_acc files require their companion loader and are rejected here.",
+            ),
+            "pdd_strength": (
+                copy.deepcopy(planner_inputs["pdd_strength"]),
+                "13 · PDD NATIVE · strength",
+                "Keep 1.0. Native shape-changing PDD head banks require full trained strength; any different visible Queue-truth value fails clearly instead of being silently replaced.",
+            ),
+        }
+        for name in _H3_PDD_SETTINGS_NODE_FIELDS:
+            source_spec, display_name, tooltip = pdd_specs[name]
+            value_type = source_spec[0]
+            source_options = source_spec[1] if len(source_spec) > 1 else {}
+            options = dict(source_options) if isinstance(source_options, dict) else {}
+            options["display_name"] = display_name
+            options["tooltip"] = tooltip
+            required[name] = (value_type, options)
+        controlnet_labels = {
+            "h3_controlnet_enabled": ("14 · H3 FUN CONTROLNET · enable", "OFF preserves the standard generation path exactly. ON requires a preprocessed control-video CineLinX module and an installed H3 Fun ControlNet."),
+            "h3_controlnet_name": ("14 · H3 FUN CONTROLNET · model", "Select the Kijai MiniMax H3 Fun ControlNet Union checkpoint from models/controlnet."),
+            "h3_controlnet_kind": ("14 · H3 FUN CONTROLNET · preprocessor kind", "Declare the already-preprocessed input: DWPose, depth, Canny, HED, MLSD or inpaint. This does not run a hidden preprocessor."),
+            "h3_controlnet_strength": ("14 · H3 FUN CONTROLNET · strength", "1.0 is the reference pose-control baseline. Lower values release structure; higher values can over-constrain identity and texture."),
+            "h3_controlnet_start_percent": ("14 · H3 FUN CONTROLNET · start percent", "Sampling interval start. 0.0 applies control from the first denoise step."),
+            "h3_controlnet_end_percent": ("14 · H3 FUN CONTROLNET · end percent", "Sampling interval end. 1.0 applies control throughout; earlier release can preserve more natural detail."),
+            "h3_controlnet_frame_scope": ("14 · H3 FUN CONTROLNET · frame scope", "Timeline segment slices the full source by each Shotboard chunk start. Repeat each chunk restarts from source frame zero."),
+            "h3_controlnet_end_policy": ("14 · H3 FUN CONTROLNET · short-source policy", "Strict match hard-fails before sampling if the source cannot cover the chunk. Hold last repeats the final control frame."),
+        }
+        for name in _H3_FUN_CONTROLNET_SETTINGS_NODE_FIELDS:
+            value_type, source_options = copy.deepcopy(planner_inputs[name])
+            options = dict(source_options) if isinstance(source_options, dict) else {}
+            display_name, tooltip = controlnet_labels[name]
+            options["display_name"] = display_name
+            options["tooltip"] = tooltip
             required[name] = (value_type, options)
         return {"required": required}
 
@@ -3512,6 +4383,43 @@ from .iamccs_minimax_h3_face_detailer import (
     NODE_DISPLAY_NAME_MAPPINGS as _FACE_DETAILER_NODE_DISPLAY_NAME_MAPPINGS,
 )
 
+from .iamccs_minimax_h3_motion_context_variant import (
+    NODE_CLASS_MAPPINGS as _MOTION_CONTEXT_VARIANT_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _MOTION_CONTEXT_VARIANT_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_minimax_h3_latent_upres_variant import (
+    NODE_CLASS_MAPPINGS as _LATENT_UPRES_VARIANT_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _LATENT_UPRES_VARIANT_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_minimax_h3_fast_latent_2pass import (
+    NODE_CLASS_MAPPINGS as _FAST_LATENT_2PASS_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _FAST_LATENT_2PASS_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_minimax_h3_universal_delivery import (
+    NODE_CLASS_MAPPINGS as _UNIVERSAL_DELIVERY_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _UNIVERSAL_DELIVERY_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_minimax_h3_exact import (
+    NODE_CLASS_MAPPINGS as _H3_EXACT_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _H3_EXACT_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_minimax_h3_seed_scout_variant import (
+    NODE_CLASS_MAPPINGS as _R40_SEED_SCOUT_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _R40_SEED_SCOUT_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_minimax_h3_pixel_refine_r40 import (
+    NODE_CLASS_MAPPINGS as _R40_PIXEL_REFINE_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _R40_PIXEL_REFINE_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_minimax_h3_editor_delivery import (
+    NODE_CLASS_MAPPINGS as _H3_EDITOR_DELIVERY_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _H3_EDITOR_DELIVERY_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_minimax_h3_progressive_spatial import (
+    NODE_CLASS_MAPPINGS as _H3_PROGRESSIVE_SPATIAL_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _H3_PROGRESSIVE_SPATIAL_NODE_DISPLAY_NAME_MAPPINGS,
+)
+
 NODE_CLASS_MAPPINGS.update(_ATOMIC_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_ATOMIC_NODE_DISPLAY_NAME_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(_CONTINUITY_NODE_CLASS_MAPPINGS)
@@ -3528,3 +4436,28 @@ NODE_CLASS_MAPPINGS.update(_CINE_H3_AUDIO_BUS_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_CINE_H3_AUDIO_BUS_NODE_DISPLAY_NAME_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(_V2V_R22_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_V2V_R22_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_MOTION_CONTEXT_VARIANT_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_MOTION_CONTEXT_VARIANT_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_LATENT_UPRES_VARIANT_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_LATENT_UPRES_VARIANT_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_FAST_LATENT_2PASS_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_FAST_LATENT_2PASS_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_UNIVERSAL_DELIVERY_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_UNIVERSAL_DELIVERY_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_H3_EXACT_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_H3_EXACT_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_R40_SEED_SCOUT_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_R40_SEED_SCOUT_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_R40_PIXEL_REFINE_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_R40_PIXEL_REFINE_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_H3_EDITOR_DELIVERY_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_H3_EDITOR_DELIVERY_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_H3_PROGRESSIVE_SPATIAL_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_H3_PROGRESSIVE_SPATIAL_NODE_DISPLAY_NAME_MAPPINGS)
+
+from .iamccs_minimax_h3_pixel_refine_variant import (
+    NODE_CLASS_MAPPINGS as _PIXEL_REFINE_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _PIXEL_REFINE_NODE_DISPLAY_NAME_MAPPINGS,
+)
+NODE_CLASS_MAPPINGS.update(_PIXEL_REFINE_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_PIXEL_REFINE_NODE_DISPLAY_NAME_MAPPINGS)

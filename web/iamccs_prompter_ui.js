@@ -2,6 +2,9 @@
 
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
+import { beginAiBusy, createModeHelper } from "./iamccs_h3_authoring_helpers.js";
+import { H3_REFERENCE_DEMOS } from "./iamccs_h3_reference_demos.js";
+import { createPrompterInspector } from "./iamccs_h3_prompter_inspector.js";
 
 const NODE_TYPE = "IAMCCS_Prompter";
 
@@ -95,12 +98,31 @@ const MODE_META = {
             ["audio_continuity_locks", "Continuity safeguards", "Identity, wardrobe, anatomy, props, geography, eyeline and lip visibility that cannot drift."],
         ],
     },
+    multi_shot_lipsync: {
+        label: "MULTI-SHOT LIPSYNC",
+        subtitle: "Guided editorial cuts + one continuous AudioBoard lip-sync track",
+        sections: [
+            ["multishot_audio_contract", "Continuous audio contract", "The connected AudioBoard track owns exact words, timing, pauses and breaths across every guided shot."],
+            ["multishot_subject_map", "Subject / speaker map", "Assign stable <Subject N> and (SN) labels to every visible speaker."],
+            ["multishot_global_direction", "Global film direction", "Define the shared location, dramatic purpose, visual language and geography of the complete sequence."],
+            ["multishot_shot_plan", "Guided shot cuts", "Describe each Shotboard image as a distinct [Shot N] opening guide. These are editorial cuts, not FLF interpolation targets."],
+            ["multishot_dialogue_map", "Dialogue map", "Keep the transcript identical to the connected audio and use <Subject N> (SN): <d>[Language] ...</d>."],
+            ["multishot_lip_sync", "Visible lip sync", "Specify active speaker, readable mouth, synchronized breath/expression and silent listener behavior for each shot."],
+            ["multishot_cut_policy", "Editorial cut policy", "State where hard cuts occur and prevent morphing or blending between different guide images."],
+            ["multishot_chunk_handoff", "Technical chunk handoff", "Motion Context may bridge hidden H3 chunks inside a shot, but must never erase an authored Shotboard cut."],
+            ["multishot_continuity_locks", "Continuity safeguards", "Lock identity, wardrobe, props, location, screen direction and eyelines across the sequence."],
+            ["multishot_environment", "Production sound", "Keep one coherent acoustic bed beneath the continuous dialogue and add only visibly motivated contacts."],
+        ],
+    },
 };
 
 const MODE_ALIASES = {
     v2v_object_swap: "v2va_object_swap",
     v2va: "v2va_object_swap",
     object_swap: "v2va_object_swap",
+    longvid_motion_context: "multi_shot_lipsync",
+    longvid_lipsync: "multi_shot_lipsync",
+    multishot_lipsync: "multi_shot_lipsync",
 };
 
 function canonicalMode(value) {
@@ -175,6 +197,18 @@ const EXAMPLES = {
         audio_environment: "[Describe only environmental ambience and contact sounds not already fixed by the custom audio.]",
         audio_continuity_locks: "[List identity, wardrobe, anatomy, prop, geography, eyeline and lip-visibility facts that cannot drift.]",
     },
+    multi_shot_lipsync: {
+        multishot_audio_contract: "Treat the connected AudioBoard track as one continuous, immutable timing authority across every guided shot. Preserve its exact words, order, pauses, breaths and duration.",
+        multishot_subject_map: "<Subject 1> (S1): the first visible speaker and identity authority.\n<Subject 2> (S2): the second visible speaker and identity authority.",
+        multishot_global_direction: "A tense cinematic field-and-reverse-field dialogue in one coherent location. Each Shotboard image starts a distinct editorial shot while the connected dialogue remains continuous across the cuts.",
+        multishot_shot_plan: "[Shot 1] Begin on <Picture 1> with <Subject 1> speaking and <Subject 2> listening. [Shot 2] Hard cut to <Picture 2> for the reply. [Shot 3] Hard cut to <Picture 3> for the final reaction. Do not morph between guide images.",
+        multishot_dialogue_map: "<Subject 1> (S1): <d>[English] We cannot stay here.</d>\n<Subject 2> (S2): <d>[English] Then stop looking back.</d>",
+        multishot_lip_sync: "Keep the active speaker's mouth clearly visible and synchronize articulation, breath, expression and head motion to the connected custom audio. The listener remains silent unless their own line is audible.",
+        multishot_cut_policy: "Use intentional hard editorial cuts at Shotboard image boundaries. A new guide image begins a new shot; it is not a request to interpolate or visually blend the two compositions.",
+        multishot_chunk_handoff: "Motion Context may bridge hidden technical H3 chunks inside one shot, but it must not erase an authored Shotboard cut. Keep speech clear of independent technical handoff beats where required.",
+        multishot_continuity_locks: "Preserve subject identity, wardrobe, props, location, screen direction and eyelines across every shot. No identity blending, duplicate speaker, guide-image mosaic, morph or unmotivated scene change.",
+        multishot_environment: "Maintain one coherent room tone and acoustic perspective beneath the continuous dialogue. Add only contact sounds visibly motivated by each shot; do not replace or reorder the connected voice track.",
+    },
 };
 
 const T2V_PROJECTS = [
@@ -243,6 +277,37 @@ const T2V_PROJECTS = [
             negatives: "No gravity-like falling, no flapping cloth, no changing station geometry, no extra limbs, no visor face drift, no lens flare overload, no text.",
         },
     },
+    {
+        id: "multi_shot_character_bible",
+        name: "Multi-Shot Character Bible",
+        sections: {
+            scene: `[CHARACTER BIBLE · EDIT BEFORE USE]
+<Subject 1> (S1): [name, age range, face geometry, hair, body scale, wardrobe, signature materials and colors].
+<Subject 2> (S2): [name, age range, face geometry, hair, body scale, wardrobe, signature materials and colors].
+<Subject 3> (S3, optional): [name, identity and wardrobe anchors].
+<Prop 1> (P1): [shape, scale, material, color, wear and current owner].
+Environment anchor: [location geometry, period, weather, practical light sources and fixed spatial landmarks].
+Visual style anchor: [camera format, lens family, palette, contrast, texture and finishing language].
+
+Treat this Bible as shared global continuity for every Shotboard slot. The local prompt is the authority for that shot's immediate action, camera and timing; it must not silently replace these identity anchors.`,
+            shot_list: `[CONTINUITY LEDGER]
+Initial state: [positions, wardrobe state, prop ownership, injuries, wetness, dirt and time of day].
+Persistent change after Shot [N]: [describe the change once, then preserve it verbatim in every later shot].
+Persistent change after Shot [N]: [describe the next state change].
+
+For each local shot, specify only: visible action, participating Subject IDs, screen direction, framing, camera movement and timing. Preserve all current Bible and ledger facts unless the local shot explicitly changes one.`,
+            acting: "Preserve each subject's facial structure, body scale, age, wardrobe fit and movement signature across cuts. Use restrained, motivated micro-performance. Do not merge identities, exchange costumes or transfer gestures between subjects.",
+            dialogue: `<Subject 1> (S1): <d>[Language] [exact line, if any]</d>
+<Subject 2> (S2): <d>[Language] [exact line, if any]</d>
+<Subject 3> (S3): <d>[Language] [exact line, if any]</d>
+Only the named speaker moves their lips for each line. Keep speaker IDs stable in every local prompt; delete unused dialogue rows.`,
+            light_and_image: "Apply the Visual style anchor and Environment anchor consistently across every shot. Preserve skin tone, wardrobe color, prop material response, light direction, weather and time-of-day continuity while allowing shot-specific exposure changes that are physically motivated.",
+            camera: "The Shotboard local prompt defines the shot-specific framing, lens and movement. Preserve screen direction, eyelines, subject handedness and spatial geography across cuts. Do not invent an unrequested zoom, reverse angle or transition.",
+            production_sound: "Maintain coherent room tone, acoustic perspective and prop sound identity across the sequence. Tie dialogue to stable Speaker IDs and add only sounds motivated by visible actions in the active local shot.",
+            non_diegetic_music: "Keep one continuous score language across shots unless a local prompt explicitly requests a motivated cue change. Do not let music replace production sound or dialogue.",
+            negatives: "No identity drift, face blending, body-scale drift, wardrobe reset, unexplained costume change, prop disappearance, prop-owner swap, continuity rollback, environment replacement, duplicate subject, speaker swap, lip-sync drift, guide-sheet mosaic, captions, watermark or logo.",
+        },
+    },
 ];
 
 function widget(node, name) {
@@ -281,7 +346,7 @@ function safeProject(raw) {
     try { parsed = JSON.parse(String(raw || "{}")); } catch {}
     return {
         schema: "iamccs.minimax_h3.prompter_project",
-        schema_version: 3,
+        schema_version: 4,
         project_name: String(parsed.project_name || "Untitled H3 Prompt"),
         task_mode: canonicalMode(parsed.task_mode),
         injection_target: ["global", "local_auto", "local_1", "local_2", "local_3"].includes(parsed.injection_target) ? parsed.injection_target : "global",
@@ -290,6 +355,9 @@ function safeProject(raw) {
         ai_direction: String(parsed.ai_direction || ""),
         ai_scope: String(parsed.ai_scope || "active_field"),
         ai_visual_roles: parsed.ai_visual_roles && typeof parsed.ai_visual_roles === "object" ? { ...parsed.ai_visual_roles } : {},
+        request: String(parsed.request || ""),
+        local_prompts: Array.isArray(parsed.local_prompts) ? parsed.local_prompts.map(row => ({...row})) : [],
+        authority_map: parsed.authority_map && typeof parsed.authority_map === "object" ? { ...parsed.authority_map } : {},
         sections: parsed.sections && typeof parsed.sections === "object" ? { ...parsed.sections } : {},
     };
 }
@@ -302,13 +370,13 @@ function composePrompt(project) {
     if (mode === "ref2va") {
         return MODE_META[mode].sections.map(([key, label]) => {
             let body = value(key) || "N/A";
-            if (key === "summary" && body !== "N/A" && !body.toLowerCase().startsWith("[reference")) body = `[reference generation] ${body}`;
+            if (key === "summary" && body !== "N/A" && !/^\[[^\]\r\n]+\]/.test(body)) body = `[reference generation] ${body}`;
             return `${label}:\n${body}`;
         }).join("\n\n");
     }
     if (mode === "v2va_object_swap") {
         let summary = value("v2va_source_video_authority") || "N/A";
-        if (summary !== "N/A" && !summary.toLowerCase().startsWith("[reference")) summary = `[reference generation + video reference] ${summary}`;
+        if (summary !== "N/A" && !/^\[[^\]\r\n]+\]/.test(summary)) summary = `[video editing] ${summary}`;
         return [
             `subject_definitions:\n${value("v2va_subject_definitions") || "N/A"}`,
             `summary:\n${summary}`,
@@ -336,9 +404,13 @@ function composePrompt(project) {
         alignment = value("boundary_frames");
         sound = value("production_sound");
         music = value("non_diegetic_music");
-    } else {
+    } else if (mode === "audio_driven") {
         detailKeys = ["audio_drive_contract", "audio_subject_map", "audio_scene_intent", "audio_timed_performance", "audio_dialogue_map", "audio_visual_sync", "audio_camera_sync", "audio_continuity_locks"];
         sound = value("audio_environment");
+        music = "N/A";
+    } else {
+        detailKeys = ["multishot_audio_contract", "multishot_subject_map", "multishot_global_direction", "multishot_shot_plan", "multishot_dialogue_map", "multishot_lip_sync", "multishot_cut_policy", "multishot_chunk_handoff", "multishot_continuity_locks"];
+        sound = value("multishot_environment");
         music = "N/A";
     }
     let detail = join(detailKeys);
@@ -427,6 +499,10 @@ function mountPrompter(node) {
     rawNames.forEach((name) => hideWidget(widget(node, name)));
 
     let project = safeProject(widget(node, "project_data")?.value);
+    node.properties = node.properties || {};
+    const snapshotProject = (reason = "manual edit") => {
+        node.properties.iamccs_prompter_previous = JSON.stringify({ ...project, _snapshot_reason: reason });
+    };
     project.task_mode = canonicalMode(widget(node, "task_mode")?.value || project.task_mode);
     project.injection_target = String(widget(node, "injection_target")?.value || project.injection_target);
     project.writing_mode = String(widget(node, "writing_mode")?.value || project.writing_mode);
@@ -436,7 +512,7 @@ function mountPrompter(node) {
     root.innerHTML = `
         <style>
             .iamccs-pr-root{--ink:#17191d;--paper:#f3efe5;--paper2:#e7e0d0;--gold:#d9ad58;--blue:#79a8d8;--muted:#9aa3ad;width:960px;height:720px;background:linear-gradient(140deg,#151820,#0c0e13 72%);color:#e9edf2;border:1px solid #363c48;border-radius:12px;overflow:hidden;font:12px Inter,Segoe UI,sans-serif;box-shadow:0 18px 50px #0008;display:flex;flex-direction:column}
-            .iamccs-pr-root *{box-sizing:border-box}.iamccs-pr-top{height:58px;display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid #303641;background:#10131a}.iamccs-pr-mark{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:linear-gradient(135deg,#e0b660,#9b6a25);color:#17130a;font:800 15px Georgia}.iamccs-pr-brand{min-width:180px}.iamccs-pr-title{font:700 15px Georgia,serif;letter-spacing:.4px}.iamccs-pr-sub{font-size:10px;color:#9fa8b5;margin-top:2px}.iamccs-pr-name{height:34px;flex:1;min-width:160px;border:1px solid #38404d!important;border-radius:7px!important;background:#171b23!important;color:#f4f6f8!important;padding:0 10px!important}.iamccs-pr-actions{display:flex;gap:6px}.iamccs-pr-btn{height:30px;border:1px solid #3b4350;border-radius:6px;background:#202630;color:#e6ebf0;padding:0 10px;cursor:pointer;font:600 11px Inter,Segoe UI,sans-serif}.iamccs-pr-btn:hover{border-color:#d9ad58;color:#fff}.iamccs-pr-btn.primary{background:#b78537;border-color:#e1ba70;color:#15110a}.iamccs-pr-btn.danger{color:#e9a29c}.iamccs-pr-modes{height:46px;padding:7px 14px;display:flex;align-items:center;gap:7px;border-bottom:1px solid #303641;background:#141820}.iamccs-pr-mode{height:30px;min-width:72px}.iamccs-pr-mode.active{background:#30455d;border-color:#79a8d8;color:#fff}.iamccs-pr-mode-note{margin-left:auto;color:#9ea7b2;font-size:10px}.iamccs-pr-layout{display:grid;grid-template-columns:236px minmax(0,1fr) 272px;min-height:0;flex:1}.iamccs-pr-left{min-width:0;border-right:1px solid #303641;padding:11px;background:#11151c;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable}.iamccs-pr-kicker{font-size:9px;text-transform:uppercase;letter-spacing:1.4px;color:#d9ad58;margin:2px 0 7px}.iamccs-pr-targets,.iamccs-pr-writing{display:grid;gap:5px;margin-bottom:13px}.iamccs-pr-target,.iamccs-pr-write{height:29px;text-align:left}.iamccs-pr-target.active,.iamccs-pr-write.active{border-color:#d9ad58;background:#382f20;color:#ffe6ad}.iamccs-pr-hint{font-size:10px;line-height:1.45;color:#929ba7;padding:8px;border-radius:7px;background:#181d25;border:1px solid #2c333e;margin-bottom:12px}.iamccs-pr-policy{width:100%;height:30px;background:#1b2029;color:#e9edf2;border:1px solid #343c48;border-radius:6px;padding:0 7px}.iamccs-pr-center{min-width:0;overflow:auto;padding:12px 14px;background:radial-gradient(circle at 50% -10%,#262d3a 0,#181c24 45%,#141820 100%)}.iamccs-pr-section{background:#f4f0e6;color:#17191d;border-radius:6px;margin-bottom:10px;box-shadow:0 4px 12px #0005;overflow:hidden;border:1px solid #cfc5b1}.iamccs-pr-section-head{height:35px;display:flex;align-items:center;gap:8px;padding:0 10px;background:#e7e0d2;border-bottom:1px solid #cdc3b1}.iamccs-pr-num{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:#1e2938;color:#f4d596;font:700 10px Georgia}.iamccs-pr-section-title{font:700 12px Georgia,serif;letter-spacing:.3px}.iamccs-pr-state{margin-left:auto;color:#75808c;font-size:9px;text-transform:uppercase}.iamccs-pr-text{display:block;width:100%;min-height:82px;resize:vertical;border:0!important;outline:0!important;background:#f8f5ed!important;color:#181a1d!important;padding:10px 12px!important;font:12px/1.5 'Courier New',monospace!important}.iamccs-pr-tip{padding:7px 11px;background:#eee8dc;color:#66645e;font-size:10px;line-height:1.35;border-top:1px dashed #d3c8b5}.iamccs-pr-right{min-width:0;border-left:1px solid #303641;background:#10141a;padding:11px;display:flex;min-height:0;flex-direction:column}.iamccs-pr-status{display:flex;gap:6px;margin-bottom:8px}.iamccs-pr-pill{border-radius:10px;padding:3px 7px;background:#222a35;color:#aeb7c2;font-size:9px}.iamccs-pr-pill.ok{background:#1d3a2b;color:#99ddb2}.iamccs-pr-pill.warn{background:#493322;color:#f3c184}.iamccs-pr-preview{flex:1;min-height:0;overflow:auto;border:1px solid #3a414c;border-radius:6px;background:#f4f0e7;color:#1b1b1b;padding:12px;white-space:pre-wrap;font:11px/1.5 'Courier New',monospace}.iamccs-pr-preview:empty:before{content:'The composed H3 prompt will appear here.';color:#8c8981}.iamccs-pr-footer{margin-top:8px;display:flex;gap:6px}.iamccs-pr-footer .iamccs-pr-btn{flex:1}.iamccs-pr-assist{display:none;margin-bottom:8px;padding:8px;border:1px solid #44637d;background:#172635;color:#bed8ec;border-radius:6px;font-size:10px;line-height:1.4}.iamccs-pr-assist.show{display:block}.iamccs-pr-load{display:none}.iamccs-pr-empty .iamccs-pr-section-head{background:#f0e0d7}.iamccs-pr-empty .iamccs-pr-state{color:#b26751}.iamccs-pr-root.mode-manual .iamccs-pr-tip{display:none}
+            .iamccs-pr-root *{box-sizing:border-box}.iamccs-pr-top{height:58px;display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid #303641;background:#10131a}.iamccs-pr-mark{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:linear-gradient(135deg,#e0b660,#9b6a25);color:#17130a;font:800 15px Georgia}.iamccs-pr-brand{min-width:180px}.iamccs-pr-title{font:700 15px Georgia,serif;letter-spacing:.4px}.iamccs-pr-sub{font-size:10px;color:#9fa8b5;margin-top:2px}.iamccs-pr-name{height:34px;flex:1;min-width:160px;border:1px solid #38404d!important;border-radius:7px!important;background:#171b23!important;color:#f4f6f8!important;padding:0 10px!important}.iamccs-pr-actions{display:flex;gap:6px}.iamccs-pr-btn{height:30px;border:1px solid #3b4350;border-radius:6px;background:#202630;color:#e6ebf0;padding:0 10px;cursor:pointer;font:600 11px Inter,Segoe UI,sans-serif}.iamccs-pr-btn:hover{border-color:#d9ad58;color:#fff}.iamccs-pr-btn.primary{background:#b78537;border-color:#e1ba70;color:#15110a}.iamccs-pr-btn.danger{color:#e9a29c}.iamccs-pr-modes{height:46px;min-width:0;padding:7px 10px;display:flex;align-items:center;gap:5px;border-bottom:1px solid #303641;background:#141820;overflow:hidden}.iamccs-pr-mode{height:30px;min-width:0;flex:0 0 auto;padding:0 7px;font-size:9px;white-space:nowrap}.iamccs-pr-mode.active{background:#30455d;border-color:#79a8d8;color:#fff}.iamccs-pr-mode-note{min-width:0;max-width:132px;margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#9ea7b2;font-size:9px}.iamccs-pr-layout{display:grid;grid-template-columns:236px minmax(0,1fr) 272px;min-height:0;flex:1}.iamccs-pr-left{min-width:0;border-right:1px solid #303641;padding:11px;background:#11151c;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable}.iamccs-pr-kicker{font-size:9px;text-transform:uppercase;letter-spacing:1.4px;color:#d9ad58;margin:2px 0 7px}.iamccs-pr-targets,.iamccs-pr-writing{display:grid;gap:5px;margin-bottom:13px}.iamccs-pr-target,.iamccs-pr-write{height:29px;text-align:left}.iamccs-pr-target.active,.iamccs-pr-write.active{border-color:#d9ad58;background:#382f20;color:#ffe6ad}.iamccs-pr-hint{font-size:10px;line-height:1.45;color:#929ba7;padding:8px;border-radius:7px;background:#181d25;border:1px solid #2c333e;margin-bottom:12px}.iamccs-pr-policy{width:100%;height:30px;background:#1b2029;color:#e9edf2;border:1px solid #343c48;border-radius:6px;padding:0 7px}.iamccs-pr-center{min-width:0;overflow:auto;padding:12px 14px;background:radial-gradient(circle at 50% -10%,#262d3a 0,#181c24 45%,#141820 100%)}.iamccs-pr-section{background:#f4f0e6;color:#17191d;border-radius:6px;margin-bottom:10px;box-shadow:0 4px 12px #0005;overflow:hidden;border:1px solid #cfc5b1}.iamccs-pr-section-head{height:35px;display:flex;align-items:center;gap:8px;padding:0 10px;background:#e7e0d2;border-bottom:1px solid #cdc3b1}.iamccs-pr-num{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:#1e2938;color:#f4d596;font:700 10px Georgia}.iamccs-pr-section-title{font:700 12px Georgia,serif;letter-spacing:.3px}.iamccs-pr-state{margin-left:auto;color:#75808c;font-size:9px;text-transform:uppercase}.iamccs-pr-text{display:block;width:100%;min-height:82px;resize:vertical;border:0!important;outline:0!important;background:#f8f5ed!important;color:#181a1d!important;padding:10px 12px!important;font:12px/1.5 'Courier New',monospace!important}.iamccs-pr-tip{padding:7px 11px;background:#eee8dc;color:#66645e;font-size:10px;line-height:1.35;border-top:1px dashed #d3c8b5}.iamccs-pr-right{min-width:0;border-left:1px solid #303641;background:#10141a;padding:11px;display:flex;min-height:0;flex-direction:column}.iamccs-pr-status{display:flex;gap:6px;margin-bottom:8px}.iamccs-pr-pill{border-radius:10px;padding:3px 7px;background:#222a35;color:#aeb7c2;font-size:9px}.iamccs-pr-pill.ok{background:#1d3a2b;color:#99ddb2}.iamccs-pr-pill.warn{background:#493322;color:#f3c184}.iamccs-pr-preview{flex:1;min-height:0;overflow:auto;border:1px solid #3a414c;border-radius:6px;background:#f4f0e7;color:#1b1b1b;padding:12px;white-space:pre-wrap;font:11px/1.5 'Courier New',monospace}.iamccs-pr-preview:empty:before{content:'The composed H3 prompt will appear here.';color:#8c8981}.iamccs-pr-footer{margin-top:8px;display:flex;gap:6px}.iamccs-pr-footer .iamccs-pr-btn{flex:1}.iamccs-pr-assist{display:none;margin-bottom:8px;padding:8px;border:1px solid #44637d;background:#172635;color:#bed8ec;border-radius:6px;font-size:10px;line-height:1.4}.iamccs-pr-assist.show{display:block}.iamccs-pr-load{display:none}.iamccs-pr-empty .iamccs-pr-section-head{background:#f0e0d7}.iamccs-pr-empty .iamccs-pr-state{color:#b26751}.iamccs-pr-root.mode-manual .iamccs-pr-tip{display:none}
         </style>`;
     const aiStyle = document.createElement("style");
     aiStyle.textContent = `
@@ -473,12 +549,17 @@ function mountPrompter(node) {
         exampleSelect.appendChild(option);
     });
     const exampleBtn = button("Load Example");
+    const restoreBtn = button("Restore Previous");
+    restoreBtn.title = "Restore the project state saved before the last preset, AI rewrite, load, clear or authority apply.";
     const loadBtn = button("Load Project");
     const saveBtn = button("Save Project", "primary");
     const fileInput = el("input", "iamccs-pr-load");
     fileInput.type = "file";
     fileInput.accept = ".json,.iamccs-h3-prompt.json,application/json";
-    actions.append(exampleSelect, exampleBtn, loadBtn, saveBtn, fileInput);
+    fileInput.hidden = true;
+    fileInput.tabIndex = -1;
+    fileInput.setAttribute("aria-hidden", "true");
+    actions.append(exampleSelect, exampleBtn, restoreBtn, loadBtn, saveBtn, fileInput);
     top.appendChild(actions);
 
     const modeBar = el("div", "iamccs-pr-modes");
@@ -532,16 +613,21 @@ function mountPrompter(node) {
     const policy = el("select", "iamccs-pr-policy");
     policy.innerHTML = `<option value="replace">Replace target</option><option value="append">Append to target</option>`;
     left.appendChild(policy);
-    left.appendChild(el("div", "iamccs-pr-kicker", "Reference-video prompt baseline"));
+    left.appendChild(el("div", "iamccs-pr-kicker", "Reference demos & prompt baselines"));
     const referencePresetSelect = el("select", "iamccs-pr-policy");
+    referencePresetSelect.setAttribute("aria-label", "MiniMax reference demo preset");
     referencePresetSelect.innerHTML = [
         `<option value="ref2va_motion">REF2VA · Video 1 motion/camera authority</option>`,
         `<option value="ref2va_paired_av">REF2VA · Video 1 + Audio 1 paired authority</option>`,
         `<option value="v2va_replace">V2VA · Picture replacement in Video 1</option>`,
     ].join("");
+    H3_REFERENCE_DEMOS.forEach(demo => referencePresetSelect.append(new Option(demo.label, demo.id)));
     const applyReferencePresetBtn = button("APPLY REFERENCE BASELINE", "iamccs-pr-write");
-    applyReferencePresetBtn.title = "Populate editable MiniMax reference fields. The resulting boxes remain the prompt truth.";
-    left.append(referencePresetSelect, applyReferencePresetBtn);
+    applyReferencePresetBtn.title = "Populate editable reference fields. DEMO entries replace the global fields and clear local demo prompts; reference files and generation settings are not changed. Nothing is queued.";
+    const referencePresetStatus = el("div", "iamccs-pr-hint");
+    referencePresetStatus.setAttribute("role", "status");
+    referencePresetStatus.style.cssText = "white-space:normal;overflow-wrap:anywhere;line-height:1.45";
+    left.append(referencePresetSelect, applyReferencePresetBtn, referencePresetStatus);
     const assistantHint = el("div", "iamccs-pr-hint", "AI Rewrite treats every filled box as your rough idea, then rewrites those same boxes into MiniMax H3-ready English in one request. Blank boxes stay blank and your project remains editable before queueing.");
     left.appendChild(assistantHint);
     const aiPanel = el("div", "iamccs-pr-ai");
@@ -593,7 +679,11 @@ function mountPrompter(node) {
     aiImageInput.type = "file";
     aiImageInput.accept = "image/png,image/jpeg,image/webp";
     aiImageInput.multiple = true;
-    const addAIImagesBtn = button("Add up to 4 AI image references");
+    aiImageInput.hidden = true;
+    aiImageInput.tabIndex = -1;
+    aiImageInput.setAttribute("aria-hidden", "true");
+    const addAIImagesBtn = button("ADD AI REFERENCE IMAGES · MAX 4");
+    addAIImagesBtn.title = "Temporary visual context for the AI rewrite. Images are analyzed for every selected AI target, but are never injected into the Shotboard or generation backend.";
     const aiImages = el("div", "iamccs-pr-ai-images");
     const rewriteBtn = button("✦ Improve selected section with AI");
     const aiStatus = el("div", "iamccs-pr-ai-status", "Ollama is local. Choose the field to improve; cloud keys are never stored in the workflow.");
@@ -672,22 +762,32 @@ function mountPrompter(node) {
             title: "Content-free R21 audio-drive template. Replace Language and transcript; the connected audio remains timing authority.",
         },
     ]);
+    addTagRow("Boundaries", [
+        { caption: "Lyrics", value: "<lyrics_start>...<lyrics_end>", select: "...", syntax: true, title: "Tokenizer-supported lyrics boundary. Use only when lyrics are explicitly authored; connected audio remains timing authority." },
+        { caption: "Caption", value: "<caption_start>...<caption_end>", select: "...", syntax: true, title: "Tokenizer-supported caption boundary for an explicitly authored caption segment." },
+    ]);
     const right = el("aside", "iamccs-pr-right");
-    right.appendChild(el("div", "iamccs-pr-kicker", "Final prompt"));
+    const promptPanel = el("div");
+    promptPanel.style.cssText = "height:100%;min-height:0;display:flex;flex-direction:column";
+    promptPanel.appendChild(el("div", "iamccs-pr-kicker", "Final prompt"));
     const assistantBanner = el("div", "iamccs-pr-assist", "AI Rewrite is active. Write a rough idea in any field, choose an engine, then rewrite. Review and edit the result before queueing MiniMax H3.");
-    right.appendChild(assistantBanner);
+    promptPanel.appendChild(assistantBanner);
     const status = el("div", "iamccs-pr-status");
     const charPill = el("div", "iamccs-pr-pill");
     const completePill = el("div", "iamccs-pr-pill");
     status.append(charPill, completePill);
-    right.appendChild(status);
+    promptPanel.appendChild(status);
     const preview = el("div", "iamccs-pr-preview");
-    right.appendChild(preview);
+    promptPanel.appendChild(preview);
     const footer = el("div", "iamccs-pr-footer");
     const copyBtn = button("Copy Prompt");
     const clearBtn = button("Clear Mode", "danger");
     footer.append(copyBtn, clearBtn);
-    right.appendChild(footer);
+    promptPanel.appendChild(footer);
+    const inspectorHost = el("div");
+    inspectorHost.style.cssText = "height:100%;min-height:0";
+    inspectorHost.appendChild(promptPanel);
+    right.appendChild(inspectorHost);
 
     layout.append(left, center, right);
     root.append(top, modeBar, layout);
@@ -705,13 +805,28 @@ function mountPrompter(node) {
         node.setDirtyCanvas?.(true, true);
     };
 
+    const inspector = createPrompterInspector({
+        getProject: () => project,
+        composePrompt,
+        getShotboard: () => shotboardsForPrompter(node)[0] || null,
+        getWidget: widget,
+        snapshotProject,
+        onProjectChanged: ({ rerender = false } = {}) => {
+            commit();
+            if (rerender) renderSections();
+            renderPreview();
+            inspector?.refresh?.();
+        },
+    });
+    inspector.promptMount.appendChild(promptPanel);
+    inspectorHost.replaceWith(inspector.root);
+
     const aiDefaults = {
         ollama: { baseUrl: "http://127.0.0.1:11434", model: "" },
         openai_compatible: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
         gemini: { baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-2.5-flash" },
         anthropic: { baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5" },
     };
-    node.properties = node.properties || {};
     const savedAI = node.properties.iamccs_prompter_ai || {};
     aiProvider.value = String(savedAI.provider || "ollama");
     aiBaseUrl.value = String(savedAI.base_url || aiDefaults[aiProvider.value]?.baseUrl || "");
@@ -759,7 +874,10 @@ function mountPrompter(node) {
             meta.appendChild(el("div", "iamccs-pr-ai-image-name", `Picture ${slot} · ${item.file.name}`));
             const role = el("select");
             ["ignore", "opening", "closing", "identity", "composition", "style", "reference"].forEach((value) => {
-                const option = document.createElement("option"); option.value = value; option.textContent = value; role.appendChild(option);
+                const option = document.createElement("option"); option.value = value; option.textContent = ({
+                    ignore:"IGNORE", opening:"OPENING FRAME", closing:"CLOSING FRAME", identity:"IDENTITY",
+                    composition:"COMPOSITION", style:"STYLE", reference:"GENERAL REFERENCE",
+                })[value]; role.appendChild(option);
             });
             role.value = String(roles[slot] || (index === 0 ? "opening" : index === 1 ? "closing" : "reference"));
             role.onchange = () => { visualRolesForTarget()[slot] = role.value; commit(); };
@@ -767,6 +885,16 @@ function mountPrompter(node) {
             card.append(thumb, meta);
             aiImages.appendChild(card);
         });
+    };
+    const buildAIImagePayload = () => {
+        const roles = visualRolesForTarget();
+        return aiVisualFiles.map((item, index) => ({
+            slot: index + 1,
+            name: item.file.name,
+            role: String(roles[String(index + 1)] || (index === 0 ? "opening" : index === 1 ? "closing" : "reference")),
+            mime_type: item.file.type || "image/png",
+            data: item.dataUrl,
+        })).filter((item) => item.role !== "ignore");
     };
     const loadOllamaModels = async ({ quiet = false } = {}) => {
         if (aiProvider.value !== "ollama") return [];
@@ -824,7 +952,7 @@ function mountPrompter(node) {
         renderAIImages();
         aiImageInput.value = "";
         aiStatus.className = "iamccs-pr-ai-status";
-        aiStatus.textContent = `${aiVisualFiles.length} temporary AI image reference(s). Assign roles for ${project.injection_target}; images are not saved inside the workflow.`;
+        aiStatus.textContent = `${aiVisualFiles.length} temporary AI image reference(s). They will be analyzed in any GLOBAL or LOCAL AI rewrite you trigger. They are not saved, injected into Shotboard, or connected to the generation backend.`;
     };
 
     const renderPreview = () => {
@@ -838,6 +966,37 @@ function mountPrompter(node) {
         completePill.textContent = `${filled}/${fields.length} sections`;
         completePill.className = `iamccs-pr-pill ${filled === fields.length ? "ok" : "warn"}`;
         assistantBanner.classList.toggle("show", project.writing_mode === "assistant_fill");
+        inspector?.refresh?.();
+    };
+
+    const renderCameraBuilder = () => {
+        const card = el("section", "iamccs-pr-section");
+        const head = el("div", "iamccs-pr-section-head");
+        head.append(el("div", "iamccs-pr-section-title", "CAMERA BUILDER · one physical camera authority"));
+        const body = el("div"); body.style.cssText = "display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;padding:9px;background:#eef0ed";
+        const fields = [
+            ["Framing", ["medium shot", "close-up", "wide shot", "medium-wide", "extreme close-up"]],
+            ["Angle", ["eye level", "low angle", "high angle", "shoulder height", "waist height"]],
+            ["Movement", ["locked-off", "slow dolly-in", "slow dolly-out", "lateral track", "gentle arc", "handheld follow"]],
+            ["Speed", ["restrained", "very slow", "steady", "deliberate", "urgent"]],
+            ["Target", ["active speaker", "Subject 1", "Subject 2", "hands / prop", "environment reveal"]],
+            ["End framing", ["hold composition", "settle in close-up", "settle in medium shot", "reveal the environment", "finish on reaction"]],
+        ];
+        const controls = fields.map(([label, values]) => {
+            const wrap = el("label"); wrap.style.cssText = "display:grid;gap:3px;color:#59616a;font-size:8px;font-weight:800"; wrap.append(document.createTextNode(label));
+            const select = el("select"); select.style.cssText = "min-width:0;height:28px;border:1px solid #b9b8b1;border-radius:4px;background:#fff;color:#20242a;font-size:9px";
+            values.forEach((value) => select.appendChild(new Option(value, value))); wrap.appendChild(select); body.appendChild(wrap); return select;
+        });
+        const apply = button("APPLY TO CAMERA BOX"); apply.style.cssText = "grid-column:1/-1";
+        apply.onclick = () => {
+            snapshotProject("camera builder apply");
+            const [framing, angle, movement, speed, target, ending] = controls.map((control) => control.value);
+            const sentence = `Begin in a ${framing} at ${angle}, then use one ${speed} ${movement} keeping ${target} readable; ${ending}. No competing camera move or unmotivated cut.`;
+            const key = ({ ref2va:"detailed_description", v2va_object_swap:"v2va_source_video_authority", audio_driven:"audio_camera_sync", multi_shot_lipsync:"multishot_shot_plan" })[project.task_mode] || "camera";
+            project.sections[key] = sentence;
+            renderSections(); commit();
+        };
+        body.appendChild(apply); card.append(head, body, el("div", "iamccs-pr-tip", "This tool writes one editable sentence into the visible camera-related box. APPLY replaces only that box; Shotboard and Queue are untouched.")); return card;
     };
 
     const renderSections = () => {
@@ -845,6 +1004,20 @@ function mountPrompter(node) {
         activePromptArea = null;
         activePromptKey = null;
         center.appendChild(tagDeck);
+        center.appendChild(createModeHelper(project.task_mode));
+        const requestCard = el("section", "iamccs-pr-section");
+        requestCard.style.cssText = "border:2px solid #a077cf;background:#271c3c;padding:12px";
+        const requestHead = el("div", "iamccs-pr-section-head");
+        requestHead.style.cssText="height:auto;min-height:38px;flex-wrap:wrap;padding:6px 10px";
+        const requestAI = button("✦ REQUEST → GLOBAL", "iamccs-pr-field-ai");
+        requestHead.append(el("div","iamccs-pr-section-title","REQUEST · describe what you want"),requestAI);
+        const requestBox = el("textarea", "iamccs-pr-text"); requestBox.value = project.request;
+        requestBox.placeholder = "Write your scene naturally: who speaks, what happens, camera, mood and supplied audio. The AI will fill the structured global boxes; it will not start Queue.";
+        requestBox.oninput = () => { project.request = requestBox.value; commit(); };
+        requestAI.onclick = () => runAIRewrite({directTargetKeys:MODE_META[project.task_mode].sections.map(([key]) => key), triggerButton:requestAI, narrativeRequest:requestBox.value});
+        requestCard.append(requestHead, requestBox, el("div","iamccs-pr-tip","REQUEST is a brief, not a second prompt. Press AI to populate the GLOBAL fields below, then review and inject. Existing global fields will be replaced for this action."));
+        center.append(requestCard);
+        center.appendChild(renderCameraBuilder());
         const meta = MODE_META[project.task_mode];
         meta.sections.forEach(([key, label, tip], index) => {
             const card = el("section", "iamccs-pr-section");
@@ -889,8 +1062,13 @@ function mountPrompter(node) {
             center.appendChild(card);
             refreshState();
         });
+        // Keep slot actions in their own production panel after the complete
+        // GLOBAL document. This prevents LOCAL cards from splitting/reflowing
+        // the global H3 section stack on narrower ComfyUI windows.
+        center.appendChild(renderLocalPrompts());
         modeButtons.forEach((item, key) => item.classList.toggle("active", key === project.task_mode));
         modeNote.textContent = meta.subtitle;
+        modeNote.title = meta.subtitle;
         renderPreview();
     };
 
@@ -918,7 +1096,11 @@ function mountPrompter(node) {
             : project.task_mode === "audio_driven"
                 ? "Audio Drive loads a content-free structural template; write the user's own scene and transcript."
                 : "T2V cinematic projects are available in T2VA mode";
-        exampleBtn.textContent = project.task_mode === "audio_driven" ? "Load Audio Drive Template" : "Load Example";
+        exampleBtn.textContent = project.task_mode === "audio_driven"
+            ? "Load Audio Drive Template"
+            : project.task_mode === "multi_shot_lipsync"
+                ? "Load Multi-Shot Demo"
+                : "Load Example";
         targetButtons.forEach((item, key) => item.classList.toggle("active", key === project.injection_target));
         writingButtons.forEach((item, key) => item.classList.toggle("active", key === project.writing_mode));
         populateAIScope();
@@ -936,19 +1118,35 @@ function mountPrompter(node) {
     };
 
     const loadExample = (mode) => {
+        snapshotProject("load example");
         project.task_mode = mode;
         const selectedT2V = mode === "t2va" ? T2V_PROJECTS.find((item) => item.id === exampleSelect.value) : null;
         const exampleSections = selectedT2V?.sections || EXAMPLES[mode] || {};
         project.sections = { ...project.sections, ...exampleSections };
-        project.project_name = selectedT2V?.name || (mode === "audio_driven" ? "Audio Drive Prompt Template" : `${MODE_META[mode].label} Example Project`);
+        project.project_name = selectedT2V?.name || (mode === "audio_driven"
+            ? "Audio Drive Prompt Template"
+            : mode === "multi_shot_lipsync"
+                ? "Multi-Shot LipSync Guided Cuts Demo"
+                : `${MODE_META[mode].label} Example Project`);
         renderControls();
         renderSections();
         commit();
     };
 
     applyReferencePresetBtn.onclick = () => {
+        snapshotProject("reference baseline");
         const preset = referencePresetSelect.value;
-        if (preset === "v2va_replace") {
+        const demo = H3_REFERENCE_DEMOS.find(item => item.id === preset);
+        if (demo) {
+            project.task_mode = demo.mode;
+            project.sections = { ...project.sections, ...demo.sections };
+            project.local_prompts = [];
+            project.request = demo.request;
+            project.project_name = demo.name;
+            project.injection_target = "global";
+            referencePresetStatus.textContent = `✓ DEMO APPLIED · ${demo.hint} All prompt boxes remain editable. Press INJECT SHOTBOARD after editing.`;
+            applyReferencePresetBtn.classList.add("active");
+        } else if (preset === "v2va_replace") {
             project.task_mode = "v2va_object_swap";
             project.sections = { ...project.sections, ...EXAMPLES.v2va_object_swap };
             project.project_name = "V2VA Picture Replacement · Video 1 Authority";
@@ -974,12 +1172,15 @@ function mountPrompter(node) {
             };
             project.project_name = pairedAudio ? "REF2VA Paired Video + Audio Authority" : "REF2VA Video Motion Authority";
         }
+        if (!demo) referencePresetStatus.textContent = "✓ BASELINE APPLIED · Edit the fields, then inject. References and generation settings are unchanged.";
         renderControls();
         renderSections();
         commit();
     };
 
-    const runAIRewrite = async ({ directTargetKeys = null, triggerButton = rewriteBtn } = {}) => {
+    const runAIRewrite = async ({ directTargetKeys = null, triggerButton = rewriteBtn, narrativeRequest = null } = {}) => {
+        if (node._iamccsPromptAiBusy) { aiStatus.textContent = "An AI rewrite is already running; wait for the spinner to finish."; return; }
+        const requestMode = project.task_mode;
         const allSections = Object.fromEntries(
             MODE_META[project.task_mode].sections.map(([key]) => [key, String(project.sections?.[key] || "").trim()])
         );
@@ -993,7 +1194,10 @@ function mountPrompter(node) {
         } else if (!targetKeys.length && Object.prototype.hasOwnProperty.call(allSections, aiScope.value)) {
             targetKeys = [aiScope.value];
         }
-        const direction = aiDirection.value.trim();
+        const direction = narrativeRequest !== null
+            ? `Turn this REQUEST into the selected MiniMax global fields. Preserve supplied dialogue verbatim; do not invent a transcript. REQUEST: ${String(narrativeRequest).trim()}`
+            : aiDirection.value.trim();
+        if (narrativeRequest !== null && !String(narrativeRequest).trim()) { aiStatus.textContent = "Write your narrative REQUEST first."; return; }
         const hasRoughText = targetKeys.some((key) => String(allSections[key] || "").trim());
         if (!targetKeys.length) {
             aiStatus.className = "iamccs-pr-ai-status error";
@@ -1009,20 +1213,12 @@ function mountPrompter(node) {
         project.ai_scope = aiScope.value;
         persistAI();
         commit();
-        const idleButtonText = String(triggerButton?.textContent || "✦ AI");
-        triggerButton.disabled = true;
-        triggerButton.textContent = "✦ THINKING…";
+        node._iamccsPromptAiBusy = true;
+        const finishBusy = beginAiBusy(triggerButton);
         aiStatus.className = "iamccs-pr-ai-status";
         aiStatus.textContent = `Sending ${targetKeys.join(", ")} to ${aiProvider.options[aiProvider.selectedIndex]?.text || aiProvider.value}.`;
         try {
-            const roles = visualRolesForTarget();
-            const imagePayload = aiVisualFiles.map((item, index) => ({
-                slot: index + 1,
-                name: item.file.name,
-                role: String(roles[String(index + 1)] || (index === 0 ? "opening" : index === 1 ? "closing" : "reference")),
-                mime_type: item.file.type || "image/png",
-                data: item.dataUrl,
-            })).filter((item) => item.role !== "ignore");
+            const imagePayload = buildAIImagePayload();
             const response = await api.fetchApi("/iamccs/prompter/rewrite", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -1042,6 +1238,9 @@ function mountPrompter(node) {
             });
             const data = await response.json();
             if (!response.ok || !data?.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+            if (project.task_mode !== requestMode || (narrativeRequest !== null && project.request !== narrativeRequest) || targetKeys.some(key => String(project.sections?.[key] || "").trim() !== allSections[key]))
+                throw new Error("The mode or target boxes changed while AI was working. Your edits were kept; request a new rewrite.");
+            snapshotProject(narrativeRequest !== null ? "AI request rewrite" : "AI field rewrite");
             Object.entries(data.sections || {}).forEach(([key, value]) => {
                 if (targetKeys.includes(key)) project.sections[key] = String(value || "");
             });
@@ -1056,15 +1255,80 @@ function mountPrompter(node) {
             aiStatus.textContent = `Rewrite failed: ${error?.message || error}`;
         } finally {
             aiApiKey.value = "";
-            triggerButton.disabled = false;
-            triggerButton.textContent = idleButtonText;
+            node._iamccsPromptAiBusy = false;
+            finishBusy();
         }
+    };
+    const renderLocalPrompts = () => {
+        const panel = el("section", "iamccs-pr-section");
+        panel.style.cssText = "border:2px solid #468eb8;background:#142b3a;color:#e6f4ff;padding:12px";
+        panel.append(el("div","iamccs-pr-section-title","LOCAL PROMPTS · one direction per Shotboard slot"));
+        panel.append(el("div","iamccs-pr-tip","GLOBAL defines the world. LOCAL defines this shot: active speaker, silent listener, action and camera. These fields are injected together with the selected main target; images/audio stay in Shotboard."));
+        const actions = el("div","iamccs-pr-footer"), add = button("+ LOCAL"), read = button("READ SHOTBOARD SLOTS");
+        actions.append(add,read); panel.append(actions);
+        const locals = project.local_prompts ||= [];
+        add.onclick = () => { locals.push({slot:Math.max(0,...locals.map(r => Number(r.slot)||0))+1,prompt:"",enabled:true}); commit(); renderSections(); };
+        read.onclick = () => {
+            const shotboard = shotboardsForPrompter(node)[0];
+            if (!shotboard) { aiStatus.textContent = "Connect the Prompter to a MiniMax Shotboard first."; return; }
+            let timeline; try { timeline = JSON.parse(widget(shotboard,"timeline_data")?.value || "{}"); } catch { timeline = {}; }
+            const rows = (timeline.segments || timeline.rows || []).filter(r => !r.placeholder && !["audio","motion","video"].includes(r.type || "image")).sort((a,b) => Number(a.start||0)-Number(b.start||0));
+            rows.forEach((row,index) => {
+                const existing = locals.find(local => (row.id && local.slot_id === String(row.id)) || (!local.slot_id && Number(local.slot) === index+1));
+                if (existing) { existing.slot=index+1; existing.slot_id=String(row.id || ""); return; }
+                locals.push({slot:index+1,slot_id:String(row.id || ""),prompt:String(row.prompt || row.local_prompt || ""),enabled:true});
+            });
+            commit(); renderSections();
+        };
+        locals.forEach((row,index) => {
+            const card = el("div","iamccs-pr-section"); card.style.marginTop = "8px";
+            const head = el("div","iamccs-pr-section-head"), slot = el("input"), enabled = el("input"), ai = button("✦ AI"), remove = button("REMOVE");
+            head.style.cssText="height:auto;min-height:38px;flex-wrap:wrap;padding:6px 10px";
+            slot.type="number"; slot.min="1"; slot.step="1"; slot.value=String(row.slot || index+1); slot.style.cssText="width:64px;min-width:0";
+            slot.title="One-based chronological visual slot. Editing this removes the previous stable slot binding.";
+            enabled.type="checkbox"; enabled.checked=row.enabled !== false; enabled.title="Inject this local prompt";
+            const area = el("textarea","iamccs-pr-text"); area.value=String(row.prompt || "");
+            area.placeholder="<Subject 1> (S1) speaks, mouth clearly visible; <Subject 2> listens silently. Describe this slot's performance and framing. Supplied audio owns the timing.";
+            slot.onchange=()=>{if(slot.checkValidity()){row.slot=Number(slot.value);row.slot_id="";commit();}};
+            enabled.onchange=()=>{row.enabled=enabled.checked;commit();};
+            area.oninput=()=>{row.prompt=area.value;commit();};
+            area.addEventListener("focus",()=>{
+                activePromptArea=area;
+                activePromptKey=`local_${row.slot || index+1}`;
+                tagHint.textContent=`Active field: LOCAL SLOT ${row.slot || index+1}`;
+            });
+            remove.onclick=()=>{locals.splice(index,1);commit();renderSections();};
+            ai.onclick=async()=>{
+                if(node._iamccsPromptAiBusy) {aiStatus.textContent="An AI rewrite is already running.";return;}
+                const rough=area.value, requestMode=project.task_mode;
+                if(!rough.trim() || !aiModel.value.trim()){aiStatus.textContent="Write in this LOCAL box and select an AI model first.";return;}
+                const key=({ref2va:"detailed_description",v2va_object_swap:"v2va_interval_edits",multi_shot_lipsync:"multishot_lip_sync",audio_driven:"audio_timed_performance"})[requestMode] || "acting";
+                node._iamccsPromptAiBusy=true; const done=beginAiBusy(ai);
+                try {
+                    persistAI();
+                    const response=await api.fetchApi("/iamccs/prompter/rewrite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:aiProvider.value,base_url:aiBaseUrl.value.trim(),model:aiModel.value.trim(),api_key:aiApiKey.value,task_mode:requestMode,sections:{[key]:rough},target_keys:[key],user_direction:`Rewrite only LOCAL slot ${row.slot}. Keep its active speaker and supplied dialogue unchanged; do not write a new global story. Global context: ${composePrompt(project).slice(0,3500)}`,images:buildAIImagePayload(),temperature:Number(aiTemperature.value||0.35),timeout:180})});
+                    const result=await response.json(); if(!response.ok||!result.ok) throw new Error(result.error||`HTTP ${response.status}`);
+                    if(project.task_mode!==requestMode || row.prompt!==rough) throw new Error("Your box changed while AI was working; your edit was kept.");
+                    if(!result.sections?.[key]) throw new Error("No local prompt returned.");
+                    snapshotProject(`AI local slot ${row.slot} rewrite`);row.prompt=String(result.sections[key]);area.value=row.prompt;commit();aiStatus.textContent=`LOCAL ${row.slot} rewritten. Review, then Inject Shotboard.`;
+                } catch(error){aiStatus.textContent=`Local rewrite failed: ${error.message}`;}
+                finally{done();node._iamccsPromptAiBusy=false;aiApiKey.value="";}
+            };
+            head.append(enabled,el("span","","SLOT"),slot,ai,remove);card.append(head,area);panel.append(card);
+        });
+        return panel;
     };
     rewriteBtn.onclick = () => runAIRewrite({ triggerButton: rewriteBtn });
 
     modeButtons.forEach((item, key) => {
         item.onclick = () => {
+            const previousMode = project.task_mode;
+            if (previousMode !== key) snapshotProject(`mode change ${previousMode} → ${key}`);
             project.task_mode = key;
+            if (key === "multi_shot_lipsync" && previousMode !== key) {
+                project.sections = { ...project.sections, ...EXAMPLES.multi_shot_lipsync };
+                project.project_name = "Multi-Shot LipSync Guided Cuts Demo";
+            }
             renderControls();
             renderSections();
             commit();
@@ -1080,7 +1344,8 @@ function mountPrompter(node) {
     injectBtn.onclick = () => {
         commit();
         const prompt = composePrompt(project);
-        if (!prompt.trim()) {
+        const activeLocals = (project.local_prompts || []).filter(row => row.enabled !== false && String(row.prompt || "").trim());
+        if (!prompt.trim() && !activeLocals.length) {
             injectStatus.className = "iamccs-pr-inject-status error";
             injectStatus.textContent = "Nothing injected: fill at least one prompt section.";
             return;
@@ -1096,13 +1361,28 @@ function mountPrompter(node) {
             if (typeof shotboard._iamccsMiniMaxInjectPrompt !== "function") {
                 throw new Error("Shotboard UI bridge is not ready; reload ComfyUI once");
             }
-            const result = shotboard._iamccsMiniMaxInjectPrompt({
-                prompt,
-                target: project.injection_target,
-                mergePolicy: project.merge_policy,
-            });
+            const targetIsGlobal = project.injection_target === "global";
+            const localFallbackKeys = {
+                t2va:["shot_list","acting","dialogue","camera"],
+                i2va:["shot_list","acting","dialogue","camera"],
+                fl2va:["action","shot_list","acting","dialogue","camera"],
+                ref2va:["detailed_description"],
+                v2va_object_swap:["v2va_interval_edits"],
+                audio_driven:["audio_timed_performance","audio_dialogue_map","audio_visual_sync"],
+                multi_shot_lipsync:["multishot_shot_plan","multishot_dialogue_map","multishot_lip_sync"],
+            };
+            const localFallback = (localFallbackKeys[project.task_mode] || ["acting","camera"])
+                .map(key => String(project.sections?.[key] || "").trim()).filter(Boolean).join("\n");
+            const result = targetIsGlobal && prompt.trim()
+                ? shotboard._iamccsMiniMaxInjectPrompt({prompt,target:"global",mergePolicy:project.merge_policy})
+                : (!activeLocals.length && localFallback
+                    ? shotboard._iamccsMiniMaxInjectPrompt({prompt:localFallback,target:project.injection_target,mergePolicy:project.merge_policy})
+                    : null);
+            const localResults = activeLocals.map(row =>
+                shotboard._iamccsMiniMaxInjectPrompt({prompt:row.prompt,target:`local_${row.slot}`,slotId:row.slot_id || "",strictSlot:true,mergePolicy:project.merge_policy}));
+            if (!result && !localResults.length) throw new Error("LOCAL target selected: fill or enable at least one LOCAL slot action.");
             injectStatus.className = "iamccs-pr-inject-status ok";
-            injectStatus.textContent = `Injected into ${result?.actualTarget || project.injection_target} (${result?.mergePolicy || project.merge_policy}). The visible Shotboard and CineLinX queue request are synchronized.`;
+            injectStatus.textContent = `Injected into ${[result,...localResults].filter(Boolean).map(r => r.actualTarget).join(", ")}. Visible boxes and CineLinX requests are synchronized; Queue was not started.`;
             injectBtn.textContent = "INJECTED ✓";
             setTimeout(() => { injectBtn.textContent = "INJECT → SHOTBOARD"; }, 1200);
         } catch (error) {
@@ -1123,12 +1403,23 @@ function mountPrompter(node) {
     nameInput.addEventListener("input", commit);
     policy.addEventListener("change", commit);
     exampleBtn.onclick = () => loadExample(project.task_mode);
+    restoreBtn.onclick = () => {
+        const previous = node.properties?.iamccs_prompter_previous;
+        if (!previous) { injectStatus.className = "iamccs-pr-inject-status error"; injectStatus.textContent = "No previous Prompter state is available yet."; return; }
+        const current = JSON.stringify(project);
+        project = safeProject(previous);
+        node.properties.iamccs_prompter_previous = current;
+        renderControls(); renderSections(); commit();
+        injectStatus.className = "iamccs-pr-inject-status ok";
+        injectStatus.textContent = "Previous Prompter state restored. Press again to toggle back; Queue was not started.";
+    };
     saveBtn.onclick = () => { commit(); downloadProject(project); };
     loadBtn.onclick = () => fileInput.click();
     fileInput.onchange = async () => {
         const file = fileInput.files?.[0];
         if (!file) return;
         try {
+            snapshotProject("load project");
             project = safeProject(await file.text());
             renderControls();
             renderSections();
@@ -1156,6 +1447,7 @@ function mountPrompter(node) {
     };
     clearBtn.onclick = () => {
         if (!confirm(`Clear all ${MODE_META[project.task_mode].label} boxes?`)) return;
+        snapshotProject("clear mode");
         MODE_META[project.task_mode].sections.forEach(([key]) => { project.sections[key] = ""; });
         renderSections();
         commit();
@@ -1166,19 +1458,15 @@ function mountPrompter(node) {
     node.size = [980, 790];
     node.resizable = false;
 
-    const originalSerialize = node.onSerialize;
-    node.onSerialize = function(serialized) {
-        commit();
-        return originalSerialize?.call?.(this, serialized);
-    };
+    // Edits already commit on input. Do not flush UI state during serialization:
+    // LiteGraph may be restoring another project's widget values at that point.
     const originalConfigure = node.onConfigure;
     node.onConfigure = function(info) {
         const result = originalConfigure?.call?.(this, info);
-        setTimeout(() => {
-            project = safeProject(widget(node, "project_data")?.value);
-            renderControls();
-            renderSections();
-        }, 0);
+        // Restore synchronously: draft saving may run before the next timer.
+        project = safeProject(widget(node, "project_data")?.value);
+        renderControls();
+        renderSections();
         return result;
     };
 

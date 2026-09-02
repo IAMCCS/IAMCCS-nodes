@@ -130,6 +130,7 @@ def _audio_contract(cine_linx: Any) -> tuple[list[dict[str, Any]], dict[str, Any
 def _is_audio(value: Any) -> bool:
     return (
         isinstance(value, dict)
+        and not bool(value.get("iamccs_transport_only", False))
         and torch.is_tensor(value.get("waveform"))
         and value["waveform"].ndim == 3
         and int(value["waveform"].shape[-1]) > 0
@@ -210,6 +211,17 @@ def _chunk_interval(shotplan: dict[str, Any], chunk: dict[str, Any]) -> tuple[fl
     fps = max(1.0, _number(shotplan.get("fps"), H3_FPS))
     start = max(0.0, _number(chunk.get("timeline_start_seconds"), 0.0))
     duration = max(1.0 / fps, _number(chunk.get("duration_seconds"), _integer(chunk.get("frame_count"), 1) / fps))
+    # A Motion Context continuation renders a pinned head and removes it
+    # again after decode.  The locked AudioBoard slice must therefore begin
+    # at that same pre-roll position.  Starting it at ``timeline_start``
+    # would discard the first ``trim_frames`` of dialogue when the decoded
+    # AV result is trimmed, producing a one-context-window lip-sync offset on
+    # every continuation chunk.  This is deliberately scoped to the explicit
+    # R37 contract and leaves every legacy I2VA/FLF mapping unchanged.
+    contract = shotplan.get("motion_context_auto_chain")
+    trim_frames = max(0, _integer(chunk.get("motion_context_trim_frames"), 0))
+    if isinstance(contract, dict) and bool(contract.get("enabled")) and trim_frames:
+        start = max(0.0, start - trim_frames / fps)
     return start, duration
 
 
@@ -307,6 +319,7 @@ def mix_audio_timeline(
     selected_index = int(segment_index)
     if selected_index < 0 or selected_index >= len(chunks):
         raise IndexError(f"segment_index={selected_index} outside 0..{len(chunks) - 1}")
+    audio_mode = str(shotplan.get("audio_mode", "h3_native_generated") or "h3_native_generated").lower()
     socket_sources = [value if _is_audio(value) else None for value in audio_inputs[:MAX_AUDIO_INPUTS]]
     bus_sources = _bus_audio_sources(cine_linx)
     # Manual AUDIO sockets remain supported and take precedence. Missing
@@ -320,12 +333,19 @@ def mix_audio_timeline(
         else (bus_sources[index] if index < len(bus_sources) and _is_audio(bus_sources[index]) else None)
         for index in range(source_count)
     ]
-    if not any(sources):
+    if not any(sources) and audio_mode != "h3_native_generated":
         raise ValueError("Connect Cine H3 Audio Bus or at least one valid ComfyUI AUDIO input")
     rate = max(8000, min(192000, int(target_sample_rate)))
     segments, contract = _audio_contract(cine_linx)
     contract = copy.deepcopy(contract)
     contract["audioSegments"] = segments
+    native_audio_bypass = (
+        audio_mode == "h3_native_generated"
+        and not any(
+            isinstance(segment, dict) and not bool(segment.get("placeholder", False))
+            for segment in segments
+        )
+    )
     mapping_policy = str(mapping_policy or "slot_locked_i2v")
     if mapping_policy not in {"slot_locked_i2v", "absolute_timeline"}:
         raise ValueError(f"Unsupported audio mapping policy: {mapping_policy}")
@@ -341,16 +361,33 @@ def mix_audio_timeline(
         str(shotplan.get("continuation_mode", "")) == "flf_image_center_bridges"
         and str(shotplan.get("audio_mode", "")) == "h3_custom_audio_drive"
     )
+    # LongVid chunks are technical windows on one global editorial clock, not
+    # visual slots.  Their slot ids (longvid_chunk_N) intentionally do not
+    # match the Shotboard image ids used by magnet-anchored AudioBoard clips.
+    # Requiring slot ids here therefore drops every valid timeline clip.  The
+    # global frame clock is the source of truth for all LongVid variants,
+    # including the isolated R37 Motion Context backend.
+    longvid_audio_driven = (
+        str(shotplan.get("audio_mode", "")) == "h3_custom_audio_drive"
+        and (
+            str(shotplan.get("task_mode", "")).lower() in {
+                "longvid_guides",
+                "longvid_ref2vid_lipsync",
+                "longvid_motion_context",
+            }
+            or any(str(chunk.get("frame_source", "")) == "longvid_global_timeline" for chunk in chunks)
+        )
+    )
     effective_mapping_policy = (
         "absolute_timeline"
-        if flf_audio_driven and mapping_policy == "slot_locked_i2v"
+        if (flf_audio_driven or longvid_audio_driven) and mapping_policy == "slot_locked_i2v"
         else mapping_policy
     )
 
     # Without AudioBoard metadata, deterministic one-input-per-chunk remains a
     # useful minimal contract for two consecutive I2VA shots.
     fallback_mapping = False
-    if not segments:
+    if not segments and not native_audio_bypass:
         fallback_mapping = True
         fps = max(1.0, _number(shotplan.get("fps"), H3_FPS))
         segments = []
@@ -409,14 +446,28 @@ def mix_audio_timeline(
             if effective_mapping_policy == "slot_locked_i2v":
                 if not (linked or (not str(segment.get("linkedVisualId") or segment.get("linked_visual_id") or "") and overlaps_slot)):
                     continue
-                destination_seconds = max(0.0, segment_start - slot_start)
-                clipped_at_slot = max(0.0, slot_start - segment_start)
+                # A linked AudioBoard clip owns only its intersection with the
+                # visual slot.  Never let an overlong source or an H3 grid
+                # extension pull samples from the following shot into this
+                # chunk.
+                intersection_start = max(segment_start, slot_start)
+                intersection_end = min(segment_end, slot_end)
+                if intersection_end <= intersection_start:
+                    continue
+                destination_seconds = max(0.0, intersection_start - slot_start)
+                clipped_at_slot = max(0.0, intersection_start - segment_start)
+                intersection_duration = intersection_end - intersection_start
             else:
                 chunk_end = generated_start + generated_duration
                 if segment_end <= generated_start or segment_start >= chunk_end:
                     continue
-                destination_seconds = max(0.0, segment_start - generated_start)
-                clipped_at_slot = max(0.0, generated_start - segment_start)
+                intersection_start = max(segment_start, generated_start)
+                intersection_end = min(segment_end, chunk_end)
+                if intersection_end <= intersection_start:
+                    continue
+                destination_seconds = max(0.0, intersection_start - generated_start)
+                clipped_at_slot = max(0.0, intersection_start - segment_start)
+                intersection_duration = intersection_end - intersection_start
 
             source = sources[source_index]
             assert source is not None
@@ -426,7 +477,7 @@ def mix_audio_timeline(
                 rate,
             )
             source_start = max(0, int(round((source_trim + clipped_at_slot) * rate)))
-            desired = max(1, int(round(max(0.0, segment_duration - clipped_at_slot) * rate)))
+            desired = max(1, int(round(max(0.0, intersection_duration) * rate)))
             available = max(0, int(source_waveform.shape[-1]) - source_start)
             take = min(desired, available)
             destination = max(0, int(round(destination_seconds * rate)))
@@ -482,7 +533,7 @@ def mix_audio_timeline(
             },
         })
 
-    if uncovered and coverage_policy == "require_each_chunk":
+    if uncovered and coverage_policy == "require_each_chunk" and not native_audio_bypass:
         raise ValueError(f"No audible AUDIO segment mapped to H3 chunk(s): {uncovered}")
 
     master_samples = max(
@@ -515,11 +566,24 @@ def mix_audio_timeline(
         "schema": "iamccs.minimax_h3.audio_timeline_mix.r21",
         "mapping_policy": effective_mapping_policy,
         "requested_mapping_policy": mapping_policy,
+        "automatic_global_clock_mapping": bool(
+            effective_mapping_policy != mapping_policy
+            and (flf_audio_driven or longvid_audio_driven)
+        ),
+        "automatic_global_clock_reason": (
+            "longvid_technical_chunks"
+            if longvid_audio_driven and effective_mapping_policy != mapping_policy
+            else "flf_bridge_chunks"
+            if flf_audio_driven and effective_mapping_policy != mapping_policy
+            else ""
+        ),
         "coverage_policy": coverage_policy,
         "headroom": headroom,
         "fallback_one_input_per_chunk": fallback_mapping,
         "chunks": len(chunks),
         "audio_segments": len(segments),
+        "native_audio_bypass": native_audio_bypass,
+        "audio_mode": audio_mode,
         "mapped_assignments": assignments,
         "uncovered_chunks": uncovered,
         "sample_rate": rate,
@@ -531,7 +595,7 @@ def mix_audio_timeline(
         "selected_chunk": selected_index,
         "flf_locked_audio_handles": flf_audio_driven,
         # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
-        "alignment": "AudioBoard slot time rebased to aligned H3 chunk time" if effective_mapping_policy == "slot_locked_i2v" else "FLF bridge audio follows the editorial timeline" if flf_audio_driven else "absolute timeline",
+        "alignment": "H3 native generated audio; external timeline bypassed" if native_audio_bypass else "AudioBoard slot time rebased to aligned H3 chunk time" if effective_mapping_policy == "slot_locked_i2v" else "FLF bridge audio follows the editorial timeline" if flf_audio_driven else "absolute timeline",
     }
 
     # CineLinX can carry reference IMAGE/AUDIO tensors. A full deepcopy would

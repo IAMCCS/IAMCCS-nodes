@@ -375,6 +375,37 @@ def _cine_image_path_signature(image_paths: Any) -> List[Dict[str, Any]]:
     return signature
 
 
+def _merge_nextframe_widgets(
+    timeline_data: Any,
+    image_paths: Any,
+    injection: Dict[str, Any],
+) -> Tuple[str, str]:
+    """Replace the anchor slot and all following slots, preserving its prefix."""
+    start_slot = max(0, _safe_int(injection.get("start_slot"), 0))
+    existing = _safe_json_loads(str(timeline_data or "{}"), {})
+    injected_raw = injection.get("timeline_data")
+    injected = injected_raw if isinstance(injected_raw, dict) else _safe_json_loads(str(injected_raw or "{}"), {})
+    if not isinstance(existing, dict):
+        existing = {}
+    if not isinstance(injected, dict):
+        injected = {}
+    if injected:
+        for key in ("segments", "rows"):
+            prefix = existing.get(key) if isinstance(existing.get(key), list) else []
+            replacement = injected.get(key) if isinstance(injected.get(key), list) else []
+            injected[key] = copy.deepcopy(prefix[:start_slot]) + copy.deepcopy(replacement)
+        injected["duration_seconds"] = max(
+            float(existing.get("duration_seconds", 0) or 0),
+            float(injected.get("duration_seconds", 0) or 0),
+        )
+    else:
+        injected = existing
+    selected = injection.get("selected_paths")
+    selected_paths = [str(path) for path in selected] if isinstance(selected, list) else []
+    merged_paths = _cine_reference_paths_from_text(image_paths)[:start_slot] + selected_paths
+    return json.dumps(injected, ensure_ascii=False), json.dumps(merged_paths, ensure_ascii=False)
+
+
 def _cine_change_fingerprint(payload: Dict[str, Any]) -> str:
     try:
         encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
@@ -2788,6 +2819,29 @@ class IAMCCS_CineShotboardPlannerV3(IAMCCS_CineShotboardPlannerPro):
         upstream_cine_linx = cine_linx
         upstream_resources = self._input_linx_resources(upstream_cine_linx)
         upstream_mode = str(upstream_cine_linx.get("mode", "") if isinstance(upstream_cine_linx, dict) else "")
+        nextframe_injection = (
+            upstream_resources.get("iamccs_next_frame_injection")
+            if isinstance(upstream_resources.get("iamccs_next_frame_injection"), dict)
+            else {}
+        )
+        if nextframe_injection and str(nextframe_injection.get("schema", "")).startswith(
+            "iamccs.next_frame_builder.cine_linx"
+        ):
+            selected_paths = nextframe_injection.get("selected_paths")
+            timeline_data, image_paths = _merge_nextframe_widgets(
+                timeline_data, image_paths, nextframe_injection
+            )
+            injected_prompt = str(nextframe_injection.get("prompt", "") or "").strip()
+            if injected_prompt and not str(global_prompt or "").strip():
+                global_prompt = injected_prompt
+            if nextframe_injection.get("width") is not None:
+                image_width = _safe_int(nextframe_injection.get("width"), image_width)
+            if nextframe_injection.get("height") is not None:
+                image_height = _safe_int(nextframe_injection.get("height"), image_height)
+            print(
+                "[IAMCCS ShotboardPlannerV3] NEXTFRAME_INJECTION "
+                f"selected={len(selected_paths) if isinstance(selected_paths, list) else 0}"
+            )
         take_router_timeline = upstream_resources.get("cine_take_router_timeline_data") if upstream_resources else None
         take_router_package = upstream_resources.get("cine_take_router_package") if upstream_resources else None
         if isinstance(take_router_timeline, str) and take_router_timeline.strip():
