@@ -23,6 +23,12 @@ import torch.nn.functional as F
 from comfy_extras.nodes_lt import LTXVAddGuide
 from PIL import Image, ImageOps
 
+# SECURITY NOTE: hashlib is used in this module only for deterministic cache,
+# change-detection, report, and diagnostic-log fingerprints of non-secret data.
+# These fast hashes are deliberately not password or credential storage. Any
+# future authentication data must use a dedicated password-hashing API such as
+# Argon2id, scrypt, bcrypt, or PBKDF2 with an appropriate salt and work factor.
+
 from .iamccs_ltx2_cinematic_flf import (
     IAMCCS_LTX2_AudioPromptDirector,
     IAMCCS_LTX2_CinematicLineStacker,
@@ -407,6 +413,10 @@ def _merge_nextframe_widgets(
 
 
 def _cine_change_fingerprint(payload: Dict[str, Any]) -> str:
+    """Return a deterministic, non-secret change fingerprint for cache logic.
+
+    This is not a password hash, credential signature, or authentication token.
+    """
     try:
         encoded = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
     except Exception:
