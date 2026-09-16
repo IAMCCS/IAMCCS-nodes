@@ -2157,12 +2157,21 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
         applied_guides: list[str] = []
         if isinstance(guide_events, list):
             native_context_frames = int(native_av_context.get("context_frames", 0)) if isinstance(native_av_context, dict) else 0
+            positioned_bridge_head = (
+                max(0, int(chunk.get("trim_head_frames", 0) or 0))
+                if shotboard_task == "longvid_guides" and bool(chunk.get("uses_bridge_first_frame"))
+                else 0
+            )
             for guide in guide_events:
                 if not isinstance(guide, dict):
                     continue
                 kind = str(guide.get("kind", "")).strip().lower()
                 source_path = str(guide.get("source_path", "")).strip()
-                local_frame = max(0, int(guide.get("local_frame", 0))) + native_context_frames
+                local_frame = (
+                    max(0, int(guide.get("local_frame", 0)))
+                    + native_context_frames
+                    + positioned_bridge_head
+                )
                 guide_id = str(guide.get("id", "guide")).strip() or "guide"
                 if kind == "image":
                     image = _load_image(source_path)
@@ -2545,6 +2554,37 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
             sampled = {key: value for key, value in sampled.items() if key != FACE_SWAP_LATENT}
         if not torch.is_tensor(native_frames) or native_frames.ndim != 4 or native_frames.shape[0] < 1:
             raise RuntimeError("MiniMax H3 video VAE returned no frames")
+        if (
+            str(shotplan.get("task_mode", "") or "").strip().lower() == "longvid_guides"
+            and isinstance(chunk.get("positioned_guides_v2"), dict)
+            and bool(chunk["positioned_guides_v2"].get("enabled"))
+        ):
+            visible_frames = max(1, int(chunk.get("unique_frames", 0) or 0))
+            head_frames = max(0, int(chunk.get("trim_head_frames", 0) or 0))
+            planned_decoded_frames = visible_frames + head_frames
+            decoded_before_crop = int(native_frames.shape[0])
+            if decoded_before_crop < planned_decoded_frames:
+                raise RuntimeError(
+                    "LongVid Positioned Guides decoded fewer frames than its Shotboard-visible contract "
+                    f"({decoded_before_crop}/{planned_decoded_frames})."
+                )
+            if decoded_before_crop > planned_decoded_frames:
+                native_frames = native_frames[:planned_decoded_frames, ...]
+                if isinstance(native_audio, dict) and torch.is_tensor(native_audio.get("waveform")):
+                    native_audio = dict(native_audio)
+                    sample_rate = max(1, int(native_audio.get("sample_rate", 32000)))
+                    target_samples = max(1, int(round(planned_decoded_frames * sample_rate / H3_FPS)))
+                    native_audio["waveform"] = native_audio["waveform"][..., :target_samples]
+                LOG.info(
+                    "MiniMax H3 Positioned Guides V3 editorial crop | chunk=%d/%d | decoded=%df -> planned=%df "
+                    "(visible=%df + bridge_head=%df)",
+                    int(chunk_index) + 1,
+                    len(shotplan.get("chunks", [])),
+                    decoded_before_crop,
+                    planned_decoded_frames,
+                    visible_frames,
+                    head_frames,
+                )
         expected_width = max(1, int(shotplan.get("width", native_frames.shape[2]) or native_frames.shape[2]))
         expected_height = max(1, int(shotplan.get("height", native_frames.shape[1]) or native_frames.shape[1]))
         decoded_width = int(native_frames.shape[2])

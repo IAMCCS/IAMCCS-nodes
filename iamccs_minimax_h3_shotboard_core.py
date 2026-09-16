@@ -807,9 +807,10 @@ def _longvid_guide_plan(
             "The matching locked audio latent is the sole phonetic timing authority: synchronize mouth shapes, phonemes, breaths and facial acting to it, and keep the mouth closed during silence. "
             "Write every user-supplied spoken line or lyric verbatim as <d>[Language] ...</d>; never infer missing words."
             if guided_audio_drive else
-            "[LONGVID POSITIONED GUIDES V2]\n"
-            "Main-timeline image guides are timed destinations inside the same evolving H3 sample, not permission to teleport, reset pose, or re-establish the camera. "
-            "Unless the authored prompt explicitly requests a cut, begin adapting motion early enough to arrive naturally at each later guide, preserve velocity and body/camera continuity through the approach, and avoid holding the previous pose until the last few frames. "
+            "[LONGVID POSITIONED GUIDES V3 · SHOTBOARD TRUTH]\n"
+            "Shotboard image positions and authored Shotboard prompt text are the only semantic authorities. "
+            "UI labels and internal ids are metadata only and must never become conditioning text. "
+            "Image guides are timed visual checkpoints inside one evolving take: approach later checkpoints progressively without pose teleportation or camera reset unless the authored Shotboard prompt explicitly requests one. "
             "Technical H3 chunk boundaries are not shot boundaries; continuation windows inherit the immediately preceding generated frame."
         )
     )
@@ -988,8 +989,9 @@ def _longvid_guide_plan(
 
             frame_count = align_h3_frames(visible_frame_count + hidden_tail)
         else:
-            frame_count = align_h3_frames(min(H3_MAX_TRAINED_FRAMES, remaining))
-            visible_frame_count = frame_count
+            requested_visible_frames = min(H3_MAX_TRAINED_FRAMES, remaining)
+            frame_count = align_h3_frames(requested_visible_frames)
+            visible_frame_count = requested_visible_frames if positioned_guides_v2 else frame_count
             trim_frames = 0
         # A near-boundary rounding can only increase to the next valid grid;
         # clamp the requested portion, never the legal H3 sample length.
@@ -1048,6 +1050,57 @@ def _longvid_guide_plan(
                         "source_offset_frames": int(guide["source_offset_frames"]) + (overlap_start - guide_start),
                     }
                 )
+        active_visual_guide = None
+        terminal_reanchor = False
+        if positioned_guides_v2:
+            # Resolve the visual slot that owns the current Shotboard time.
+            # This is derived entirely from the live timeline; no label, id,
+            # prompt phrase, duration or subject is hard-coded.
+            for candidate in visual_guides:
+                candidate_start = int(candidate.get("global_frame", 0))
+                candidate_end = int(
+                    candidate.get(
+                        "end_frame",
+                        candidate_start + max(1, int(candidate.get("duration_frames", 1))),
+                    )
+                )
+                if candidate_start <= cursor < candidate_end:
+                    active_visual_guide = candidate
+
+            authored_image_starts_here = any(
+                str(item.get("kind", "")).strip().lower() == "image"
+                for item in local_guides
+            )
+            is_final_technical_chunk = bool(chunk_end >= requested_frames)
+            if (
+                chunk_index > 0
+                and is_final_technical_chunk
+                and not authored_image_starts_here
+                and isinstance(active_visual_guide, dict)
+                and int(active_visual_guide.get("end_frame", 0) or 0) >= requested_frames
+                and visible_frame_count > 0
+            ):
+                # The previous generated frame owns the opening; the exact
+                # authored Shotboard image owns the final visible frame.
+                # Re-using it at the END is intentionally different from the
+                # old bug that re-injected the same still at local frame zero.
+                terminal_local_frame = max(0, requested_frames - cursor - 1)
+                terminal_id = str(active_visual_guide.get("id") or "visual_guide")
+                local_guides.append(
+                    {
+                        **active_visual_guide,
+                        "id": f"{terminal_id}__terminal_reanchor",
+                        "global_frame": requested_frames - 1,
+                        "local_frame": terminal_local_frame,
+                        "intersection_start_frame": cursor,
+                        "intersection_end_frame": requested_frames,
+                        "continued_from_previous_chunk": True,
+                        "point_anchor": True,
+                        "terminal_reanchor": True,
+                    }
+                )
+                terminal_reanchor = True
+
         local_guides.sort(key=lambda item: (int(item["local_frame"]), str(item["kind"]), str(item["id"])))
         image_local_guides = [
             item for item in local_guides
@@ -1078,11 +1131,10 @@ def _longvid_guide_plan(
                 first_guide = image_local_guides[0]
                 first_frame = int(first_guide.get("local_frame", 0))
                 if first_frame > 0:
-                    first_label = str(first_guide.get("label") or first_guide.get("id") or "next guide")
                     transition_prompt_lines.append(
-                        f"From 0.00s to {first_frame / H3_FPS:.2f}s, evolve continuously toward timed visual "
-                        f"guide '{first_label}'. Begin adapting early; arrive naturally at the guide time "
-                        "without a last-moment pose snap, teleport, freeze or camera reset."
+                        f"From 0.00s to {first_frame / H3_FPS:.2f}s, evolve continuously toward the next "
+                        "authored visual checkpoint. Begin adapting early; arrive naturally at its exact "
+                        "Shotboard time without a last-moment pose snap, teleport, freeze or camera reset."
                     )
 
                 for previous_guide, next_guide in zip(image_local_guides, image_local_guides[1:]):
@@ -1090,25 +1142,41 @@ def _longvid_guide_plan(
                     end_frame = int(next_guide.get("local_frame", 0))
                     if end_frame <= start_frame:
                         continue
-                    next_label = str(next_guide.get("label") or next_guide.get("id") or "next guide")
                     transition_prompt_lines.append(
                         f"From {start_frame / H3_FPS:.2f}s to {end_frame / H3_FPS:.2f}s, continuously evolve "
-                        f"from the current guide toward timed visual guide '{next_label}'. Start the physical "
-                        "transition progressively across the interval and preserve coherent intermediate motion; "
-                        "do not wait until the final frames to change pose or composition."
+                        "from the current authored checkpoint toward the next authored visual checkpoint. "
+                        "Start the physical transition progressively across the interval and preserve coherent "
+                        "intermediate motion; do not wait until the final frames to change pose or composition."
                     )
+            if terminal_reanchor:
+                transition_prompt_lines.append(
+                    "The final authored visual checkpoint is the terminal state authority for this window. "
+                    "Resolve on that Shotboard image at the final visible frame; do not invent a new beat after it."
+                )
         transition_contract = "\n".join(transition_prompt_lines)
         local_prompt_lines = [
             f"Timeline guide at {(float(item['local_frame']) + trim_frames) / H3_FPS:.2f}s: {item['prompt']}"
             for item in local_guides
             if item.get("kind") == "image" and _text(item.get("prompt"))
         ]
-        creative_prompt = _compose_prompt(
-            global_prompt=_text(global_prompt),
-            local_prompt="\n".join(local_prompt_lines),
-            audio_prompt="",
-            prompt_mapping=prompt_mapping,
+        terminal_truth_prompt = (
+            _text(active_visual_guide.get("prompt"))
+            if terminal_reanchor and isinstance(active_visual_guide, dict)
+            else ""
         )
+        if terminal_reanchor and terminal_truth_prompt:
+            # Once the final visual slot owns the tail, do not replay the
+            # whole-scene global prompt: earlier camera/action instructions can
+            # otherwise be re-triggered after the last checkpoint. The active
+            # Shotboard row is the semantic truth for this terminal window.
+            creative_prompt = terminal_truth_prompt
+        else:
+            creative_prompt = _compose_prompt(
+                global_prompt=_text(global_prompt),
+                local_prompt="\n".join(local_prompt_lines),
+                audio_prompt="",
+                prompt_mapping=prompt_mapping,
+            )
         prompt = "\n\n".join(
             part
             for part in (
@@ -1180,6 +1248,14 @@ def _longvid_guide_plan(
                     ),
                     "duplicate_cross_window_guides": False,
                     "transition_contract_lines": len(transition_prompt_lines),
+                    "truth_revision": 3,
+                    "labels_in_conditioning": False,
+                    "terminal_reanchor": bool(terminal_reanchor),
+                    "semantic_authority": (
+                        "active_shotboard_visual_prompt"
+                        if terminal_reanchor and terminal_truth_prompt
+                        else "shotboard_prompt_mapping"
+                    ),
                 },
             } if positioned_guides_v2 else {}),
         }
@@ -1210,7 +1286,7 @@ def _longvid_guide_plan(
         "backend": (
             "r37_iamccs_motion_context_upstream_v012"
             if motion_context_enabled
-            else ("r42_positioned_guides_v2_stock_addguide" if positioned_guides_v2 else "r31_stock_minimax_h3_add_guide")
+            else ("r42_positioned_guides_v3_shotboard_truth" if positioned_guides_v2 else "r31_stock_minimax_h3_add_guide")
         ),
         "lipsync": bool(lipsync or guided_audio_drive),
         "guided_audio_drive": guided_audio_drive,
@@ -1218,11 +1294,11 @@ def _longvid_guide_plan(
     }
     return {
         "schema": "iamccs.minimax_h3.shotplan",
-        "schema_version": 10 if positioned_guides_v2 else 9,
+        "schema_version": 11 if positioned_guides_v2 else 9,
         "backend_revision": (
             "r37-motion-context-variant"
             if motion_context_enabled
-            else ("r42-positioned-guides-v2" if positioned_guides_v2 else "r31")
+            else ("r42-positioned-guides-v3-shotboard-truth" if positioned_guides_v2 else "r31")
         ),
         "source_timeline_schema": _text(timeline.get("schema")),
         "fps": H3_FPS,
@@ -1240,7 +1316,7 @@ def _longvid_guide_plan(
                     "longvid_guided_audio_drive_hard_cuts"
                     if guided_audio_drive
                     else (
-                        "longvid_positioned_guides_v2_generated_frame_bridge"
+                        "longvid_positioned_guides_v3_shotboard_truth_bridge"
                         if positioned_guides_v2
                         else "longvid_timeline_guides_hard_cuts"
                     )
