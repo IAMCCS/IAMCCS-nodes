@@ -792,6 +792,7 @@ def _longvid_guide_plan(
     )
     chunk_task = "ref2va" if lipsync else "t2va"
     guided_audio_drive = bool(not lipsync and audio_mode == "h3_custom_audio_drive")
+    positioned_guides_v2 = bool(plan_mode == "longvid_guides" and not guided_audio_drive)
     guide_prompt_header = (
         "[LONG MULTI-SHOT MOTION CONTEXT AUTO CHAIN]\n"
         "The previous chunk's native video/audio latent is pinned at the head of each continuation chunk. Preserve motion direction, identity, scene state and audio continuity across technical H3 joins while following the positioned Shotboard shot guides. Different image guides remain authored shot anchors, not a guaranteed continuous camera morph."
@@ -806,7 +807,10 @@ def _longvid_guide_plan(
             "The matching locked audio latent is the sole phonetic timing authority: synchronize mouth shapes, phonemes, breaths and facial acting to it, and keep the mouth closed during silence. "
             "Write every user-supplied spoken line or lyric verbatim as <d>[Language] ...</d>; never infer missing words."
             if guided_audio_drive else
-            "[LONGVID TIMELINE GUIDES]\nMain-timeline image and audio guides are pinned at their stated local times. Preserve them exactly at those positions; generate the intervening motion naturally."
+            "[LONGVID POSITIONED GUIDES V2]\n"
+            "Main-timeline image guides are timed destinations inside the same evolving H3 sample, not permission to teleport, reset pose, or re-establish the camera. "
+            "Unless the authored prompt explicitly requests a cut, begin adapting motion early enough to arrive naturally at each later guide, preserve velocity and body/camera continuity through the approach, and avoid holding the previous pose until the last few frames. "
+            "Technical H3 chunk boundaries are not shot boundaries; continuation windows inherit the immediately preceding generated frame."
         )
     )
     # The live Shotboard serializes its canonical edited boxes in rows.
@@ -995,13 +999,29 @@ def _longvid_guide_plan(
         chunk_end = cursor + visible_frame_count
         local_guides: list[dict[str, Any]] = []
         for guide in visual_guides:
-            # Preserve the proven R37 interval contract: a dragged Shotboard
-            # slot remains the visual authority for its full authored extent.
-            # If an explicit smaller technical window intersects that slot,
-            # rebase the same guide after the carried AV head; slot timing is
-            # never shortened or replaced by a generated T2V interval.
             guide_start = int(guide["global_frame"])
             guide_end = int(guide.get("end_frame", guide_start + max(1, int(guide.get("duration_frames", 1)))))
+            if positioned_guides_v2:
+                # A still AddGuide is a point constraint, not a duration-hold
+                # primitive. Re-injecting the same still merely because its UI
+                # box crosses a 362f technical boundary produces a second hard
+                # anchor at local frame zero and can visibly reset the pose.
+                if cursor <= guide_start < chunk_end:
+                    local_guides.append(
+                        {
+                            **guide,
+                            "local_frame": guide_start - cursor,
+                            "intersection_start_frame": guide_start,
+                            "intersection_end_frame": min(chunk_end, guide_end),
+                            "continued_from_previous_chunk": False,
+                            "point_anchor": True,
+                        }
+                    )
+                continue
+
+            # Motion Context and LipSync preserve the proven R37 interval
+            # contract: a dragged Shotboard slot remains authoritative for its
+            # full authored extent and may be rebased inside a technical window.
             overlap_start = max(cursor, guide_start)
             overlap_end = min(chunk_end, guide_end)
             if overlap_start < overlap_end:
@@ -1029,6 +1049,55 @@ def _longvid_guide_plan(
                     }
                 )
         local_guides.sort(key=lambda item: (int(item["local_frame"]), str(item["kind"]), str(item["id"])))
+        image_local_guides = [
+            item for item in local_guides
+            if str(item.get("kind", "")).strip().lower() == "image"
+        ]
+        authored_opening_guide = any(
+            int(item.get("local_frame", -1)) == 0
+            and int(item.get("global_frame", -1)) == int(cursor)
+            for item in image_local_guides
+        )
+        use_generated_bridge = bool(
+            positioned_guides_v2
+            and chunk_index > 0
+            and not authored_opening_guide
+        )
+        effective_chunk_task = "i2va" if use_generated_bridge else chunk_task
+
+        transition_prompt_lines: list[str] = []
+        if positioned_guides_v2:
+            if use_generated_bridge:
+                transition_prompt_lines.append(
+                    "This technical window opens on the immediately preceding generated frame. "
+                    "Continue its exact motion direction, body state, camera trajectory and scene state; "
+                    "do not re-establish or reset the shot."
+                )
+
+            if image_local_guides:
+                first_guide = image_local_guides[0]
+                first_frame = int(first_guide.get("local_frame", 0))
+                if first_frame > 0:
+                    first_label = str(first_guide.get("label") or first_guide.get("id") or "next guide")
+                    transition_prompt_lines.append(
+                        f"From 0.00s to {first_frame / H3_FPS:.2f}s, evolve continuously toward timed visual "
+                        f"guide '{first_label}'. Begin adapting early; arrive naturally at the guide time "
+                        "without a last-moment pose snap, teleport, freeze or camera reset."
+                    )
+
+                for previous_guide, next_guide in zip(image_local_guides, image_local_guides[1:]):
+                    start_frame = int(previous_guide.get("local_frame", 0))
+                    end_frame = int(next_guide.get("local_frame", 0))
+                    if end_frame <= start_frame:
+                        continue
+                    next_label = str(next_guide.get("label") or next_guide.get("id") or "next guide")
+                    transition_prompt_lines.append(
+                        f"From {start_frame / H3_FPS:.2f}s to {end_frame / H3_FPS:.2f}s, continuously evolve "
+                        f"from the current guide toward timed visual guide '{next_label}'. Start the physical "
+                        "transition progressively across the interval and preserve coherent intermediate motion; "
+                        "do not wait until the final frames to change pose or composition."
+                    )
+        transition_contract = "\n".join(transition_prompt_lines)
         local_prompt_lines = [
             f"Timeline guide at {(float(item['local_frame']) + trim_frames) / H3_FPS:.2f}s: {item['prompt']}"
             for item in local_guides
@@ -1044,6 +1113,7 @@ def _longvid_guide_plan(
             part
             for part in (
                 guide_prompt_header,
+                transition_contract,
                 creative_prompt,
             )
             if part
@@ -1053,7 +1123,7 @@ def _longvid_guide_plan(
             "slot_index": chunk_index,
             "slot_id": f"longvid_chunk_{chunk_index + 1}",
             "slot_label": f"LongVid {chunk_index + 1:03d}",
-            "task_mode": chunk_task,
+            "task_mode": effective_chunk_task,
             "frame_count": frame_count,
             "requested_frame_count": visible_frame_count if motion_context_enabled else min(H3_MAX_TRAINED_FRAMES, remaining),
             **({
@@ -1071,7 +1141,7 @@ def _longvid_guide_plan(
             "timeline_start_frame": cursor,
             "timeline_start_seconds": cursor / H3_FPS,
             "overlap_frames": 0,
-            "trim_head_frames": 0,
+            "trim_head_frames": 1 if use_generated_bridge else 0,
             "join_mode": "hard_cut",
             "unique_frames": visible_frame_count,
             "first_image": "",
@@ -1086,16 +1156,32 @@ def _longvid_guide_plan(
             "local_prompt": "\n".join(local_prompt_lines),
             "audio_prompt": "",
             "transition": (
-                "longvid_start"
-                if motion_context_enabled and cursor == 0
-                else ("motion_context_continuation" if motion_context_enabled else "longvid_hard_cut")
+                "longvid_generated_bridge_continuation"
+                if use_generated_bridge
+                else (
+                    "longvid_start"
+                    if motion_context_enabled and cursor == 0
+                    else ("motion_context_continuation" if motion_context_enabled else "longvid_positioned_guides")
+                )
             ),
-            "uses_bridge_first_frame": False,
+            "uses_bridge_first_frame": use_generated_bridge,
             "uses_explicit_first_keyframe": False,
             "uses_explicit_last_keyframe": False,
             "flf_anchor_contract": "longvid_positioned_guides",
             "frame_source": "longvid_global_timeline",
             "guides": local_guides,
+            **({
+                "positioned_guides_v2": {
+                    "enabled": True,
+                    "opening_authority": (
+                        "previous_generated_frame"
+                        if use_generated_bridge
+                        else ("authored_guide" if authored_opening_guide else "free_t2va")
+                    ),
+                    "duplicate_cross_window_guides": False,
+                    "transition_contract_lines": len(transition_prompt_lines),
+                },
+            } if positioned_guides_v2 else {}),
         }
         chunks.append(chunk)
         prompt_map.append(
@@ -1103,7 +1189,7 @@ def _longvid_guide_plan(
                 "chunk_index": chunk_index,
                 "slot_index": chunk_index,
                 "slot_label": chunk["slot_label"],
-                "task_mode": chunk_task,
+                "task_mode": effective_chunk_task,
                 "start_seconds": chunk["timeline_start_seconds"],
                 "duration_seconds": chunk["duration_seconds"],
                 "prompt": prompt,
@@ -1124,7 +1210,7 @@ def _longvid_guide_plan(
         "backend": (
             "r37_iamccs_motion_context_upstream_v012"
             if motion_context_enabled
-            else "r31_stock_minimax_h3_add_guide"
+            else ("r42_positioned_guides_v2_stock_addguide" if positioned_guides_v2 else "r31_stock_minimax_h3_add_guide")
         ),
         "lipsync": bool(lipsync or guided_audio_drive),
         "guided_audio_drive": guided_audio_drive,
@@ -1132,8 +1218,12 @@ def _longvid_guide_plan(
     }
     return {
         "schema": "iamccs.minimax_h3.shotplan",
-        "schema_version": 9,
-        "backend_revision": "r37-motion-context-variant" if motion_context_enabled else "r31",
+        "schema_version": 10 if positioned_guides_v2 else 9,
+        "backend_revision": (
+            "r37-motion-context-variant"
+            if motion_context_enabled
+            else ("r42-positioned-guides-v2" if positioned_guides_v2 else "r31")
+        ),
         "source_timeline_schema": _text(timeline.get("schema")),
         "fps": H3_FPS,
         "width": resolved_width,
@@ -1143,7 +1233,19 @@ def _longvid_guide_plan(
         "continuation_mode": (
             "upstream_motion_context_native_av_latent"
             if motion_context_enabled
-            else ("longvid_ref2vid_lipsync_guides_hard_cuts" if lipsync else ("longvid_guided_audio_drive_hard_cuts" if guided_audio_drive else "longvid_timeline_guides_hard_cuts"))
+            else (
+                "longvid_ref2vid_lipsync_guides_hard_cuts"
+                if lipsync
+                else (
+                    "longvid_guided_audio_drive_hard_cuts"
+                    if guided_audio_drive
+                    else (
+                        "longvid_positioned_guides_v2_generated_frame_bridge"
+                        if positioned_guides_v2
+                        else "longvid_timeline_guides_hard_cuts"
+                    )
+                )
+            )
         ),
         **({
         "backend_variant": "motion_context_auto_chain_v1",

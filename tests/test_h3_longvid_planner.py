@@ -52,6 +52,45 @@ def plan(rows, *, duration_frames, tail=22, window=362):
     )
 
 
+class LongVidPositionedGuidesV2RegressionTests(unittest.TestCase):
+    def test_cross_window_image_slot_is_not_reinjected_and_generated_bridge_opens_next_window(self):
+        rows = [image_row(i + 1, i * 102, 102, "start" if i == 0 else "continuous") for i in range(4)]
+        result = plan(rows, duration_frames=408, tail=0)
+
+        self.assertEqual(result["task_mode"], "longvid_guides")
+        self.assertEqual(result["backend_revision"], "r42-positioned-guides-v2")
+        self.assertEqual(result["continuation_mode"], "longvid_positioned_guides_v2_generated_frame_bridge")
+        self.assertEqual([chunk["timeline_start_frame"] for chunk in result["chunks"]], [0, 362])
+        image_ids = [
+            [guide["id"] for guide in chunk["guides"] if guide["kind"] == "image"]
+            for chunk in result["chunks"]
+        ]
+        self.assertEqual(image_ids, [["pose_1", "pose_2", "pose_3", "pose_4"], []])
+        self.assertEqual([chunk["task_mode"] for chunk in result["chunks"]], ["t2va", "i2va"])
+        self.assertEqual([chunk["uses_bridge_first_frame"] for chunk in result["chunks"]], [False, True])
+        self.assertEqual([chunk["trim_head_frames"] for chunk in result["chunks"]], [0, 1])
+        self.assertIn("[LONGVID POSITIONED GUIDES V2]", result["chunks"][0]["prompt"])
+        self.assertIn("begin adapting motion early enough", result["chunks"][0]["prompt"].lower())
+        self.assertIn("immediately preceding generated frame", result["chunks"][1]["prompt"].lower())
+
+    def test_authored_guide_exactly_on_chunk_boundary_remains_opening_authority(self):
+        rows = [
+            image_row(1, 0, 100, "start"),
+            image_row(2, 362, 46, "continuous"),
+        ]
+        result = plan(rows, duration_frames=408, tail=0)
+        second = result["chunks"][1]
+        images = [guide for guide in second["guides"] if guide["kind"] == "image"]
+
+        self.assertEqual(len(images), 1)
+        self.assertEqual(images[0]["id"], "pose_2")
+        self.assertEqual(images[0]["local_frame"], 0)
+        self.assertEqual(second["task_mode"], "t2va")
+        self.assertFalse(second["uses_bridge_first_frame"])
+        self.assertEqual(second["trim_head_frames"], 0)
+        self.assertEqual(second["positioned_guides_v2"]["opening_authority"], "authored_guide")
+
+
 class LongVidMotionContextRegressionTests(unittest.TestCase):
     def test_legacy_workflow_defaults_to_proven_r37_full_window(self):
         result = CORE.build_shotplan(

@@ -1804,6 +1804,33 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             )
         planned_first = _load_image(str(chunk.get("first_image", "")))
         planned_last = _load_image(str(chunk.get("last_image", "")))
+
+        positioned_bridge = bool(
+            chunk.get("uses_bridge_first_frame")
+            and str(shotplan.get("task_mode", "") or "").strip().lower() == "longvid_guides"
+            and int(segment_index) > 0
+        )
+        if positioned_bridge and planned_first is None and not torch.is_tensor(first_frame_override):
+            if torch.is_tensor(bridge_frame):
+                planned_first = bridge_frame[:1]
+                bridge_source = "socket"
+            else:
+                planned_first = _load_flf_bridge(str(render_id or ""))
+                bridge_source = "saved_last_frame"
+            if planned_first is None:
+                raise RuntimeError(
+                    "LongVid Positioned Guides V2 needs the immediately preceding generated bridge frame "
+                    f"for continuation chunk {int(segment_index) + 1}, but none was found. "
+                    "Start from chunk 1 and keep the Native Checkpoint queue/render_id path intact."
+                )
+            LOG.info(
+                "MiniMax H3 Positioned Guides V2 bridge opening | segment=%d/%d | source=%s | render=%s",
+                int(segment_index) + 1,
+                len(shotplan.get("chunks", [])),
+                bridge_source,
+                str(render_id or "") or "none",
+            )
+
         # FL2VA keeps the timeline's explicit shared boundary authoritative:
         # A->B is followed by B->C.  Older plans may still carry
         # ``uses_bridge_first_frame=true`` from the short-lived legacy parity
@@ -2197,12 +2224,15 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             motion_tail = int(motion_state["carry"]["ref_video"].shape[0])
             motion_report = f"decoded_frame_reference_motion_carry motion_tail={motion_tail}f"
         execution_task = task
-        if shotboard_task == "longvid_guides" and task == "t2va":
-            execution_task = (
-                "t2va (LongVid positioned guides + locked AudioBoard AV)"
-                if str(shotplan.get("audio_mode", "")) == "h3_custom_audio_drive"
-                else "t2va (LongVid positioned guides)"
-            )
+        if shotboard_task == "longvid_guides" and task in {"t2va", "i2va"}:
+            if task == "i2va" and positioned_bridge:
+                execution_task = "i2va (LongVid Positioned Guides V2 + generated bridge opening)"
+            else:
+                execution_task = (
+                    "t2va (LongVid positioned guides + locked AudioBoard AV)"
+                    if str(shotplan.get("audio_mode", "")) == "h3_custom_audio_drive"
+                    else "t2va (LongVid Positioned Guides V2)"
+                )
         elif shotboard_task == "longvid_ref2vid_lipsync" and task.startswith("ref2va"):
             execution_task = "ref2va (LongVid positioned guides + locked AudioBoard LipSync)"
         LOG.info(
