@@ -579,6 +579,10 @@ def rewrite_sections_with_ai(
     images: Any = None,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     provider = str(provider or "ollama").strip().lower()
+    if provider == "lm_studio":
+        base_url = str(base_url or "http://localhost:1234/v1").rstrip("/")
+        if not base_url.endswith("/v1") and not base_url.endswith("/chat/completions"):
+            base_url += "/v1"
     model = str(model or "").strip()
     if not model:
         raise ValueError("Select an AI model before rewriting")
@@ -615,7 +619,7 @@ def rewrite_sections_with_ai(
             timeout,
         )
         content = str((result.get("message") or {}).get("content") or "")
-    elif provider == "openai_compatible":
+    elif provider in {"openai_compatible", "lm_studio"}:
         root = str(base_url or "https://api.openai.com/v1").rstrip("/")
         url = root if root.endswith("/chat/completions") else f"{root}/chat/completions"
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
@@ -726,6 +730,10 @@ def _multimodal_json_chat(provider: str, base_url: str, model: str, api_key: str
                           temperature: float = 0.3, timeout: float = 120.0) -> dict[str, Any]:
     """Shared vision/JSON transport for IAMCCS planning tools."""
     provider = str(provider or "ollama").strip().lower()
+    if provider == "lm_studio":
+        base_url = str(base_url or "http://localhost:1234/v1").rstrip("/")
+        if not base_url.endswith("/v1") and not base_url.endswith("/chat/completions"):
+            base_url += "/v1"
     model = str(model or "").strip()
     if not model:
         raise ValueError("Select an AI model first")
@@ -744,7 +752,7 @@ def _multimodal_json_chat(provider: str, base_url: str, model: str, api_key: str
                  **({"images": [item["data"] for item in visual_inputs]} if visual_inputs else {}),
              }], "options": {"temperature": float(temperature)}}, {}, timeout)
         content = str((result.get("message") or {}).get("content") or "")
-    elif provider == "openai_compatible":
+    elif provider in {"openai_compatible", "lm_studio"}:
         root = str(base_url or "https://api.openai.com/v1").rstrip("/")
         url = root if root.endswith("/chat/completions") else f"{root}/chat/completions"
         body: Any = user
@@ -910,6 +918,10 @@ def rewrite_nextframe_prompt_with_ai(
 ) -> tuple[str, dict[str, Any]]:
     """Turn a rough scene direction into a Qwen 2511 Next Scene prompt."""
     provider = str(provider or "ollama").strip().lower()
+    if provider == "lm_studio":
+        base_url = str(base_url or "http://localhost:1234/v1").rstrip("/")
+        if not base_url.endswith("/v1") and not base_url.endswith("/chat/completions"):
+            base_url += "/v1"
     model = str(model or "").strip()
     if not model:
         raise ValueError("Select an AI model before using AI Assistance")
@@ -948,7 +960,7 @@ def rewrite_nextframe_prompt_with_ai(
             timeout,
         )
         content = str((result.get("message") or {}).get("content") or "")
-    elif provider == "openai_compatible":
+    elif provider in {"openai_compatible", "lm_studio"}:
         root = str(base_url or "https://api.openai.com/v1").rstrip("/")
         url = root if root.endswith("/chat/completions") else f"{root}/chat/completions"
         result = _http_json(
@@ -1030,6 +1042,10 @@ def invent_nextframe_ideas_with_ai(
 ) -> tuple[list[dict[str, str]], dict[str, Any]]:
     """Invent several next-frame alternatives from a story logline and visual references."""
     provider = str(provider or "ollama").strip().lower()
+    if provider == "lm_studio":
+        base_url = str(base_url or "http://localhost:1234/v1").rstrip("/")
+        if not base_url.endswith("/v1") and not base_url.endswith("/chat/completions"):
+            base_url += "/v1"
     model = str(model or "").strip()
     if not model:
         raise ValueError("Select an AI model before using Idea AI")
@@ -1060,7 +1076,7 @@ def invent_nextframe_ideas_with_ai(
             ], "options": {"temperature": temperature},
         }, {}, timeout)
         content = str((result.get("message") or {}).get("content") or "")
-    elif provider == "openai_compatible":
+    elif provider in {"openai_compatible", "lm_studio"}:
         root = str(base_url or "https://api.openai.com/v1").rstrip("/")
         url = root if root.endswith("/chat/completions") else f"{root}/chat/completions"
         openai_user: Any = user
@@ -1570,6 +1586,19 @@ def _register_prompter_routes() -> None:
         from server import PromptServer
 
         routes = PromptServer.instance.routes
+
+        @routes.get("/iamccs/prompter/lmstudio/models")
+        async def iamccs_prompter_lmstudio_models(request):
+            try:
+                root = str(request.query.get("base_url") or "http://localhost:1234/v1").rstrip("/")
+                if not root.endswith("/v1"):
+                    root += "/v1"
+                payload = await asyncio.to_thread(_http_get_json, f"{root}/models", 10.0)
+                models = [{"name": str(item["id"])} for item in payload.get("data", [])
+                          if isinstance(item, dict) and item.get("id")]
+                return web.json_response({"ok": True, "models": models})
+            except Exception as exc:
+                return web.json_response({"ok": False, "error": str(exc)}, status=400)
 
         @routes.get("/iamccs/prompter/ollama/models")
         async def iamccs_prompter_ollama_models(request):

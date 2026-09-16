@@ -358,16 +358,31 @@ def _patch_layout_and_payload() -> None:
         raise RuntimeError("IAMCCS native AV continuity cannot locate the MiniMax H3 payload hook.")
     if getattr(current_payload, _PAYLOAD_MARKER, False):
         return
+
     module_name = str(getattr(current_payload, "__module__", ""))
-    if (
+    motion_context_owner = bool(
         getattr(current_payload, "_h3_motion_context_payload_patch", False)
-        or getattr(current_payload, "_director_continuity_payload_patch", False)
         or "h3_motion_context" in module_name
+    )
+    director_owner = bool(
+        getattr(current_payload, "_director_continuity_payload_patch", False)
         or "MiniMaxH3_Director" in module_name
-    ):
+    )
+
+    if director_owner:
         raise RuntimeError(
-            "IAMCCS native AV continuity found another H3 temporal-payload owner. Disable that continuity pack and restart ComfyUI."
+            "IAMCCS native AV continuity found MiniMaxH3_Director already owning "
+            "the H3 temporal payload. Disable one continuity engine and restart ComfyUI."
         )
+
+    if motion_context_owner:
+        LOG.warning(
+            "IAMCCS native AV continuity composing over existing Motion Context "
+            "H3 payload hook | module=%s | callable=%s",
+            module_name,
+            getattr(current_payload, "__qualname__", getattr(current_payload, "__name__", "unknown")),
+        )
+
     def payload_patch(self, _stock_payload=current_payload, **kwargs):
         result = _stock_payload(self, **kwargs)
         keyframes = kwargs.get("minimax_keyframes") or []
@@ -386,8 +401,13 @@ def _patch_layout_and_payload() -> None:
         return result
 
     setattr(payload_patch, _PAYLOAD_MARKER, True)
+    if motion_context_owner:
+        setattr(payload_patch, "_h3_motion_context_payload_patch", True)
     model_cls.extra_conds = payload_patch
-    LOG.info("IAMCCS native AV continuity installed its marker-gated H3 payload hook")
+    LOG.info(
+        "IAMCCS native AV continuity installed its marker-gated H3 payload hook%s",
+        " over Motion Context" if motion_context_owner else "",
+    )
 
 
 def apply_native_av_context(

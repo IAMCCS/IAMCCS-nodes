@@ -35,6 +35,13 @@ from .iamccs_minimax_h3_atomic_backend import (
 
 LOG = logging.getLogger("IAMCCS.MiniMaxH3.MotionContextVariant")
 CATEGORY = "IAMCCS/MiniMax H3/Motion Context Variant"
+
+IAMCCS_MC_PATCH_REV = "R42-anchor-latent-v2-2026-09-16"
+LOG.warning(
+    "IAMCCS Motion Context Variant LOADED | patch=%s | file=%s",
+    IAMCCS_MC_PATCH_REV,
+    __file__,
+)
 PROVIDER = "ComfyUI-H3-Motion-Context-Auto-Chain-addon"
 
 
@@ -50,14 +57,59 @@ def _provider_node(name: str):
     return cls
 
 
-def _provider_call(name: str, method: str, *, chain_config: dict[str, Any], **kwargs):
-    """Call both the legacy v0.1.2 and native-ComfyUI v0.1.9 provider APIs.
+def _provider_chain_config(chain_config: dict[str, Any], **fallbacks) -> dict[str, Any]:
+    """Return an isolated H3_CHAIN contract compatible with newer Auto-Chain builds.
 
-    v0.1.2 exposed ``latent_path``/``clip_index`` widgets and separate
-    context-length arguments.  The current upstream addon collapses those
-    values into one ``H3_CHAIN`` input.  IAMCCS keeps one adapter here so a
-    provider update cannot silently route a Motion Context graph through a
-    partially compatible wrapper.
+    Some provider releases read ``effective_trim_frames`` directly from
+    ``chain_config``.  IAMCCS historically also supported older releases where
+    context/trim values were separate arguments.  Normalize the bridge here and
+    never give a third-party provider our original dict by reference.
+    """
+    if not isinstance(chain_config, dict):
+        raise TypeError(
+            "IAMCCS Motion Context provider chain_config must be a dict, "
+            f"got {type(chain_config).__name__}"
+        )
+
+    config = copy.deepcopy(chain_config)
+    repaired: list[str] = []
+
+    if "effective_trim_frames" not in config:
+        trim = fallbacks.get("trim_frames", fallbacks.get("context_length", 0))
+        config["effective_trim_frames"] = max(0, int(trim or 0))
+        repaired.append("effective_trim_frames")
+
+    if "fps" not in config:
+        config["fps"] = float(fallbacks.get("fps", 24.0) or 24.0)
+        repaired.append("fps")
+
+    if "clip_index" not in config:
+        if "save_clip_index" in config:
+            config["clip_index"] = int(config["save_clip_index"])
+        elif "load_clip_index" in config:
+            config["clip_index"] = int(config["load_clip_index"]) + 1
+        else:
+            config["clip_index"] = 1
+        repaired.append("clip_index")
+
+    if repaired:
+        LOG.warning(
+            "IAMCCS repaired incomplete H3_CHAIN provider contract: %s",
+            ", ".join(repaired),
+        )
+
+    return config
+
+
+def _provider_call(name: str, method: str, *, chain_config: dict[str, Any], **kwargs):
+    """Call both legacy and current Auto-Chain provider APIs safely.
+
+    Older provider builds exposed ``latent_path``/``clip_index`` widgets and
+    separate context-length arguments.  Newer builds collapse those values into
+    one ``H3_CHAIN`` input and require ``effective_trim_frames`` inside it.
+
+    The provider always receives an isolated copy so a Load/Save implementation
+    cannot mutate the config later reused by Motion Context.
     """
     instance = _provider_node(name)()
     function = getattr(instance, method)
@@ -72,7 +124,7 @@ def _provider_call(name: str, method: str, *, chain_config: dict[str, Any], **kw
         if accepts_kwargs or key in parameters
     }
     if accepts_kwargs or "chain_config" in parameters:
-        payload["chain_config"] = chain_config
+        payload["chain_config"] = _provider_chain_config(chain_config, **kwargs)
     return function(**payload)
 
 
@@ -150,7 +202,13 @@ def _safe_run_name(value: str) -> str:
     return name or "iamccs_h3"
 
 
-def _chain_config(render_id: str, segment_index: int) -> dict[str, Any]:
+def _chain_config(
+    render_id: str,
+    segment_index: int,
+    *,
+    effective_trim_frames: int = 0,
+    fps: float = 24.0,
+) -> dict[str, Any]:
     index = int(segment_index)
     run_name = _safe_run_name(render_id)
     return {
@@ -160,6 +218,12 @@ def _chain_config(render_id: str, segment_index: int) -> dict[str, Any]:
         "load_clip_index": max(0, index),
         "save_clip_index": index + 1,
         "reset": index == 0,
+        # Auto-Chain addon v0.1.9+ owns its context span through H3_CHAIN.
+        # Older IAMCCS adapters only supplied the filesystem fields above,
+        # which made chunk 2 fail before sampling with KeyError.
+        "effective_trim_frames": max(0, int(effective_trim_frames)),
+        "fps": float(fps),
+        "clip_index": index + 1,
     }
 
 
@@ -193,6 +257,145 @@ def _fit_audio(audio: Any, frames: int, fps: float) -> Any:
     return result
 
 
+def _remove_audio_frame_range(
+    audio: Any,
+    start_frame: int,
+    end_frame: int,
+    fps: float,
+) -> Any:
+    """Remove from audio the same interval removed from final decoded video."""
+    if not isinstance(audio, dict) or not torch.is_tensor(audio.get("waveform")):
+        return audio
+    sample_rate = max(1, int(audio.get("sample_rate", 32000)))
+    waveform = audio["waveform"]
+    total_samples = int(waveform.shape[-1])
+    start_sample = max(
+        0,
+        min(total_samples, int(round(float(start_frame) / float(fps) * sample_rate))),
+    )
+    end_sample = max(
+        start_sample,
+        min(total_samples, int(round(float(end_frame) / float(fps) * sample_rate))),
+    )
+    if end_sample <= start_sample:
+        return audio
+    result = dict(audio)
+    result["waveform"] = torch.cat(
+        (waveform[..., :start_sample], waveform[..., end_sample:]),
+        dim=-1,
+    )
+    result["sample_rate"] = sample_rate
+    return result
+
+
+def _freeze_safe_final_tail(
+    frames: Any,
+    fps: float,
+    plan: dict[str, Any],
+) -> tuple[Any, dict[str, Any] | None]:
+    """Remove only a genuinely static generated tail from the final Guided chunk.
+
+    Motion is measured adaptively against the earlier part of the same clip.
+    The exact last decoded frame is always preserved, so the authored final
+    Shotboard destination remains the delivery endpoint.
+    """
+    if not torch.is_tensor(frames) or frames.ndim != 4:
+        return frames, None
+
+    total = int(frames.shape[0])
+    if total < 16:
+        return frames, None
+
+    contract = plan.get("motion_context_auto_chain")
+    if not isinstance(contract, dict):
+        contract = {}
+
+    if not bool(contract.get("freeze_safe_tail_trim", True)):
+        return frames, None
+
+    probe_frames = max(
+        12,
+        int(contract.get("freeze_safe_probe_frames", round(float(fps) * 2.0)) or round(float(fps) * 2.0)),
+    )
+    min_static_frames = max(
+        6,
+        int(contract.get("freeze_safe_min_static_frames", round(float(fps) * 0.40)) or round(float(fps) * 0.40)),
+    )
+    keep_final_frames = max(
+        1,
+        int(contract.get("freeze_safe_keep_final_frames", 1) or 1),
+    )
+    absolute_threshold = max(
+        0.0001,
+        float(contract.get("freeze_safe_abs_motion_threshold", 0.0015) or 0.0015),
+    )
+    baseline_ratio = max(
+        0.01,
+        min(0.80, float(contract.get("freeze_safe_baseline_ratio", 0.18) or 0.18)),
+    )
+
+    probe_frames = min(probe_frames, total - 3)
+    if probe_frames < min_static_frames:
+        return frames, None
+
+    with torch.no_grad():
+        rgb = frames[..., :3].detach().to(dtype=torch.float32).movedim(-1, 1)
+        h, w = int(rgb.shape[-2]), int(rgb.shape[-1])
+        scale = min(1.0, 64.0 / max(1, h), 64.0 / max(1, w))
+        if scale < 1.0:
+            rgb = F.interpolate(
+                rgb,
+                size=(max(8, int(round(h * scale))), max(8, int(round(w * scale)))),
+                mode="area",
+            )
+
+        diffs = (rgb[1:] - rgb[:-1]).abs().mean(dim=(1, 2, 3))
+        if int(diffs.numel()) < min_static_frames:
+            return frames, None
+
+        baseline_end = max(4, int(diffs.numel()) - probe_frames)
+        baseline = float(torch.median(diffs[:baseline_end]).item())
+        threshold = max(absolute_threshold, baseline * baseline_ratio)
+
+        # If the whole clip is essentially static, there is no trustworthy
+        # boundary between intended stillness and a generated freeze.
+        if baseline <= absolute_threshold * 1.5:
+            return frames, None
+
+        low_run = 0
+        for value in reversed(diffs[-probe_frames:].tolist()):
+            if float(value) <= threshold:
+                low_run += 1
+            else:
+                break
+
+    static_frames = low_run + 1 if low_run else 0
+    if static_frames < min_static_frames:
+        return frames, None
+
+    static_frames = min(static_frames, total - 2)
+    keep_final_frames = min(keep_final_frames, static_frames)
+
+    remove_start = total - static_frames
+    remove_end = total - keep_final_frames
+    removed = remove_end - remove_start
+    if removed <= 0:
+        return frames, None
+
+    trimmed = torch.cat((frames[:remove_start], frames[remove_end:]), dim=0)
+    return trimmed, {
+        "removed_frames": int(removed),
+        "static_frames": int(static_frames),
+        "remove_start_frame": int(remove_start),
+        "remove_end_frame": int(remove_end),
+        "kept_final_frames": int(keep_final_frames),
+        "baseline_motion": float(baseline),
+        "threshold": float(threshold),
+        "original_frames": int(total),
+        "delivered_frames": int(trimmed.shape[0]),
+    }
+
+
 def _sampling_from_plan(plan: dict[str, Any], **fallbacks) -> dict[str, Any]:
     """Resolve R37 sampler controls from the Shotboard Queue-time truth.
 
@@ -215,6 +418,66 @@ def _sampling_from_plan(plan: dict[str, Any], **fallbacks) -> dict[str, Any]:
         "shift_video": float(sampling.get("shift_video", fallbacks["shift_video"])),
         "shift_audio": float(sampling.get("shift_audio", fallbacks["shift_audio"])),
     }
+
+
+def _visual_keyframe_payload(keyframe: Any) -> Any:
+    """Return the visual payload carried by a MiniMax H3 keyframe.
+
+    ComfyUI 0.34+ consumes the temporary ``image`` field inside
+    MiniMaxH3ImageToVideo and stores the encoded anchor as ``latent``.
+    Older/custom H3 implementations may still expose ``image``.  Support both
+    representations so destination validation follows the actual conditioning
+    contract instead of one historical metadata shape.
+    """
+    if not isinstance(keyframe, dict):
+        return None
+    latent_payload = keyframe.get("latent")
+    if latent_payload is not None:
+        return latent_payload
+    image_payload = keyframe.get("image")
+    if image_payload is not None:
+        return image_payload
+    return None
+
+
+def _terminal_visual_anchors(conditioning: Any, endpoint: int) -> list[dict[str, Any]]:
+    """Collect visual H3 anchors exactly at ``endpoint``."""
+    anchors: list[dict[str, Any]] = []
+    if not isinstance(conditioning, (list, tuple)):
+        return anchors
+    for item in conditioning:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            continue
+        metadata = item[1]
+        if not isinstance(metadata, dict):
+            continue
+        keyframes = metadata.get("minimax_keyframes", [])
+        if not isinstance(keyframes, (list, tuple)):
+            continue
+        for keyframe in keyframes:
+            if (
+                isinstance(keyframe, dict)
+                and int(keyframe.get("resolved_frame_index", -1)) == int(endpoint)
+                and _visual_keyframe_payload(keyframe) is not None
+            ):
+                anchors.append(keyframe)
+    return anchors
+
+
+def _same_visual_anchor(source: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """True when Motion Context retained the exact authored visual anchor.
+
+    The upstream Motion Context implementation shallow-copies preserved
+    keyframe dictionaries.  The encoded visual payload object therefore remains
+    identical even though the dictionary object itself changes.
+    """
+    if not isinstance(source, dict) or not isinstance(candidate, dict):
+        return False
+    if int(candidate.get("resolved_frame_index", -1)) != int(source.get("resolved_frame_index", -2)):
+        return False
+    source_payload = _visual_keyframe_payload(source)
+    candidate_payload = _visual_keyframe_payload(candidate)
+    return source_payload is not None and candidate_payload is source_payload
 
 
 def _guide_uses_native_tail(guide: Any, context_offset_frames: int) -> bool:
@@ -391,7 +654,12 @@ class IAMCCS_MiniMaxH3MotionContextConditionR37:
                 f"positioned_guides={guide_report}"
             )
 
-        config = _chain_config(render_id, segment_index)
+        config = _chain_config(
+            render_id,
+            segment_index,
+            effective_trim_frames=expected_trim,
+            fps=float(plan.get("fps", 24) or 24),
+        )
         context_latent = _provider_call(
             "MiniMaxH3AutoChainLoadLatent",
             "load",
@@ -407,21 +675,39 @@ class IAMCCS_MiniMaxH3MotionContextConditionR37:
                 "Do not purge h3_context while a chain is running."
             )
         # Capture the actual terminal anchor before the provider installs its
-        # native head. It must survive unchanged; otherwise fail before sampling.
+        # native head.  ComfyUI 0.34+ stores ImageToVideo visual anchors as
+        # encoded ``latent`` payloads (the temporary ``image`` key is popped
+        # during conditioning), while older/custom builds may still expose
+        # ``image``.  Validate the semantic visual anchor rather than one
+        # historical metadata field.
         destination = str(chunk.get("last_image", "") or "")
-        terminal_anchors = []
+        terminal_anchors: list[dict[str, Any]] = []
         if str(plan.get("task_mode", "")) == "longvid_continuous_guided":
             endpoint = int(chunk["frame_count"]) - 1
-            for _, metadata in conditioning:
-                terminal_anchors.extend(
-                    k for k in metadata.get("minimax_keyframes", [])
-                    if int(k.get("resolved_frame_index", -1)) == endpoint
-                    and k.get("image") is not None
-                )
+            terminal_anchors = _terminal_visual_anchors(conditioning, endpoint)
+            available_visual_indices = sorted({
+                int(k.get("resolved_frame_index", -1))
+                for item in conditioning
+                if isinstance(item, (list, tuple)) and len(item) >= 2 and isinstance(item[1], dict)
+                for k in item[1].get("minimax_keyframes", [])
+                if isinstance(k, dict) and _visual_keyframe_payload(k) is not None
+            })
+            LOG.warning(
+                "IAMCCS MC DESTINATION AUDIT | patch=%s | segment=%d | destination=%r | "
+                "expected_frame=%d | terminal_anchor_count=%d | visual_keyframes=%s",
+                IAMCCS_MC_PATCH_REV,
+                int(segment_index) + 1,
+                destination,
+                endpoint,
+                len(terminal_anchors),
+                available_visual_indices,
+            )
             if not destination or not terminal_anchors:
                 raise ValueError(
                     f"Continuous Guided segment {int(segment_index) + 1}: "
-                    f"missing Shotboard destination anchor {destination!r} at frame {endpoint}"
+                    f"missing Shotboard destination anchor {destination!r} at frame {endpoint}; "
+                    f"visual keyframes present at {available_visual_indices or 'none'}; "
+                    f"patch={IAMCCS_MC_PATCH_REV}"
                 )
         conditioned, actual_trim = _provider_call(
             "MiniMaxH3AutoChainMotionContext",
@@ -436,10 +722,17 @@ class IAMCCS_MiniMaxH3MotionContextConditionR37:
             audio_vae=audio_vae,
         )
         if terminal_anchors:
-            retained = [k for _, metadata in conditioned for k in metadata.get("minimax_keyframes", [])]
-            if not all(any(k.get("image") is source.get("image")
-                           and k.get("resolved_frame_index") == source.get("resolved_frame_index")
-                           for k in retained) for source in terminal_anchors):
+            retained = [
+                k
+                for item in conditioned
+                if isinstance(item, (list, tuple)) and len(item) >= 2 and isinstance(item[1], dict)
+                for k in item[1].get("minimax_keyframes", [])
+                if isinstance(k, dict)
+            ]
+            if not all(
+                any(_same_visual_anchor(source, candidate) for candidate in retained)
+                for source in terminal_anchors
+            ):
                 raise RuntimeError("Motion Context changed or removed the Shotboard destination anchor")
             LOG.info("Continuous Guided destination verified | segment=%d | image=%s | frame=%d | native_head_trim=%d | dissolve=not_requested_by_context",
                      int(segment_index) + 1, destination, endpoint, int(actual_trim))
@@ -549,10 +842,44 @@ class IAMCCS_MiniMaxH3MotionContextGenerationR37:
             )
         frames = frames[:visible_frames]
         audio = _fit_audio(audio, visible_frames, float(fps))
+
+        freeze_info = None
+        task_mode = str(plan.get("task_mode", "") or "").strip().lower()
+        is_final_chunk = int(chunk_index) + 1 >= len(plan.get("chunks", []))
+        if task_mode == "longvid_continuous_guided" and is_final_chunk:
+            frames, freeze_info = _freeze_safe_final_tail(frames, float(fps), plan)
+            if freeze_info:
+                audio = _remove_audio_frame_range(
+                    audio,
+                    freeze_info["remove_start_frame"],
+                    freeze_info["remove_end_frame"],
+                    float(fps),
+                )
+                audio = _fit_audio(audio, int(frames.shape[0]), float(fps))
+                LOG.info(
+                    "IAMCCS freeze-safe final tail | patch=%s | detected=%df | removed=%df | "
+                    "kept_final=%df | original=%df | delivered=%df | "
+                    "baseline=%.6f | threshold=%.6f",
+                    IAMCCS_MC_PATCH_REV,
+                    int(freeze_info["static_frames"]),
+                    int(freeze_info["removed_frames"]),
+                    int(freeze_info["kept_final_frames"]),
+                    int(freeze_info["original_frames"]),
+                    int(freeze_info["delivered_frames"]),
+                    float(freeze_info["baseline_motion"]),
+                    float(freeze_info["threshold"]),
+                )
+
+        delivered_frames = int(frames.shape[0])
         bridge_last = frames[-1:].detach().clone()
+        freeze_report = (
+            f" | freeze_safe_tail={int(freeze_info['removed_frames'])}f"
+            if freeze_info else " | freeze_safe_tail=0f"
+        )
         report = (
             f"{base_report} | R37={attention_report} | upstream_motion_context_trim={trim_frames}f | "
-            f"delivered={visible_frames}f | sampler_truth=shotboard:{steps}x{sampler_name}+{scheduler}"
+            f"planned_visible={visible_frames}f | delivered={delivered_frames}f"
+            f"{freeze_report} | sampler_truth=shotboard:{steps}x{sampler_name}+{scheduler}"
         )
         return frames, audio, bridge_last, sampled_latent, fps, report
 

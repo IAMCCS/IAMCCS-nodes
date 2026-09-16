@@ -98,7 +98,7 @@ const FRIENDLY_VALUES = {
   adaptive_safe: "Adaptive attention · safe", spectrum: "Spectrum attention", sage_spectrum: "Sage + Spectrum",
   comfy_kitchen: "Comfy Kitchen optimized attention", auto_3060: "Automatic · 8–12 GB VRAM (legacy)",
   pdd_native_8step: "PDD · complete 8-step recipe", fasth3_dense_6step: "FastH3 · complete 6-step recipe",
-  matlowai_fused_turbo_manual_sigma: "Fused Fast · T2VA only · manual sigma", h3_sla: "SLA · complete 4-step recipe",
+  matlowai_fused_turbo_manual_sigma: "Fused Fast · checkpoint-specific recipe", h3_sla: "SLA · complete 4-step recipe",
 };
 
 const H3_NATIVE_RESOLUTION_PRESETS = Object.freeze([
@@ -348,8 +348,13 @@ function declaredTurboSteps(node, name) {
 function applyDeclaredTurboContract(node) {
   if (String(widget(node, "turbo_mode")?.value || "off") === "off") return false;
   if (["pdd_native_8step", "iamccs_progressive_pdd_2stage", "fasth3_dense_6step", "matlowai_fused_turbo_manual_sigma"].includes(String(widget(node, "acceleration")?.value || "native"))) return false;
-  if (declaredTurboSteps(node, widget(node, "turbo_lora_name")?.value) !== 3) return false;
-  setValue(node, "steps", 3, false); return true;
+  const steps = declaredTurboSteps(node, widget(node, "turbo_lora_name")?.value);
+  if (![3, 4, 8].includes(steps)) return false;
+  const options = widget(node, "turbo_lora_name")?.options || {};
+  const asset = (options.iamccs_h3_assets || []).find(asset => asset.name === widget(node, "turbo_lora_name")?.value);
+  const contract = options.iamccs_h3_recipes?.[asset?.recipe]?.values;
+  if (contract) Object.entries(contract).forEach(([name, value]) => setValue(node, name, value, false));
+  setValue(node, "steps", steps, false); return true;
 }
 function resetAcceleration(set) { set("turbo_mode", "off"); set("turbo_lora_name", ""); set("pdd_lora_name", ""); set("fused_turbo_model_name", ""); }
 function selectedAcceleration(node) {
@@ -387,22 +392,23 @@ function applyRecipe(node, recipe) {
     const asset = firstChoice(node, "pdd_lora_name", (name) => isPddLoRA(name, family));
     if (!asset) { alert(`PDD is unavailable: install a ${family.toUpperCase()} PDD LoRA before selecting this recipe.`); return false; }
     resetAcceleration(set); set("pdd_lora_name", asset); set("pdd_strength", 1); set("acceleration", "pdd_native_8step");
-    set("steps", 8); set("sampler_name", "euler"); set("scheduler", "simple");
+    set("steps", 8); set("sampler_name", "euler"); set("scheduler", "simple"); set("denoise", 1); set("shift_video", 12); set("shift_audio", 3);
   } else if (recipe === "fasth3") {
     const asset = firstChoice(node, "turbo_lora_name", isFastH3LoRA); if (!asset) { alert("FastH3 is unavailable: no compatible FastH3 LoRA is installed."); return false; }
     resetAcceleration(set); set("turbo_mode", "off"); set("turbo_lora_name", asset); set("turbo_strength", 1);
-    set("acceleration", "fasth3_dense_6step"); set("steps", 6);
+    set("acceleration", "fasth3_dense_6step"); set("steps", 6); set("sampler_name", "euler"); set("scheduler", "simple"); set("denoise", 1); set("shift_video", 12); set("shift_audio", 3);
   } else if (recipe === "sla") {
     const asset = firstChoice(node, "turbo_lora_name", (name) => name.includes("sla") && name.includes(family)); if (!asset) { alert(`SLA is unavailable: no compatible ${family.toUpperCase()} SLA LoRA is installed.`); return false; }
     resetAcceleration(set); set("turbo_mode", "early_8_10"); set("turbo_lora_name", asset); set("turbo_strength", 1);
-    set("acceleration", "h3_sla"); set("steps", 4); set("h3_sla_sparsity", 0.85); set("h3_sla_dense_last_steps", 0);
+    set("acceleration", "h3_sla"); set("steps", 4); set("h3_sla_sparsity", 0.85); set("h3_sla_dense_last_steps", 0); set("sampler_name", "euler"); set("scheduler", "simple"); set("denoise", 1); set("shift_video", 6); set("shift_audio", 3); set("turbo_sampler_mode", "res_multistep_stock");
   } else if (recipe === "fused") {
-    if (shotboardMode(node) !== "t2va") { alert("Fused Fast requires T2VA. Choose a compatible accelerator for this mode."); return false; }
     const current = String(widget(node, "fused_turbo_model_name")?.value || "");
     const asset = current || firstChoice(node, "fused_turbo_model_name", (name) => (name.includes("fused") || name.includes("turbo")) && !name.includes("ref2"));
     if (!asset) { alert("Fused Fast is unavailable: no compatible fused diffusion model is installed."); return false; }
+    const convrot = asset.toLowerCase().includes("convrot");
+    if (!(convrot ? ["t2va", "i2va", "fl2va", "ref2va"] : ["t2va"]).includes(shotboardMode(node))) { alert("This fused checkpoint does not support the selected mode."); return false; }
     resetAcceleration(set); set("fused_turbo_model_name", asset); set("acceleration", "matlowai_fused_turbo_manual_sigma");
-    set("fused_turbo_sigma_preset", "4_step"); set("steps", 4); set("sampler_name", "euler"); set("scheduler", "simple");
+    set("fused_turbo_sigma_preset", "4_step"); set("steps", 4); set("sampler_name", convrot ? "res_multistep" : "euler"); set("scheduler", "simple");
     set("denoise", 1); set("shift_video", 12); set("shift_audio", 3);
   } else if (recipe === "control") {
     set("h3_controlnet_enabled", true); const asset = firstChoice(node, "h3_controlnet_name", () => true); if (asset) set("h3_controlnet_name", asset);
@@ -469,8 +475,11 @@ function accelerationAvailable(node, recipe, mode = shotboardMode(node)) {
   const family = modeFamily(mode);
   if (recipe === "pdd") return Boolean(firstChoice(node, "pdd_lora_name", (name) => isPddLoRA(name, family)));
   if (recipe === "fasth3") return Boolean(firstChoice(node, "turbo_lora_name", isFastH3LoRA));
-  if (recipe === "sla") return Boolean(firstChoice(node, "turbo_lora_name", (name) => name.includes("sla") && name.includes(family)));
-  if (recipe === "fused") return String(mode) === "t2va" && Boolean(String(widget(node, "fused_turbo_model_name")?.value || "") || firstChoice(node, "fused_turbo_model_name", (name) => name.includes("fused") || name.includes("turbo")));
+  if (recipe === "sla") return widget(node, "turbo_lora_name")?.options?.iamccs_sla_available !== false && Boolean(firstChoice(node, "turbo_lora_name", (name) => name.includes("sla") && name.includes(family)));
+  if (recipe === "fused") {
+    const name = String(widget(node, "fused_turbo_model_name")?.value || "") || firstChoice(node, "fused_turbo_model_name", (name) => name.includes("fused") || name.includes("turbo"));
+    return Boolean(name) && (String(name).toLowerCase().includes("convrot") ? ["t2va", "i2va", "fl2va", "ref2va"] : ["t2va"]).includes(String(mode));
+  }
   return true;
 }
 
@@ -524,6 +533,11 @@ function mount(node) {
   <div class="h3p-head"><span class="h3p-mark">IAMCCS PRO</span><div><div class="h3p-title">H3 Settings PRO</div><div class="h3p-sub">Render compiler · one queue truth · no editorial duplication</div></div><div class="h3p-mode"><span class="h3p-sub">SHOTBOARD MODE</span><b data-mode>NOT CONNECTED</b></div></div>
   <div class="h3p-layout"><nav class="h3p-rail"></nav><main class="h3p-main"><div class="h3p-section-title"></div><div class="h3p-section-note"></div><div class="h3p-context"></div><div class="h3p-recipes"></div><div class="h3p-grid" data-grid></div></main><aside class="h3p-truth"><h3>Queue Truth</h3><div class="h3p-truth-list"></div><div class="h3p-health"></div></aside></div>`;
   const q = (selector) => root.querySelector(selector); let active = String(node.properties?.iamccs_h3_settings_pro_active_section || "assistant"), lastMode = "";
+  // Canvas wheel handlers must not consume the panel's native scrolling.
+  root.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
+  const scrollStyle = document.createElement("style");
+  scrollStyle.textContent = ".iamccs-h3pro{height:680px!important}.iamccs-h3pro .h3p-layout{min-height:0;overflow:hidden}.iamccs-h3pro .h3p-main,.iamccs-h3pro .h3p-truth{overflow-y:auto;min-height:0;overscroll-behavior:contain;pointer-events:auto}.iamccs-h3pro .h3p-truth-row b{overflow-wrap:anywhere}";
+  root.append(scrollStyle);
   function fieldRelevant(name, mode) {
     const value = String(mode).toLowerCase();
     if (name.startsWith("v2v_") && !value.startsWith("v2va_")) return false;
@@ -564,6 +578,11 @@ function mount(node) {
       else if (name === "performance_profile") applyMemoryProfileChoice(node, value);
       else if (name === "acceleration") applyAccelerationChoice(node, value);
       else setValue(node, name, value);
+      if (name === "fused_turbo_model_name" && selectedAcceleration(node) === "fused") applyRecipe(node, "fused");
+      if (name === "fused_turbo_sigma_preset" && selectedAcceleration(node) === "fused") {
+        const count = Number(String(value).split("_")[0]);
+        if ([4, 6, 8].includes(count)) setValue(node, "steps", count, false);
+      }
       if (name === "turbo_mode" || name === "turbo_lora_name") applyDeclaredTurboContract(node);
       refresh();
     }; box.append(control);
@@ -605,7 +624,7 @@ function mount(node) {
     groups.forEach((group) => { const button = document.createElement("button"); button.className = `h3p-tab${active === group.id ? " active" : ""}`; button.textContent = group.label; button.onclick = () => { active = group.id; node.properties ||= {}; node.properties.iamccs_h3_settings_pro_active_section = active; app.graph?.change?.(); refresh(); }; rail.append(button); });
     const owner = document.createElement("div"); owner.className = "h3p-owner"; owner.innerHTML = "<strong>OWNERSHIP LOCK</strong>Shotboard: mode, timeline, media, prompts, duration, FPS and audio.<br><br>Settings PRO: render, memory, acceleration and delivery."; rail.append(owner);
   }
-  function addRecipe(parent, label, id, enabled = true, selected = false) { const button = document.createElement("button"); button.className = `h3p-recipe${selected ? " active" : ""}`; button.textContent = label; button.disabled = !enabled; button.onclick = () => applyRecipe(node, id); parent.append(button); }
+  function addRecipe(parent, label, id, enabled = true, selected = false) { const button = document.createElement("button"); button.className = `h3p-recipe${selected ? " active" : ""}`; button.textContent = id === "fused" ? "FUSED · 4 STEP · CHECKPOINT COMPATIBILITY" : label; button.disabled = !enabled; button.onclick = () => applyRecipe(node, id); parent.append(button); }
   function renderAssistant(mode) {
     const grid = q("[data-grid]"); grid.className = "h3p-flow"; grid.replaceChildren();
     const ask = (text) => { const el = document.createElement("div"); el.className = "h3p-question"; el.textContent = text; grid.append(el); };
@@ -624,7 +643,7 @@ function mount(node) {
           label.style.cssText='display:flex;position:static;align-items:center;gap:6px;flex:0 0 auto;max-width:120px;height:auto;margin:0;padding:10px;border:1px solid #74cbbb;border-radius:8px;font-size:10px;line-height:1.3;white-space:normal';
           label.title='ON: continue each interval from its generated AV latent tail. OFF: one joint sample. Requires the LatentGoAhead branch.';
           const toggle=widget(node,'keyframe_joint_latent_new');
-          const input=document.createElement('input');input.type='checkbox';input.checked=Boolean(toggle?.value);input.disabled=!toggle;
+          const input=document.createElement('input');input.type='checkbox';input.checked=Boolean(toggle?.value);input.disabled=!toggle || !connectedNodes(node).some(n=>/MiniMaxH3LatentGoAhead/.test(nodeClass(n)));
           input.style.cssText='position:static;flex:0 0 16px;width:16px;height:16px;margin:0';
           input.onchange=()=>{setValue(node,'keyframe_joint_latent_new',input.checked);if(mode!=='keyframe_joint_native')setAssistantMode(node,'keyframe_joint_native');refresh();};
           label.append(input,document.createTextNode('LATENT NEW'));row.append(button,label);
@@ -689,6 +708,11 @@ function mount(node) {
       : "Only controls relevant to this render layer are shown.";
     q(".h3p-context").innerHTML = `<b>Current Shotboard authority:</b> ${mode}. Mode, media, prompts, duration and FPS remain stored in Shotboard.`;
     const recipes = q(".h3p-recipes"); recipes.replaceChildren(); if (group.assistant) { renderAssistant(mode); return; }
+    if (active === "speed") {
+      const help = document.createElement("p");
+      help.textContent = "Choose ONE speed recipe. Native: quality baseline; PDD: 8-step distillation; FastH3: 6 steps; SLA: 4-step sparse-attention recipe; Fused ConvRot: baked 4-step model, no extra Turbo/PDD LoRA. Memory presets only change memory, not speed. Manual overrides are optional below.";
+      recipes.append(help);
+    }
     const recipeSet = active === "memory" ? [["≤ 8–12 GB · 124F / 2048 ROWS", "vram8"], ["12–16 GB · 209F / 4096 ROWS", "vram12"], ["16–24 GB · 294F / 8192 ROWS", "vram16"], ["24 GB+ · 362F / 16384 ROWS", "vram24"]] : active === "speed" ? [["NATIVE QUALITY · 20 STEP", "native"], ["PDD · 8 STEP", "pdd"], ["FASTH3 · 6 STEP", "fasth3"], ["SLA · 4 STEP", "sla"], ["FUSED FAST · T2VA ONLY", "fused"]] : active === "control" ? [["ENABLE + SELECT INSTALLED MODEL", "control"]] : active === "face" ? [["SAFE FACE SWAP", "face"]] : active === "finish" ? [["NATIVE DELIVERY", "native-delivery"], ["H3 2-PASS UPRES", "upres"]] : [];
     recipeSet.forEach(([label, id]) => addRecipe(recipes, label, id, (id !== "upres" || branchGate(node, "h3_upres_model_name").available) && accelerationAvailable(node,id,mode)));
     if (active === "overview") {
@@ -701,7 +725,18 @@ function mount(node) {
       recipes.prepend(format);
     }
     const grid = q("[data-grid]"); grid.className = "h3p-grid"; grid.replaceChildren();
-    const names = fieldNames(group, mode);
+    let names = fieldNames(group, mode);
+    if (active === "speed") {
+      const toggle = document.createElement("label"), check = document.createElement("input");
+      check.type = "checkbox"; check.checked = Boolean(node.properties?.iamccs_speed_manual);
+      check.onchange = () => { node.properties ||= {}; node.properties.iamccs_speed_manual = check.checked; refresh(); };
+      toggle.append(check, " Show advanced/manual speed controls"); recipes.append(toggle);
+      if (!check.checked) {
+        const selected = selectedAcceleration(node);
+        const fields = {native: [], pdd: ["pdd_lora_name"], fasth3: ["turbo_lora_name"], sla: ["turbo_lora_name", "h3_sla_sparsity"], fused: ["fused_turbo_model_name"]}[selected] || ["turbo_mode", "turbo_lora_name"];
+        names = names.filter(name => ["acceleration", ...fields].includes(name));
+      }
+    }
     let layout = FUNCTIONAL_LAYOUT[active];
     if (active === "advanced") {
       const bucket = (name) => name.startsWith("h3_r40_") ? "SEED SCOUT" : name.startsWith("ltx_") ? "LTX DELIVERY" : name.startsWith("v2v_") ? "SOURCE VIDEO" : name.startsWith("flf_") || name.startsWith("motion_context_") ? "CONTINUITY" : name.includes("memory") || name.includes("device") || name.includes("vram") ? "MEMORY & RUNTIME" : "OTHER TECHNICAL";
@@ -715,15 +750,17 @@ function mount(node) {
   }
   function renderTruth(mode) {
     const values = [["Mode / media authority", `${mode} · Shotboard`], ["VRAM preset", friendly(widget(node, "performance_profile")?.value)], ["Memory contract", `${widget(node,"motion_context_window_frames")?.value ?? "—"} frames · ${widget(node,"h3_exact_chunk_rows")?.value ?? "—"} rows`], ["Acceleration engine", friendly(widget(node, "acceleration")?.value)], ["Turbo LoRA", String(widget(node, "turbo_mode")?.value || "off") === "off" ? "OFF" : (widget(node, "turbo_lora_name")?.value || "MISSING")], ["PDD LoRA", widget(node,"pdd_lora_name")?.value || "OFF"], ["Fused model", widget(node, "fused_turbo_model_name")?.value || "OFF"], ["Effective sampling", `${widget(node, "steps")?.value ?? "—"} steps · ${widget(node, "sampler_name")?.value ?? "—"} · ${widget(node, "scheduler")?.value ?? "—"}`], ["Canvas", `${widget(node, "width")?.value ?? "—"} × ${widget(node, "height")?.value ?? "—"}`], ["ControlNet", widget(node, "h3_controlnet_name")?.value || "OFF"], ["Delivery", widget(node, "upscale_enabled")?.value ? widget(node, "upscale_mode")?.value : "NATIVE"]];
-    const list = q(".h3p-truth-list"); list.replaceChildren(); values.forEach(([label, value]) => { const row = document.createElement("div"); row.className = "h3p-truth-row"; row.innerHTML = `<span>${label}</span><b>${String(value ?? "—")}</b>`; list.append(row); });
+    const list = q(".h3p-truth-list"); list.replaceChildren(); values.forEach(([label, value]) => { const row = document.createElement("div"); row.className = "h3p-truth-row"; const caption = document.createElement("span"), content = document.createElement("b"); caption.textContent = label; content.textContent = String(value ?? "—"); row.append(caption, content); list.append(row); });
     const issueList = warnings(mode), health = q(".h3p-health"); health.className = `h3p-health ${issueList.some(([kind]) => kind === "error") ? "error" : issueList.some(([kind]) => kind === "warn") ? "warn" : ""}`; health.innerHTML = issueList.map(([, message]) => `• ${message}`).join("<br>");
   }
   function refresh() {
+    const scrollTop = q(".h3p-main").scrollTop;
     const mode = shotboardMode(node);
     mirrorShotboardAuthority(node);
     node._iamccsSettingsProConnectedClasses = connectedNodes(node).map(nodeClass);
     node._iamccsSettingsProBranchSignature = [...node._iamccsSettingsProConnectedClasses].sort().join("|");
     lastMode = mode; q("[data-mode]").textContent = mode.toUpperCase(); renderRail(mode); renderMain(mode); renderTruth(mode);
+    q(".h3p-main").scrollTop = scrollTop;
   }
   node._iamccsSettingsProRefresh = refresh; const dom = node.addDOMWidget("H3 Settings PRO", "iamccs_h3_settings_pro_panel", root, { serialize: false }); dom.computeSize = (width) => [Math.max(1080, Number(width || 1080)), 680];
   node.setSize?.([1140, 750]); node.color = "#33291d"; node.bgcolor = "#0d131a"; refresh(); node._iamccsSettingsProTimer = window.setInterval(() => {

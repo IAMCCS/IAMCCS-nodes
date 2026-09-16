@@ -3,6 +3,7 @@ from pathlib import Path
 import sys
 import types
 import unittest
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).parents[1]
@@ -41,6 +42,60 @@ spec.loader.exec_module(variant)
 
 
 class MotionContextRoutingTests(unittest.TestCase):
+    def test_chain_config_includes_new_provider_trim_contract(self):
+        config = variant._chain_config("render_1", 1, effective_trim_frames=22, fps=24)
+        self.assertEqual(config["effective_trim_frames"], 22)
+        self.assertEqual(config["clip_index"], 2)
+        self.assertEqual(config["fps"], 24.0)
+
+    def test_provider_call_does_not_let_provider_mutate_original_chain_config(self):
+        config = variant._chain_config(
+            "render_1", 1, effective_trim_frames=22, fps=24
+        )
+
+        class MutatingProvider:
+            def load(self, chain_config):
+                chain_config.pop("effective_trim_frames", None)
+                chain_config["fps"] = 999
+                return (None,)
+
+        with patch.object(variant, "_provider_node", return_value=MutatingProvider):
+            variant._provider_call(
+                "MiniMaxH3AutoChainLoadLatent",
+                "load",
+                chain_config=config,
+            )
+
+        self.assertEqual(config["effective_trim_frames"], 22)
+        self.assertEqual(config["fps"], 24.0)
+
+    def test_provider_call_repairs_missing_effective_trim_frames_for_new_provider(self):
+        legacy_config = {
+            "chain_id": "render_1",
+            "latent_prefix": "h3_context/render_1_clip",
+            "load_clip_index": 1,
+            "save_clip_index": 2,
+            "reset": False,
+        }
+
+        class NewProvider:
+            def apply(self, chain_config):
+                self.seen = chain_config
+                return (chain_config["effective_trim_frames"],)
+
+        provider_class = NewProvider
+        with patch.object(variant, "_provider_node", return_value=provider_class):
+            result = variant._provider_call(
+                "MiniMaxH3AutoChainMotionContext",
+                "apply",
+                chain_config=legacy_config,
+                context_length="22",
+                fps=24.0,
+            )
+
+        self.assertEqual(result[0], 22)
+        self.assertNotIn("effective_trim_frames", legacy_config)
+
     def test_enabled_contract_selects_motion_context_even_without_variant_mirror(self):
         plan = {
             "task_mode": "longvid_motion_context",

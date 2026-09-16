@@ -2108,18 +2108,33 @@ function installEditor(node, reason = "install") {
     const startTime = Number(clip.startTime || 0);
     const dragTargets = [clip, ...linkedClipsFor(clip)].filter((item, index, items) => item && items.indexOf(item) === index);
     const dragStartTimes = new Map(dragTargets.map((item) => [item.id, Number(item.startTime || 0)]));
+    // Bound the entire linked group in its original lanes: no overlap and no
+    // tunnelling through a neighbour, even with snapping disabled.
+    let minDelta = -Infinity, maxDelta = Infinity;
+    for (const target of dragTargets) {
+      const initial = dragStartTimes.get(target.id);
+      const end = initial + Number(target.duration || 0);
+      minDelta = Math.max(minDelta, -initial);
+      for (const other of manifest.clips || []) {
+        if (dragTargets.includes(other) || trackIdForClip(other) !== trackIdForClip(target)) continue;
+        const otherStart = Number(other.startTime || 0);
+        const otherEnd = otherStart + Number(other.duration || 0);
+        if (otherEnd <= initial + 1e-7) minDelta = Math.max(minDelta, otherEnd - initial);
+        else if (otherStart >= end - 1e-7) maxDelta = Math.min(maxDelta, otherStart - end);
+      }
+    }
     const pointerTarget = event.currentTarget || event.target;
     try { pointerTarget?.setPointerCapture?.(event.pointerId); } catch {}
     const move = (ev) => {
       ev.preventDefault?.();
       const dt = clientDeltaToTimelineCssPx(ev.clientX - startX) / pxPerSecond();
       const nextStart = snapTimelineTime(Math.max(0, startTime + dt));
-      const appliedDelta = nextStart - startTime;
+      const appliedDelta = Math.max(minDelta, Math.min(maxDelta, nextStart - startTime));
       for (const target of dragTargets) {
         target.startTime = Math.max(0, Number(dragStartTimes.get(target.id) || 0) + appliedDelta);
         updateClipElementPreview(target, "MOVE");
       }
-      clip.startTime = nextStart;
+      clip.startTime = startTime + appliedDelta;
       updateMonitor();
       if (status) status.textContent = `${dragTargets.length > 1 ? "Move linked clips" : "Move clip"}: ${fmtTime(clip.startTime)} -> ${fmtTime(clip.startTime + Number(clip.duration || 0))}.`;
     };
@@ -2154,6 +2169,16 @@ function installEditor(node, reason = "install") {
       trimIn: Math.max(0, Number(item.trimStart || 0)),
       trimOut: Math.max(Math.max(0.1, Number(item.trimStart || 0)) + 0.1, Number(item.trimEnd || Number(item.trimStart || 0) + Number(item.duration || 1))),
     }]));
+    let minLeftDelta = -Infinity, maxRightDelta = Infinity;
+    for (const target of trimTargets) {
+      const snapshot = trimSnapshots.get(target.id);
+      for (const other of manifest.clips || []) {
+        if (trimTargets.includes(other) || trackIdForClip(other) !== trackIdForClip(target)) continue;
+        const otherStart = Number(other.startTime || 0), otherEnd = otherStart + Number(other.duration || 0);
+        if (otherEnd <= snapshot.start + 1e-7) minLeftDelta = Math.max(minLeftDelta, otherEnd - snapshot.start);
+        else if (otherStart >= snapshot.start + snapshot.duration - 1e-7) maxRightDelta = Math.min(maxRightDelta, otherStart - snapshot.start - snapshot.duration);
+      }
+    }
     const pointerTarget = event.currentTarget || event.target;
     try { pointerTarget?.setPointerCapture?.(event.pointerId); } catch {}
     const move = (ev) => {
@@ -2167,7 +2192,7 @@ function installEditor(node, reason = "install") {
         const maxStart = fixedTimelineEnd - 0.1;
         const rawStart = Math.max(minStart, Math.min(maxStart, primary.start + dt));
         const nextStart = Math.max(minStart, Math.min(maxStart, snapTimelineTime(rawStart)));
-        const appliedDelta = nextStart - primary.start;
+        const appliedDelta = Math.max(minLeftDelta, nextStart - primary.start);
         for (const target of trimTargets) {
           const snapshot = trimSnapshots.get(target.id);
           if (!snapshot) continue;
@@ -2187,7 +2212,7 @@ function installEditor(node, reason = "install") {
         const maxDuration = Math.max(0.1, primarySourceDuration - primary.trimIn);
         const rawEnd = Math.max(primary.start + 0.1, Math.min(primary.start + maxDuration, primary.start + primary.duration + dt));
         const nextEnd = Math.max(primary.start + 0.1, Math.min(primary.start + maxDuration, snapTimelineTime(rawEnd)));
-        const appliedDelta = nextEnd - (primary.start + primary.duration);
+        const appliedDelta = Math.min(maxRightDelta, nextEnd - (primary.start + primary.duration));
         for (const target of trimTargets) {
           const snapshot = trimSnapshots.get(target.id);
           if (!snapshot) continue;

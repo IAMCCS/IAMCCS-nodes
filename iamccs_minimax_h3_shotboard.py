@@ -2491,6 +2491,8 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         requested_steps = max(1, int(_finite_float(steps, 16, 1, 100)))
         fused_turbo_requested = str(acceleration or "").lower() == "matlowai_fused_turbo_manual_sigma"
         fused_turbo_model = str(fused_turbo_model_name or "").strip()
+        fused_convrot = "convrot" in fused_turbo_model.lower()
+        fused_supported_tasks = {"t2va", "i2va", "fl2va", "ref2va"} if fused_convrot else {"t2va"}
         fused_turbo_sigma = str(fused_turbo_sigma_preset or "4_step").strip().lower()
         if fused_turbo_sigma not in {"4_step", "6_step", "8_step"}:
             fused_turbo_sigma = "4_step"
@@ -2499,9 +2501,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 raise ValueError("Fused Fast H3 needs a selected installed MiniMax H3 model in diffusion_models")
             if requested_turbo_mode != "off" or pdd_requested or secondary_lora_requested:
                 raise ValueError("Fused Fast H3 is a complete model profile: turn Turbo, PDD and secondary LoRA off")
-            if str(task_mode or "auto_from_timeline").lower() not in {
-                "t2va", "auto_from_timeline"
-            }:
+            if str(task_mode or "auto_from_timeline").lower() not in fused_supported_tasks | {"auto_from_timeline"}:
                 raise ValueError(
                     "Fused Fast H3 is restricted to T2VA. "
                     "Use the standard H3 backend for every image, reference, V2VA, LongVid and Multi-Shot route."
@@ -2691,8 +2691,8 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "model_name": fused_turbo_model,
             "sigma_preset": fused_turbo_sigma,
             "steps": {"4_step": 4, "6_step": 6, "8_step": 8}[fused_turbo_sigma],
-            "sampler": "euler",
-            "scheduler": "manual_sigmas",
+            "sampler": "res_multistep" if fused_convrot else "euler",
+            "scheduler": "simple" if fused_convrot else "manual_sigmas",
             "required_shifts": {"video": 12.0, "audio": 3.0},
             "source": "shotboard",
         }
@@ -2700,7 +2700,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             unsupported = sorted({
                 str(chunk.get("task_mode", "")).lower()
                 for chunk in plan.get("chunks", [])
-                if str(chunk.get("task_mode", "")).lower() != "t2va"
+                if str(chunk.get("task_mode", "")).lower() not in fused_supported_tasks
             })
             if unsupported:
                 raise ValueError(
@@ -2710,7 +2710,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             # This profile is deliberately explicit, not a hidden override:
             # the UI action populates exactly these values before Queue.
             plan["sampling"].update({
-                "steps": plan["fused_turbo_preview"]["steps"], "sampler_name": "euler",
+                "steps": plan["fused_turbo_preview"]["steps"], "sampler_name": "res_multistep" if fused_convrot else "euler",
                 "scheduler": "simple", "denoise": 1.0, "shift_video": 12.0, "shift_audio": 3.0,
             })
         plan["fasth3"] = {

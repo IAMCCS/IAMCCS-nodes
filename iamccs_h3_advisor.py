@@ -132,8 +132,9 @@ def validate_settings(settings, task=None):
         name = settings.get("fused_turbo_model_name", "")
         if not name or not folder_paths.get_full_path("diffusion_models", name):
             raise ValueError("Fused Fast H3: select an installed fused checkpoint in Fused model, then analyze again.")
-        if str(task) not in {"t2va", "auto_from_timeline"} or settings.get("secondary_lora_enabled"):
-            raise ValueError("Fused Fast H3 requires T2VA and no secondary style LoRA.")
+        supported = {"t2va", "i2va", "fl2va", "ref2va", "auto_from_timeline"} if "convrot" in str(name).lower() else {"t2va", "auto_from_timeline"}
+        if str(task) not in supported or settings.get("secondary_lora_enabled"):
+            raise ValueError("This fused checkpoint requires a supported task and no secondary style LoRA.")
     fields = []
     if settings.get("turbo_mode", "off") != "off":
         fields.append(("turbo_lora_name", "turbo"))
@@ -280,7 +281,8 @@ def propose(request, inventory):
             common.update(upscale_enabled=False, upscale_mode="off")
             warnings.append("The current latent delivery does not match a face crop. Proposals explicitly switch to native output; RTX final is available when connected.")
     fused = settings.get("acceleration") == "matlowai_fused_turbo_manual_sigma"
-    if fused and (task not in {"t2va", "i2va", "fl2va", "auto_from_timeline"} or family != "fl2va" or settings.get("secondary_lora_enabled")):
+    fused_modes = {"t2va", "i2va", "fl2va", "ref2va", "auto_from_timeline"} if "convrot" in str(settings.get("fused_turbo_model_name", "")).lower() else {"t2va", "auto_from_timeline"}
+    if fused and (task not in fused_modes or settings.get("secondary_lora_enabled")):
         warnings.append("The current fused branch cannot satisfy this task/style selection. Proposals explicitly switch to the connected native base.")
         fused = False
     fused_model = settings.get("fused_turbo_model_name", "")
@@ -331,7 +333,7 @@ def propose(request, inventory):
             sigma = sigma if sigma in {"4_step", "6_step", "8_step"} else "4_step"
             values.update(acceleration="matlowai_fused_turbo_manual_sigma", fused_turbo_model_name=fused_model,
                           fused_turbo_sigma_preset=sigma, turbo_mode="off", steps=int(sigma.split("_")[0]),
-                          sampler_name="euler", scheduler="simple", denoise=1.0, shift_video=12.0, shift_audio=3.0)
+                          sampler_name="res_multistep" if "convrot" in str(fused_model).lower() else "euler", scheduler="simple", denoise=1.0, shift_video=12.0, shift_audio=3.0)
             notes.append("Complete fused checkpoint + matching manual-sigma recipe. Filename identifies the fused asset; no GPU-specific filename is assumed.")
         elif eligible and use_speed:
             asset = eligible[0]

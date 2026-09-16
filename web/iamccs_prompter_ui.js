@@ -646,6 +646,7 @@ function mountPrompter(node) {
     aiPanel.append(aiScopeLabel, aiDirectionLabel);
     const aiProvider = el("select");
     aiProvider.innerHTML = `<option value="ollama">Ollama / local</option><option value="openai_compatible">OpenAI-compatible</option><option value="gemini">Google Gemini</option><option value="anthropic">Anthropic</option>`;
+    aiProvider.add(new Option("LM Studio / local", "lm_studio"), 1);
     const aiBaseUrl = el("input");
     aiBaseUrl.placeholder = "Provider base URL";
     const aiModel = el("input");
@@ -840,6 +841,7 @@ function mountPrompter(node) {
 
     const aiDefaults = {
         ollama: { baseUrl: "http://127.0.0.1:11434", model: "" },
+        lm_studio: { baseUrl: "http://localhost:1234/v1", model: "" },
         openai_compatible: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
         gemini: { baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-2.5-flash" },
         anthropic: { baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5" },
@@ -859,11 +861,13 @@ function mountPrompter(node) {
     };
     const renderAIProviderChrome = () => {
         const isOllama = aiProvider.value === "ollama";
+        const isLocal = isOllama || aiProvider.value === "lm_studio";
         keyLabel.hidden = isOllama;
-        connectOllamaBtn.hidden = !isOllama;
-        refreshModelsBtn.hidden = !isOllama;
-        aiProviderChip.textContent = isOllama ? "OLLAMA · LOCAL" : "CLOUD / API";
-        aiProviderChip.classList.toggle("ok", isOllama);
+        connectOllamaBtn.hidden = !isLocal;
+        refreshModelsBtn.hidden = !isLocal;
+        connectOllamaBtn.textContent = isOllama ? "CONNECT OLLAMA" : "CONNECT LM STUDIO";
+        aiProviderChip.textContent = isLocal ? `${isOllama ? "OLLAMA" : "LM STUDIO"} · LOCAL` : "CLOUD / API";
+        aiProviderChip.classList.toggle("ok", isLocal);
         aiBaseUrl.placeholder = isOllama ? "http://127.0.0.1:11434" : "Provider API base URL";
     };
     const aiVisualFiles = [];
@@ -937,13 +941,15 @@ function mountPrompter(node) {
         })).filter((item) => item.role !== "ignore");
     };
     const loadOllamaModels = async ({ quiet = false } = {}) => {
-        if (aiProvider.value !== "ollama") return [];
+        if (!["ollama", "lm_studio"].includes(aiProvider.value)) return [];
+        const providerName = aiProvider.value === "lm_studio" ? "LM Studio" : "Ollama";
         refreshModelsBtn.disabled = true;
         connectOllamaBtn.disabled = true;
         connectOllamaBtn.textContent = "CONNECTING…";
-        if (!quiet) aiStatus.textContent = "Reading installed Ollama models…";
+        if (!quiet) aiStatus.textContent = `Reading ${providerName} models…`;
         try {
-            const response = await api.fetchApi(`/iamccs/prompter/ollama/models?base_url=${encodeURIComponent(aiBaseUrl.value.trim() || "http://127.0.0.1:11434")}`);
+            const endpoint = aiProvider.value === "lm_studio" ? "lmstudio" : "ollama";
+            const response = await api.fetchApi(`/iamccs/prompter/${endpoint}/models?base_url=${encodeURIComponent(aiBaseUrl.value.trim() || aiDefaults[aiProvider.value].baseUrl)}`);
             const data = await response.json();
             if (!response.ok || !data?.ok) throw new Error(data?.error || `HTTP ${response.status}`);
             const names = (data.models || []).map((item) => String(item.name || "")).filter(Boolean);
@@ -953,19 +959,19 @@ function mountPrompter(node) {
             if ((!aiModel.value.trim() || !names.includes(aiModel.value.trim())) && names.length) aiModel.value = names[0];
             persistAI();
             aiStatus.className = "iamccs-pr-ai-status ok";
-            aiStatus.textContent = names.length ? `${names.length} Ollama model(s) available. Selected: ${aiModel.value}.` : "Ollama is reachable but has no installed models.";
-            connectOllamaBtn.textContent = "OLLAMA CONNECTED";
+            aiStatus.textContent = names.length ? `${names.length} ${providerName} model(s) available. Selected: ${aiModel.value}.` : `${providerName} is reachable but exposes no models.`;
+            connectOllamaBtn.textContent = `${providerName.toUpperCase()} CONNECTED`;
             connectOllamaBtn.style.borderColor = "#5F9C79";
             connectOllamaBtn.style.background = "#17352D";
-            aiProviderChip.textContent = "OLLAMA · READY";
+            aiProviderChip.textContent = `${providerName.toUpperCase()} · READY`;
             return names;
         } catch (error) {
             aiStatus.className = "iamccs-pr-ai-status error";
-            aiStatus.textContent = `Ollama unavailable: ${error?.message || error}`;
-            connectOllamaBtn.textContent = "OLLAMA ERROR · RETRY";
+            aiStatus.textContent = `${providerName} unavailable: ${error?.message || error}`;
+            connectOllamaBtn.textContent = `${providerName.toUpperCase()} ERROR · RETRY`;
             connectOllamaBtn.style.borderColor = "#B76464";
             connectOllamaBtn.style.background = "#3B2020";
-            aiProviderChip.textContent = "OLLAMA · ERROR";
+            aiProviderChip.textContent = `${providerName.toUpperCase()} · ERROR`;
             return [];
         } finally {
             refreshModelsBtn.disabled = false;
@@ -979,7 +985,7 @@ function mountPrompter(node) {
         aiApiKey.value = "";
         persistAI();
         renderAIProviderChrome();
-        if (aiProvider.value === "ollama") await loadOllamaModels();
+        if (["ollama", "lm_studio"].includes(aiProvider.value)) await loadOllamaModels();
     };
     [aiBaseUrl, aiModel, aiTemperature].forEach((control) => control.addEventListener("change", persistAI));
     refreshModelsBtn.onclick = () => loadOllamaModels();
@@ -1515,8 +1521,8 @@ function mountPrompter(node) {
                 .map(key => String(project.sections?.[key] || "").trim()).filter(Boolean).join("\n");
             const result = targetIsGlobal && prompt.trim()
                 ? shotboard._iamccsMiniMaxInjectPrompt({prompt,target:"global",mergePolicy:project.merge_policy})
-                : (!activeLocals.length && localFallback
-                    ? shotboard._iamccsMiniMaxInjectPrompt({prompt:localFallback,target:project.injection_target,mergePolicy:project.merge_policy})
+                : (!activeLocals.length && (localFallback || prompt.trim())
+                    ? shotboard._iamccsMiniMaxInjectPrompt({prompt:localFallback || prompt,target:project.injection_target,mergePolicy:project.merge_policy})
                     : null);
             // A Shotboard rebuild can legitimately replace segment ids while
             // preserving the visible chronological slots.  Treat the stable id
@@ -1619,7 +1625,7 @@ function mountPrompter(node) {
     renderSections();
     renderAIProviderChrome();
     commit();
-    if (aiProvider.value === "ollama") setTimeout(() => loadOllamaModels({ quiet: true }), 0);
+    if (["ollama", "lm_studio"].includes(aiProvider.value)) setTimeout(() => loadOllamaModels({ quiet: true }), 0);
 }
 
 app.registerExtension({
