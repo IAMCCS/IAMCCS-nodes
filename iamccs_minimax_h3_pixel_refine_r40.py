@@ -174,7 +174,8 @@ class IAMCCS_MiniMaxH3PixelRefineR40:
         if output.exists():
             raise FileExistsError(f"R40 segment already exists: {output}. Start a new render rather than overwriting it")
         visible = int(native_frames.shape[0])
-        join = max(0, int(join_trim_frames))
+        from .iamccs_minimax_h3_shotboard import _delivery_join_frames
+        join = _delivery_join_frames(cine_linx, index, join_trim_frames)
         frames = visible - (1 if join == 1 else 0)
         audio = _trim_audio_frames(native_audio, 1, H3_FPS) if join == 1 else native_audio
         stage2_report = "native/off"

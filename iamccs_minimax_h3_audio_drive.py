@@ -504,6 +504,13 @@ class IAMCCS_MiniMaxH3AtomicAudioDrive:
     ):
         shotplan, chunk, index = _resolve_chunk(cine_linx, segment_index)
         behavior, plan_behavior, migrated = _resolve_behavior(cine_linx, audio_behavior)
+        if shotplan.get("task_mode") == "v2va_face_swap" and behavior == BEHAVIOR_LOCKED:
+            from .iamccs_h3_face_swap import FACE_SWAP_LATENT
+            crop = av_latent.get(FACE_SWAP_LATENT, {})
+            audio = crop.get("audio")
+            if not _is_audio(audio):
+                raise ValueError("Face Swap is missing its pre-sliced locked source audio.")
+            return av_latent, None, audio, None, behavior, "Face Swap: source audio already locked in the masked AV latent"
         task = _effective_task(cine_linx, chunk)
         shotboard_mode = str(shotplan.get("task_mode", "") or "").strip().lower()
         lipsync_contract = shotplan.get("lipsync") if isinstance(shotplan.get("lipsync"), dict) else {}

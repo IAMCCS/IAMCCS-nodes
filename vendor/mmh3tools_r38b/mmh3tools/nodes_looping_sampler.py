@@ -254,6 +254,8 @@ def _run_sampling(noise, guider, sampler, sigmas, av_init,
 def _chunk_noise(noise, index):
     """A distinct noise per chunk. Reusing one object gives every chunk the
     same noise, which reads as the model refusing to advance."""
+    if hasattr(noise, "for_window"):
+        return noise.for_window(index)
     if index == 0 or not hasattr(noise, "seed"):
         return noise
     n = copy.copy(noise)

@@ -166,13 +166,17 @@ function injectionSelection(board) {
   return { anchorIndex, frames: frames.slice(anchorIndex) };
 }
 
-function buildInjectionTimeline(frames, slotSeconds, prompt, negativePrompt, startSlot = 0) {
+function buildInjectionTimeline(frames, slotSeconds, prompt, negativePrompt, startSlot = 0, h3Plan = {}) {
   const fps = 24;
   const seconds = Math.max(0.25, Number(slotSeconds) || 5);
   const slotFrames = Math.max(1, Math.round(seconds * fps));
   startSlot = Math.max(0, Number(startSlot) || 0);
   const segments = frames.map((frame, index) => {
-    const localPrompt = frame.role === "source" && frame.prompt === "Source frame" ? "" : String(frame.prompt || "");
+    const qwenPrompt = frame.role === "source" && frame.prompt === "Source frame" ? "" : String(frame.prompt || "");
+    const h3Local = String(frame.h3_local_prompt || h3Plan.h3_local_prompt || "").trim();
+    const h3Transition = String(frame.h3_transition_prompt || h3Plan.h3_transition_prompt || "").trim();
+    const h3Locks = String(frame.h3_continuity_locks || h3Plan.h3_continuity_locks || "").trim();
+    const localPrompt = [h3Local || qwenPrompt, h3Transition ? `Transition: ${h3Transition}` : "", h3Locks ? `Continuity locks: ${h3Locks}` : ""].filter(Boolean).join("\n");
     const absoluteIndex = startSlot + index;
     const start = absoluteIndex * slotFrames;
     return {
@@ -182,6 +186,8 @@ function buildInjectionTimeline(frames, slotSeconds, prompt, negativePrompt, sta
       imageTruthPath: String(frame.filename || ""), fileName: fileParts(frame.filename).filename,
       prompt: localPrompt, local_prompt: localPrompt, relay_prompt: localPrompt, note: localPrompt,
       use_guide: true, use_prompt: Boolean(localPrompt), guideStrength: 1, guide_strength: 1,
+      qwen_frame_prompt: qwenPrompt, h3_local_prompt: h3Local, h3_transition_prompt: h3Transition,
+      h3_continuity_locks: h3Locks, h3_mode: String(frame.h3_mode || h3Plan.recommended_mode || "auto"),
       force: 1, source: TYPE, nextframe_selected: true,
     };
   });
@@ -263,6 +269,7 @@ function installStyle() {
     .iamccs-nfb-reference-deck{margin-top:10px;border:1px solid #29374b;border-radius:12px;background:#0d131c;overflow:hidden}.iamccs-nfb-reference-head{display:flex;justify-content:space-between;align-items:center;padding:7px 10px;border-bottom:1px solid #243043}.iamccs-nfb-reference-head b{font-size:10px;letter-spacing:.09em;text-transform:uppercase;color:#b9c7d8}.iamccs-nfb-reference-head span{font-size:9px;color:#728096}.iamccs-nfb-reference-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:8px}.iamccs-nfb-reference-card{display:grid;grid-template-columns:112px minmax(0,1fr);height:88px;border:1px solid #28374a;border-radius:9px;background:#101823;overflow:hidden;transition:opacity .15s,border-color .15s}.iamccs-nfb-reference-card.disabled{opacity:.48}.iamccs-nfb-reference-card.drag{border-color:var(--cyan);box-shadow:inset 0 0 0 1px #4ee1d255}.iamccs-nfb-reference-thumb{position:relative;background:#070a0f;border-right:1px solid #28374a;overflow:hidden}.iamccs-nfb-reference-thumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}.iamccs-nfb-reference-thumb .empty{position:absolute;inset:0;display:grid;place-items:center;text-align:center;color:#627188;font-size:9px;padding:8px}.iamccs-nfb-reference-card.has-image .empty{display:none}.iamccs-nfb-reference-badge{position:absolute;left:5px;top:5px;border:1px solid #ffffff26;border-radius:5px;background:#05080cce;color:#dce7f4;padding:3px 5px;font-size:8px;font-weight:800}.iamccs-nfb-reference-info{min-width:0;display:grid;grid-template-rows:auto auto 1fr;padding:7px 8px;gap:5px}.iamccs-nfb-reference-top{display:flex;align-items:center;justify-content:space-between;gap:7px}.iamccs-nfb-reference-toggle{display:flex;align-items:center;gap:4px;color:#8ff0e7;font-size:9px;white-space:nowrap}.iamccs-nfb-reference-toggle input{accent-color:#31cdbf}.iamccs-nfb-reference-role{width:100%;height:25px;border:1px solid #304158;border-radius:6px;background:#0a1018;color:#dbe5ef;padding:2px 6px;font-size:9px}.iamccs-nfb-reference-bottom{display:flex;align-items:end;gap:5px;min-width:0}.iamccs-nfb-reference-file{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#758398;font-size:8px}.iamccs-nfb-reference-bottom button{border:1px solid #34465e;border-radius:6px;background:#182332;color:#d7e1eb;padding:3px 7px;font-size:8px}.iamccs-nfb-reference-bottom button.remove{flex:0 0 auto;color:#f29aa2;border-color:#4a3039}
     .iamccs-nfb-prompts{display:grid;grid-template-columns:1.45fr 1fr;gap:10px;margin-top:13px}.iamccs-nfb-prompt{border:1px solid var(--line);background:#0d131c;border-radius:12px;overflow:hidden}.iamccs-nfb-prompt.negative{border-color:#3a2a34}.iamccs-nfb-prompt-head{display:flex;align-items:center;justify-content:space-between;padding:9px 12px;border-bottom:1px solid #202a38;color:#bcc7d5;font-size:11px;text-transform:uppercase;letter-spacing:.08em}.iamccs-nfb-prompt.negative .iamccs-nfb-prompt-head{color:#cfadb7;border-bottom-color:#35252e}.iamccs-nfb-prompt textarea{display:block;width:100%;height:92px;resize:vertical;border:0;outline:0;background:#0b1018;color:#eef3f8;padding:12px 13px;line-height:1.45;user-select:text}.iamccs-nfb-prompt.negative textarea{background:#120d13;color:#eadde1}.iamccs-nfb-prompt textarea::placeholder{color:#647084}.iamccs-nfb-actions{display:flex;justify-content:space-between;align-items:center;padding-top:12px;gap:10px}.iamccs-nfb-primary{border:0;border-radius:10px;padding:11px 19px;background:linear-gradient(135deg,#52eadb,#23b9b0);color:#041312;font-weight:800;box-shadow:0 8px 24px #27cfc139}.iamccs-nfb-primary:hover{filter:brightness(1.08)}.iamccs-nfb-primary:disabled{opacity:.45;cursor:wait}.iamccs-nfb-use{border:1px solid #4ee1d276;border-radius:10px;padding:10px 15px;background:#0d2828;color:#8ef6eb;font-weight:700}.iamccs-nfb-use:disabled{opacity:.35;cursor:not-allowed}
     .iamccs-nfb-prompt-head button{border:1px solid #335166;border-radius:7px;background:#122431;color:#75e6dc;padding:4px 7px;font-size:9px;text-transform:uppercase;letter-spacing:.05em}.iamccs-nfb-prompt-head button:hover{border-color:#53bcb3;background:#17343d}
+    .iamccs-nfb-h3convert{margin-top:9px;border:1px solid #315d57;border-radius:10px;background:#0b1718;padding:9px}.iamccs-nfb-h3head{display:flex;align-items:center;gap:8px;margin-bottom:7px}.iamccs-nfb-h3head b{color:#88eee2;font-size:10px;letter-spacing:.07em}.iamccs-nfb-h3head select{margin-left:auto;height:29px;border:1px solid #315d57;border-radius:6px;background:#081112;color:#ccece8;padding:0 7px}.iamccs-nfb-h3head button{height:29px;border:1px solid #45a99e;border-radius:6px;background:#123b38;color:#a6fff5;font-weight:800}.iamccs-nfb-h3grid{display:grid;grid-template-columns:1.2fr 1fr 1fr;gap:7px}.iamccs-nfb-h3grid label{display:grid;gap:3px;color:#759994;font-size:8px;font-weight:800}.iamccs-nfb-h3grid textarea{height:62px;resize:vertical;border:1px solid #284844;border-radius:6px;background:#071011;color:#dff8f5;padding:7px;font-size:10px;user-select:text}
     .iamccs-nfb-prompt-tools{display:flex;gap:6px}.iamccs-nfb-prompt-head button.ai{border-color:#6c4db4;background:linear-gradient(135deg,#241d40,#182d3d);color:#cbb7ff}.iamccs-nfb-ai{display:none;margin-top:10px;border:1px solid #3a315d;border-radius:12px;background:linear-gradient(145deg,#151225,#0d151f);padding:11px;box-shadow:inset 0 1px #ffffff0a}.iamccs-nfb.ai-open .iamccs-nfb-ai{display:block}.iamccs-nfb-ai-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:9px}.iamccs-nfb-ai-head b{font-size:12px;color:#ddd2ff}.iamccs-nfb-ai-head span{font-size:10px;color:#81759f}.iamccs-nfb-ai-fields{display:grid;grid-template-columns:150px 1fr 1fr 38px;gap:7px}.iamccs-nfb-ai input,.iamccs-nfb-ai select{width:100%;height:34px;border:1px solid #393552;border-radius:7px;background:#090d15;color:#e8e4f3;padding:6px 8px;outline:none;user-select:text}.iamccs-nfb-ai input:focus,.iamccs-nfb-ai select:focus{border-color:#7f6cc0}.iamccs-nfb-ai .refresh{border:1px solid #423a61;border-radius:7px;background:#19152a;color:#c8baf4}.iamccs-nfb-ai-foot{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:8px}.iamccs-nfb-ai-note{font-size:10px;color:#887f9e}.iamccs-nfb-ai-run{border:1px solid #816aca;border-radius:8px;background:linear-gradient(135deg,#533f93,#296372);color:white;padding:7px 12px;font-weight:750}.iamccs-nfb-ai-run:disabled{opacity:.45;cursor:wait}.iamccs-nfb-ai-progress{display:none;align-items:center;gap:7px;margin-top:8px;padding:7px 9px;border:1px solid #514579;border-radius:8px;background:#0b0d19;color:#bdb1df;font-size:10px}.iamccs-nfb-ai-progress.active{display:flex}.iamccs-nfb-ai-progress i{width:14px;height:14px;border:2px solid #6f638e;border-top-color:#6bf0e2;border-radius:50%;animation:nfbSpin .75s linear infinite}.iamccs-nfb-ai-progress b{margin-left:auto;color:#7ff0e5;font-variant-numeric:tabular-nums}@keyframes nfbSpin{to{transform:rotate(360deg)}}
     .iamccs-nfb-idea-overlay{position:absolute;z-index:35;inset:0;display:none;align-items:center;justify-content:center;padding:28px;background:#03060bd9;backdrop-filter:blur(12px)}.iamccs-nfb.idea-open .iamccs-nfb-idea-overlay{display:flex}.iamccs-nfb-idea-dialog{width:min(920px,96%);max-height:calc(100% - 28px);display:flex;flex-direction:column;border:1px solid #4b4270;border-radius:16px;overflow:hidden;background:radial-gradient(circle at 75% -15%,#29315a 0,transparent 35%),linear-gradient(155deg,#171329,#0b121c 58%,#090d14);box-shadow:0 28px 90px #000c}.iamccs-nfb-idea-head{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;padding:15px 17px;border-bottom:1px solid #393453;background:#111321bd}.iamccs-nfb-idea-head h3{margin:0;color:#eee9ff;font-size:16px}.iamccs-nfb-idea-head p{margin:3px 0 0;color:#938aa9;font-size:10px}.iamccs-nfb-idea-body{flex:1 1 auto;min-height:0;display:grid;grid-template-columns:310px minmax(0,1fr)}.iamccs-nfb-idea-form{padding:15px;border-right:1px solid #343149;background:#0c1019b8;overflow:auto}.iamccs-nfb-idea-form label{display:block;margin-bottom:5px;color:#aca2c3;font-size:10px;text-transform:uppercase;letter-spacing:.07em}.iamccs-nfb-idea-form textarea{width:100%;height:150px;resize:vertical;border:1px solid #3e3958;border-radius:9px;outline:0;background:#080c14;color:#f0edf8;padding:11px;line-height:1.45;user-select:text}.iamccs-nfb-idea-form textarea:focus{border-color:#8673cc}.iamccs-nfb-idea-controls{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}.iamccs-nfb-idea-controls select{width:100%;height:34px;border:1px solid #3b3853;border-radius:7px;background:#0a0e17;color:#e5e0ef;padding:5px 8px}.iamccs-nfb-idea-provider{margin-top:11px;padding:9px;border:1px solid #302d45;border-radius:8px;background:#11131d;color:#8f87a4;font-size:9px;line-height:1.45}.iamccs-nfb-idea-provider b{color:#c8bdea}.iamccs-nfb-idea-generate{width:100%;margin-top:11px;border:1px solid #8b72db;border-radius:9px;background:linear-gradient(135deg,#654bb4,#257681);color:#fff;padding:10px;font-weight:800}.iamccs-nfb-idea-generate:disabled{opacity:.45;cursor:wait}.iamccs-nfb-idea-warning{margin-top:8px;color:#7e7691;font-size:9px;line-height:1.4}.iamccs-nfb-idea-progress{display:none;align-items:center;gap:8px;margin-top:10px;padding:8px 9px;border:1px solid #4c426c;border-radius:8px;color:#beb2dc;font-size:10px}.iamccs-nfb-idea-progress.active{display:flex}.iamccs-nfb-idea-progress i{width:15px;height:15px;border:2px solid #625879;border-top-color:#65f0e2;border-radius:50%;animation:nfbSpin .75s linear infinite}.iamccs-nfb-idea-progress b{margin-left:auto;color:#71eadf;font-variant-numeric:tabular-nums}.iamccs-nfb-idea-results{min-height:0;overflow:auto;padding:14px;display:grid;grid-template-columns:1fr 1fr;align-content:start;gap:10px}.iamccs-nfb-idea-empty{grid-column:1/-1;min-height:210px;display:grid;place-items:center;text-align:center;border:1px dashed #3b3752;border-radius:11px;color:#777087;padding:25px}.iamccs-nfb-idea-card{border:1px solid #38354e;border-radius:10px;overflow:hidden;background:#10141e;box-shadow:0 8px 20px #0005}.iamccs-nfb-idea-card-head{display:flex;align-items:center;gap:8px;padding:9px 10px;border-bottom:1px solid #302e43;background:#171827}.iamccs-nfb-idea-card-num{flex:0 0 23px;width:23px;height:23px;border-radius:6px;display:grid;place-items:center;background:#58439a;color:#fff;font-size:9px;font-weight:850}.iamccs-nfb-idea-card-head b{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e6e0f2;font-size:11px}.iamccs-nfb-idea-card-body{padding:10px}.iamccs-nfb-idea-beat{min-height:29px;color:#a9a1b8;font-size:9px;line-height:1.45}.iamccs-nfb-idea-prompt{max-height:94px;overflow:auto;margin-top:8px;padding:8px;border-radius:7px;background:#080d14;color:#cbd4df;font-size:9px;line-height:1.45;user-select:text}.iamccs-nfb-idea-card-actions{display:flex;gap:6px;margin-top:9px}.iamccs-nfb-idea-card-actions button{flex:1;border:1px solid #3d3b55;border-radius:7px;background:#1a1d2a;color:#c8c1d5;padding:6px;font-size:9px}.iamccs-nfb-idea-card-actions button.use{border-color:#397c78;background:#12302f;color:#88eee4;font-weight:750}.iamccs-nfb-idea-close{border:1px solid #403b59;border-radius:8px;background:#1b1b2a;color:#d8d2e3;padding:7px 10px}
     .iamccs-nfb-board{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;overflow:hidden;border-top:1px solid var(--line);padding:15px 16px 17px;background:#090d13}.iamccs-nfb-board-head{flex:0 0 auto;display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}.iamccs-nfb-board-title{font-size:12px;font-weight:750;letter-spacing:.08em;text-transform:uppercase}.iamccs-nfb-count{color:var(--muted);font-weight:500;margin-left:7px}.iamccs-nfb-board-tools{display:flex;gap:7px}.iamccs-nfb-board-tools button,.iamccs-nfb-injectbar button{border:1px solid var(--line);background:#111823;color:#aeb9c8;border-radius:8px;padding:6px 9px;font-size:11px}.iamccs-nfb-injectbar{flex:0 0 auto;display:flex;align-items:center;gap:7px;margin-bottom:11px;padding:8px 9px;border:1px solid #223247;border-radius:10px;background:#0d141e}.iamccs-nfb-injectbar-label{margin-right:3px;color:#7f8da1;font-size:10px;text-transform:uppercase;letter-spacing:.08em}.iamccs-nfb-injectbar button.target.on{border-color:#3e948d;background:#12302f;color:#8cf2e8}.iamccs-nfb-injectbar button.inject{margin-left:auto;border-color:#55ded0;background:linear-gradient(135deg,#183f3d,#123032);color:#8ff5eb;font-weight:750}
@@ -434,6 +441,7 @@ function mount(node) {
         <section class="iamccs-nfb-prompt"><div class="iamccs-nfb-prompt-head"><span>Direction for the next scene</span><div class="iamccs-nfb-prompt-tools"><button type="button" data-action="prompt-template">Director template</button><button type="button" class="ai" data-action="idea-open">✦ Idea AI</button><button type="button" class="ai" data-action="ai-toggle">✦ AI Assistance</button></div></div><textarea data-role="positive" placeholder="Write a rough direction or a complete Next Scene prompt..."></textarea></section>
         <section class="iamccs-nfb-prompt negative"><div class="iamccs-nfb-prompt-head"><span>Avoid in the result</span><span>Negative prompt</span></div><textarea data-role="negative" placeholder="Artifacts, unwanted text, anatomy errors..."></textarea></section>
       </div>
+      <section class="iamccs-nfb-h3convert"><div class="iamccs-nfb-h3head"><b>MINIMAX H3 MOTION PROMPT</b><select data-h3="mode"><option value="auto">AUTO</option><option value="i2va">I2VA</option><option value="fl2va">FL2VA · FIRST/LAST</option><option value="longvid_guides">LONGVID / MULTI-SHOT</option></select><button type="button" data-action="h3-convert">✦ Convert prompts + images for H3</button></div><div class="iamccs-nfb-h3grid"><label>H3 LOCAL MOTION<textarea data-h3="local" placeholder="Moving action, acting, camera and timing…"></textarea></label><label>TRANSITION<textarea data-h3="transition" placeholder="Source → target motion path…"></textarea></label><label>CONTINUITY LOCKS<textarea data-h3="locks" placeholder="Identity, wardrobe, geography, light…"></textarea></label></div></section>
       <section class="iamccs-nfb-ai"><div class="iamccs-nfb-ai-head"><b>✦ Qwen 2511 Prompt Director</b><span>API keys are used once and never saved</span></div><div class="iamccs-nfb-ai-fields"><select data-ai="provider"><option value="ollama">Ollama · local</option><option value="openai_compatible">OpenAI / compatible</option><option value="anthropic">Claude / Anthropic</option></select><input data-ai="base-url" placeholder="Provider base URL"><input data-ai="model" list="iamccs-nfb-ai-models" placeholder="Model"><button class="refresh" data-action="ai-models" title="Refresh Ollama models">↻</button><input data-ai="api-key" type="password" autocomplete="off" placeholder="API key (not stored)" style="grid-column:2/4"><datalist id="iamccs-nfb-ai-models"></datalist></div><div class="iamccs-nfb-ai-foot"><span class="iamccs-nfb-ai-note">Turns the current text into a concise, continuity-safe prompt with the exact Next Scene trigger.</span><button class="iamccs-nfb-ai-run" data-action="ai-run">Optimize prompt</button></div><div class="iamccs-nfb-ai-progress" data-ai="progress"><i></i><span>AI Prompt Director is working…</span><b data-ai="seconds">0 s</b></div></section>
       <div class="iamccs-nfb-actions"><button class="iamccs-nfb-use" data-action="use-result" disabled>Use generated frame as next source</button><button class="iamccs-nfb-primary" data-action="generate">Generate next scene</button></div>
     </main>
@@ -461,6 +469,11 @@ function mount(node) {
   const aiRun = root.querySelector('[data-action="ai-run"]');
   const aiProgress = root.querySelector('[data-ai="progress"]');
   const aiSeconds = root.querySelector('[data-ai="seconds"]');
+  const h3Mode = root.querySelector('[data-h3="mode"]');
+  const h3Local = root.querySelector('[data-h3="local"]');
+  const h3Transition = root.querySelector('[data-h3="transition"]');
+  const h3Locks = root.querySelector('[data-h3="locks"]');
+  const h3Convert = root.querySelector('[data-action="h3-convert"]');
   const ideaOverlay = root.querySelector(".iamccs-nfb-idea-overlay");
   const ideaLogline = root.querySelector('[data-idea="logline"]');
   const ideaCount = root.querySelector('[data-idea="count"]');
@@ -481,6 +494,10 @@ function mount(node) {
 
   let board = parseBoard(read(node, "storyboard_json", "{}"));
   board.inject_targets = injectTargetsOf(board);
+  h3Mode.value = ["auto", "i2va", "fl2va", "longvid_guides"].includes(String(board.h3_plan?.recommended_mode)) ? String(board.h3_plan.recommended_mode) : "auto";
+  h3Local.value = String(board.h3_plan?.h3_local_prompt || "");
+  h3Transition.value = String(board.h3_plan?.h3_transition_prompt || "");
+  h3Locks.value = String(board.h3_plan?.h3_continuity_locks || "");
   function normalizeAnchor() {
     const frames = framesOf(board);
     let index = frames.findIndex((frame) => String(frame?.id || "") === String(board.inject_anchor_id || ""));
@@ -628,6 +645,16 @@ function mount(node) {
     board.schema = "iamccs.next_frame_builder.storyboard.v1";
     write(node, "storyboard_json", JSON.stringify(board)); renderBoard();
   }
+  function persistH3Plan() {
+    board.h3_plan = {
+      recommended_mode: h3Mode.value || "auto",
+      h3_local_prompt: h3Local.value.trim(),
+      h3_transition_prompt: h3Transition.value.trim(),
+      h3_continuity_locks: h3Locks.value.trim(),
+    };
+    write(node, "storyboard_json", JSON.stringify(board));
+  }
+  [h3Mode, h3Local, h3Transition, h3Locks].forEach((control) => control.addEventListener("change", persistH3Plan));
 
   function persistAiSettings() {
     node.properties = node.properties || {};
@@ -705,6 +732,41 @@ function mount(node) {
     for (const item of activeReferences()) specs.push({ path: item.path, name: `Image ${item.imageNumber}`, role: roleMap[item.role] || "reference", slot: String(item.imageNumber) });
     const settled = await Promise.allSettled(specs.slice(0, 3).map(async (item) => ({ ...(await fetchIdeaImage(item.path, item.name)), name: item.name, role: item.role, slot: item.slot })));
     return { images: settled.filter((item) => item.status === "fulfilled").map((item) => item.value), skipped: settled.filter((item) => item.status === "rejected").map((item) => item.reason?.message || "Unreadable reference") };
+  }
+  async function collectH3Images() {
+    const specs = [];
+    const sourcePath = String(read(node, "source_image", "") || "").trim();
+    if (sourcePath) specs.push({ path: sourcePath, name: "Image 1 · H3 opening frame", role: "opening", slot: "1" });
+    if (generatedFilename) specs.push({ path: generatedFilename, name: "Image 2 · H3 closing frame", role: "closing", slot: "2" });
+    const roleMap = { second_character: "identity", object: "reference", environment: "composition", style: "style", lighting: "style" };
+    for (const item of activeReferences()) specs.push({ path: item.path, name: `Image ${specs.length + 1} · ${item.role}`, role: roleMap[item.role] || "reference", slot: String(specs.length + 1) });
+    const settled = await Promise.allSettled(specs.slice(0, 4).map(async (item) => ({ ...(await fetchIdeaImage(item.path, item.name)), name: item.name, role: item.role, slot: item.slot })));
+    return settled.filter((item) => item.status === "fulfilled").map((item) => item.value);
+  }
+  async function convertPromptToH3() {
+    if (!promptArea.value.trim()) { promptArea.focus(); setStatus("Write or generate the NextFrame prompt first", "error"); return; }
+    if (!aiModel.value.trim()) { aiModel.focus(); setStatus("Select a vision-capable AI model", "error"); return; }
+    try {
+      h3Convert.disabled = true; startAiTimer(); persistAiSettings();
+      setStatus("Reading the frames and converting the still prompt into H3 motion…", "busy");
+      const images = await collectH3Images();
+      const response = await fetch(api.apiURL("/iamccs/nextframe/h3"), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
+        provider: aiProvider.value, base_url: aiBaseUrl.value.trim(), model: aiModel.value.trim(), api_key: aiApiKey.value,
+        qwen_prompt: promptArea.value.trim(), requested_mode: h3Mode.value || "auto", images, temperature: 0.25, timeout: 150,
+      }) });
+      const payload = await response.json();
+      if (!response.ok || !payload?.ok) throw new Error(payload?.error || "H3 conversion failed");
+      h3Local.value = String(payload.h3_local_prompt || "");
+      h3Transition.value = String(payload.h3_transition_prompt || "");
+      h3Locks.value = String(payload.h3_continuity_locks || "");
+      h3Mode.value = ["auto", "i2va", "fl2va", "longvid_guides"].includes(String(payload.recommended_mode)) ? String(payload.recommended_mode) : h3Mode.value;
+      persistH3Plan();
+      const last = framesOf(board).at(-1);
+      if (last) Object.assign(last, { h3_local_prompt: h3Local.value.trim(), h3_transition_prompt: h3Transition.value.trim(), h3_continuity_locks: h3Locks.value.trim(), h3_mode: h3Mode.value });
+      persistBoard(); aiApiKey.value = "";
+      setStatus(`H3 ${h3Mode.value.toUpperCase()} prompt ready · ${images.length} image reference(s) read`);
+    } catch (error) { console.error(error); setStatus(error?.message || "H3 conversion failed", "error"); }
+    finally { stopAiTimer(); h3Convert.disabled = false; }
   }
   async function generateSceneIdeas() {
     const logline = ideaLogline.value.trim();
@@ -905,7 +967,7 @@ function mount(node) {
     board.inject_anchor_index = selection.anchorIndex;
     persistBoard();
     const timeline = buildInjectionTimeline(
-      frames, read(node, "inject_slot_seconds", 5), promptArea.value, negativeArea.value, selection.anchorIndex,
+      frames, read(node, "inject_slot_seconds", 5), promptArea.value, negativeArea.value, selection.anchorIndex, board.h3_plan || {},
     );
     const selectedPaths = frames.map((frame) => String(frame.filename));
     const enabledTypes = new Map(
@@ -925,7 +987,9 @@ function mount(node) {
         write(target, "image_paths", JSON.stringify(merged.paths));
         write(target, "duration_seconds", merged.timeline.duration_seconds);
         write(target, "frame_rate", timeline.frame_rate);
-        if (!String(read(target, "global_prompt", "")).trim()) write(target, "global_prompt", promptArea.value.trim());
+        if (!String(read(target, "global_prompt", "")).trim()) write(target, "global_prompt", h3Local.value.trim() || promptArea.value.trim());
+        const recommendedMode = String(board.h3_plan?.recommended_mode || "auto");
+        if (targetKey === "minimax" && recommendedMode !== "auto") write(target, "task_mode", recommendedMode);
       }
       if (connectCineLinx(target)) {
         connected += 1;
@@ -1059,6 +1123,7 @@ function mount(node) {
   root.querySelector('[data-action="export"]').addEventListener("click", () => downloadJson(`IAMCCS_NextFrameBuilder_${read(node, "session_id", "storyboard")}.json`, board));
   root.querySelector('[data-action="clear"]').addEventListener("click", () => { board.frames = []; board.inject_anchor_id = ""; board.inject_anchor_index = 0; persistBoard(); setResult(""); setStatus("Storyboard cleared"); });
   root.querySelector('[data-action="inject"]').addEventListener("click", injectSelected);
+  h3Convert.addEventListener("click", convertPromptToH3);
   for (const button of root.querySelectorAll("[data-target]")) {
     button.addEventListener("click", () => {
       board.inject_targets[button.dataset.target] = !board.inject_targets[button.dataset.target];
@@ -1088,7 +1153,13 @@ function mount(node) {
     if (String(detail.display_node ?? detail.node ?? "") !== String(node.id)) return;
     const output = detail.output || {};
     const boardJson = firstValue(output.storyboard_json, ""); const filename = firstValue(output.generated_filename, "");
-    if (boardJson) { board = parseBoard(boardJson); board.inject_targets = injectTargetsOf(board); normalizeAnchor(); write(node, "storyboard_json", JSON.stringify(board)); }
+    if (boardJson) {
+      const previousPlan = board.h3_plan || {};
+      board = parseBoard(boardJson); board.inject_targets = injectTargetsOf(board); board.h3_plan = board.h3_plan || previousPlan;
+      const last = framesOf(board).at(-1);
+      if (last && previousPlan.h3_local_prompt) Object.assign(last, { h3_local_prompt: previousPlan.h3_local_prompt, h3_transition_prompt: previousPlan.h3_transition_prompt || "", h3_continuity_locks: previousPlan.h3_continuity_locks || "", h3_mode: previousPlan.recommended_mode || "auto" });
+      normalizeAnchor(); write(node, "storyboard_json", JSON.stringify(board));
+    }
     if (filename) setResult(filename);
     const message = firstValue(output.message, filename ? "Next scene ready" : "Generation complete");
     setStatus(message); renderBoard();

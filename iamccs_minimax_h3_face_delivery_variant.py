@@ -140,3 +140,31 @@ class IAMCCS_MiniMaxH3FaceDeliveryR38B:
         finally:
             mm.unload_all_models()
             mm.soft_empty_cache()
+
+
+class IAMCCS_MiniMaxH3WideCharacterDetailer12GB(IAMCCS_MiniMaxH3FaceDeliveryR38B):
+    """Named 12 GB preset for distant visible faces in medium/wide shots.
+
+    This deliberately reuses the audited track/refine/stitch path.  It raises
+    crop resolution and lowers detection confidence, but does not pretend to
+    be a full-frame or multi-person body restorer.
+    """
+
+    CATEGORY = "IAMCCS/MiniMax H3/Detailer"
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        result = copy.deepcopy(super().INPUT_TYPES())
+        required = result["required"]
+        required["canvas_width"] = ("INT", {"default": 640, "min": 256, "max": 1536, "step": 32})
+        required["canvas_height"] = ("INT", {"default": 640, "min": 256, "max": 1536, "step": 32})
+        required["crop_factor"] = ("FLOAT", {"default": 2.2, "min": 1.0, "max": 6.0, "step": 0.05})
+        required["confidence"] = ("FLOAT", {"default": 0.25, "min": 0.01, "max": 1.0, "step": 0.01})
+        required["steps"] = ("INT", {"default": 4, "min": 1, "max": 100})
+        required["denoise"] = ("FLOAT", {"default": 0.20, "min": 0.0, "max": 1.0, "step": 0.01})
+        required["window_frames"] = ("INT", {"default": 73, "min": 34, "max": 510})
+        required["window_overlap"] = ("INT", {"default": 22, "min": 0, "max": 170})
+        required["strength_small_face"] = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})
+        required["strength_large_face"] = ("FLOAT", {"default": 0.20, "min": 0.0, "max": 1.0, "step": 0.01})
+        required["blend"] = ("FLOAT", {"default": 0.72, "min": 0.0, "max": 1.0, "step": 0.01})
+        return result

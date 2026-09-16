@@ -64,7 +64,7 @@ export function inspectH3Prompt({ project, prompt, board, getWidget }) {
     if (mode === "fl2va" && visual.length < 2) add("error", "FL2VA needs two boundary images", "Add an opening and closing image slot.");
     if (mode === "v2va_object_swap" && !/<Video 1>/i.test(text)) add("warn", "V2VA source authority is not named", "Name <Video 1> in the visible source-authority box and ensure the reference module is connected.");
     if (["audio_driven", "multi_shot_lipsync"].includes(mode) && !audio.length) add("error", "No audible Shotboard segment", "Publish or place AudioBoard audio in the Shotboard lanes. H3-generated audio does not require an input segment.");
-    if (mode === "multi_shot_lipsync" && visual.length < 2) add("warn", "Only one guided shot", "Multi-Shot LipSync is valid, but two or more image slots are needed to exercise editorial cuts.");
+    if (mode === "multi_shot_lipsync" && visual.length < 2) add("warn", "Only one guided shot", "Long Multi-Shot is valid, but two or more image slots are needed to exercise editorial cuts.");
     const maxLocal = Math.max(0, ...locals.map((row) => Number(row.slot) || 0));
     if (visual.length && maxLocal > visual.length) add("warn", "A local prompt targets a missing visual slot", `Highest enabled local slot is ${maxLocal}; the Shotboard currently exposes ${visual.length}.`);
     if (!issues.some((item) => item.level === "error")) add("ok", "Authoring contract is ready", "Visible Prompter fields can be injected. The Shotboard boxes remain the final queue-time truth.");

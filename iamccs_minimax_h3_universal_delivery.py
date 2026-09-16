@@ -27,6 +27,10 @@ from .iamccs_minimax_h3_fast_latent_2pass import (
     FAST_ROUTE,
     IAMCCS_MiniMaxH3FastLatent2PassR41,
 )
+from .iamccs_minimax_h3_ultimate_tiled import (
+    ULTIMATE_ROUTE,
+    IAMCCS_MiniMaxH3UltimateTiledDelivery,
+)
 from .iamccs_minimax_h3_pixel_refine_variant import IAMCCS_MiniMaxH3PixelRefineR38B
 from .iamccs_minimax_h3_pixel_refine_variant import (
     _next_prompt,
@@ -50,7 +54,83 @@ CATEGORY = "IAMCCS/MiniMax H3/Universal Delivery"
 MASTER_ROUTES = {"ltx23"}
 LTX_PER_CHUNK_ROUTE = "ltx23_per_chunk"
 RTX_FINAL_ROUTE = "rtx_final"
-KNOWN_ROUTES = {"off", RTX_FINAL_ROUTE, "h3_pixel_refine", FAST_ROUTE, LTX_PER_CHUNK_ROUTE, *MASTER_ROUTES}
+KNOWN_ROUTES = {"off", RTX_FINAL_ROUTE, "h3_pixel_refine", FAST_ROUTE, ULTIMATE_ROUTE, LTX_PER_CHUNK_ROUTE, *MASTER_ROUTES}
+
+
+class IAMCCS_MiniMaxH3ExactLTXDeliverySizeR42:
+    """Remove the protected LTX canvas and honour the authored delivery boxes.
+
+    The LTX latent upsampler works on a legal processing canvas which can be
+    larger than the requested output (for example 2208x1152 for a 2048x1080
+    delivery).  The old R42 group exposed only that processing size, so its
+    internal node labelled ``EXACT DELIVERY SIZE`` could not know the actual
+    authored target.  This external adapter reads the target from Shotboard
+    truth after LTX decode.  UHD requests stay untouched here because the
+    following RTX node owns their final exact-size pass.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "cine_linx": (SUPERNODE_LINX_TYPE,),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("images", "report")
+    FUNCTION = "resize"
+    CATEGORY = CATEGORY
+
+    def resize(self, images, cine_linx):
+        if not torch.is_tensor(images) or images.ndim != 4 or int(images.shape[0]) < 1:
+            raise ValueError("R42 exact LTX delivery expects an IMAGE frame batch")
+        plan = _resolve_shotplan(cine_linx)
+        settings = plan.get("upscale_settings") if isinstance(plan.get("upscale_settings"), dict) else {}
+        target_width = max(256, int(settings.get("target_width", plan.get("upscale_width", images.shape[2])) or images.shape[2]))
+        target_height = max(256, int(settings.get("target_height", plan.get("upscale_height", images.shape[1])) or images.shape[1]))
+        ltx_4k = bool(settings.get("ltx_4k_enabled", False)) and _route(cine_linx) in MASTER_ROUTES
+        source_height, source_width = int(images.shape[1]), int(images.shape[2])
+        if ltx_4k:
+            return images, (
+                f"R42 exact LTX delivery deferred to RTX 4K | "
+                f"stage={source_width}x{source_height} -> target={target_width}x{target_height}"
+            )
+        if (source_width, source_height) == (target_width, target_height):
+            return images, f"R42 exact LTX delivery already {target_width}x{target_height}"
+
+        target_aspect = float(target_width) / float(target_height)
+        source_aspect = float(source_width) / float(source_height)
+        crop_width, crop_height = source_width, source_height
+        if source_aspect > target_aspect:
+            crop_width = max(2, min(source_width, round(source_height * target_aspect)))
+        elif source_aspect < target_aspect:
+            crop_height = max(2, min(source_height, round(source_width / target_aspect)))
+        crop_left = max(0, (source_width - crop_width) // 2)
+        crop_top = max(0, (source_height - crop_height) // 2)
+        cropped = images[:, crop_top:crop_top + crop_height, crop_left:crop_left + crop_width, :]
+
+        # Keep the resize bounded on long clips.  LTX delivery is already a
+        # full IMAGE batch, but interpolation no longer adds another full
+        # float32 copy of the programme to the peak working set.
+        source_device, source_dtype = images.device, images.dtype
+        completed = []
+        for start in range(0, int(cropped.shape[0]), 4):
+            piece = cropped[start:start + 4].permute(0, 3, 1, 2).to(dtype=torch.float32)
+            piece = torch.nn.functional.interpolate(
+                piece,
+                size=(target_height, target_width),
+                mode="bicubic",
+                align_corners=False,
+                antialias=True,
+            ).permute(0, 2, 3, 1).clamp_(0.0, 1.0)
+            completed.append(piece.to(device=source_device, dtype=source_dtype))
+        resized = torch.cat(completed, dim=0)
+        return resized, (
+            f"R42 exact LTX delivery | protected={source_width}x{source_height} | "
+            f"center_crop={crop_width}x{crop_height} | final={target_width}x{target_height}"
+        )
 
 
 def _stream_rtx_frames(frames, output, audio, width, height, fps, quality):
@@ -155,7 +235,7 @@ class IAMCCS_MiniMaxH3UniversalRouteControlR42:
     def resolve(self, cine_linx):
         route = _route(cine_linx)
         master = route in MASTER_ROUTES
-        per_segment = route in {"off", RTX_FINAL_ROUTE, "h3_pixel_refine", FAST_ROUTE, LTX_PER_CHUNK_ROUTE}
+        per_segment = route in {"off", RTX_FINAL_ROUTE, "h3_pixel_refine", FAST_ROUTE, ULTIMATE_ROUTE, LTX_PER_CHUNK_ROUTE}
         report = (
             f"R42 universal route={route} | queue_owner="
             f"{'native master checkpoint' if master else 'selected per-segment delivery'} | lazy=yes"
@@ -181,7 +261,7 @@ class IAMCCS_MiniMaxH3UniversalNativeWindowedR42(IAMCCS_MiniMaxH3PixelRefineR38B
 
 
 class IAMCCS_MiniMaxH3UniversalFastR42(IAMCCS_MiniMaxH3FastLatent2PassR41):
-    """Fast latent R41 branch, evaluated only when selected by R42."""
+    """Shared lazy H3 delivery socket: R41 full-pass or Ultimate tiled."""
 
     OUTPUT_NODE = False
     CATEGORY = CATEGORY
@@ -191,6 +271,9 @@ class IAMCCS_MiniMaxH3UniversalFastR42(IAMCCS_MiniMaxH3FastLatent2PassR41):
         if cine_linx is None and len(args) >= 7:
             cine_linx = args[6]
         route = _route(cine_linx)
+        if route == ULTIMATE_ROUTE:
+            kwargs["queue_next_segment"] = True
+            return IAMCCS_MiniMaxH3UltimateTiledDelivery().finish(*args, **kwargs)
         if route != FAST_ROUTE:
             raise ValueError(f"R42 Fast branch was requested for incompatible route: {route}")
         kwargs["queue_next_segment"] = True
@@ -284,7 +367,8 @@ class IAMCCS_MiniMaxH3UniversalRTXFinalR42:
         if output.exists():
             raise FileExistsError(f"RTX Final refuses to overwrite existing segment: {output}")
 
-        join = max(0, int(join_trim_frames or 0))
+        from .iamccs_minimax_h3_shotboard import _delivery_join_frames
+        join = _delivery_join_frames(cine_linx, index, join_trim_frames)
         drop = 1 if join == 1 else 0
         visible_frames = native_frames[drop:] if drop else native_frames
         audio = _trim_audio_frames(native_audio, drop, fps) if drop else native_audio
@@ -344,6 +428,15 @@ class IAMCCS_MiniMaxH3UniversalRTXFinalR42:
 class IAMCCS_MiniMaxH3UniversalNativeCheckpointR42(IAMCCS_MiniMaxH3NativeCheckpointSave):
     """Always save native; queue only when a one-film delivery needs all chunks."""
 
+    # The legacy checkpoint class is an OUTPUT_NODE because older standalone
+    # workflows terminate directly on it.  In the universal graph the real
+    # terminal is UniversalPathRouterR42, which lazily requests exactly one
+    # delivery branch.  Inheriting OUTPUT_NODE=True here made ComfyUI execute
+    # this checkpoint independently as a second terminal, evaluating a stale
+    # standard H3 path even when LatentGoAhead/Continuous AV was selected.
+    # Keep the legacy class untouched and make only this universal subclass an
+    # ordinary upstream node.
+    OUTPUT_NODE = False
     CATEGORY = CATEGORY
 
     def checkpoint(self, *args, **kwargs):
@@ -546,7 +639,7 @@ class IAMCCS_MiniMaxH3UniversalPathRouterR42:
             return "native_or_windowed_path"
         if route == RTX_FINAL_ROUTE:
             return "rtx_final_path"
-        if route == FAST_ROUTE:
+        if route in {FAST_ROUTE, ULTIMATE_ROUTE}:
             return "fast_path"
         return "master_path"
 
@@ -595,7 +688,29 @@ class IAMCCS_MiniMaxH3UniversalPathRouterR42:
             f"R42 universal delivery | route={route} | segment={index + 1}/{total} | "
             f"ready={'yes' if ready else 'waiting for native master'} | {path or 'no path yet'}"
         )
-        return {"ui": {"text": [report]}, "result": (path, ready, report)}
+        ui = {"text": [report]}
+        if ready:
+            authored = Path(path)
+            if authored.is_file():
+                try:
+                    subfolder = authored.parent.relative_to(
+                        Path(folder_paths.get_output_directory())
+                    ).as_posix()
+                except ValueError:
+                    # ComfyUI cannot serve arbitrary filesystem paths through
+                    # its output preview endpoint. The path remains visible in
+                    # the report and no misleading preview is emitted.
+                    subfolder = None
+                if subfolder is not None:
+                    ui.update({
+                        "images": [{
+                            "filename": authored.name,
+                            "subfolder": subfolder,
+                            "type": "output",
+                        }],
+                        "animated": (True,),
+                    })
+        return {"ui": ui, "result": (path, ready, report)}
 
 
 class IAMCCS_MiniMaxH3UniversalEditorPolicyR42:
@@ -633,22 +748,26 @@ class IAMCCS_MiniMaxH3UniversalEditorPolicyR42:
 
 
 NODE_CLASS_MAPPINGS = {
+    "IAMCCS_MiniMaxH3ExactLTXDeliverySizeR42": IAMCCS_MiniMaxH3ExactLTXDeliverySizeR42,
     "IAMCCS_MiniMaxH3UniversalRouteControlR42": IAMCCS_MiniMaxH3UniversalRouteControlR42,
     "IAMCCS_MiniMaxH3UniversalNativeCheckpointR42": IAMCCS_MiniMaxH3UniversalNativeCheckpointR42,
     "IAMCCS_MiniMaxH3UniversalNativeWindowedR42": IAMCCS_MiniMaxH3UniversalNativeWindowedR42,
     "IAMCCS_MiniMaxH3UniversalRTXFinalR42": IAMCCS_MiniMaxH3UniversalRTXFinalR42,
     "IAMCCS_MiniMaxH3UniversalFastR42": IAMCCS_MiniMaxH3UniversalFastR42,
+    "IAMCCS_MiniMaxH3UltimateTiledDelivery": IAMCCS_MiniMaxH3UltimateTiledDelivery,
     "IAMCCS_MiniMaxH3UniversalMasterSaveR42": IAMCCS_MiniMaxH3UniversalMasterSaveR42,
     "IAMCCS_MiniMaxH3UniversalPathRouterR42": IAMCCS_MiniMaxH3UniversalPathRouterR42,
     "IAMCCS_MiniMaxH3UniversalEditorPolicyR42": IAMCCS_MiniMaxH3UniversalEditorPolicyR42,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "IAMCCS_MiniMaxH3ExactLTXDeliverySizeR42": "MiniMax H3 R42 · Exact LTX Delivery Size",
     "IAMCCS_MiniMaxH3UniversalRouteControlR42": "MiniMax H3 R42 · Universal Route + Queue Owner",
     "IAMCCS_MiniMaxH3UniversalNativeCheckpointR42": "MiniMax H3 R42 · Native Safety Checkpoint",
     "IAMCCS_MiniMaxH3UniversalNativeWindowedR42": "MiniMax H3 · Native / Safe Windowed Delivery",
     "IAMCCS_MiniMaxH3UniversalRTXFinalR42": "MiniMax H3 · Native → RTX Final · Streaming",
-    "IAMCCS_MiniMaxH3UniversalFastR42": "MiniMax H3 · Quality Latent 2-Pass Delivery",
+    "IAMCCS_MiniMaxH3UniversalFastR42": "MiniMax H3 · R42 Universal H3 Delivery",
+    "IAMCCS_MiniMaxH3UltimateTiledDelivery": "IAMCCS H3 ULTIMATE LATENT · TILED",
     "IAMCCS_MiniMaxH3UniversalMasterSaveR42": "MiniMax H3 · LTX Master Delivery Save",
     "IAMCCS_MiniMaxH3UniversalPathRouterR42": "MiniMax H3 · Lazy Delivery Path Router",
     "IAMCCS_MiniMaxH3UniversalEditorPolicyR42": "MiniMax H3 R42 · Editor Shot / Master Policy",

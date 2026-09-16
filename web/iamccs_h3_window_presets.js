@@ -88,7 +88,7 @@ export const motionContextPresetValues = (preset) => ({
 });
 
 export function motionContextEstimate(windowFrames, tailFrames = 22) {
-    const window = Math.max(56, Math.min(362, Math.round(Number(windowFrames) || 124)));
+    const window = Math.max(56, Math.min(362, Math.round(Number(windowFrames) || 362)));
     const tail = Math.max(0, Math.min(window - 1, Math.round(Number(tailFrames) || 0)));
     const visible = Math.max(1, window - tail);
     return {window,tail,visible,windowSeconds:window/24,tailSeconds:tail/24,visibleSeconds:visible/24};
@@ -111,7 +111,7 @@ export function createH3MotionContextPanel(read, apply) {
     clipNote.style.cssText = "font-size:10px;line-height:1.45;color:#c8badf";
     clipNote.textContent = "ClipProj: 4B v3.1 is the default lower-memory conditioner; 8B is larger and heavier; OFF uses the workflow fallback CLIP. Presets are starting points, not guarantees. Applying one never changes prompts, image slots, audio, mode or duration.";
     const refresh = () => {
-        const windowFrames = Number(read("motion_context_window_frames") ?? 124);
+        const windowFrames = Number(read("motion_context_window_frames") ?? 362);
         const tailFrames = Number(read("flf_continuity_tail_frames") ?? 22);
         const profile = String(read("h3_exact_profile") || "");
         const match = H3_MOTION_CONTEXT_PRESETS.find((preset) => preset.window === windowFrames && preset.profile === profile)

@@ -78,6 +78,10 @@ def _first_value(source: dict[str, Any], keys: tuple[str, ...]) -> Any:
 
 
 def _slot_prompt(slot: dict[str, Any]) -> str:
+    # An explicitly emptied current field is not permission to restore an
+    # older local_prompt/relay_prompt mirror.
+    if "prompt" in slot:
+        return _text(slot["prompt"])
     return _text(_first_value(slot, ("prompt", "local_prompt", "relay_prompt", "text")))
 
 
@@ -86,6 +90,8 @@ def _slot_audio_prompt(slot: dict[str, Any]) -> str:
 
 
 def _slot_image(slot: dict[str, Any]) -> str:
+    if "imageFile" in slot:
+        return _text(slot["imageFile"])
     value = _first_value(
         slot,
         (
@@ -208,7 +214,7 @@ def _normalise_slots(timeline: dict[str, Any], duration_seconds: float, fallback
                 f"riduci il trimming a massimo {H3_MAX_TRAINED_FRAMES} frame."
             )
         image = _slot_image(row)
-        if not image:
+        if not image and "imageFile" not in row:
             try:
                 ref_index = int(row.get("ref", 0)) - 1
             except (TypeError, ValueError):
@@ -327,38 +333,85 @@ def _normalise_flf_bridge_slots(
         )
 
     raw_lengths = [requested_total * gap / gap_total for gap in gaps]
-    requested_lengths = [max(H3_MIN_FRAMES, int(math.floor(value))) for value in raw_lengths]
-    remainder = requested_total - sum(requested_lengths)
+    # First preserve the authored frame distances for prompt/timeline math.
+    authored_lengths = [max(H3_MIN_FRAMES, int(math.floor(value))) for value in raw_lengths]
+    remainder = requested_total - sum(authored_lengths)
     order = sorted(
         range(len(raw_lengths)),
         key=lambda index: raw_lengths[index] - math.floor(raw_lengths[index]),
         reverse=remainder > 0,
     )
-    step = 1 if remainder > 0 else -1
+    authored_step = 1 if remainder > 0 else -1
     for offset in range(abs(remainder)):
         index = order[offset % len(order)]
-        if step < 0 and requested_lengths[index] <= H3_MIN_FRAMES:
+        if authored_step < 0 and authored_lengths[index] <= H3_MIN_FRAMES:
             continue
-        requested_lengths[index] += step
+        authored_lengths[index] += authored_step
+
+    # A shared FLF boundary is emitted by both neighbouring samples and then
+    # removed once at delivery.  Allocate that one frame per join before
+    # snapping to H3's legal 17k+5 grid.  Snapping each bridge independently
+    # upward (the old behaviour) turned a 10-second board into 10.33 seconds
+    # and made the extra tail look like a frozen handoff.
+    target_sample_total = requested_total + max(0, len(gaps) - 1)
+    raw_lengths = [target_sample_total * gap / gap_total for gap in gaps]
+
+    def _floor_grid(value: float) -> int:
+        frames = max(H3_MIN_FRAMES, int(math.floor(value)))
+        return frames - ((frames - H3_MIN_FRAMES) % 17)
+
+    sample_lengths = [_floor_grid(value) for value in raw_lengths]
+    # Every legal length differs by 17 frames. Choose the nearest legal total
+    # and distribute its steps where the authored interval is currently most
+    # under-represented. This keeps the visual timing ratio while minimizing
+    # the unavoidable H3 grid error.
+    base_total = sum(sample_lengths)
+    step_count = int(round((target_sample_total - base_total) / 17.0))
+    if step_count > 0:
+        order = sorted(
+            range(len(raw_lengths)),
+            key=lambda index: raw_lengths[index] - sample_lengths[index],
+            reverse=True,
+        )
+        for offset in range(step_count):
+            index = order[offset % len(order)]
+            sample_lengths[index] += 17
+    elif step_count < 0:
+        order = sorted(
+            range(len(raw_lengths)),
+            key=lambda index: sample_lengths[index] - raw_lengths[index],
+            reverse=True,
+        )
+        for offset in range(-step_count):
+            index = order[offset % len(order)]
+            if sample_lengths[index] > H3_MIN_FRAMES:
+                sample_lengths[index] -= 17
 
     bridge_slots: list[dict[str, Any]] = []
     cursor = 0.0
     for index, (first, last) in enumerate(zip(anchors, anchors[1:])):
-        requested_frames = requested_lengths[index]
+        requested_frames = authored_lengths[index]
+        sample_frames = sample_lengths[index]
         if requested_frames > H3_MAX_TRAINED_FRAMES:
             raise ValueError(
                 f"Il ponte FLF '{first['label']} -> {last['label']}' richiede {requested_frames} frame: "
                 f"avvicina i centri dei box o aggiungi un keyframe (massimo {H3_MAX_TRAINED_FRAMES})."
             )
-        frame_count = align_h3_frames(requested_frames)
+        frame_count = align_h3_frames(sample_frames)
         if frame_count > H3_MAX_TRAINED_FRAMES:
             raise ValueError(
                 f"Il ponte FLF '{first['label']} -> {last['label']}' diventa {frame_count} frame dopo "
                 f"l'allineamento H3 17k+5: riduci leggermente la durata relativa del ponte."
             )
         ui_bridge = bridge_by_pair.get((_text(first.get("id")), _text(last.get("id"))), {})
-        local_prompt = _text(_first_value(ui_bridge, ("prompt", "local_prompt", "relay_prompt"))) or _text(first.get("prompt"))
-        audio_prompt = _text(_first_value(ui_bridge, ("audio_prompt", "sound_prompt"))) or _text(first.get("audio_prompt"))
+        # Bridge text is a derived UI mirror. Live rows own both explicit edits
+        # and deliberate empty prompts; a stale bridge must never win.
+        if isinstance(timeline.get('rows'), list):
+            local_prompt = _text(first.get('prompt'))
+            audio_prompt = _text(first.get('audio_prompt'))
+        else:
+            local_prompt = _slot_prompt(ui_bridge) if ui_bridge else _text(first.get('prompt'))
+            audio_prompt = _slot_audio_prompt(ui_bridge) if ui_bridge else _text(first.get('audio_prompt'))
         bridge_slots.append(
             {
                 "id": _text(ui_bridge.get("id")) or f"flf_bridge_{index + 1}",
@@ -458,13 +511,13 @@ def _audio_handoff_prompt(frame_count: int, *, is_first_chunk: bool, is_final_ch
     if not is_first_chunk:
         instructions.append(
             "During the first 1.00 second of this chunk, use no dialogue, words, cries or new vocalisation. "
-            "Continue the preceding location ambience, physical action and quiet natural breathing before any new line starts."
+            "Continue only the sounds specified by the authored prompt before any new line starts."
         )
     if not is_final_chunk:
         instructions.append(
             f"Complete every spoken line and shout no later than {dialogue_deadline:.2f} seconds. "
             "During the final 1.00 second of this chunk, use no dialogue, words, cries or new vocalisation. "
-            "Keep only continuous location ambience, physical action sounds and quiet natural breathing; "
+            "Keep only the sounds specified by the authored prompt; "
             "do not begin the next line before the following chunk."
         )
     return " ".join(instructions)
@@ -472,7 +525,12 @@ def _audio_handoff_prompt(frame_count: int, *, is_first_chunk: bool, is_final_ch
 
 def _chunk_task(task_mode: str, audio_mode: str, has_first: bool, has_last: bool) -> str:
     requested = _text(task_mode).lower()
-    if requested in {"ref2va", "ref2va_audio", "ref2va_reference", "ref2vid_lipsync", "lipsync_ref2vid", "v2va_object_swap"}:
+    if requested in {"v2va_controlnet", "controlnet_v2v", "h3_fun_controlnet"}:
+        # The official ComfyUI H3 Fun implementation patches a T2VA model and
+        # supplies temporal structure through control_video. It is not a
+        # REF2VA semantic-reference route.
+        return "t2va"
+    if requested in {"ref2va", "ref2va_audio", "ref2va_reference", "ref2vid_lipsync", "lipsync_ref2vid", "v2va_object_swap", "v2va_face_swap"}:
         return "ref2va"
     if audio_mode == "h3_ref2va_audio":
         return "ref2va"
@@ -704,6 +762,7 @@ def _longvid_guide_plan(
     motion_context_tail_frames: int = 0,
     motion_context_audio: bool = True,
     motion_context_window_frames: int = H3_MAX_TRAINED_FRAMES,
+    motion_context_guide_boundary: str = "safe_handoff",
 ) -> dict[str, Any]:
     """Compile the long-video timeline into stock ``MiniMaxH3AddGuide`` events.
 
@@ -718,6 +777,14 @@ def _longvid_guide_plan(
     if motion_context_tail_frames not in {0, 22, 39, 56}:
         motion_context_tail_frames = 22
     motion_context_enabled = motion_context_tail_frames > 0
+    # A positioned AddGuide in the middle of a native AV sample is a known
+    # source of full-frame flashes on the INT8/ComfyKitchen path.  The safe
+    # default makes authored image guides technical handoff points: a chunk
+    # ends before the next guide and the next chunk receives it at its local
+    # opening.  ``positioned`` remains available for old diagnostic recipes.
+    guide_boundary_mode = _text(motion_context_guide_boundary).lower() or "safe_handoff"
+    if guide_boundary_mode not in {"safe_handoff", "positioned"}:
+        guide_boundary_mode = "safe_handoff"
     plan_mode = (
         "longvid_motion_context"
         if motion_context_enabled
@@ -726,8 +793,8 @@ def _longvid_guide_plan(
     chunk_task = "ref2va" if lipsync else "t2va"
     guided_audio_drive = bool(not lipsync and audio_mode == "h3_custom_audio_drive")
     guide_prompt_header = (
-        "[LONGVID MOTION CONTEXT AUTO CHAIN]\n"
-        "The previous chunk's native video/audio latent is pinned at the head of each continuation chunk. Preserve motion direction, identity, scene state and audio continuity across the join while following the positioned Shotboard guides."
+        "[LONG MULTI-SHOT MOTION CONTEXT AUTO CHAIN]\n"
+        "The previous chunk's native video/audio latent is pinned at the head of each continuation chunk. Preserve motion direction, identity, scene state and audio continuity across technical H3 joins while following the positioned Shotboard shot guides. Different image guides remain authored shot anchors, not a guaranteed continuous camera morph."
         if motion_context_enabled else
         "[LONGVID REF2VID LIPSYNC]\n"
         "<Picture 1> is the persistent visual identity. AudioBoard clips are pinned at their exact local timeline positions and are the performance timing source. "
@@ -750,7 +817,7 @@ def _longvid_guide_plan(
     editor_rows = timeline.get("rows")
     visual_rows = (
         [dict(row) for row in editor_rows if isinstance(row, dict)]
-        if isinstance(editor_rows, list) and editor_rows
+        if isinstance(editor_rows, list)
         else _timeline_rows(timeline)
     )
     image_paths = _timeline_image_paths(timeline)
@@ -806,7 +873,7 @@ def _longvid_guide_plan(
                 "image": image,
                 "prompt": guide["prompt"],
                 "audio_prompt": "",
-                "transition": "timeline_guide",
+                "transition": _normalise_transition(row.get("transition"), len(visual_guides)),
                 "use_keyframe": True,
             }
         )
@@ -859,6 +926,9 @@ def _longvid_guide_plan(
     # the sampler still receives a legal 17k+5 frame count.  The first chunk
     # has no previous latent and is aligned independently, then cropped to the
     # same visible cadence as every continuation chunk.
+    # R37 and the original R41/R42 workflows default to the complete 362-frame
+    # H3 window.  A smaller window is still an explicit technical choice; it
+    # never changes authored slot lengths or guide positions.
     requested_motion_window = align_h3_frames(
         max(
             H3_MIN_FRAMES,
@@ -878,8 +948,41 @@ def _longvid_guide_plan(
         remaining = requested_frames - cursor
         if motion_context_enabled:
             visible_frame_count = min(visible_capacity, remaining)
+            # Reserve a trained-length sample for the last technical window.
+            # A 408-frame timeline with 187-frame capacity previously ended
+            # in a 34-frame fragment (56 including context).
+            minimum_tail = min(visible_capacity, max(1, H3_MIN_TRAINED_FRAMES - motion_context_tail_frames))
+            if remaining > visible_capacity and remaining - visible_capacity < minimum_tail:
+                visible_frame_count = remaining - minimum_tail
             trim_frames = motion_context_tail_frames if chunks else 0
-            frame_count = align_h3_frames(visible_frame_count + trim_frames)
+            # In the first chunk there is no provider trim yet, but the
+            # sampled latent still needs a complete native context tail for
+            # the next chunk.  Keep it hidden from delivery and retain it in
+            # sampled_latent for AutoChainLoadLatent.
+            hidden_tail = motion_context_tail_frames if not chunks else trim_frames
+
+            if guide_boundary_mode == "safe_handoff":
+                future_boundaries = sorted(
+                    {
+                        int(guide.get("global_frame", 0) or 0)
+                        for guide in visual_guides
+                        if cursor < int(guide.get("global_frame", 0) or 0) < cursor + visible_frame_count
+                    }
+                )
+                if future_boundaries:
+                    candidate = future_boundaries[0] - cursor
+                    # Never create an empty technical interval.  A short
+                    # authored interval is valid on H3 (5 + 17k frames), and
+                    # continuation chunks still receive their full tail.
+                    if candidate >= H3_MIN_FRAMES:
+                        visible_frame_count = candidate
+                        if remaining > visible_frame_count:
+                            # The next guide is now the exact timeline start
+                            # of the following chunk; the old final-window
+                            # rebalance must not move this authored boundary.
+                            minimum_tail = 0
+
+            frame_count = align_h3_frames(visible_frame_count + hidden_tail)
         else:
             frame_count = align_h3_frames(min(H3_MAX_TRAINED_FRAMES, remaining))
             visible_frame_count = frame_count
@@ -892,14 +995,11 @@ def _longvid_guide_plan(
         chunk_end = cursor + visible_frame_count
         local_guides: list[dict[str, Any]] = []
         for guide in visual_guides:
-            # Image slots are timeline intervals, not one-frame events.  A
-            # slot that spans several legal H3 chunks must remain the visual
-            # authority in every intersecting chunk.  When the slot started
-            # in an earlier chunk, re-anchor it at the first visible frame of
-            # this chunk; Motion Context later offsets that anchor past the
-            # pinned native AV head.  New slot starts retain their exact local
-            # position, so hard cuts and mixed-duration timelines are not
-            # converted into an implicit transition.
+            # Preserve the proven R37 interval contract: a dragged Shotboard
+            # slot remains the visual authority for its full authored extent.
+            # If an explicit smaller technical window intersects that slot,
+            # rebase the same guide after the carried AV head; slot timing is
+            # never shortened or replaced by a generated T2V interval.
             guide_start = int(guide["global_frame"])
             guide_end = int(guide.get("end_frame", guide_start + max(1, int(guide.get("duration_frames", 1)))))
             overlap_start = max(cursor, guide_start)
@@ -930,7 +1030,7 @@ def _longvid_guide_plan(
                 )
         local_guides.sort(key=lambda item: (int(item["local_frame"]), str(item["kind"]), str(item["id"])))
         local_prompt_lines = [
-            f"Timeline guide at {float(item['local_frame']) / H3_FPS:.2f}s: {item['prompt']}"
+            f"Timeline guide at {(float(item['local_frame']) + trim_frames) / H3_FPS:.2f}s: {item['prompt']}"
             for item in local_guides
             if item.get("kind") == "image" and _text(item.get("prompt"))
         ]
@@ -958,8 +1058,12 @@ def _longvid_guide_plan(
             "requested_frame_count": visible_frame_count if motion_context_enabled else min(H3_MAX_TRAINED_FRAMES, remaining),
             **({
                 "visible_frame_count": visible_frame_count,
-                "motion_context_trim_frames": trim_frames,
-                "motion_context_tail_frames": motion_context_tail_frames,
+            "motion_context_trim_frames": trim_frames,
+            "motion_context_tail_frames": motion_context_tail_frames,
+            "motion_context_hidden_tail_frames": (
+                motion_context_tail_frames if motion_context_enabled and not chunks else 0
+            ),
+            "motion_context_guide_boundary": guide_boundary_mode,
             } if motion_context_enabled else {}),
             "fps": H3_FPS,
             "duration_seconds": frame_count / H3_FPS,
@@ -981,7 +1085,11 @@ def _longvid_guide_plan(
             "audio_handoff_silence_tail_seconds": 0.0,
             "local_prompt": "\n".join(local_prompt_lines),
             "audio_prompt": "",
-            "transition": "longvid_hard_cut",
+            "transition": (
+                "longvid_start"
+                if motion_context_enabled and cursor == 0
+                else ("motion_context_continuation" if motion_context_enabled else "longvid_hard_cut")
+            ),
             "uses_bridge_first_frame": False,
             "uses_explicit_first_keyframe": False,
             "uses_explicit_last_keyframe": False,
@@ -1119,6 +1227,172 @@ def _longvid_guide_plan(
     }
 
 
+def _masked_loop_guided_plan(base: dict[str, Any], *, duration_seconds: float,
+                             window_frames: int, overlap_frames: int) -> dict[str, Any]:
+    """Collapse a positioned-guide plan into one in-place looping latent.
+
+    Unlike the legacy LongVid and Motion Context routes this contract has no
+    outer segment queue, no decoded-frame join and no trim/crossfade.  The
+    looping sampler owns the technical windows inside one full-length AV
+    latent, while Shotboard image positions remain absolute guide indices.
+    """
+    guide_track = base.get("guide_track") if isinstance(base.get("guide_track"), dict) else {}
+    events = guide_track.get("events") if isinstance(guide_track.get("events"), list) else []
+    image_guides = [
+        dict(item) for item in events
+        if isinstance(item, dict) and str(item.get("kind", "")).strip().lower() == "image"
+    ]
+    if len(image_guides) < 2:
+        raise ValueError(
+            "GUIDED AV LOOP · EXPERIMENTAL requires at least two chronological Shotboard image guides."
+        )
+    image_guides.sort(key=lambda item: (int(item.get("global_frame", 0)), str(item.get("id", ""))))
+    indices = [int(item.get("global_frame", 0)) for item in image_guides]
+    if indices[0] < 0 or any(b <= a for a, b in zip(indices, indices[1:])):
+        raise ValueError(
+            "GUIDED AV LOOP image guides must have unique, strictly increasing timeline positions."
+        )
+
+    requested_frames = max(
+        H3_MIN_FRAMES,
+        int(round(max(0.01, float(duration_seconds)) * H3_FPS)),
+        max(int(item.get("end_frame", item.get("global_frame", 0) + 1)) for item in image_guides),
+    )
+    total_frames = align_h3_frames(requested_frames)
+    if total_frames > 3600:
+        raise ValueError(
+            f"GUIDED AV LOOP needs {total_frames} frames, above the current 3600-frame looping ceiling. "
+            "Shorten the timeline or split it into editorial reels."
+        )
+    for item in image_guides:
+        if int(item.get("global_frame", 0)) >= total_frames:
+            raise ValueError(
+                f"GUIDED AV LOOP guide '{item.get('label') or item.get('id')}' lies outside the "
+                f"{total_frames}-frame master latent."
+            )
+
+    window = align_h3_frames(max(H3_MIN_TRAINED_FRAMES, min(H3_MAX_TRAINED_FRAMES, int(window_frames))))
+    window = min(H3_MAX_TRAINED_FRAMES, window)
+    overlap = int(overlap_frames)
+    if overlap not in {22, 39, 56}:
+        overlap = 22
+    if overlap >= window:
+        raise ValueError("GUIDED AV LOOP overlap must be smaller than its technical window.")
+
+    authored_prompts = [
+        str(item.get("prompt", "")).strip() for item in image_guides
+        if str(item.get("prompt", "")).strip()
+    ]
+    local_prompt = "\n".join(
+        f"Guide at {int(item['global_frame']) / H3_FPS:.2f}s: {str(item.get('prompt', '')).strip()}"
+        for item in image_guides if str(item.get("prompt", "")).strip()
+    )
+    global_prompt = str(base.get("global_prompt", "") or "").strip()
+    structural_prompt = (
+        "[GUIDED AV LOOP · EXPERIMENTAL]\nGenerate one continuous evolving take. The Shotboard images are exact "
+        "positioned visual guides on the same global timeline. Preserve motion direction and scene state "
+        "through every internal masked overlap; do not stage a cut, freeze, dissolve, reset or re-establish "
+        "the shot at a technical window boundary."
+    )
+    # The dedicated conditioner maps local prompts to the technical window
+    # that owns their guide.  Never concatenate future local directions into
+    # this fallback prompt: doing so made e.g. a later "wide shot" command act
+    # during the first window before its image guide was reached.
+    prompt = "\n\n".join(part for part in (structural_prompt, global_prompt) if part).strip()
+
+    chunk = {
+        "index": 0,
+        "slot_index": 0,
+        "slot_id": "guided_av_loop_master",
+        "slot_label": "Guided AV Loop master",
+        "task_mode": "t2va",
+        "frame_count": total_frames,
+        "requested_frame_count": requested_frames,
+        "fps": H3_FPS,
+        "duration_seconds": total_frames / H3_FPS,
+        "timeline_start_frame": 0,
+        "timeline_start_seconds": 0.0,
+        "overlap_frames": 0,
+        "trim_head_frames": 0,
+        "join_mode": "in_place_masked_loop",
+        "unique_frames": total_frames,
+        "first_image": "",
+        "last_image": "",
+        "prompt": prompt,
+        "creative_prompt": "\n".join([global_prompt, *authored_prompts]).strip(),
+        "local_prompt": local_prompt,
+        "audio_prompt": "",
+        "transition": "single_master_latent",
+        "uses_bridge_first_frame": False,
+        "uses_explicit_first_keyframe": False,
+        "uses_explicit_last_keyframe": False,
+        "flf_anchor_contract": "absolute_keyframes_inside_one_masked_loop_latent",
+        "frame_source": "masked_loop_global_timeline",
+        "guides": image_guides,
+    }
+    base.update({
+        "schema_version": max(10, int(base.get("schema_version", 0) or 0)),
+        "backend_revision": "guided-av-loop-experimental-v3-full-master-av",
+        "backend_variant": "iamccs_guided_av_loop_experimental_v3",
+        "task_mode": "guided_av_loop_experimental",
+        "generation_mode": "guided_av_loop_experimental",
+        "requested_task_mode": "guided_av_loop_experimental",
+        "continuation_mode": "single_master_latent_in_place_masked_overlap",
+        "chunk_policy": f"one_master_{total_frames}f_window_{window}f_overlap_{overlap}f",
+        "chunk_max_frames": window,
+        "chunks": [chunk],
+        "prompt_map": [{
+            "chunk_index": 0,
+            "slot_index": 0,
+            "slot_label": chunk["slot_label"],
+            "task_mode": "t2va",
+            "start_seconds": 0.0,
+            "duration_seconds": total_frames / H3_FPS,
+            "prompt": prompt,
+            "guide_count": len(image_guides),
+        }],
+        "total_segments": 1,
+        "total_unique_frames": total_frames,
+        "effective_duration_seconds": total_frames / H3_FPS,
+        "requested_duration_seconds": requested_frames / H3_FPS,
+        "masked_loop_guided": {
+            "enabled": True,
+            "provider": "vendored MMH3Tools looping sampler",
+            "conditioning_contract": "one_prompt_per_technical_window",
+            "structural_prompt": structural_prompt,
+            "global_prompt": global_prompt,
+            "carry": "mask",
+            "latent_transport": "one_persistent_full_native_av_master",
+            "handover_analysis": "window_overlap_is_the_exact_reused_context",
+            "recompose_only_reused_context": True,
+            "chunk_frames": window,
+            "overlap_frames": overlap,
+            "overlap_strength_video": 1.0,
+            "overlap_strength_audio": 1.0,
+            "keyframe_indices": indices,
+            "keyframes": image_guides,
+            "outer_queue": False,
+            "join": "none; chunks are written back into the master latent in place",
+            "experimental": True,
+        },
+        "mode_contract": {
+            "mode": "guided_av_loop_experimental",
+            "public_name": "GUIDED AV LOOP · EXPERIMENTAL",
+            "subtitle": "ONE MASTER AV LATENT · INTERNAL MASKED WINDOWS",
+            "backend": "isolated_masked_loop_sampler",
+            "legacy_backend_untouched": True,
+            "core_requirements": ["continuous_per_row_mask", "any_frame_keyframe_guides"],
+        },
+    })
+    base["guide_track"] = {
+        **guide_track,
+        "mode": "guided_av_loop_experimental",
+        "backend": "iamccs_guided_av_loop_experimental_v3",
+        "events": events,
+    }
+    return base
+
+
 def build_shotplan(
     *,
     timeline_data: Any,
@@ -1128,7 +1402,7 @@ def build_shotplan(
     audio_mode: str = "h3_native_generated",
     prompt_mapping: str = "global_plus_local",
     flf_join_mode: str = "h3_keyframe_cut",
-    flf_overlap_frames: int = 9,
+    flf_overlap_frames: int = 0,
     upscale_mode: str = "off",
     width: int = 1344,
     height: int = 768,
@@ -1151,12 +1425,37 @@ def build_shotplan(
     motion_context_tail_frames: int = 22,
     motion_context_audio: bool = True,
     motion_context_window_frames: int = H3_MAX_TRAINED_FRAMES,
+    keyframe_joint_latent_new: bool = False,
 ) -> dict[str, Any]:
     """Translate a Shotboard timeline into executable MiniMax H3 chunks.
 
     ``generation_mode`` and ``chunk_seconds`` remain accepted only so boards
     saved by the first standalone prototype can still be opened.
     """
+    if task_mode == "keyframe_joint_native" and keyframe_joint_latent_new:
+        arguments = dict(locals())
+        arguments.update(task_mode="latent_go_ahead", keyframe_joint_latent_new=False)
+        result = build_shotplan(**arguments)
+        result["requested_task_mode"] = "keyframe_joint_native"
+        result["mode_contract"].update(
+            mode="keyframe_joint_latent_new", latent_new=True,
+            destination="authored_image_guide", history="original_generated_av_tail",
+            sample_count=len(result["chunks"]), context_handover=True)
+        return result
+    if task_mode == "latent_go_ahead":
+        arguments = dict(locals())
+        arguments.update(task_mode="fl2va", flf_join_mode="h3_keyframe_cut", flf_overlap_frames=0)
+        result = build_shotplan(**arguments)
+        for chunk in result['chunks']:
+            chunk['audio_handoff_prompt'] = ''
+            chunk['prompt'] = '\n\n'.join(str(p) for p in (chunk.get('alignment_prompt'), chunk.get('creative_prompt')) if p)
+        for entry, chunk in zip(result.get('prompt_map', []), result['chunks']):
+            entry['prompt'] = chunk['prompt']
+        result["task_mode"] = "latent_go_ahead"
+        result["requested_task_mode"] = "latent_go_ahead"
+        result["mode_contract"] = {"mode":"latent_go_ahead", "experimental":True,
+            "history":"original_av_latents_at_past_coordinates", "pixel_crossfade_frames":0}
+        return result
     timeline = parse_timeline(timeline_data)
     if generation_mode and task_mode == "auto":
         legacy = {
@@ -1180,9 +1479,9 @@ def build_shotplan(
 
     acceleration = _text(acceleration).lower() or "native"
     if acceleration not in {
-        "auto_3060", "low_vram_auto", "native", "h3_sage", "sage", "sage_sol", "sol_low_vram",
+        "auto_3060", "low_vram_auto", "native", "h3_sage", "h3_sla", "sage", "sage_sol", "sol_low_vram",
         "adaptive_safe", "sol_adaptive_safe", "sol_adaptive_balanced", "spectrum", "sage_spectrum",
-        "comfy_kitchen", "h3_exact", "pdd_native_8step", "fasth3_dense_6step",
+        "comfy_kitchen", "h3_exact", "pdd_native_8step", "fasth3_dense_6step", "matlowai_fused_turbo_manual_sigma",
         "iamccs_progressive_2stage", "iamccs_progressive_3stage", "iamccs_progressive_pdd_2stage",
     }:
         raise ValueError(f"accelerazione H3 non valida: {acceleration}")
@@ -1215,6 +1514,7 @@ def build_shotplan(
         "h3_latent_upres",
         "h3_pixel_refine",
         "h3_fast_latent_2pass",
+        "h3_ultimate_tiled",
     }:
         raise ValueError(f"upscale H3 non valido: {active_upscale_mode}")
     if not _bool(upscale_enabled, False):
@@ -1227,6 +1527,16 @@ def build_shotplan(
         roles.append(("subject_identity", "subject_identity", "composition", "style")[len(roles)])
 
     requested_task_mode = _text(task_mode).lower() or "auto_from_timeline"
+    # Compatibility: the former serialized mode id remains the stable IAMCCS
+    # FL2VA Continuous AV route.  A new, explicitly experimental mode enables
+    # automatic freeze-tail trimming without altering saved workflows.
+    herrgotts_requested = requested_task_mode in {
+        "longvid_masked_loop_guided", "masked_loop_guided", "long_masked_loop_guided",
+    }
+    experimental_loop_requested = requested_task_mode in {
+        "guided_av_loop_experimental", "longvid_guided_av_loop_experimental",
+    }
+    continuous_av_requested = herrgotts_requested or experimental_loop_requested
     # R31 is deliberately explicit.  ``auto`` continues to resolve exactly
     # as old boards did, so adding positioned guides can never change an
     # existing FLF/I2VA/REF2VA render route.
@@ -1240,7 +1550,54 @@ def build_shotplan(
     motion_context_requested = requested_task_mode in {
         "longvid_motion_context", "longvid_motion_context_auto_chain", "motion_context_auto_chain",
     }
-    if requested_task_mode in {"longvid_guides", "longvid", "long_video_guides"} or longvid_lipsync_requested or motion_context_requested:
+    if experimental_loop_requested:
+        # One Queue execution, one persistent full AV master latent. The
+        # looping sampler divides it into internal masked windows; these are
+        # never exposed as Shotboard FL2VA chunks or outer queue segments.
+        base = _longvid_guide_plan(
+            timeline=timeline,
+            global_prompt=global_prompt,
+            duration_seconds=max(0.01, _float(duration_seconds, 10.0)),
+            prompt_mapping=prompt_mapping,
+            resolved_width=resolved_width,
+            resolved_height=resolved_height,
+            audio_mode=audio_mode,
+            acceleration=acceleration,
+            ref_image_size=ref_image_size,
+            text_encoder_device=text_encoder_device,
+            roles=roles,
+            reference_video_role=reference_video_role,
+            reference_audio_role=reference_audio_role,
+            sol_conditioning=sol_conditioning,
+            spectrum_profile=spectrum_profile,
+            vram_clean_before_decode=vram_clean_before_decode,
+            rife_mode=rife_mode,
+            active_upscale_mode=active_upscale_mode,
+            upscale_enabled=upscale_enabled,
+            voice_reference_picture_index=voice_reference_picture_index,
+            lipsync=False,
+            motion_context_tail_frames=0,
+            motion_context_audio=motion_context_audio,
+            motion_context_window_frames=motion_context_window_frames,
+        )
+        return _masked_loop_guided_plan(
+            base,
+            duration_seconds=max(0.01, _float(duration_seconds, 10.0)),
+            window_frames=motion_context_window_frames,
+            overlap_frames=motion_context_tail_frames,
+        )
+    joint_keyframes_requested = requested_task_mode == "keyframe_joint_native"
+    if joint_keyframes_requested:
+        if acceleration.startswith("iamccs_progressive"):
+            raise ValueError("KEYFRAME JOINT requires single-stage native sampling; turn off progressive sampling.")
+        requested_joint_frames = int(round(float(duration_seconds) * H3_FPS))
+        if requested_joint_frames > H3_MAX_TRAINED_FRAMES:
+            raise ValueError(
+                f"KEYFRAME JOINT requires one H3 sample: maximum {H3_MAX_TRAINED_FRAMES} frames "
+                f"({H3_MAX_TRAINED_FRAMES / H3_FPS:.2f}s). Shorten the timeline; "
+                "this mode never silently splits into FLF clips."
+            )
+    if requested_task_mode in {"longvid_guides", "longvid", "long_video_guides", "keyframe_joint_native"} or longvid_lipsync_requested or motion_context_requested:
         # Direct callers receive the same audio authority as the ShotPlanner UI.
         if longvid_lipsync_requested:
             audio_mode = "h3_custom_audio_drive"
@@ -1272,6 +1629,23 @@ def build_shotplan(
             motion_context_audio=motion_context_audio,
             motion_context_window_frames=motion_context_window_frames,
         )
+        if joint_keyframes_requested:
+            chunks = plan.get("chunks", [])
+            events = plan.get("guide_track", {}).get("events", [])
+            image_events = [event for event in events if event.get("kind") == "image"]
+            if len(chunks) != 1 or len(image_events) < 2:
+                raise ValueError("KEYFRAME JOINT needs at least two enabled image guides within one H3 window.")
+            plan["requested_task_mode"] = "keyframe_joint_native"
+            plan["mode_contract"] = {
+                "mode": "keyframe_joint_native",
+                "backend": "stock_h3_addguide_joint_sampling",
+                "sample_count": 1,
+                "pixel_crossfade_frames": 0,
+                "context_handover": False,
+                "experimental": True,
+                "motion_guaranteed": False,
+            }
+            plan["chunk_policy"] = "one_joint_native_sample_no_silent_split"
         if motion_context_requested:
             plan["requested_task_mode"] = requested_task_mode
             plan["mode_contract"] = {
@@ -1302,12 +1676,36 @@ def build_shotplan(
         if audio_slots:
             slots = audio_slots
     auto_task_mode = requested_task_mode in {"auto", "auto_from_timeline"}
-    explicit_flf_mode = requested_task_mode in {"flf", "fflf", "fl2va"}
+    # LONG CONTINUOUS GUIDED is deliberately compiled by the FL2VA interval
+    # planner, not by Long Multi-Shot's positioned AddGuide planner.  Every
+    # consecutive pair of authored pictures is one destination interval; from
+    # interval two onward the upstream Motion Context provider owns the opening
+    # frames with the previous *sampled native AV latent*.
+    continuous_guided_requested = requested_task_mode in {
+        "longvid_continuous_guided", "long_continuous_guided",
+    } or continuous_av_requested
+    legacy_motion_context_requested = continuous_guided_requested and not continuous_av_requested
+    if continuous_guided_requested and not continuous_av_requested:
+        # Canonicalize only this new isolated branch; all historical mode IDs
+        # retain their serialized spelling for compatibility.
+        requested_task_mode = "longvid_continuous_guided"
+        task_mode = requested_task_mode
+    explicit_flf_mode = requested_task_mode in {"flf", "fflf", "fl2va"} or continuous_guided_requested
     explicit_i2v_mode = requested_task_mode in {"i2v", "i2va"}
     explicit_ref2v_mode = requested_task_mode in {
-        "ref2va", "ref2va_audio", "ref2va_reference", "ref2vid_lipsync", "lipsync_ref2vid", "v2va_object_swap",
+        "ref2va", "ref2va_audio", "ref2va_reference", "ref2vid_lipsync", "lipsync_ref2vid", "v2va_object_swap", "v2va_face_swap",
     }
     image_slots = [slot for slot in slots if _text(slot.get("image"))]
+    if continuous_guided_requested:
+        if len(image_slots) < 2:
+            raise ValueError(
+                "LONG CONTINUOUS GUIDED requires at least two chronological Shotboard image guides."
+            )
+        starts = [float(slot.get("start_seconds", 0.0)) for slot in image_slots]
+        if any(next_start <= start for start, next_start in zip(starts, starts[1:])):
+            raise ValueError(
+                "LONG CONTINUOUS GUIDED image guides must have unique, strictly increasing timeline positions."
+            )
     legacy_explicit_last = len(image_slots) == 1 and bool(_text(image_slots[0].get("explicit_last_image")))
     flf_anchor_mode = bool(
         (explicit_flf_mode and len(image_slots) >= 2)
@@ -1331,14 +1729,50 @@ def build_shotplan(
     resolved_join_mode = _text(flf_join_mode).lower() or "h3_keyframe_cut"
     if resolved_join_mode not in {"h3_keyframe_cut", "wan_overlap_blend"}:
         raise ValueError(f"Modalita di concat FLF H3 non valida: {flf_join_mode}")
-    resolved_overlap_frames = max(1, min(24, int(_float(flf_overlap_frames, 9))))
+    # The user-visible overlap is a delivery effect, not a Motion Context
+    # requirement.  Keep it truly off unless WAN overlap blend is explicitly
+    # selected.  The keyframe-cut path below still trims exactly one duplicated
+    # shared boundary frame; that is not a dissolve and is intentionally not
+    # exposed as an overlap amount.
+    authored_overlap_frames = max(0, min(24, int(_float(flf_overlap_frames, 0))))
+    # Decoded overlap is legal only for the ordinary FLF keyframe-adjacency
+    # delivery path.  Hard-cut I2V/REF2VA and latent-handover continuation
+    # already have their own boundary contract; blending their decoded clips
+    # would reintroduce a previous shot or create the long frozen dissolves the
+    # user explicitly disabled.  Keep a saved WAN selection harmless outside
+    # its compatible route instead of silently changing generation semantics.
+    overlap_allowed = bool(
+        flf_anchor_mode
+        and not continuous_guided_requested
+        and not i2v_hard_cut_mode
+        and not ref2v_hard_cut_mode
+    )
+    resolved_join_mode = (
+        resolved_join_mode if overlap_allowed else "h3_keyframe_cut"
+    )
+    resolved_overlap_frames = (
+        authored_overlap_frames
+        if overlap_allowed and resolved_join_mode == "wan_overlap_blend"
+        else 0
+    )
 
     chunks: list[dict[str, Any]] = []
     prompt_map: list[dict[str, Any]] = []
     unique_frames_total = 0
 
     for slot_index, slot in enumerate(slots):
+        requested_frame_count = int(slot["requested_frame_count"])
+        motion_trim_frames = 0
         frame_count = int(slot["frame_count"])
+        if legacy_motion_context_requested and slot_index > 0:
+            motion_trim_frames = max(5, int(motion_context_tail_frames or 22))
+            frame_count = align_h3_frames(requested_frame_count + motion_trim_frames)
+            if frame_count > H3_MAX_TRAINED_FRAMES:
+                raise ValueError(
+                    f"LONG CONTINUOUS GUIDED interval '{slot['label']}' needs {frame_count} sampled frames "
+                    f"({requested_frame_count} visible + {motion_trim_frames} Motion Context frames), above "
+                    f"MiniMax H3's {H3_MAX_TRAINED_FRAMES}-frame limit. Move the guides closer or add a guide."
+                )
         hard_cut_start = slot_index > 0 and (
             slot["transition"] == "hard_cut" or i2v_hard_cut_mode or ref2v_hard_cut_mode
         )
@@ -1353,7 +1787,18 @@ def build_shotplan(
         explicit_last = _text(slot.get("explicit_last_image"))
         terminal_anchor = explicit_last or next_anchor
         chunk_index = len(chunks)
-        first_path = _text(slot.get("image"))
+        # Match the proven Context Loop First-Scene Image Gate exactly.
+        # Scene 1 is a normal A -> B FL2VA interval.  A continuation scene must
+        # not tokenize the shared B image again: its opening is owned by the
+        # previous sampled AV tail injected by Motion Context, while only the
+        # next authored destination remains as the final keyframe.  Re-sending
+        # B as Picture 1 creates competing opening conditions and causes the
+        # reset/freeze/dissolve behaviour seen in the failed smoke.
+        first_path = (
+            ""
+            if continuous_guided_requested and slot_index > 0
+            else _text(slot.get("image"))
+        )
         # Stable FL2VA is an N-keyframe / N-1-chunk contract:
         #
         #   chunk 1 = Picture A -> Picture B
@@ -1369,10 +1814,11 @@ def build_shotplan(
         last_path = terminal_anchor
         has_first = bool(first_path or bridge_first)
         overlap = 0
-        if chunk_index > 0 and not hard_cut_start and has_first:
+        if chunk_index > 0 and not hard_cut_start and has_first and not continuous_guided_requested:
             overlap = 1 if resolved_join_mode == "h3_keyframe_cut" else resolved_overlap_frames
         chunk_task = _chunk_task(task_mode, audio_mode, has_first, bool(last_path))
         start_frame = unique_frames_total
+        unique_frames = frame_count - motion_trim_frames if continuous_guided_requested else frame_count - overlap
         creative_prompt = _compose_prompt(
             global_prompt=_text(global_prompt),
             local_prompt=_text(slot.get("prompt")),
@@ -1423,15 +1869,25 @@ def build_shotplan(
             "slot_label": slot["label"],
             "task_mode": chunk_task,
             "frame_count": frame_count,
-            "requested_frame_count": int(slot["requested_frame_count"]),
+            "requested_frame_count": requested_frame_count,
+            **({
+                "visible_frame_count": unique_frames,
+                "visible_duration_seconds": unique_frames / H3_FPS,
+                "motion_context_trim_frames": motion_trim_frames,
+                "motion_context_tail_frames": max(5, int(motion_context_tail_frames or 22)),
+            } if continuous_guided_requested else {}),
             "fps": H3_FPS,
             "duration_seconds": frame_count / H3_FPS,
             "timeline_start_frame": start_frame,
             "timeline_start_seconds": start_frame / H3_FPS,
             "overlap_frames": overlap,
-            "trim_head_frames": overlap,
-            "join_mode": resolved_join_mode if overlap else "none",
-            "unique_frames": frame_count - overlap,
+            "trim_head_frames": motion_trim_frames if continuous_guided_requested else overlap,
+            "join_mode": (
+                "phase_aligned_full_av"
+                if continuous_av_requested and slot_index > 0
+                else ("motion_context_native_av" if motion_trim_frames else (resolved_join_mode if overlap else "none"))
+            ),
+            "unique_frames": unique_frames,
             "first_image": first_path,
             "last_image": last_path,
             "prompt": prompt,
@@ -1444,16 +1900,36 @@ def build_shotplan(
             "audio_handoff_silence_tail_seconds": 0.0 if lipsync_requested or locked_audio_hard_cut or slot_index + 1 >= len(slots) else 1.0,
             "local_prompt": slot["prompt"],
             "audio_prompt": slot["audio_prompt"],
-            "transition": "hard_cut" if hard_cut_start else "keyframe_adjacency",
+            "transition": (
+                "motion_context_continuation"
+                if motion_trim_frames
+                else ("hard_cut" if hard_cut_start else "keyframe_adjacency")
+            ),
             "uses_bridge_first_frame": bridge_first,
             "uses_explicit_first_keyframe": bool(first_path),
             "uses_explicit_last_keyframe": bool(last_path),
             "flf_anchor_contract": (
-                "shared_planned_timeline_keyframe"
-                if flf_anchor_mode and not hard_cut_start
-                else "independent_or_hard_cut"
+                "previous_full_av_latent_plus_authored_destination"
+                if continuous_av_requested and slot_index > 0
+                else (
+                    "previous_native_av_head_plus_authored_destination"
+                    if legacy_motion_context_requested and motion_trim_frames
+                    else (
+                        "authored_opening_and_destination"
+                        if continuous_guided_requested
+                        else (
+                            "shared_planned_timeline_keyframe"
+                            if flf_anchor_mode and not hard_cut_start
+                            else "independent_or_hard_cut"
+                        )
+                    )
+                )
             ),
-            "frame_source": "timeline_segment_trim",
+            "frame_source": (
+                "iamccs_continuous_av_flf_interval"
+                if continuous_av_requested
+                else ("continuous_flf_interval" if continuous_guided_requested else "timeline_segment_trim")
+            ),
         }
         if lipsync_audio is not None:
             chunk["lipsync_audio"] = lipsync_audio
@@ -1470,13 +1946,104 @@ def build_shotplan(
                 "prompt": prompt,
             }
         )
-        unique_frames_total += frame_count - overlap
+        unique_frames_total += unique_frames
 
     reference_image_paths = _timeline_image_paths(timeline)[:4]
     image_count = len(reference_image_paths) or sum(1 for slot in slots if slot.get("image"))
     return {
         "schema": "iamccs.minimax_h3.shotplan",
         "schema_version": 10,
+        **({
+            "backend_revision": "iamccs-fl2va-continuous-av-v1",
+            "backend_variant": (
+                "iamccs_guided_av_loop_experimental_v1"
+                if experimental_loop_requested else "iamccs_fl2va_continuous_av_v1"
+            ),
+            "herrgotts_direct_av_chain": {
+                "enabled": True,
+                "provider": "IAMCCS internal GPLv3 continuation engine",
+                "source_attribution": "Herrgotts H3 Infinite Continuation Suite v1.2.1",
+                "context_frames": str(max(5, int(motion_context_tail_frames or 22))),
+                "handover_mode": "auto" if experimental_loop_requested else "manual",
+                "alignment_mode": "phase_aligned_extended",
+                "handover_preset": "Balanced",
+                "video_crossfade_frames": resolved_overlap_frames,
+                "audio_crossfade_ms": 15.0,
+                "max_safe_tail_bridge_frames": 2,
+                "latent_transport": "direct_full_native_av",
+                "preserve_authored_intermediate_keyframes": not experimental_loop_requested,
+                "manual_landing_tail_frames": 34 if experimental_loop_requested else 0,
+                "freeze_tail_analysis": "automatic" if experimental_loop_requested else "diagnostic_only",
+                "recompose_only_reused_context": bool(experimental_loop_requested),
+                "semantics": "n_shotboard_guides_n_minus_one_flf_intervals",
+            },
+            "iamccs_continuous_av": {
+                "enabled": True,
+                "context_frames": str(max(5, int(motion_context_tail_frames or 22))),
+                "handover_mode": "auto" if experimental_loop_requested else "manual",
+                "alignment_mode": "phase_aligned_extended",
+                "handover_preset": "Balanced",
+                "video_crossfade_frames": resolved_overlap_frames,
+                "audio_crossfade_ms": 15.0,
+                "max_safe_tail_bridge_frames": 2,
+                "latent_transport": "direct_full_native_av",
+                "preserve_authored_intermediate_keyframes": not experimental_loop_requested,
+                "manual_landing_tail_frames": 34 if experimental_loop_requested else 0,
+                "freeze_tail_analysis": "automatic" if experimental_loop_requested else "diagnostic_only",
+                "recompose_only_reused_context": bool(experimental_loop_requested),
+            },
+            **({
+                "iamccs_guided_av_loop": {
+                    "enabled": True,
+                    "context_frames": str(max(5, int(motion_context_tail_frames or 22))),
+                    "handover_mode": "auto",
+                    "alignment_mode": "phase_aligned_extended",
+                    "handover_preset": "Balanced",
+                    "video_crossfade_frames": resolved_overlap_frames,
+                    "audio_crossfade_ms": 15.0,
+                    "max_safe_tail_bridge_frames": 2,
+                    "latent_transport": "direct_full_native_av",
+                    "preserve_authored_intermediate_keyframes": False,
+                    "manual_landing_tail_frames": 34,
+                    "freeze_tail_analysis": "automatic",
+                    "recompose_only_reused_context": True,
+                }
+            } if experimental_loop_requested else {}),
+            "mode_contract": {
+                "mode": requested_task_mode,
+                "public_name": (
+                    "GUIDED AV LOOP · EXPERIMENTAL"
+                    if experimental_loop_requested else "FL2VA CONTINUOUS AV"
+                ),
+                "subtitle": "PHASE-ALIGNED LATENT HANDOVER",
+                "backend": "iamccs_internal_continuous_av_engine",
+                "former_masked_loop_removed": True,
+                "legacy_backend_untouched": True,
+                "requires": "ComfyUI MiniMax H3 runtime",
+            },
+        } if continuous_av_requested else ({
+            "backend_revision": "long-continuous-guided-v1",
+            "backend_variant": "motion_context_auto_chain_v1",
+            "motion_context_auto_chain": {
+                "enabled": True,
+                "provider": "ComfyUI-H3-Motion-Context-Auto-Chain-addon",
+                "minimum_provider_version": "0.1.2",
+                "context_frames": max(5, int(motion_context_tail_frames or 22)),
+                "audio_context_frames": 24 if motion_context_audio else 0,
+                "continue_audio": bool(motion_context_audio),
+                "latent_transport": "native_av_safetensors",
+                "semantics": "fl2va_interval_previous_av_head_plus_next_last_frame",
+                "guide_boundary": "safe_handoff",
+                "interior_image_guides": "rejected",
+                "model_max_frames": H3_MAX_TRAINED_FRAMES,
+            },
+            "mode_contract": {
+                "mode": "longvid_continuous_guided",
+                "backend": "isolated_motion_context_flf_intervals",
+                "legacy_backend_untouched": True,
+                "requires": "ComfyUI-H3-Motion-Context-Auto-Chain-addon>=0.1.2",
+            },
+        } if continuous_guided_requested else {})),
         "source_timeline_schema": _text(timeline.get("schema")),
         "fps": H3_FPS,
         "width": resolved_width,
@@ -1484,6 +2051,11 @@ def build_shotplan(
         "task_mode": task_mode,
         "generation_mode": task_mode,
         "continuation_mode": (
+            "herrgotts_phase_aligned_full_av_handover"
+            if herrgotts_requested
+            else ("direct_native_av_latent_plus_next_shotboard_destination"
+            if continuous_guided_requested
+            else (
             "ref2vid_lipsync_audioboard_hard_cuts"
             if lipsync_requested
             else (
@@ -1494,7 +2066,7 @@ def build_shotplan(
                     if ref2v_hard_cut_mode
                     else ("flf_shared_planned_keyframes" if flf_anchor_mode else "timeline_keyframe_adjacency")
                 )
-            )
+            )))
         ),
         "audio_mode": audio_mode,
         "prompt_mapping": prompt_mapping,
@@ -1523,6 +2095,11 @@ def build_shotplan(
         "upscale_enabled": bool(_bool(upscale_enabled, False)),
         "upscale_mode": active_upscale_mode,
         "chunk_policy": (
+            "n_guides_n_minus_one_herrgotts_direct_av_intervals"
+            if herrgotts_requested
+            else ("n_guides_n_minus_one_continuous_flf_intervals"
+            if continuous_guided_requested
+            else (
             "one_visual_or_audioboard_slot_one_ref2vid_lipsync_hard_cut_chunk"
             if lipsync_requested
             else (
@@ -1537,7 +2114,7 @@ def build_shotplan(
                         else "one_timeline_box_one_h3_chunk"
                     )
                 )
-            )
+            )))
         ),
         "flf_anchor_mode": flf_anchor_mode,
         "i2v_hard_cut_mode": i2v_hard_cut_mode,

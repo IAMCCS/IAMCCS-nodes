@@ -339,13 +339,13 @@ def mix_audio_timeline(
     segments, contract = _audio_contract(cine_linx)
     contract = copy.deepcopy(contract)
     contract["audioSegments"] = segments
-    native_audio_bypass = (
-        audio_mode == "h3_native_generated"
-        and not any(
-            isinstance(segment, dict) and not bool(segment.get("placeholder", False))
-            for segment in segments
-        )
-    )
+    # Shotboard audio mode is the final authority.  Native H3 audio must bypass
+    # every external timeline source even when an older workflow still carries
+    # concrete AudioBoard segments in CineLinX.
+    native_audio_bypass = audio_mode == "h3_native_generated"
+    if native_audio_bypass:
+        segments = []
+        contract["audioSegments"] = []
     mapping_policy = str(mapping_policy or "slot_locked_i2v")
     if mapping_policy not in {"slot_locked_i2v", "absolute_timeline"}:
         raise ValueError(f"Unsupported audio mapping policy: {mapping_policy}")
@@ -670,6 +670,11 @@ class IAMCCS_MiniMaxH3AudioTimelineMixR21:
         **kwargs,
     ):
         audio_inputs = [kwargs.get(f"audio_{index}") for index in range(1, MAX_AUDIO_INPUTS + 1)]
+        face_source = cine_linx.get("resources", {}).get("iamccs_h3_face_swap_source")
+        if face_source is not None:
+            # The masked backend slices and locks source audio with its video window.
+            audio = face_source.get("audio") or audio_inputs[0]
+            return cine_linx, audio, audio, json.dumps({"audio_owner": "masked_ref2va_backend"})
         out_linx, master, chunk, report = mix_audio_timeline(
             cine_linx,
             segment_index,

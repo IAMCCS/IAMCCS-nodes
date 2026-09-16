@@ -99,7 +99,7 @@ const MODE_META = {
         ],
     },
     multi_shot_lipsync: {
-        label: "MULTI-SHOT LIPSYNC",
+        label: "LONG MULTI-SHOT",
         subtitle: "Guided editorial cuts + one continuous AudioBoard lip-sync track",
         sections: [
             ["multishot_audio_contract", "Continuous audio contract", "The connected AudioBoard track owns exact words, timing, pauses and breaths across every guided shot."],
@@ -355,6 +355,8 @@ function safeProject(raw) {
         ai_direction: String(parsed.ai_direction || ""),
         ai_scope: String(parsed.ai_scope || "active_field"),
         ai_visual_roles: parsed.ai_visual_roles && typeof parsed.ai_visual_roles === "object" ? { ...parsed.ai_visual_roles } : {},
+        visual_story_relationship: String(parsed.visual_story_relationship || ""),
+        visual_story_plan: parsed.visual_story_plan && typeof parsed.visual_story_plan === "object" ? { ...parsed.visual_story_plan } : {},
         request: String(parsed.request || ""),
         local_prompts: Array.isArray(parsed.local_prompts) ? parsed.local_prompts.map(row => ({...row})) : [],
         authority_map: parsed.authority_map && typeof parsed.authority_map === "object" ? { ...parsed.authority_map } : {},
@@ -524,7 +526,7 @@ function mountPrompter(node) {
         .iamccs-pr-ai-status{min-width:0;min-height:31px;padding:7px 8px;border:1px solid #2c4052;border-radius:6px;background:#0d1720;color:#91a4b5;font-size:9px;line-height:1.4;overflow-wrap:anywhere}.iamccs-pr-ai-status.ok{border-color:#356c4e;color:#8fd1aa}.iamccs-pr-ai-status.error{border-color:#75443f;color:#ed9c92}
         .iamccs-pr-ai .iamccs-pr-btn{width:100%;height:auto;min-height:31px;border-color:#6094c0;background:#274866;color:#eef7ff;padding:6px 8px;line-height:1.25;white-space:normal}
         .iamccs-pr-ai-modelrow{display:grid;grid-template-columns:minmax(0,1fr) 32px;gap:6px;min-width:0}.iamccs-pr-ai-modelrow .iamccs-pr-btn{height:31px;min-height:31px;padding:0!important;font-size:14px}.iamccs-pr-ai-modelrow datalist{display:none}
-        .iamccs-pr-ai-images{display:grid;grid-template-columns:minmax(0,1fr);gap:5px;min-width:0}.iamccs-pr-ai-image{display:grid;grid-template-columns:44px minmax(0,1fr);gap:6px;padding:5px;border:1px solid #304255;border-radius:6px;background:#0c141c;min-width:0}.iamccs-pr-ai-thumb{width:44px;height:44px;object-fit:cover;border-radius:4px;background:#202832}.iamccs-pr-ai-image-meta{display:grid;gap:3px;min-width:0}.iamccs-pr-ai-image-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aebdca;font-size:8px}.iamccs-pr-ai-image select{height:24px!important;font-size:8px!important}.iamccs-pr-ai-file{display:none}
+        .iamccs-pr-ai-images{display:grid;grid-template-columns:minmax(0,1fr);gap:5px;min-width:0}.iamccs-pr-ai-image{display:grid;grid-template-columns:44px minmax(0,1fr) 25px;gap:6px;padding:5px;border:1px solid #304255;border-radius:6px;background:#0c141c;min-width:0}.iamccs-pr-ai-thumb{width:44px;height:44px;object-fit:cover;border-radius:4px;background:#202832}.iamccs-pr-ai-image-meta{display:grid;gap:3px;min-width:0}.iamccs-pr-ai-image-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aebdca;font-size:8px}.iamccs-pr-ai-image select{height:24px!important;font-size:8px!important}.iamccs-pr-ai-remove{width:25px!important;min-height:25px!important;height:25px!important;padding:0!important;border-color:#75443f!important;background:#301b1b!important;color:#f1aaa2!important}.iamccs-pr-ai-file{display:none}
         .iamccs-pr-example-select{height:30px;max-width:146px;border:1px solid #3b4350;border-radius:6px;background:#171b23;color:#e9edf2;padding:0 6px;font:600 10px Inter,Segoe UI,sans-serif}
         .iamccs-pr-inject{width:100%;height:38px!important;margin:0 0 7px;background:linear-gradient(135deg,#d3a447,#8d5c20)!important;border:1px solid #f0ca7d!important;color:#171109!important;font-size:12px!important;font-weight:900!important;letter-spacing:.06em;box-shadow:0 5px 14px #0007}
         .iamccs-pr-inject-status{min-height:30px;margin-bottom:12px;padding:7px;border:1px solid #303944;border-radius:6px;background:#151b22;color:#91a0ae;font-size:9px;line-height:1.35}.iamccs-pr-inject-status.ok{border-color:#3f7957;color:#9fe0b7}.iamccs-pr-inject-status.error{border-color:#824b45;color:#efaaa1}
@@ -595,7 +597,7 @@ function mountPrompter(node) {
     const targetHint = el("div", "iamccs-pr-hint");
     left.appendChild(targetHint);
     const injectBtn = button("INJECT → SHOTBOARD", "iamccs-pr-inject");
-    injectBtn.title = "Write the composed prompt immediately into the connected MiniMax Shotboard and keep the CineLinX queue-time injection contract synchronized.";
+    injectBtn.title = "Write the composed prompt into the connected MiniMax Shotboard. A connected Prompter never overrides Shotboard during Queue; the visible Shotboard boxes are final truth.";
     const injectStatus = el("div", "iamccs-pr-inject-status", "Connect CineLinX to a MiniMax Shotboard, choose a target, then inject.");
     left.append(injectBtn, injectStatus);
     left.appendChild(el("div", "iamccs-pr-kicker", "Writing mode"));
@@ -683,11 +685,17 @@ function mountPrompter(node) {
     aiImageInput.tabIndex = -1;
     aiImageInput.setAttribute("aria-hidden", "true");
     const addAIImagesBtn = button("ADD AI REFERENCE IMAGES · MAX 4");
-    addAIImagesBtn.title = "Temporary visual context for the AI rewrite. Images are analyzed for every selected AI target, but are never injected into the Shotboard or generation backend.";
+    addAIImagesBtn.title = "Add images incrementally. Each file is uploaded to ComfyUI input and can be removed with × before Shotboard injection.";
     const aiImages = el("div", "iamccs-pr-ai-images");
+    const visualRelationship = el("textarea");
+    visualRelationship.placeholder = "Describe exactly how the action unfolds from Picture 1 through Picture 2, Picture 3… Say whether transitions are continuous movement or explicit editorial cuts, and what must remain unchanged.";
+    visualRelationship.value = project.visual_story_relationship || "";
+    const relationshipLabel = el("label", "", "ORDERED IMAGE ACTION / STORY IDEA");
+    relationshipLabel.appendChild(visualRelationship);
+    const buildVisualStoryBtn = button("✦ BUILD H3 GLOBAL + LOCAL PROMPTS");
     const rewriteBtn = button("✦ Improve selected section with AI");
     const aiStatus = el("div", "iamccs-pr-ai-status", "Ollama is local. Choose the field to improve; cloud keys are never stored in the workflow.");
-    aiPanel.append(aiRow1, aiRow2, keyLabel, connectOllamaBtn, addAIImagesBtn, aiImageInput, aiImages, rewriteBtn, aiStatus);
+    aiPanel.append(aiRow1, aiRow2, keyLabel, connectOllamaBtn, addAIImagesBtn, aiImageInput, aiImages, relationshipLabel, buildVisualStoryBtn, rewriteBtn, aiStatus);
     left.appendChild(aiPanel);
 
     const center = el("main", "iamccs-pr-center");
@@ -753,6 +761,14 @@ function mountPrompter(node) {
         { caption: "<scenetrans>", value: "<scenetrans>", syntax: true, title: "Dialogue continues across a scene transition" },
         { caption: "<cutoff>", value: "<cutoff>", syntax: true, title: "Speech is intentionally cut off by the video ending" },
     ]);
+    addTagRow("Voice beta", [
+        { caption: "<laughs>", value: "<laughs>", syntax: true, title: "Community-tested non-verbal cue inside <d>; experimental and seed-dependent." },
+        { caption: "<sighs>", value: "<sighs>", syntax: true, title: "Community-tested breath/emotion cue inside <d>; experimental and seed-dependent." },
+        { caption: "<cough>", value: "<cough>", syntax: true, title: "Community-reported non-verbal cue inside <d>; experimental and seed-dependent." },
+        { caption: "<shuddering breath>", value: "<shuddering breath>", syntax: true, title: "Community-tested micro-performance cue inside <d>; experimental and seed-dependent." },
+        { caption: "<i>stress</i>", value: "<i>...</i>", select: "...", syntax: true, title: "Community-tested word emphasis; it can produce gibberish on some seeds." },
+        { caption: "whispered tone", value: "<d>[English, whispered in a pleading tone] ...</d>", select: "...", syntax: true, title: "Community-tested delivery instruction in the language tag; replace language, tone and text." },
+    ]);
     addTagRow("Audio drive", [
         {
             caption: "S1 driven line",
@@ -797,6 +813,7 @@ function mountPrompter(node) {
         project.merge_policy = policy.value;
         project.ai_direction = aiDirection.value;
         project.ai_scope = aiScope.value || "active_field";
+        project.visual_story_relationship = visualRelationship.value;
         setWidget(node, "project_data", JSON.stringify(project));
         setWidget(node, "task_mode", project.task_mode);
         setWidget(node, "injection_target", project.injection_target);
@@ -862,6 +879,17 @@ function mountPrompter(node) {
         reader.onerror = () => reject(reader.error || new Error("Unable to read image"));
         reader.readAsDataURL(file);
     });
+    const uploadVisualFile = async (file) => {
+        const form = new FormData();
+        const safeName = `${Date.now()}_${String(file.name || "visual.png").replace(/[^a-z0-9._-]+/gi, "_")}`;
+        form.append("image", file, safeName);
+        form.append("subfolder", "IAMCCS/Prompter");
+        form.append("overwrite", "false");
+        const response = await api.fetchApi("/upload/image", { method: "POST", body: form });
+        if (!response.ok) throw new Error(`Image upload failed (${response.status})`);
+        const data = await response.json();
+        return [data.subfolder, data.name].filter(Boolean).join("/");
+    };
     const renderAIImages = () => {
         aiImages.replaceChildren();
         const roles = visualRolesForTarget();
@@ -882,7 +910,18 @@ function mountPrompter(node) {
             role.value = String(roles[slot] || (index === 0 ? "opening" : index === 1 ? "closing" : "reference"));
             role.onchange = () => { visualRolesForTarget()[slot] = role.value; commit(); };
             meta.appendChild(role);
-            card.append(thumb, meta);
+            const remove = button("×", "iamccs-pr-ai-remove");
+            remove.title = `Remove Picture ${slot}`;
+            remove.onclick = () => {
+                const previousRoles = aiVisualFiles.map((_entry, oldIndex) => String(roles[String(oldIndex + 1)] || (oldIndex === 0 ? "opening" : oldIndex === 1 ? "closing" : "reference")));
+                aiVisualFiles.splice(index, 1);
+                const nextRoles = {};
+                previousRoles.filter((_value, oldIndex) => oldIndex !== index).forEach((value, nextIndex) => { nextRoles[String(nextIndex + 1)] = value; });
+                project.ai_visual_roles[project.injection_target || "global"] = nextRoles;
+                renderAIImages(); commit();
+                aiStatus.textContent = `${aiVisualFiles.length} persistent workflow image reference(s) ready.`;
+            };
+            card.append(thumb, meta, remove);
             aiImages.appendChild(card);
         });
     };
@@ -894,6 +933,7 @@ function mountPrompter(node) {
             role: String(roles[String(index + 1)] || (index === 0 ? "opening" : index === 1 ? "closing" : "reference")),
             mime_type: item.file.type || "image/png",
             data: item.dataUrl,
+            path: item.path || "",
         })).filter((item) => item.role !== "ignore");
     };
     const loadOllamaModels = async ({ quiet = false } = {}) => {
@@ -946,13 +986,67 @@ function mountPrompter(node) {
     connectOllamaBtn.onclick = () => loadOllamaModels();
     addAIImagesBtn.onclick = () => aiImageInput.click();
     aiImageInput.onchange = async () => {
-        const files = Array.from(aiImageInput.files || []).filter((file) => /^image\//.test(file.type)).slice(0, 4);
-        aiVisualFiles.splice(0, aiVisualFiles.length);
-        for (const file of files) aiVisualFiles.push({ file, dataUrl: await readFileDataUrl(file) });
-        renderAIImages();
-        aiImageInput.value = "";
+        const selected = Array.from(aiImageInput.files || []).filter((file) => /^image\//.test(file.type));
+        const existing = new Set(aiVisualFiles.map((item) => `${item.file.name}:${item.file.size}:${item.file.lastModified}`));
+        const files = selected.filter((file) => !existing.has(`${file.name}:${file.size}:${file.lastModified}`)).slice(0, Math.max(0, 4 - aiVisualFiles.length));
         aiStatus.className = "iamccs-pr-ai-status";
-        aiStatus.textContent = `${aiVisualFiles.length} temporary AI image reference(s). They will be analyzed in any GLOBAL or LOCAL AI rewrite you trigger. They are not saved, injected into Shotboard, or connected to the generation backend.`;
+        aiStatus.textContent = files.length ? "Uploading visual references to ComfyUI input…" : "No new image added (maximum 4 or duplicate selection).";
+        try {
+            for (const file of files) aiVisualFiles.push({ file, dataUrl: await readFileDataUrl(file), path: await uploadVisualFile(file) });
+            renderAIImages();
+            aiStatus.className = "iamccs-pr-ai-status ok";
+            aiStatus.textContent = `${aiVisualFiles.length} image reference(s) saved in ComfyUI input, readable by AI and ready for Shotboard injection.`;
+        } catch (error) {
+            aiStatus.className = "iamccs-pr-ai-status error";
+            aiStatus.textContent = error?.message || "Image upload failed";
+        } finally {
+            aiImageInput.value = "";
+        }
+    };
+
+    visualRelationship.addEventListener("input", () => { project.visual_story_relationship = visualRelationship.value; commit(); });
+    buildVisualStoryBtn.onclick = async () => {
+        if (!aiVisualFiles.length) { aiStatus.className = "iamccs-pr-ai-status error"; aiStatus.textContent = "Add at least one image first."; return; }
+        if (!visualRelationship.value.trim()) { visualRelationship.focus(); aiStatus.className = "iamccs-pr-ai-status error"; aiStatus.textContent = "Describe how the action must unfold across the ordered pictures."; return; }
+        if (!aiModel.value.trim()) { aiModel.focus(); aiStatus.className = "iamccs-pr-ai-status error"; aiStatus.textContent = "Select an AI vision model first."; return; }
+        try {
+            buildVisualStoryBtn.disabled = true; persistAI();
+            aiStatus.className = "iamccs-pr-ai-status"; aiStatus.textContent = "Reading images and building H3 global/local motion prompts…";
+            const response = await api.fetchApi("/iamccs/prompter/visual-story", {
+                method: "POST", headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ provider: aiProvider.value, base_url: aiBaseUrl.value.trim(), model: aiModel.value.trim(),
+                    api_key: aiApiKey.value, relationship: visualRelationship.value.trim(), task_mode: project.task_mode,
+                    images: buildAIImagePayload(), temperature: Number(aiTemperature.value || 0.3), timeout: 150 }),
+            });
+            const payload = await response.json();
+            if (!response.ok || !payload?.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
+            const plan = payload.plan || {};
+            project.visual_story_plan = { ...plan, image_paths: aiVisualFiles.map((item) => item.path).filter(Boolean) };
+            const globalKey = ({
+                fl2va: "action",
+                ref2va: "detailed_description",
+                v2va_object_swap: "v2va_interval_edits",
+                audio_driven: "audio_timed_performance",
+                multi_shot_lipsync: "multishot_shot_plan",
+            })[project.task_mode] || "scene";
+            const globalText = String(plan.global_prompt || [plan.global_direction,
+                plan.continuity_locks ? `Continuity locks: ${plan.continuity_locks}` : ""].filter(Boolean).join("\n")).trim();
+            if (globalText) project.sections[globalKey] = globalText;
+            if (project.task_mode === "multi_shot_lipsync") {
+                project.sections.multishot_global_direction = String(plan.global_direction || project.sections.multishot_global_direction || "");
+                project.sections.multishot_continuity_locks = String(plan.continuity_locks || project.sections.multishot_continuity_locks || "");
+            }
+            project.local_prompts = (plan.shots || []).map((shot, index) => ({
+                slot: Number(shot.slot || index + 1), enabled: true,
+                prompt: [shot.local_prompt, shot.h3_transition_prompt ? `H3 transition: ${shot.h3_transition_prompt}` : ""].filter(Boolean).join("\n"),
+                h3_transition_prompt: String(shot.h3_transition_prompt || ""), image_path: aiVisualFiles[index]?.path || "",
+            }));
+            aiApiKey.value = ""; commit(); renderSections(); renderPreview();
+            aiStatus.className = "iamccs-pr-ai-status ok";
+            aiStatus.textContent = `H3 global prompt + ${project.local_prompts.length} ordered local shot(s) built · recommended mode ${String(plan.recommended_mode || "auto").toUpperCase()}. Review, then INJECT → SHOTBOARD.`;
+        } catch (error) {
+            aiStatus.className = "iamccs-pr-ai-status error"; aiStatus.textContent = error?.message || "Visual story planning failed";
+        } finally { buildVisualStoryBtn.disabled = false; }
     };
 
     const renderPreview = () => {
@@ -1010,12 +1104,39 @@ function mountPrompter(node) {
         const requestHead = el("div", "iamccs-pr-section-head");
         requestHead.style.cssText="height:auto;min-height:38px;flex-wrap:wrap;padding:6px 10px";
         const requestAI = button("✦ REQUEST → GLOBAL", "iamccs-pr-field-ai");
-        requestHead.append(el("div","iamccs-pr-section-title","REQUEST · describe what you want"),requestAI);
+        const requestStory = button("✦ REQUEST → GLOBAL + LOCALS", "iamccs-pr-field-ai");
+        requestStory.onclick = async () => {
+            if (!project.request.trim()) { aiStatus.textContent = "Write the global idea and numbered local prompt directions first."; return; }
+            try {
+                requestStory.disabled = true; persistAI();
+                aiStatus.textContent = "Developing global direction and numbered local prompts…";
+                const response = await api.fetchApi("/iamccs/prompter/visual-story", {
+                    method: "POST", headers: {"Content-Type":"application/json"},
+                    body: JSON.stringify({provider:aiProvider.value,base_url:aiBaseUrl.value.trim(),model:aiModel.value.trim(),
+                        api_key:aiApiKey.value,relationship:project.request,task_mode:project.task_mode,images:[],
+                        temperature:Number(aiTemperature.value || 0.3),timeout:150}),
+                });
+                const data = await response.json();
+                if (!response.ok || !data.ok) throw Error(data.error || `HTTP ${response.status}`);
+                snapshotProject("request global and locals");
+                project.sections = {};
+                const globalKey = ({fl2va:"action",ref2va:"detailed_description",v2va_object_swap:"v2va_interval_edits",audio_driven:"audio_timed_performance",multi_shot_lipsync:"multishot_shot_plan"})[project.task_mode] || "scene";
+                project.sections[globalKey] = data.plan.global_prompt;
+                project.local_prompts = data.plan.shots.map(shot => ({slot:shot.slot, enabled:true,
+                    prompt:[shot.local_prompt,shot.h3_transition_prompt].filter(Boolean).join("\n")}));
+                project.injection_target = "global";
+                aiApiKey.value = ""; commit(); renderSections(); renderPreview();
+                aiStatus.className = "iamccs-pr-ai-status ok";
+                aiStatus.textContent = `Global + ${project.local_prompts.length} local prompts ready. Review, then INJECT → SHOTBOARD.`;
+            } catch (error) { aiStatus.className = "iamccs-pr-ai-status error"; aiStatus.textContent = error.message; }
+            finally { requestStory.disabled = false; }
+        };
+        requestHead.append(el("div","iamccs-pr-section-title","REQUEST · describe what you want"),requestAI,requestStory);
         const requestBox = el("textarea", "iamccs-pr-text"); requestBox.value = project.request;
-        requestBox.placeholder = "Write your scene naturally: who speaks, what happens, camera, mood and supplied audio. The AI will fill the structured global boxes; it will not start Queue.";
+        requestBox.placeholder = "Describe the global scene, then: Prompt 1: I want… Prompt 2: then… Prompt 3: finally… Choose GLOBAL + LOCALS to develop all numbered prompts and inject them together.";
         requestBox.oninput = () => { project.request = requestBox.value; commit(); };
         requestAI.onclick = () => runAIRewrite({directTargetKeys:MODE_META[project.task_mode].sections.map(([key]) => key), triggerButton:requestAI, narrativeRequest:requestBox.value});
-        requestCard.append(requestHead, requestBox, el("div","iamccs-pr-tip","REQUEST is a brief, not a second prompt. Press AI to populate the GLOBAL fields below, then review and inject. Existing global fields will be replaced for this action."));
+        requestCard.append(requestHead, requestBox, el("div","iamccs-pr-tip","GLOBAL fills the structured global boxes. GLOBAL + LOCALS replaces the global and local draft with an ordered development of your numbered directions. Review the local slot numbers before INJECT; no generation is queued."));
         center.append(requestCard);
         center.appendChild(renderCameraBuilder());
         const meta = MODE_META[project.task_mode];
@@ -1099,7 +1220,7 @@ function mountPrompter(node) {
         exampleBtn.textContent = project.task_mode === "audio_driven"
             ? "Load Audio Drive Template"
             : project.task_mode === "multi_shot_lipsync"
-                ? "Load Multi-Shot Demo"
+                ? "Load Long Multi-Shot Demo"
                 : "Load Example";
         targetButtons.forEach((item, key) => item.classList.toggle("active", key === project.injection_target));
         writingButtons.forEach((item, key) => item.classList.toggle("active", key === project.writing_mode));
@@ -1126,7 +1247,7 @@ function mountPrompter(node) {
         project.project_name = selectedT2V?.name || (mode === "audio_driven"
             ? "Audio Drive Prompt Template"
             : mode === "multi_shot_lipsync"
-                ? "Multi-Shot LipSync Guided Cuts Demo"
+                ? "Long Multi-Shot Guided Cuts Demo"
                 : `${MODE_META[mode].label} Example Project`);
         renderControls();
         renderSections();
@@ -1327,7 +1448,7 @@ function mountPrompter(node) {
             project.task_mode = key;
             if (key === "multi_shot_lipsync" && previousMode !== key) {
                 project.sections = { ...project.sections, ...EXAMPLES.multi_shot_lipsync };
-                project.project_name = "Multi-Shot LipSync Guided Cuts Demo";
+                project.project_name = "Long Multi-Shot Guided Cuts Demo";
             }
             renderControls();
             renderSections();
@@ -1361,6 +1482,25 @@ function mountPrompter(node) {
             if (typeof shotboard._iamccsMiniMaxInjectPrompt !== "function") {
                 throw new Error("Shotboard UI bridge is not ready; reload ComfyUI once");
             }
+            if (activeLocals.length) {
+                const timeline = JSON.parse(String(widget(shotboard,"timeline_data")?.value || "{}"));
+                const slots = (timeline.segments || []).filter(row => !row?.placeholder && !["audio","motion","video"].includes(String(row?.type || "image").toLowerCase()))
+                    .sort((a,b) => Number(a.start || 0)-Number(b.start || 0));
+                const used = new Set();
+                for (const row of activeLocals) {
+                    const bound = row.slot_id ? slots.findIndex(slot => String(slot.id) === String(row.slot_id)) : -1;
+                    const index = bound >= 0 ? bound : Number(row.slot)-1;
+                    if (!Number.isInteger(index) || index < 0 || index >= slots.length || used.has(index)) {
+                        throw Error(`Local prompt ${row.slot}: missing or duplicate Shotboard slot. Read Shotboard slots before injecting; nothing changed.`);
+                    }
+                    used.add(index);
+                }
+            }
+            const visualPaths = [
+                ...(project.visual_story_plan?.image_paths || []),
+                ...aiVisualFiles.map((item) => item.path),
+            ].map((value) => String(value || "").trim()).filter(Boolean);
+            if (visualPaths.length) setWidget(shotboard, "image_paths", JSON.stringify([...new Set(visualPaths)]));
             const targetIsGlobal = project.injection_target === "global";
             const localFallbackKeys = {
                 t2va:["shot_list","acting","dialogue","camera"],
@@ -1378,11 +1518,16 @@ function mountPrompter(node) {
                 : (!activeLocals.length && localFallback
                     ? shotboard._iamccsMiniMaxInjectPrompt({prompt:localFallback,target:project.injection_target,mergePolicy:project.merge_policy})
                     : null);
+            // A Shotboard rebuild can legitimately replace segment ids while
+            // preserving the visible chronological slots.  Treat the stable id
+            // as the first choice, but always pass the visible one-based slot as
+            // the deterministic fallback.  This keeps LOCAL prompts attached to
+            // the boxes the filmmaker sees instead of failing on a stale id.
             const localResults = activeLocals.map(row =>
-                shotboard._iamccsMiniMaxInjectPrompt({prompt:row.prompt,target:`local_${row.slot}`,slotId:row.slot_id || "",strictSlot:true,mergePolicy:project.merge_policy}));
+                shotboard._iamccsMiniMaxInjectPrompt({prompt:row.prompt,target:`local_${Math.max(1, Number(row.slot) || 1)}`,slotId:row.slot_id || "",strictSlot:true,mergePolicy:project.merge_policy}));
             if (!result && !localResults.length) throw new Error("LOCAL target selected: fill or enable at least one LOCAL slot action.");
             injectStatus.className = "iamccs-pr-inject-status ok";
-            injectStatus.textContent = `Injected into ${[result,...localResults].filter(Boolean).map(r => r.actualTarget).join(", ")}. Visible boxes and CineLinX requests are synchronized; Queue was not started.`;
+            injectStatus.textContent = `Injected into ${[result,...localResults].filter(Boolean).map(r => r.actualTarget).join(", ")}.${visualPaths.length ? ` ${visualPaths.length} visual path(s) synchronized to Shotboard.` : ""} Shotboard visible boxes are now the only Queue truth; Queue was not started.`;
             injectBtn.textContent = "INJECTED ✓";
             setTimeout(() => { injectBtn.textContent = "INJECT → SHOTBOARD"; }, 1200);
         } catch (error) {

@@ -7,6 +7,19 @@ const NODE_TYPE = "IAMCCS_bus_group";
 const ENABLED_MODE = 0;   // LiteGraph.ALWAYS
 const MAX_CHANNELS = 32;
 
+// Keep the Bus Group controls comfortably usable on high-resolution displays
+// without changing the scale of any other ComfyUI node.
+const UI_SCALE = 2;
+const BASE_NODE_WIDTH = 260 * UI_SCALE;
+const MIN_ROW_WIDTH = 180 * UI_SCALE;
+const HEADER_WIDGET_HEIGHT = 20 * UI_SCALE;
+const HEADER_FONT_SIZE = 14 * UI_SCALE;
+const GROUP_ROW_HEIGHT = 22 * UI_SCALE;
+const GROUP_FONT_SIZE = 14 * UI_SCALE;
+const CONTROL_FONT_SIZE = 10 * UI_SCALE;
+const MACRO_ROW_HEIGHT = 26 * UI_SCALE;
+const MACRO_FONT_SIZE = 12 * UI_SCALE;
+
 function getMuteMode() {
     // ComfyUI uses LiteGraph.NEVER for mute; some builds also have a separate "bypass" mode.
     return window?.LiteGraph?.NEVER ?? 2;
@@ -347,17 +360,17 @@ function isColorNear(a, b, tolerance) {
 }
 
 class BusGroupSpacerWidget {
-    constructor(height = 8) {
+    constructor(height = 8 * UI_SCALE) {
         this.type = "custom";
         this.name = "iamccs_bus_group_spacer";
         this.label = "";
         this.options = { serialize: false };
-        this._height = Math.max(2, Number(height) || 8);
+        this._height = Math.max(2 * UI_SCALE, Number(height) || 8 * UI_SCALE);
     }
 
     computeSize(width) {
-        const w = Number.isFinite(width) ? width : 260;
-        return [Math.max(10, w), this._height];
+        const w = Number.isFinite(width) ? width : BASE_NODE_WIDTH;
+        return [Math.max(10 * UI_SCALE, w), this._height];
     }
 
     draw() {}
@@ -370,22 +383,22 @@ class BusGroupDividerWidget {
         this.name = "iamccs_bus_group_divider";
         this.label = "";
         this.options = { serialize: false };
-        this._height = 10;
+        this._height = 10 * UI_SCALE;
     }
 
     computeSize(width) {
-        const w = Number.isFinite(width) ? width : 260;
-        return [Math.max(10, w), this._height];
+        const w = Number.isFinite(width) ? width : BASE_NODE_WIDTH;
+        return [Math.max(10 * UI_SCALE, w), this._height];
     }
 
     draw(ctx, node, width, posY, height) {
         try {
             const h = height || this._height;
-            const x0 = 12;
+            const x0 = 12 * UI_SCALE;
             const y = posY + Math.floor(h / 2);
             ctx.save();
             ctx.strokeStyle = "rgba(255,255,255,0.12)";
-            ctx.lineWidth = 1;
+            ctx.lineWidth = UI_SCALE;
             ctx.beginPath();
             ctx.moveTo(x0, y);
             ctx.lineTo(width - x0, y);
@@ -474,7 +487,7 @@ function _computeRowCentersLocalY(node) {
     const LG = window?.LiteGraph;
     const titleH = Number(LG?.NODE_TITLE_HEIGHT ?? 30);
     const defaultWidgetH = Number(LG?.NODE_WIDGET_HEIGHT ?? 20);
-    const margin = 4;
+    const margin = 4 * UI_SCALE;
 
     let y = titleH + margin;
     const centers = [];
@@ -482,7 +495,7 @@ function _computeRowCentersLocalY(node) {
     for (const w of node?.widgets || []) {
         let h = defaultWidgetH;
         try {
-            const sz = w?.computeSize?.(node?.size?.[0] || 260);
+            const sz = w?.computeSize?.(node?.size?.[0] || BASE_NODE_WIDTH);
             if (Array.isArray(sz) && Number.isFinite(sz[1])) h = sz[1];
         } catch {}
 
@@ -546,14 +559,14 @@ class BusGroupRowWidget {
         this.group = group;
         this.node = node;
         // Keep rows compact: user wants less vertical padding between groups.
-        this._height = 22;
+        this._height = GROUP_ROW_HEIGHT;
         this._tapAnimUntil = 0;
     }
 
     computeSize(width) {
         if (this._iamccsHiddenByShowMode) return [0, 0];
-        const w = Number.isFinite(width) ? width : 260;
-        return [Math.max(180, w), this._height];
+        const w = Number.isFinite(width) ? width : BASE_NODE_WIDTH;
+        return [Math.max(MIN_ROW_WIDTH, w), this._height];
     }
 
     serializeValue() {
@@ -596,10 +609,10 @@ class BusGroupRowWidget {
             ctx.translate(0, tapOffset);
         }
 
-        const x0 = 10;
+        const x0 = 10 * UI_SCALE;
         // Slightly wider box (2px) without changing inner layout/hitboxes.
-        const boxX0 = x0 - 1;
-        const boxW = width - x0 * 2 + 2;
+        const boxX0 = x0 - UI_SCALE;
+        const boxW = width - x0 * 2 + 2 * UI_SCALE;
         const yMid = posY + h * 0.5;
 
         const isReceiver = !!node?.properties?._iamccs_is_receiver;
@@ -622,23 +635,23 @@ class BusGroupRowWidget {
         const useGroupFill = !!node?.properties?.iamccs_bus_group_widget_colors;
         ctx.globalAlpha = useGroupFill ? 0.14 : 0.10;
         ctx.fillStyle = useGroupFill ? stripeColor : "#000";
-        ctx.fillRect(boxX0, posY + 1, boxW, h - 2);
+        ctx.fillRect(boxX0, posY + UI_SCALE, boxW, h - 2 * UI_SCALE);
         ctx.restore();
 
         // Subtle relief so rows are easier to distinguish
         try {
             ctx.save();
             ctx.strokeStyle = "rgba(255,255,255,0.07)";
-            ctx.lineWidth = 1;
+            ctx.lineWidth = UI_SCALE;
             ctx.beginPath();
-            ctx.moveTo(boxX0 + 1, posY + 2);
-            ctx.lineTo(boxX0 + boxW - 1, posY + 2);
+            ctx.moveTo(boxX0 + UI_SCALE, posY + 2 * UI_SCALE);
+            ctx.lineTo(boxX0 + boxW - UI_SCALE, posY + 2 * UI_SCALE);
             ctx.stroke();
 
             ctx.strokeStyle = "rgba(0,0,0,0.25)";
             ctx.beginPath();
-            ctx.moveTo(boxX0 + 1, posY + h - 2);
-            ctx.lineTo(boxX0 + boxW - 1, posY + h - 2);
+            ctx.moveTo(boxX0 + UI_SCALE, posY + h - 2 * UI_SCALE);
+            ctx.lineTo(boxX0 + boxW - UI_SCALE, posY + h - 2 * UI_SCALE);
             ctx.stroke();
             ctx.restore();
         } catch {}
@@ -646,29 +659,29 @@ class BusGroupRowWidget {
         if (selected) {
             ctx.save();
             ctx.strokeStyle = "rgba(46, 204, 113, 0.9)";
-            ctx.lineWidth = 2;
-            ctx.strokeRect(boxX0 + 1, posY + 2, boxW - 2, h - 4);
+            ctx.lineWidth = 2 * UI_SCALE;
+            ctx.strokeRect(boxX0 + UI_SCALE, posY + 2 * UI_SCALE, boxW - 2 * UI_SCALE, h - 4 * UI_SCALE);
             ctx.restore();
         }
 
         if (!selected && isMemberOfSelectedMacro) {
             ctx.save();
             ctx.strokeStyle = "rgba(30, 144, 255, 0.65)";
-            ctx.lineWidth = 2;
-            ctx.strokeRect(boxX0 + 1, posY + 2, boxW - 2, h - 4);
+            ctx.lineWidth = 2 * UI_SCALE;
+            ctx.strokeRect(boxX0 + UI_SCALE, posY + 2 * UI_SCALE, boxW - 2 * UI_SCALE, h - 4 * UI_SCALE);
             ctx.restore();
         }
 
         ctx.save();
         ctx.globalAlpha = 0.9;
         ctx.fillStyle = stripeColor;
-        ctx.fillRect(x0, posY + 2, 4, h - 4);
+        ctx.fillRect(x0, posY + 2 * UI_SCALE, 4 * UI_SCALE, h - 4 * UI_SCALE);
         ctx.restore();
 
         // A few extra pixels after the S toggle.
-        const rightPad = 14;
-        const toggleR = 9;
-        const gap = 10;
+        const rightPad = 14 * UI_SCALE;
+        const toggleR = 9 * UI_SCALE;
+        const gap = 10 * UI_SCALE;
         const soloCX = width - rightPad - toggleR;
         const muteCX = soloCX - (toggleR * 2 + gap);
 
@@ -677,10 +690,11 @@ class BusGroupRowWidget {
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
         ctx.fillStyle = "#ddd";
-        const ledR = 3;
-        const ledX = x0 + 10;
-        const nameX = x0 + 14 + (this.value.mute || this.value.solo ? 10 : 0);
-        const nameMaxW = Math.max(10, muteCX - 16 - nameX);
+        ctx.font = `${GROUP_FONT_SIZE}px sans-serif`;
+        const ledR = 3 * UI_SCALE;
+        const ledX = x0 + 10 * UI_SCALE;
+        const nameX = x0 + 14 * UI_SCALE + (this.value.mute || this.value.solo ? 10 * UI_SCALE : 0);
+        const nameMaxW = Math.max(10 * UI_SCALE, muteCX - 16 * UI_SCALE - nameX);
         const gTitle = String(this.group?.title ?? "(group)");
 
         // Red LED for mute, green for solo (next to name).
@@ -706,17 +720,17 @@ class BusGroupRowWidget {
             // Red ring indicator when muted
             if (this.value.mute) {
                 ctx.strokeStyle = "#ff4d4d";
-                ctx.lineWidth = 2;
+                ctx.lineWidth = 2 * UI_SCALE;
                 ctx.beginPath();
-                ctx.arc(muteCX, yMid, toggleR + 1, 0, Math.PI * 2);
+                ctx.arc(muteCX, yMid, toggleR + UI_SCALE, 0, Math.PI * 2);
                 ctx.stroke();
             }
 
             ctx.fillStyle = "#fff";
-            ctx.font = "bold 10px sans-serif";
+            ctx.font = `bold ${CONTROL_FONT_SIZE}px sans-serif`;
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
-            ctx.fillText("M", muteCX, yMid + 0.5);
+            ctx.fillText("M", muteCX, yMid + 0.5 * UI_SCALE);
             ctx.restore();
 
             // Solo toggle
@@ -729,17 +743,17 @@ class BusGroupRowWidget {
             // Green ring indicator when solo
             if (this.value.solo) {
                 ctx.strokeStyle = "#2ecc71";
-                ctx.lineWidth = 2;
+                ctx.lineWidth = 2 * UI_SCALE;
                 ctx.beginPath();
-                ctx.arc(soloCX, yMid, toggleR + 1, 0, Math.PI * 2);
+                ctx.arc(soloCX, yMid, toggleR + UI_SCALE, 0, Math.PI * 2);
                 ctx.stroke();
             }
 
             ctx.fillStyle = "#fff";
-            ctx.font = "bold 10px sans-serif";
+            ctx.font = `bold ${CONTROL_FONT_SIZE}px sans-serif`;
             ctx.textAlign = "center";
             ctx.textBaseline = "middle";
-            ctx.fillText("S", soloCX, yMid + 0.5);
+            ctx.fillText("S", soloCX, yMid + 0.5 * UI_SCALE);
             ctx.restore();
         }
 
@@ -768,10 +782,10 @@ class BusGroupRowWidget {
 
         const macroMode = !!node?.properties?.iamccs_bus_group_macro_mode;
 
-        const width = node?.size?.[0] || 260;
-        const rightPad = 14;
-        const toggleR = 9;
-        const gap = 10;
+        const width = node?.size?.[0] || BASE_NODE_WIDTH;
+        const rightPad = 14 * UI_SCALE;
+        const toggleR = 9 * UI_SCALE;
+        const gap = 10 * UI_SCALE;
         const soloCX = width - rightPad - toggleR;
         const muteCX = soloCX - (toggleR * 2 + gap);
 
@@ -871,12 +885,12 @@ class BusGroupMacroRowWidget {
         this.macro = macro;
         this.node = node;
         // Tighter spacing between macros, but with a larger usable box area.
-        this._height = 26;
+        this._height = MACRO_ROW_HEIGHT;
     }
 
     computeSize(width) {
-        const w = Number.isFinite(width) ? width : 260;
-        return [Math.max(180, w), this._height];
+        const w = Number.isFinite(width) ? width : BASE_NODE_WIDTH;
+        return [Math.max(MIN_ROW_WIDTH, w), this._height];
     }
 
     _iterTargetRows() {
@@ -919,7 +933,7 @@ class BusGroupMacroRowWidget {
 
     draw(ctx, node, width, posY, height) {
         const h = height || this._height;
-        const x0 = 10;
+        const x0 = 10 * UI_SCALE;
         const yMid = posY + h * 0.5;
 
         // Cache last drawn bounds so hit-testing can include Y.
@@ -931,9 +945,9 @@ class BusGroupMacroRowWidget {
         } catch {}
 
         // Match group-row spacing: keep a few pixels from the right edge.
-        const rightPad = 14;
-        const toggleR = 8;
-        const gap = 10;
+        const rightPad = 14 * UI_SCALE;
+        const toggleR = 8 * UI_SCALE;
+        const gap = 10 * UI_SCALE;
         const actCX = width - rightPad - toggleR;
         const muteCX = actCX - (toggleR * 2 + gap);
 
@@ -945,7 +959,7 @@ class BusGroupMacroRowWidget {
         const allSolo = rows.length ? rows.every(r => !!r.value.solo) : false;
 
         // Macro background + distinctive frame (with minimal padding)
-        const padY = 1;
+        const padY = UI_SCALE;
         ctx.save();
         ctx.globalAlpha = isSelected ? 0.14 : 0.10;
         ctx.fillStyle = "#ffffff";
@@ -956,25 +970,25 @@ class BusGroupMacroRowWidget {
         ctx.save();
         ctx.globalAlpha = 0.95;
         ctx.fillStyle = "#fff";
-        ctx.fillRect(x0 + 1, posY + padY + 1, 4, h - (padY + 1) * 2);
+        ctx.fillRect(x0 + UI_SCALE, posY + padY + UI_SCALE, 4 * UI_SCALE, h - (padY + UI_SCALE) * 2);
         ctx.restore();
 
         ctx.save();
         // Subtle border; selected is slightly stronger
         ctx.strokeStyle = isSelected ? "rgba(255, 255, 255, 0.45)" : "rgba(255, 255, 255, 0.25)";
-        ctx.lineWidth = 2;
-        ctx.strokeRect(x0 + 1, posY + padY + 1, width - x0 * 2 - 2, h - (padY + 1) * 2);
+        ctx.lineWidth = 2 * UI_SCALE;
+        ctx.strokeRect(x0 + UI_SCALE, posY + padY + UI_SCALE, width - x0 * 2 - 2 * UI_SCALE, h - (padY + UI_SCALE) * 2);
         ctx.restore();
 
         // Title
         ctx.save();
-        ctx.font = "12px sans-serif";
+        ctx.font = `${MACRO_FONT_SIZE}px sans-serif`;
         ctx.textAlign = "left";
         ctx.textBaseline = "middle";
         ctx.fillStyle = "#f4f8ff";
         const name = String(this.macro?.name || "(macro)");
-        const nameX = x0 + 10;
-        const nameMaxW = Math.max(10, muteCX - 16 - nameX);
+        const nameX = x0 + 10 * UI_SCALE;
+        const nameMaxW = Math.max(10 * UI_SCALE, muteCX - 16 * UI_SCALE - nameX);
         ctx.fillText(fitString(ctx, `MACRO: ${name}`, nameMaxW), nameX, yMid);
         ctx.restore();
 
@@ -988,16 +1002,16 @@ class BusGroupMacroRowWidget {
         // Red ring indicator when macro is fully muted
         if (allMuted) {
             ctx.strokeStyle = "#ff4d4d";
-            ctx.lineWidth = 2;
+            ctx.lineWidth = 2 * UI_SCALE;
             ctx.beginPath();
-            ctx.arc(muteCX, yMid, toggleR + 1, 0, Math.PI * 2);
+            ctx.arc(muteCX, yMid, toggleR + UI_SCALE, 0, Math.PI * 2);
             ctx.stroke();
         }
         ctx.fillStyle = "#fff";
-        ctx.font = "bold 10px sans-serif";
+        ctx.font = `bold ${CONTROL_FONT_SIZE}px sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText("M", muteCX, yMid + 0.5);
+        ctx.fillText("M", muteCX, yMid + 0.5 * UI_SCALE);
         ctx.restore();
 
         // Activate button
@@ -1010,16 +1024,16 @@ class BusGroupMacroRowWidget {
         // Green ring indicator when macro is fully solo/active
         if (allSolo) {
             ctx.strokeStyle = "#2ecc71";
-            ctx.lineWidth = 2;
+            ctx.lineWidth = 2 * UI_SCALE;
             ctx.beginPath();
-            ctx.arc(actCX, yMid, toggleR + 1, 0, Math.PI * 2);
+            ctx.arc(actCX, yMid, toggleR + UI_SCALE, 0, Math.PI * 2);
             ctx.stroke();
         }
         ctx.fillStyle = "#fff";
-        ctx.font = "bold 10px sans-serif";
+        ctx.font = `bold ${CONTROL_FONT_SIZE}px sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText("A", actCX, yMid + 0.5);
+        ctx.fillText("A", actCX, yMid + 0.5 * UI_SCALE);
         ctx.restore();
     }
 
@@ -1029,11 +1043,11 @@ class BusGroupMacroRowWidget {
         if (!isDown && !isUp) return false;
         if (node?.properties?.iamccs_bus_group_safety_shift && !event.shiftKey) return false;
 
-        const width = node?.size?.[0] || 260;
+        const width = node?.size?.[0] || BASE_NODE_WIDTH;
         // Keep consistent with draw(): a little space from the right edge.
-        const rightPad = 14;
-        const toggleR = 7;
-        const gap = 10;
+        const rightPad = 14 * UI_SCALE;
+        const toggleR = 8 * UI_SCALE;
+        const gap = 10 * UI_SCALE;
         const actCX = width - rightPad - toggleR;
         const muteCX = actCX - (toggleR * 2 + gap);
 
@@ -1196,8 +1210,8 @@ function rebuildWidgets(node) {
         const measureCanvas = rebuildWidgets._iamccsMeasureCanvas || (rebuildWidgets._iamccsMeasureCanvas = document.createElement("canvas"));
         const measureCtx = measureCanvas.getContext("2d");
         if (measureCtx) {
-            // Match the typical LiteGraph text size for widgets.
-            measureCtx.font = "14px sans-serif";
+            // Match the enlarged group-row text size.
+            measureCtx.font = `${GROUP_FONT_SIZE}px sans-serif`;
             let maxTitleW = 0;
             for (const g of groups) {
                 const t = String(g?.title ?? "(group)");
@@ -1206,20 +1220,20 @@ function rebuildWidgets(node) {
             }
 
             // Layout constants from BusGroupRowWidget.draw()
-            const x0 = 10;
-            const rightPad = 14;
-            const toggleR = 8;
-            const gap = 10;
+            const x0 = 10 * UI_SCALE;
+            const rightPad = 14 * UI_SCALE;
+            const toggleR = 9 * UI_SCALE;
+            const gap = 10 * UI_SCALE;
             // Worst-case nameX when LED is present (adds 10).
-            const nameX = x0 + 14 + 10;
-            const extra = 24; // make the box a bit wider than the text
+            const nameX = x0 + 14 * UI_SCALE + 10 * UI_SCALE;
+            const extra = 24 * UI_SCALE; // make the box a bit wider than the text
 
             // Ensure nameMaxW >= maxTitleW + extra.
-            // nameMaxW = width - (rightPad + 3*toggleR + gap + 16 + nameX)
-            const needed = Math.ceil(maxTitleW + extra + (rightPad + 3 * toggleR + gap + 16 + nameX));
+            // nameMaxW = width - (rightPad + 3*toggleR + gap + 16*scale + nameX)
+            const needed = Math.ceil(maxTitleW + extra + (rightPad + 3 * toggleR + gap + 16 * UI_SCALE + nameX));
             if (Number.isFinite(needed) && needed > 0) {
-                node.size = node.size || [260, 60];
-                node.size[0] = Math.max(node.size[0] || 0, Math.min(1600, needed));
+                node.size = node.size || [BASE_NODE_WIDTH, 60 * UI_SCALE];
+                node.size[0] = Math.max(BASE_NODE_WIDTH, node.size[0] || 0, Math.min(1600 * UI_SCALE, needed));
             }
         }
     } catch {}
@@ -1467,14 +1481,14 @@ app.registerExtension({
         // We keep the inter-widget margin but shrink the final bottom pad.
         const origComputeSize = nodeType.prototype.computeSize;
         nodeType.prototype.computeSize = function () {
-            const base = origComputeSize ? origComputeSize.apply(this, arguments) : (this.size || [260, 60]);
+            const base = origComputeSize ? origComputeSize.apply(this, arguments) : (this.size || [BASE_NODE_WIDTH, 60 * UI_SCALE]);
             try {
                 const LG = window?.LiteGraph;
                 const titleH = Number(LG?.NODE_TITLE_HEIGHT ?? 30);
                 const defaultWidgetH = Number(LG?.NODE_WIDGET_HEIGHT ?? 20);
-                const topPad = 4;
-                const betweenPad = 4;
-                const bottomPad = 2; // independent from topPad (not "linked")
+                const topPad = 4 * UI_SCALE;
+                const betweenPad = 4 * UI_SCALE;
+                const bottomPad = 2 * UI_SCALE; // independent from topPad (not "linked")
 
                 const allWidgets = Array.isArray(this.widgets) ? this.widgets : [];
                 const visibleWidgets = allWidgets.filter(w => {
@@ -1491,7 +1505,7 @@ app.registerExtension({
                     const w = visibleWidgets[i];
                     let h = defaultWidgetH;
                     try {
-                        const sz = w?.computeSize?.(this.size?.[0] || base?.[0] || 260);
+                        const sz = w?.computeSize?.(this.size?.[0] || base?.[0] || BASE_NODE_WIDTH);
                         if (Array.isArray(sz) && Number.isFinite(sz[1])) h = Math.max(0, sz[1]);
                     } catch {}
 
@@ -1502,8 +1516,9 @@ app.registerExtension({
                 // If no widgets are visible, keep a tiny bottom so the title bar doesn't hug the border.
                 if (visibleWidgets.length === 0) y += bottomPad;
 
-                const wOut = Array.isArray(base) ? (base[0] ?? (this.size?.[0] || 260)) : (this.size?.[0] || 260);
-                const hOut = Math.max(y, titleH + 10);
+                const baseWidth = Array.isArray(base) ? (base[0] ?? (this.size?.[0] || BASE_NODE_WIDTH)) : (this.size?.[0] || BASE_NODE_WIDTH);
+                const wOut = Math.max(BASE_NODE_WIDTH, baseWidth);
+                const hOut = Math.max(y, titleH + 10 * UI_SCALE);
                 return [wOut, hOut];
             } catch {
                 return base;
@@ -1558,11 +1573,41 @@ app.registerExtension({
                 const orig = typeof w.computeSize === "function" ? w.computeSize.bind(w) : null;
                 w._iamccsOrigComputeSize = orig;
 
+                // Modern LiteGraph reads widget.height for both drawing and pointer hit-testing.
+                // Override it only on this node's standard header widgets.
+                try {
+                    Object.defineProperty(w, "height", {
+                        configurable: true,
+                        get: () => HEADER_WIDGET_HEIGHT,
+                    });
+                } catch {}
+
+                // LiteGraph supplies the canvas font globally; scope the larger font to this
+                // widget so other nodes retain their normal UI scale.
+                const drawMethod = typeof w.draw === "function"
+                    ? "draw"
+                    : (typeof w.drawWidget === "function" ? "drawWidget" : null);
+                if (drawMethod) {
+                    const originalDraw = w[drawMethod].bind(w);
+                    w[drawMethod] = function (ctx) {
+                        if (!ctx?.save) return originalDraw(...arguments);
+                        ctx.save();
+                        ctx.font = `${HEADER_FONT_SIZE}px sans-serif`;
+                        try {
+                            return originalDraw(...arguments);
+                        } finally {
+                            ctx.restore();
+                        }
+                    };
+                }
+
                 w.computeSize = function (width) {
                     if (this._iamccsHiddenByOptions) return [0, 0];
-                    if (this._iamccsOrigComputeSize) return this._iamccsOrigComputeSize(width);
-                    const w0 = Number.isFinite(width) ? width : 260;
-                    return [w0, 20];
+                    const originalSize = this._iamccsOrigComputeSize?.(width);
+                    const w0 = Array.isArray(originalSize) && Number.isFinite(originalSize[0])
+                        ? originalSize[0]
+                        : (Number.isFinite(width) ? width : BASE_NODE_WIDTH);
+                    return [Math.max(BASE_NODE_WIDTH, w0), HEADER_WIDGET_HEIGHT];
                 };
             };
 
@@ -1735,7 +1780,7 @@ app.registerExtension({
             this.addWidget("button", "↻ Refresh groups", null, () => this._iamccsRefresh());
 
             // A bit of padding after the header widgets.
-            const headerPad = new BusGroupSpacerWidget(5);
+            const headerPad = new BusGroupSpacerWidget(5 * UI_SCALE);
             this.addCustomWidget(headerPad);
             this._iamccsHeaderPadWidget = headerPad;
 

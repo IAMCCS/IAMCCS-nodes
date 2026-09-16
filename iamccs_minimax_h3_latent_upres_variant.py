@@ -332,7 +332,8 @@ class IAMCCS_MiniMaxH3LatentUpresChunkCheckpointR38:
                 f"R38 decoded {int(upscaled_frames.shape[0])} frames, but needs {trim}+{visible} for the visible chunk"
             )
         chunk = upscaled_frames[trim:trim + visible].detach().to(device="cpu", dtype=torch.float16).contiguous()
-        join_trim = max(0, int(join_trim_frames))
+        from .iamccs_minimax_h3_shotboard import _delivery_join_frames
+        join_trim = _delivery_join_frames(cine_linx, index, join_trim_frames)
         if join_trim == 1:
             chunk = chunk[1:].contiguous()
         root = Path(folder_paths.get_output_directory()) / "minimax_h3_shotboard" / "r38_latent_upres" / _safe_render_id(resolved_render_id)

@@ -130,10 +130,65 @@ class IAMCCS_MiniMaxH3EditorDeliveryMedia:
         return frames, audio, master_ready, str(resolved), report
 
 
+class IAMCCS_MiniMaxH3DeliveryPreviewStripR42:
+    """Expose a lightweight visual result for every automatic R42 pass.
+
+    The delivery/editor adapter may hold hundreds of decoded frames. Sending
+    the full batch to PreviewImage creates unnecessary temp files and makes a
+    long-video workflow hard to inspect. This node selects only first, middle
+    and last, while retaining the segment/master provenance in its UI report.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "delivery_frames": ("IMAGE",),
+                "current_segment": ("INT", {"forceInput": True}),
+                "total_segments": ("INT", {"forceInput": True}),
+                "resolved_path": ("STRING", {"forceInput": True}),
+                "delivery_report": ("STRING", {"forceInput": True}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING")
+    RETURN_NAMES = ("preview_frames", "preview_report")
+    FUNCTION = "build"
+    CATEGORY = CATEGORY
+
+    @classmethod
+    def IS_CHANGED(cls, *args, **kwargs):
+        # Automatic segment queues reuse the same graph and node ids.
+        return float("nan")
+
+    def build(self, delivery_frames, current_segment, total_segments, resolved_path, delivery_report):
+        if not torch.is_tensor(delivery_frames) or delivery_frames.ndim != 4:
+            raise ValueError("R42 Delivery Preview expects an IMAGE batch")
+        count = int(delivery_frames.shape[0])
+        if count < 1:
+            raise ValueError("R42 Delivery Preview received an empty IMAGE batch")
+        indexes = sorted({0, count // 2, count - 1})
+        preview = delivery_frames[indexes]
+        index = max(0, int(current_segment))
+        total = max(1, int(total_segments))
+        source = str(resolved_path or "").strip()
+        scope = "DELIVERY MASTER" if source and index + 1 >= total else "CURRENT CHUNK"
+        report = (
+            f"R42 {scope} PREVIEW | segment={index + 1}/{total} | "
+            f"source_frames={count} | shown={','.join(str(value) for value in indexes)} | "
+            f"path={source or 'native in-memory checkpoint'}"
+        )
+        if delivery_report:
+            report = f"{report} | {delivery_report}"
+        return {"ui": {"text": [report]}, "result": (preview, report)}
+
+
 NODE_CLASS_MAPPINGS = {
     "IAMCCS_MiniMaxH3EditorDeliveryMedia": IAMCCS_MiniMaxH3EditorDeliveryMedia,
+    "IAMCCS_MiniMaxH3DeliveryPreviewStripR42": IAMCCS_MiniMaxH3DeliveryPreviewStripR42,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_MiniMaxH3EditorDeliveryMedia": "MiniMax H3 · Delivery Checkpoint → Editor Chunk",
+    "IAMCCS_MiniMaxH3DeliveryPreviewStripR42": "R42 Delivery Preview · First / Middle / Last",
 }

@@ -2,6 +2,25 @@
 // Format: https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/docs/VIDEO_PROMPT_WRITING_GUIDE_ref_en.md
 export const H3_REFERENCE_DEMOS = [
     {
+        id: "preset_multishot_sketch",
+        label: "PRESET · Multishot: Sketch",
+        name: "Multishot: Sketch",
+        mode: "ref2va",
+        shotboardMode: "ref2va",
+        video: false,
+        picture: true,
+        request: "Use one composite sketch sheet as a strict storyboard for a four-shot cinematic forest fly-through. Preserve its shot order, framing, subject positions and camera progression while rendering the sketches as realistic live action.",
+        hint: "Connect the single composite sketch sheet from Canvas/CineLinX as Picture 1 through the established Shotboard reference route. The preset edits prompt fields only: Shotboard still owns mode, timeline, media and duration; Settings PRO still owns rendering.",
+        sections: {
+            subject_definitions: "<Picture 1> is the supplied composite sketch storyboard. Use it primarily as a strict layout, composition, framing, character-position and shot-order reference. Its four panels define a four-stage visual progression: the armored orc reveal, the armored woman reveal, the hummingbird and red flower reveal, and the old wizard casting electricity. Preserve the camera direction and the relative placement shown in every panel.",
+            summary: "[reference generation] Create a realistic cinematic live-action forest sequence based closely on <Picture 1>. A drone camera repeatedly accelerates forward along a river corridor, stops for four distinct subject reveals in the storyboard order, and maintains the supplied compositions without reproducing the sketch-sheet layout on screen.",
+            retention_analysis: "<Picture 1> ([Shot 1] through [Shot 4] storyboard and composition anchor): fully_preserved - retain the four-shot order, framing, camera direction, subject positions and reveal rhythm established by the composite sketch sheet. Translate drawn lines into photorealistic forest, water, rock, armor, skin, feathers, flower petals and electrical light; do not preserve paper texture, panel borders, labels or the visible collage layout.",
+            detailed_description: "Realistic cinematic live-action fantasy with natural forest depth, grounded anatomy, physically plausible armor and detailed environmental light. [Shot 1] The drone camera moves forward at high speed above a forest river between trees and rocks, then brakes into the side-view composition established by the first sketch panel, revealing an angry armored orc. Hold just long enough to read the face and armor. [Shot 2] The camera accelerates forward again along the same river direction and stops in the second supplied composition, revealing a happy armored woman seated on a rock and holding a sword. Preserve her placement, pose and screen side from <Picture 1>. [Shot 3] The drone launches forward once more through the same continuous forest geography and settles into the third storyboard composition, revealing a hummingbird hovering beside a red flower. Keep the bird, flower and surrounding negative space aligned to the sketch. [Shot 4] The camera makes its final fast forward move and brakes into the fourth supplied composition, revealing an old wizard casting a powerful electrical spell. Blue-white electricity grows from his controlled hand motion and illuminates nearby bark, stone, mist and water. Every acceleration and stop is deliberate and readable. Preserve the storyboard's shot order, framing progression, camera direction and character positions. Render one full-frame cinematic image at a time: no contact sheet, split screen, visible sketch, panel border, caption, logo, subject duplication, identity blending or unintended morph between reveals.",
+            overall_soundscape: "Continuous forest wind, fast aerial movement, river water and foliage rush link the four shots. Each stop briefly clarifies local sound: armored movement and an orc breath, fabric and sword contact near the seated woman, hummingbird wing beats beside the flower, then a sharp electrical build and resonant spell impact around the wizard. No dialogue.",
+            non_diegetic_music: "A restrained cinematic pulse follows the forward accelerations and falls away at each reveal, building to a low orchestral-electronic swell under the final electrical spell.",
+        },
+    },
+    {
         id: "demo_v2v_style", label: "DEMO · V2V / clay-animation restyle", name: "R37B · V2V Clay Animation",
         mode: "ref2va", shotboardMode: "v2va_object_swap", video: true, picture: false,
         request: "Restyle the supplied five-second forest-performer video as handcrafted clay animation. Keep its performer, gestures, composition and camera timing. Generate quiet forest ambience; do not reuse the source soundtrack.",

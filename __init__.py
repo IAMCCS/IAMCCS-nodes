@@ -35,6 +35,42 @@ def _iamccs_expose_ffmpeg():
 
 _iamccs_expose_ffmpeg()
 
+
+def _iamccs_register_h3_union_model_patch_paths():
+    """Expose legacy shared ControlNet folders to ComfyUI's MODEL_PATCH loader.
+
+    Current ComfyUI stores MiniMax H3 Fun Union under ``models/model_patches``.
+    Existing IAMCCS installations may keep the same 2.3 GB file in a shared
+    ``models/controlnet`` path (for example X:\\Models). Register only folders
+    containing an H3 Fun Union-looking file, avoiding duplicate copies and
+    leaving every other ControlNet untouched.
+    """
+    try:
+        import folder_paths
+
+        for root in folder_paths.get_folder_paths("controlnet"):
+            directory = Path(root)
+            if not directory.is_dir():
+                continue
+            found = any(
+                p.is_file()
+                and "minimax" in p.name.lower()
+                and "h3" in p.name.lower()
+                and "controlnet" in p.name.lower()
+                for p in directory.rglob("*")
+            )
+            if found:
+                folder_paths.add_model_folder_path("model_patches", str(directory), is_default=False)
+                logging.getLogger(__name__).info(
+                    "[IAMCCS] H3 Fun Union compatibility path registered as model_patches: %s",
+                    directory,
+                )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("[IAMCCS] H3 model-patch path registration skipped: %s", exc)
+
+
+_iamccs_register_h3_union_model_patch_paths()
+
 from .iamccs_comfy_compat import apply_iamccs_comfy_compat_patches
 
 apply_iamccs_comfy_compat_patches()
@@ -414,6 +450,10 @@ from .iamccs_krea2_multigen import (
     IAMCCS_Krea2MultiGen,
 )
 
+from .iamccs_redhead_node import (
+    IAMCCSRedheadNode,
+)
+
 from .iamccs_multiline_prompt_splitter import (
     IAMCCS_MultilinePromptSplitter8,
 )
@@ -764,6 +804,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_IntValueMonitor": IAMCCS_IntValueMonitor,
     "IAMCCS_QwenMultiGen": IAMCCS_QwenMultiGen,
     "IAMCCS_Krea2MultiGen": IAMCCS_Krea2MultiGen,
+    "IAMCCS_RedheadNode": IAMCCSRedheadNode,
     "IAMCCS_FluxKleinMultiGen": IAMCCS_FluxKleinMultiGen,
     "IAMCCS_FluxKleinRefine": IAMCCS_FluxKleinRefine,
     "IAMCCS_ImageBatch6": IAMCCS_ImageBatch6,
@@ -1013,6 +1054,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_IntValueMonitor": "INT Value Monitor",
     "IAMCCS_QwenMultiGen": "IAMCCS Qwen Multi-Gen",
     "IAMCCS_Krea2MultiGen": "IAMCCS Krea 2 Identity Multi-Gen",
+    "IAMCCS_RedheadNode": "IAMCCS Redhead Node (Krea2)",
     "IAMCCS_FluxKleinMultiGen": "Flux Klein Multi-Gen",
     "IAMCCS_FluxKleinRefine": "Flux Klein Refine (Local NO PAID)",
     "IAMCCS_ImageBatch6": "IAMCCS Image Batch 6",
@@ -1229,6 +1271,10 @@ except Exception as _iamccs_cine_pp_error:
 WEB_DIRECTORY = "./web"
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
+
+from .iamccs_h3_face_swap import NODE_CLASS_MAPPINGS as _FACE_SWAP_NODES, NODE_DISPLAY_NAME_MAPPINGS as _FACE_SWAP_NAMES
+NODE_CLASS_MAPPINGS.update(_FACE_SWAP_NODES)
+NODE_DISPLAY_NAME_MAPPINGS.update(_FACE_SWAP_NAMES)
 
 
 def _print_startup_banner() -> None:
@@ -2508,6 +2554,18 @@ def setup_api_routes() -> None:
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)
 
+        @routes.post("/api/iamccs/h3/advice")
+        async def iamccs_h3_advice_endpoint(request):
+            import asyncio
+            from .iamccs_h3_advisor import advice
+            try:
+                payload = await request.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("Expected a settings object")
+                return web.json_response(await asyncio.to_thread(advice, payload))
+            except (ValueError, TypeError) as exc:
+                return web.json_response({"error": str(exc)}, status=400)
+
     except Exception as e:
         # Never hard-fail ComfyUI startup due to optional API endpoints.
         logging.getLogger("IAMCCS.API").warning("Could not setup IAMCCS API routes: %r", e)
@@ -2712,3 +2770,26 @@ def _iamccs_install_ltx2_vae_encode_autofix() -> None:
 
 
 _iamccs_install_ltx2_vae_encode_autofix()
+
+# Krea 2 Studio is intentionally registered from IAMCCS-nodes rather than
+# embedded in an application edition. The frontend consumes only this stable
+# node contract, so the prototype can later be propagated without duplicating
+# the regional-conditioning implementation.
+try:
+    from .iamccs_krea2_studio import (
+        NODE_CLASS_MAPPINGS as _KREA2_STUDIO_CLASSES,
+        NODE_DISPLAY_NAME_MAPPINGS as _KREA2_STUDIO_NAMES,
+    )
+    NODE_CLASS_MAPPINGS.update(_KREA2_STUDIO_CLASSES)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_KREA2_STUDIO_NAMES)
+except Exception as _krea2_studio_error:
+    log.exception("[IAMCCS] Krea 2 Studio registration failed: %s", _krea2_studio_error)
+
+try:
+    from .iamccs_ahead_seam_editor import register_routes as _register_ahead_seams
+    from .iamccs_ahead_control_node import NODE_CLASS_MAPPINGS as _ahead_classes, NODE_DISPLAY_NAME_MAPPINGS as _ahead_names
+    NODE_CLASS_MAPPINGS.update(_ahead_classes)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_ahead_names)
+    _register_ahead_seams()
+except Exception as _ahead_seam_error:
+    log.exception("[IAMCCS] Ahead seam editor registration failed: %s", _ahead_seam_error)

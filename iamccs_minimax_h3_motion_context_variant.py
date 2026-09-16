@@ -13,6 +13,7 @@ branch executes in workflows that expose both backends.
 from __future__ import annotations
 
 import copy
+import inspect
 import json
 import logging
 import re
@@ -49,6 +50,32 @@ def _provider_node(name: str):
     return cls
 
 
+def _provider_call(name: str, method: str, *, chain_config: dict[str, Any], **kwargs):
+    """Call both the legacy v0.1.2 and native-ComfyUI v0.1.9 provider APIs.
+
+    v0.1.2 exposed ``latent_path``/``clip_index`` widgets and separate
+    context-length arguments.  The current upstream addon collapses those
+    values into one ``H3_CHAIN`` input.  IAMCCS keeps one adapter here so a
+    provider update cannot silently route a Motion Context graph through a
+    partially compatible wrapper.
+    """
+    instance = _provider_node(name)()
+    function = getattr(instance, method)
+    parameters = inspect.signature(function).parameters
+    accepts_kwargs = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in parameters.values()
+    )
+    payload = {
+        key: value
+        for key, value in kwargs.items()
+        if accepts_kwargs or key in parameters
+    }
+    if accepts_kwargs or "chain_config" in parameters:
+        payload["chain_config"] = chain_config
+    return function(**payload)
+
+
 def _chunk(plan: dict[str, Any], index: int) -> dict[str, Any]:
     chunks = plan.get("chunks")
     if not isinstance(chunks, list) or not chunks:
@@ -61,10 +88,31 @@ def _chunk(plan: dict[str, Any], index: int) -> dict[str, Any]:
 
 def _variant_active(cine_linx: Any) -> bool:
     plan = _resolve_shotplan(cine_linx)
-    return (
-        str(plan.get("backend_variant", "")).lower() == "motion_context_auto_chain_v1"
-        or str(plan.get("acceleration", "")).lower() == "comfy_kitchen"
-    )
+    task_mode = str(plan.get("task_mode", "") or "").strip().lower()
+    contract = plan.get("motion_context_auto_chain")
+    motion_context_enabled = bool(isinstance(contract, dict) and contract.get("enabled"))
+    declared_variant = str(plan.get("backend_variant", "") or "").strip().lower()
+
+    # LongVid Motion Context must never fall through to the legacy/T2V branch.
+    # The executable contract is the authority; acceleration is only a sampler
+    # choice and cannot prove that a Motion Context chain was compiled.
+    motion_context_modes = {"longvid_motion_context", "longvid_continuous_guided"}
+    if task_mode in motion_context_modes and not motion_context_enabled:
+        raise RuntimeError(
+            "IAMCCS Motion Context contract is missing or disabled. "
+            "Recompile the Shotboard/Settings plan; refusing to fall back to T2V."
+        )
+    if motion_context_enabled and declared_variant not in ("", "motion_context_auto_chain_v1"):
+        raise RuntimeError(
+            "IAMCCS Motion Context contract conflicts with backend_variant="
+            f"'{declared_variant}'. Refusing an ambiguous backend route."
+        )
+    if declared_variant == "motion_context_auto_chain_v1" and not motion_context_enabled:
+        raise RuntimeError(
+            "IAMCCS Motion Context backend was selected without an enabled "
+            "motion_context_auto_chain contract."
+        )
+    return motion_context_enabled or str(plan.get("acceleration", "") or "").strip().lower() == "comfy_kitchen"
 
 
 def _motion_context_active(cine_linx: Any) -> bool:
@@ -115,6 +163,20 @@ def _chain_config(render_id: str, segment_index: int) -> dict[str, Any]:
     }
 
 
+def _trim_chain_config(trim_frames: int, fps: float, segment_index: int) -> dict[str, Any]:
+    """Minimal chain contract needed by provider v0.1.9's trim node.
+
+    Trimming happens after sampling and does not need the run's filesystem
+    prefix.  Keeping this local also lets old graphs use the same adapter
+    without adding a new render-id socket to the generation node.
+    """
+    return {
+        "effective_trim_frames": max(0, int(trim_frames)),
+        "fps": float(fps),
+        "clip_index": int(segment_index) + 1,
+    }
+
+
 def _fit_audio(audio: Any, frames: int, fps: float) -> Any:
     if not isinstance(audio, dict) or not torch.is_tensor(audio.get("waveform")):
         return audio
@@ -131,6 +193,46 @@ def _fit_audio(audio: Any, frames: int, fps: float) -> Any:
     return result
 
 
+def _sampling_from_plan(plan: dict[str, Any], **fallbacks) -> dict[str, Any]:
+    """Resolve R37 sampler controls from the Shotboard Queue-time truth.
+
+    Early R37 workflows retained sampler widgets on the isolated generation
+    node.  Later Settings/Shotboard revisions made ``plan['sampling']`` the
+    visible authoring truth, but the R37 branch still consumed those stale
+    node widgets.  Keep the inputs as compatibility fallbacks while honoring
+    the compiled plan whenever it is present.
+    """
+    sampling = plan.get("sampling")
+    if not isinstance(sampling, dict):
+        sampling = {}
+    return {
+        "seed": int(sampling.get("seed", fallbacks["seed"])),
+        "seed_stride": int(sampling.get("seed_stride", fallbacks["seed_stride"])),
+        "steps": int(sampling.get("steps", fallbacks["steps"])),
+        "sampler_name": str(sampling.get("sampler_name", fallbacks["sampler_name"])),
+        "scheduler": str(sampling.get("scheduler", fallbacks["scheduler"])),
+        "denoise": float(sampling.get("denoise", fallbacks["denoise"])),
+        "shift_video": float(sampling.get("shift_video", fallbacks["shift_video"])),
+        "shift_audio": float(sampling.get("shift_audio", fallbacks["shift_audio"])),
+    }
+
+
+def _guide_uses_native_tail(guide: Any, context_offset_frames: int) -> bool:
+    """True when the previous native AV tail already owns this visual beat.
+
+    A visual slot can span a technical chunk boundary.  Re-encoding that same
+    still at the first visible frame after the 22-frame pinned head creates a
+    cut exactly where Motion Context is meant to be seamless.  Future guides
+    remain real positioned anchors; only the carried active guide is skipped.
+    """
+    return bool(
+        int(context_offset_frames) > 0
+        and isinstance(guide, dict)
+        and str(guide.get("kind", "") or "").strip().lower() == "image"
+        and bool(guide.get("continued_from_previous_chunk"))
+    )
+
+
 def _apply_positioned_guides(
     conditioning,
     latent,
@@ -140,19 +242,43 @@ def _apply_positioned_guides(
     chunk: dict[str, Any],
     context_offset_frames: int,
 ):
-    """Materialize R37 Shotboard guides before adding the prior AV tail.
-
-    The legacy atomic conditioner deliberately knows nothing about the
-    isolated ``longvid_motion_context`` mode.  Its T2VA base conditioning is
-    therefore correct, but R37 must apply its own positioned guides.  The
-    offset reserves the latent head occupied by the previous chunk on every
-    continuation segment.
-    """
-    if str(plan.get("task_mode", "") or "").lower() != "longvid_motion_context":
+    """Materialize each authored R37 guide exactly once for this chunk."""
+    # Both public Motion Context modes use the same positioned-guide contract.
+    # Previously ``longvid_continuous_guided`` compiled the guide events but
+    # silently skipped them here.  Continuation chunks then had only the prior
+    # AV tail plus their terminal image, which could resurrect an older slot
+    # before finally converging on the requested destination.
+    task_mode = str(plan.get("task_mode", "") or "").lower()
+    if task_mode not in {"longvid_motion_context", "longvid_continuous_guided"}:
         return conditioning, []
     guide_events = chunk.get("guides")
     if not isinstance(guide_events, list):
         return conditioning, []
+
+    contract = plan.get("motion_context_auto_chain")
+    guide_boundary = ""
+    if isinstance(contract, dict):
+        guide_boundary = str(contract.get("guide_boundary", "") or "").strip().lower()
+    if guide_boundary == "safe_handoff":
+        # The planner must hand an authored image to the next technical
+        # interval at its opening.  An image guide in the visible middle of a
+        # Motion Context sample is exactly the topology that produced the
+        # full-frame flashes seen in the first chunk.  Refuse stale plans so a
+        # queued workflow cannot silently run the old positioned-guide path.
+        visible_frames = int(chunk.get("visible_frame_count", chunk.get("frame_count", 0)) or 0)
+        interior = [
+            str(guide.get("id", "guide"))
+            for guide in guide_events
+            if isinstance(guide, dict)
+            and str(guide.get("kind", "") or "").strip().lower() == "image"
+            and 0 < int(guide.get("local_frame", 0) or 0) < visible_frames
+        ]
+        if interior:
+            raise RuntimeError(
+                "Motion Context Shotboard plan is stale: image guide(s) "
+                f"{', '.join(interior)} occur inside a visible sample. "
+                "Reopen/apply the Shotboard so guides become handoff boundaries."
+            )
 
     from comfy_extras.nodes_minimax_h3 import MiniMaxH3AddGuide
 
@@ -163,6 +289,9 @@ def _apply_positioned_guides(
             continue
         kind = str(guide.get("kind", "") or "").strip().lower()
         guide_id = str(guide.get("id", "guide") or "guide").strip()
+        if _guide_uses_native_tail(guide, context_offset_frames):
+            applied.append(f"native-tail:{guide_id}")
+            continue
         source_path = str(guide.get("source_path", "") or "").strip()
         frame_index = max(0, int(guide.get("local_frame", 0) or 0)) + max(0, int(context_offset_frames))
         if kind == "image":
@@ -179,9 +308,8 @@ def _apply_positioned_guides(
             applied.append(f"image:{guide_id}@{frame_index}")
         elif kind == "audio":
             if custom_audio_drive:
-                # The same rebased waveform is already encoded as a locked AV
-                # latent by AtomicAudioDrive. Adding it again would duplicate
-                # the conditioning and can degrade lip synchronization.
+                # AtomicAudioDrive already owns the rebased waveform.  Adding
+                # it again as a guide would duplicate phonetic conditioning.
                 applied.append(f"audio-lock-only:{guide_id}@{frame_index}")
                 continue
             audio = _load_timeline_audio(source_path)
@@ -253,17 +381,24 @@ class IAMCCS_MiniMaxH3MotionContextConditionR37:
                 ", ".join(applied_guides),
             )
         if int(segment_index) <= 0 or expected_trim <= 0:
+            mode_label = (
+                "LONG CONTINUOUS GUIDED interval 1"
+                if str(plan.get("task_mode", "") or "").lower() == "longvid_continuous_guided"
+                else "R37 Motion Context clip 1"
+            )
             return conditioning, 0, (
-                "R37 Motion Context clip 1: upstream pass-through (no previous latent) | "
+                f"{mode_label}: upstream pass-through (no previous latent) | "
                 f"positioned_guides={guide_report}"
             )
 
         config = _chain_config(render_id, segment_index)
-        context_latent = _provider_node("MiniMaxH3AutoChainLoadLatent")().load(
+        context_latent = _provider_call(
+            "MiniMaxH3AutoChainLoadLatent",
+            "load",
+            chain_config=config,
             latent_path=config["latent_prefix"],
             clip_index=config["load_clip_index"],
             reset=False,
-            chain_config=config,
         )[0]
         if context_latent is None:
             raise RuntimeError(
@@ -271,7 +406,27 @@ class IAMCCS_MiniMaxH3MotionContextConditionR37:
                 f"render_id={render_id!r}, previous_segment={int(segment_index)}. "
                 "Do not purge h3_context while a chain is running."
             )
-        conditioned, actual_trim = _provider_node("MiniMaxH3AutoChainMotionContext")().apply(
+        # Capture the actual terminal anchor before the provider installs its
+        # native head. It must survive unchanged; otherwise fail before sampling.
+        destination = str(chunk.get("last_image", "") or "")
+        terminal_anchors = []
+        if str(plan.get("task_mode", "")) == "longvid_continuous_guided":
+            endpoint = int(chunk["frame_count"]) - 1
+            for _, metadata in conditioning:
+                terminal_anchors.extend(
+                    k for k in metadata.get("minimax_keyframes", [])
+                    if int(k.get("resolved_frame_index", -1)) == endpoint
+                    and k.get("image") is not None
+                )
+            if not destination or not terminal_anchors:
+                raise ValueError(
+                    f"Continuous Guided segment {int(segment_index) + 1}: "
+                    f"missing Shotboard destination anchor {destination!r} at frame {endpoint}"
+                )
+        conditioned, actual_trim = _provider_call(
+            "MiniMaxH3AutoChainMotionContext",
+            "apply",
+            chain_config=config,
             conditioning=conditioning,
             vae=video_vae,
             latent=latent,
@@ -280,13 +435,26 @@ class IAMCCS_MiniMaxH3MotionContextConditionR37:
             context_latent=context_latent,
             audio_vae=audio_vae,
         )
+        if terminal_anchors:
+            retained = [k for _, metadata in conditioned for k in metadata.get("minimax_keyframes", [])]
+            if not all(any(k.get("image") is source.get("image")
+                           and k.get("resolved_frame_index") == source.get("resolved_frame_index")
+                           for k in retained) for source in terminal_anchors):
+                raise RuntimeError("Motion Context changed or removed the Shotboard destination anchor")
+            LOG.info("Continuous Guided destination verified | segment=%d | image=%s | frame=%d | native_head_trim=%d | dissolve=not_requested_by_context",
+                     int(segment_index) + 1, destination, endpoint, int(actual_trim))
         if int(actual_trim) != expected_trim:
             raise RuntimeError(
                 "IAMCCS Motion Context trim contract changed underneath the planner: "
                 f"provider={actual_trim}, planned={expected_trim}. Refusing a shifted join."
             )
+        report_label = (
+            "LONG CONTINUOUS GUIDED native AV hand-off"
+            if str(plan.get("task_mode", "") or "").lower() == "longvid_continuous_guided"
+            else "R37 upstream Motion Context applied"
+        )
         report = (
-            f"R37 upstream Motion Context applied | segment={int(segment_index) + 1}/{len(plan['chunks'])} | "
+            f"{report_label} | segment={int(segment_index) + 1}/{len(plan['chunks'])} | "
             f"video_tail={context_frames}f | audio_tail={audio_context_frames}f | trim={actual_trim}f | "
             f"positioned_guides={guide_report}"
         )
@@ -313,6 +481,25 @@ class IAMCCS_MiniMaxH3MotionContextGenerationR37:
                shift_video, shift_audio, trim_frames, motion_state=None):
         plan = copy.deepcopy(_resolve_shotplan(cine_linx))
         chunk = _chunk(plan, chunk_index)
+        sampling = _sampling_from_plan(
+            plan,
+            seed=seed,
+            seed_stride=seed_stride,
+            steps=steps,
+            sampler_name=sampler_name,
+            scheduler=scheduler,
+            denoise=denoise,
+            shift_video=shift_video,
+            shift_audio=shift_audio,
+        )
+        seed = sampling["seed"]
+        seed_stride = sampling["seed_stride"]
+        steps = sampling["steps"]
+        sampler_name = sampling["sampler_name"]
+        scheduler = sampling["scheduler"]
+        denoise = sampling["denoise"]
+        shift_video = sampling["shift_video"]
+        shift_audio = sampling["shift_audio"]
         acceleration = str(plan.get("acceleration", "native") or "native").lower()
         attention_report = "authored acceleration delegated"
         if acceleration == "comfy_kitchen":
@@ -345,7 +532,10 @@ class IAMCCS_MiniMaxH3MotionContextGenerationR37:
         frames, audio, _, sampled_latent, fps, base_report = result
         trim_frames = max(0, int(trim_frames))
         if trim_frames:
-            frames, audio = _provider_node("MiniMaxH3AutoChainMotionContextTrim")().trim(
+            frames, audio = _provider_call(
+                "MiniMaxH3AutoChainMotionContextTrim",
+                "trim",
+                chain_config=_trim_chain_config(trim_frames, float(fps), int(chunk_index)),
                 images=frames,
                 trim_frames=trim_frames,
                 audio=audio,
@@ -362,7 +552,7 @@ class IAMCCS_MiniMaxH3MotionContextGenerationR37:
         bridge_last = frames[-1:].detach().clone()
         report = (
             f"{base_report} | R37={attention_report} | upstream_motion_context_trim={trim_frames}f | "
-            f"delivered={visible_frames}f"
+            f"delivered={visible_frames}f | sampler_truth=shotboard:{steps}x{sampler_name}+{scheduler}"
         )
         return frames, audio, bridge_last, sampled_latent, fps, report
 
@@ -394,11 +584,13 @@ class IAMCCS_MiniMaxH3MotionContextStateCommitR37:
         if not _motion_context_active(cine_linx):
             return frames, audio, resolved_render_id, checkpoint_report
         config = _chain_config(resolved_render_id, segment_index)
-        path = _provider_node("MiniMaxH3AutoChainSaveLatent")().save(
+        path = _provider_call(
+            "MiniMaxH3AutoChainSaveLatent",
+            "save",
+            chain_config=config,
             latent=sampled_latent,
             filename_prefix=config["latent_prefix"],
             clip_index=config["save_clip_index"],
-            chain_config=config,
         )[0]
         report = f"{checkpoint_report} | R37 Motion Context AV latent committed: {path}"
         LOG.info("IAMCCS Motion Context state committed | segment=%d | %s", int(segment_index) + 1, path)

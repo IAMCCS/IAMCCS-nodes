@@ -2895,6 +2895,25 @@ def _audio_with_gain(audio: Any, gain: float) -> Any:
     return out
 
 
+def _trim_audio_to_editor_clip(audio: Any, clip: Dict[str, Any]) -> Any:
+    """Apply the audio clip's own source trim and timeline duration."""
+    waveform, sample_rate = _audio_waveform(audio)
+    if waveform is None:
+        return None
+    trim_start = max(0.0, _safe_float(clip.get("trimStart"), 0.0))
+    duration = max(0.0, _safe_float(clip.get("duration"), 0.0))
+    source_samples = int(waveform.shape[-1])
+    start = min(source_samples, max(0, int(round(trim_start * sample_rate))))
+    requested = max(0, int(round(duration * sample_rate)))
+    end = min(source_samples, start + requested)
+    if end <= start:
+        return None
+    return {
+        "waveform": waveform[..., start:end],
+        "sample_rate": int(sample_rate),
+    }
+
+
 def _mix_editor_audio_tracks(audio_tracks: List[Any]) -> Any:
     prepared = []
     target_rate = 0
@@ -4015,7 +4034,54 @@ def _normalize_editor_manifest(value: Any, session_key: Any, fps: float = 24.0) 
     data.setdefault("ui_state", {})
     if not isinstance(data["ui_state"], dict):
         data["ui_state"] = {}
+    _enforce_editor_audio_hard_cuts(data)
     return data
+
+
+def _enforce_editor_audio_hard_cuts(manifest: Dict[str, Any]) -> int:
+    """Stop each take-audio clip at the next take-audio edit point."""
+    clips = manifest.get("clips") if isinstance(manifest.get("clips"), list) else []
+    fps = max(1.0, _safe_float(manifest.get("fps"), 24.0))
+    audio_clips = [
+        clip for clip in clips
+        if isinstance(clip, dict)
+        and str(clip.get("type") or "").lower() == "audio"
+        and str(clip.get("trackId") or "").strip().upper() not in {"AM", "MASTER"}
+        and str(clip.get("audioLane") or "").strip().upper() != "MASTER"
+        and str(clip.get("role") or "").strip().lower() not in {"master_audio", "master_excerpt"}
+    ]
+    audio_clips.sort(key=lambda clip: (
+        _safe_float(clip.get("startTime"), 0.0),
+        _safe_int(clip.get("takeIndex"), 0),
+        _safe_int(clip.get("clipIndex"), 0),
+    ))
+    changed = 0
+    for index, clip in enumerate(audio_clips):
+        start = max(0.0, _safe_float(clip.get("startTime"), 0.0))
+        later_starts = [
+            _safe_float(other.get("startTime"), 0.0)
+            for other in audio_clips[index + 1:]
+            if _safe_float(other.get("startTime"), 0.0) > start + 1e-6
+        ]
+        if not later_starts:
+            continue
+        hard_out = min(later_starts)
+        duration = max(0.0, _safe_float(clip.get("duration"), 0.0))
+        if start + duration <= hard_out + 1e-6:
+            continue
+        new_duration = max(1.0 / fps, hard_out - start)
+        trim_start = max(0.0, _safe_float(clip.get("trimStart"), 0.0))
+        source_limit = max(
+            trim_start + new_duration,
+            _safe_float(clip.get("sourceDurationLimit"), 0.0),
+            _safe_float(clip.get("sourceDuration"), 0.0),
+        )
+        clip["duration"] = float(new_duration)
+        clip["trimEnd"] = float(min(source_limit, trim_start + new_duration))
+        clip["audioHardCutAt"] = float(hard_out)
+        clip["audioCollisionPolicy"] = "stop_at_next_audio_edit"
+        changed += 1
+    return changed
 
 
 def _editor_track_for_take(take_index: int, kind: str) -> Tuple[str, int]:
@@ -4971,6 +5037,7 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
 
         comps = []
         comp_entries = []
+        audio_mix_entries = []
         for clip in clips:
             asset = assets.get(str(clip.get("assetId"))) if isinstance(assets.get(str(clip.get("assetId"))), dict) else {}
             parked = _load_parked_video_clip(asset)
@@ -4989,7 +5056,7 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
             if tail_trim > 0:
                 source_end = trim_end if trim_end > 0 else int(comp.images.shape[0]) / max(1.0, fps)
                 trim_end = max(trim_start + (1.0 / max(1.0, fps)), source_end - (tail_trim / max(1.0, fps)))
-            images, audio, _, _ = _trim_component(
+            images, video_trimmed_audio, _, _ = _trim_component(
                 comp,
                 fps,
                 trim_start,
@@ -4997,15 +5064,22 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
             )
             audio_clip = companion_audio_clip(clip)
             if audio_clip is not None:
+                audio = _trim_audio_to_editor_clip(comp.audio, audio_clip)
                 audio = _audio_with_gain(audio, editor_audio_gain(audio_clip)) if editor_audio_enabled(audio_clip) else None
+                audio_mix_clip = audio_clip
             elif editor_solo_active:
                 # A legacy video without a published companion audio clip must
                 # not leak through when the user has explicitly soloed a lane.
                 audio = None
+                audio_mix_clip = clip
+            else:
+                audio = video_trimmed_audio
+                audio_mix_clip = clip
             images = _apply_goya_suite_clip_edit(images, clip)
             edited_comp = Types.VideoComponents(images=images, audio=audio, frame_rate=comp.frame_rate)
             comps.append(edited_comp)
             comp_entries.append((clip, edited_comp))
+            audio_mix_entries.append((audio_mix_clip, edited_comp))
         first = comps[0]
         first_shape = tuple(first.images.shape[1:3])
         for comp in comps:
@@ -5058,7 +5132,7 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
         elif effective_audio_policy == "first_video_audio":
             audio = first.audio
         elif effective_audio_policy == "concat_clip_audio":
-            audio = _mix_editor_video_audio(comp_entries, int(frames.shape[0]), fps)
+            audio = _mix_editor_video_audio(audio_mix_entries, int(frames.shape[0]), fps)
             manual_audio_items = []
             for clip in manifest.get("clips", []):
                 if not isinstance(clip, dict) or str(clip.get("type")) != "audio":

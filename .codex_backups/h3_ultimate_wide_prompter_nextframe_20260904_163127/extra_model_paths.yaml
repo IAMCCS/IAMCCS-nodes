@@ -1,0 +1,64 @@
+﻿comfyui:
+    base_path: X:\Models
+    is_default: true
+    checkpoints: StableDiffusion/
+    clip: clip/
+    clip_vision: clip_vision/
+    configs: configs/
+    controlnet: controlnet/
+    diffusion_models: |
+                  diffusion_models/
+                  unet/
+    unet: unet/
+    embeddings: embeddings/
+    loras: lora/
+    upscale_models: upscale_models/
+    vae: vae/
+    pulid: pulid/
+    style_models: style_models/
+    detection: detection
+    SEEDVR2: SEEDVR2/
+    latent_upscale_models: latent_upscale_models
+    text_encoders: clip/
+    audio_encoders: audio_encoders
+    woosh: woosh/
+    DramaBox: DramaBox/
+# IAMCCS test bridge: let this cu130 ComfyUI also see the model folders from the E: install.
+iamccs_e_models:
+    base_path: E:\ComfyUI_1\ComfyUI-Easy-Install\ComfyUI\models
+    checkpoints: checkpoints/
+    clip: clip/
+    clip_vision: clip_vision/
+    configs: configs/
+    controlnet: controlnet/
+    diffusion_models: |
+                  diffusion_models/
+                  unet/
+    unet: unet/
+    embeddings: embeddings/
+    loras: loras/
+    upscale_models: upscale_models/
+    vae: vae/
+    vae_approx: vae_approx/
+    pulid: pulid/
+    style_models: style_models/
+    latent_upscale_models: latent_upscale_models/
+    text_encoders: |
+                  text_encoders/
+                  clip/
+    audio_encoders: audio_encoders/
+    woosh: woosh/
+    DramaBox: DramaBox/
+    TTS: TTS/
+    chatterbox: chatterbox/
+    qwen-tts: qwen-tts/
+    Qwen3-TTS: Qwen3-TTS/
+    Step-Audio-EditX: Step-Audio-EditX/
+    vibevoice: vibevoice/
+    LLM: LLM/
+    model_patches: model_patches/
+# Explicit WanAnimate ONNX detection path (ViTPose/YOLO).
+x_detection_models:
+    base_path: X:\Models
+    detection: detection/
+

@@ -4,7 +4,7 @@ import { api } from "../../scripts/api.js";
 const TYPE = "IAMCCS_ShotboardVideoEditorV1";
 const RENDER_TYPE = "IAMCCS_ShotboardVideoEditorRenderV1";
 const STYLE_ID = "iamccs-shotboard-video-editor-v1-style-monitor-compatible";
-const UI_VERSION = "20260824-multitrack-audio-mute-solo";
+const UI_VERSION = "20260911-audio-hard-cut-truth";
 const NODE_SIZE = [1600, 1560];
 const CHROME_HEIGHT = 156;
 const WIDGET_HEIGHT = NODE_SIZE[1] - CHROME_HEIGHT;
@@ -158,6 +158,7 @@ function normalizeManifestTracks(manifest) {
     solo: Boolean(track?.solo ?? false),
     volume: Math.max(0, Math.min(2, Number.isFinite(Number(track?.volume)) ? Number(track.volume) : 1)),
   }));
+  enforceAudioHardCuts(data);
   return data;
 }
 
@@ -201,6 +202,7 @@ function manifestFromNode(node) {
 
 function saveManifest(node, manifest) {
   ensureMasterAudioLaneClip(manifest);
+  enforceAudioHardCuts(manifest);
   manifest.updated_at = Date.now() / 1000;
   const text = JSON.stringify(manifest, null, 2);
   node.properties = node.properties || {};
@@ -861,6 +863,39 @@ function isMasterClip(clip) {
   const role = String(clip?.role || "").trim().toLowerCase();
   const lane = String(clip?.audioLane || "").trim().toUpperCase();
   return trackId === "AM" || trackId === "MASTER" || role === "master_audio" || role === "master_excerpt" || lane === "MASTER";
+}
+
+function enforceAudioHardCuts(manifest) {
+  const fps = Math.max(1, Number(manifest?.fps || 24));
+  const clips = (Array.isArray(manifest?.clips) ? manifest.clips : [])
+    .filter((clip) => clip?.type === "audio" && !isMasterClip(clip))
+    .sort((a, b) => Number(a.startTime || 0) - Number(b.startTime || 0)
+      || Number(a.takeIndex || 0) - Number(b.takeIndex || 0)
+      || Number(a.clipIndex || 0) - Number(b.clipIndex || 0));
+  let changed = false;
+  for (let index = 0; index < clips.length; index++) {
+    const clip = clips[index];
+    const start = Math.max(0, Number(clip.startTime || 0));
+    const laterStarts = clips.slice(index + 1)
+      .map((other) => Number(other.startTime || 0))
+      .filter((value) => value > start + 1e-6);
+    if (!laterStarts.length) continue;
+    const hardOut = Math.min(...laterStarts);
+    if (start + Number(clip.duration || 0) <= hardOut + 1e-6) continue;
+    const duration = Math.max(1 / fps, hardOut - start);
+    const trimStart = Math.max(0, Number(clip.trimStart || 0));
+    const sourceLimit = Math.max(
+      trimStart + duration,
+      Number(clip.sourceDurationLimit || 0),
+      Number(clip.sourceDuration || 0)
+    );
+    clip.duration = duration;
+    clip.trimEnd = Math.min(sourceLimit, trimStart + duration);
+    clip.audioHardCutAt = hardOut;
+    clip.audioCollisionPolicy = "stop_at_next_audio_edit";
+    changed = true;
+  }
+  return changed;
 }
 
 function clipEndSeconds(clip) {

@@ -9,6 +9,8 @@
 ### Category: ComfyUI Custom Nodes
 ### Main Feature: Fix for LoRA loading in native WANAnimate workflows + general nodes 4 ComfyUI
 
+## Version: 1.5.4 (Added other IAMCCS H3 utilities and nodes featuring the IAMCCS Cinematic Pipeline Framework)
+
 
 ## Version: 1.5.3 (Fixed Bugs, added several Minimax H3 nodes and Cine utilities for a IAMCCS Cinematic Pipeline Framework)
 

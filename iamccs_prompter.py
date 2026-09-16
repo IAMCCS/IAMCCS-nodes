@@ -32,7 +32,7 @@ AI_IMAGE_MAX_BYTES = 16 * 1024 * 1024
 AUDIO_HANDOFF_AUTHORING_RULE = (
     "Never carry dialogue or a new vocalisation across two independently generated chunks. "
     "For every non-final chunk, finish all dialogue and shouts at least 1.00 second before the end; "
-    "reserve the final 1.00 second for continuous ambience, physical action sounds and quiet natural breathing. "
+    "reserve the final 1.00 second for only the ambience and sounds requested by the user. "
     "Every following chunk must also reserve its first 1.00 second for that same ambience and continued physical action before any new line starts. "
     "Do not impose this restriction on the final or only chunk."
 )
@@ -193,7 +193,7 @@ def default_project() -> dict[str, Any]:
     return {
         "schema": PROJECT_SCHEMA,
         "schema_version": PROJECT_VERSION,
-        "project_name": "Platform at Blue Hour",
+        "project_name": "Untitled H3 Prompt",
         "task_mode": "t2va",
         "injection_target": "global",
         "writing_mode": "guided",
@@ -201,7 +201,10 @@ def default_project() -> dict[str, Any]:
         "ai_direction": "",
         "ai_scope": "active_field",
         "ai_visual_roles": {},
-        "sections": copy.deepcopy(DEFAULT_SECTIONS),
+        # Examples remain available through Load Example, but a newly added
+        # Prompter must never carry a character/story into Shotboard merely
+        # because its CineLinX socket is connected.
+        "sections": {key: "" for key in DEFAULT_SECTIONS},
     }
 
 
@@ -718,6 +721,168 @@ def rewrite_sections_with_ai(
     }
 
 
+def _multimodal_json_chat(provider: str, base_url: str, model: str, api_key: str,
+                          system: str, user: str, images: Any = None,
+                          temperature: float = 0.3, timeout: float = 120.0) -> dict[str, Any]:
+    """Shared vision/JSON transport for IAMCCS planning tools."""
+    provider = str(provider or "ollama").strip().lower()
+    model = str(model or "").strip()
+    if not model:
+        raise ValueError("Select an AI model first")
+    visual_inputs = _normalise_ai_images(images)
+    api_key = str(api_key or "").strip() or {
+        "openai_compatible": os.environ.get("OPENAI_API_KEY", ""),
+        "gemini": os.environ.get("GEMINI_API_KEY", ""),
+        "anthropic": os.environ.get("ANTHROPIC_API_KEY", ""),
+    }.get(provider, "")
+    if provider == "ollama":
+        result = _http_json(
+            f"{_ollama_native_base(base_url)}/api/chat",
+            {"model": model, "stream": False, "format": "json",
+             "messages": [{"role": "system", "content": system}, {
+                 "role": "user", "content": user,
+                 **({"images": [item["data"] for item in visual_inputs]} if visual_inputs else {}),
+             }], "options": {"temperature": float(temperature)}}, {}, timeout)
+        content = str((result.get("message") or {}).get("content") or "")
+    elif provider == "openai_compatible":
+        root = str(base_url or "https://api.openai.com/v1").rstrip("/")
+        url = root if root.endswith("/chat/completions") else f"{root}/chat/completions"
+        body: Any = user
+        if visual_inputs:
+            body = [{"type": "text", "text": user}] + [{
+                "type": "image_url", "image_url": {"url": f"data:{item['mime_type']};base64,{item['data']}"},
+            } for item in visual_inputs]
+        result = _http_json(url, {"model": model, "temperature": float(temperature),
+            "response_format": {"type": "json_object"},
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": body}]},
+            {"Authorization": f"Bearer {api_key}"} if api_key else {}, timeout)
+        choices = result.get("choices") or []
+        content = str(((choices[0] if choices else {}).get("message") or {}).get("content") or "")
+    elif provider == "gemini":
+        root = str(base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
+        encoded_model = urllib.parse.quote(model, safe="-._")
+        parts: list[dict[str, Any]] = [{"text": user}]
+        parts.extend({"inlineData": {"mimeType": item["mime_type"], "data": item["data"]}} for item in visual_inputs)
+        result = _http_json(f"{root}/models/{encoded_model}:generateContent?key={urllib.parse.quote(api_key)}",
+            {"systemInstruction": {"parts": [{"text": system}]},
+             "contents": [{"role": "user", "parts": parts}],
+             "generationConfig": {"temperature": float(temperature), "responseMimeType": "application/json"}}, {}, timeout)
+        candidates = result.get("candidates") or []
+        response_parts = (((candidates[0] if candidates else {}).get("content") or {}).get("parts") or [])
+        content = "".join(str(part.get("text") or "") for part in response_parts if isinstance(part, dict))
+    elif provider == "anthropic":
+        if not api_key:
+            raise ValueError("Claude requires an API key or ANTHROPIC_API_KEY")
+        root = str(base_url or "https://api.anthropic.com/v1").rstrip("/")
+        url = root if root.endswith("/messages") else f"{root}/messages"
+        body = [{"type": "image", "source": {"type": "base64", "media_type": item["mime_type"], "data": item["data"]}}
+                for item in visual_inputs] + [{"type": "text", "text": user}]
+        result = _http_json(url, {"model": model, "max_tokens": 4096,
+            "temperature": float(temperature), "system": system,
+            "messages": [{"role": "user", "content": body}]},
+            {"x-api-key": api_key, "anthropic-version": "2023-06-01"}, timeout)
+        content = "".join(str(item.get("text") or "") for item in (result.get("content") or []) if isinstance(item, dict))
+    else:
+        raise ValueError(f"Unsupported AI provider: {provider}")
+    return _extract_json_payload(content)
+
+
+VISUAL_STORY_SYSTEM_PROMPT = """You are IAMCCS Visual Story Planner for MiniMax H3.
+Read every supplied image in exact Picture/Shotboard slot order and obey the user's action idea. Return JSON only:
+{"global_prompt":"...","global_direction":"...","recommended_mode":"auto|i2va|fl2va|longvid_guides","continuity_locks":"...","shots":[{"slot":1,"local_prompt":"...","h3_transition_prompt":"..."}]}
+
+global_prompt must be a complete, directly usable MiniMax H3 global prompt for one consecutive audiovisual sequence. Use this structure inside the text: subject definitions; reference/guide authority for every <Picture N>; integrated chronological action with explicit [Shot N] beats in slot order; camera path and transition mechanics; continuity locks; overall soundscape; non-diegetic music. Treat the pictures as ordered visual guide states, never as a collage. Do not invent timestamps, dialogue, cuts, new characters or story events unless the user supplied them. If the user asks for continuous action, describe causal movement between guides and explicitly forbid reset, loop-back, unmotivated cut, dissolve, morph, teleport, T2V drift and action restarting from Picture 1. If the user asks for editorial cuts, state the cut boundaries explicitly instead.
+
+Create one shot object per image in slot order. local_prompt is a filmable H3 instruction for that guide with framing, active movement, performance, camera and audible visible events. h3_transition_prompt describes the causal action/camera hand-off from the preceding guide into this guide; slot 1 describes how motion begins from <Picture 1>. Preserve identity, wardrobe, anatomy, props, screen direction, geography, lighting, lens logic and action state. English only; no Markdown outside the plain prompt strings."""
+
+
+def build_visual_story_plan_with_ai(provider: str, base_url: str, model: str, api_key: str,
+                                    relationship: str, task_mode: str, images: Any,
+                                    temperature: float = 0.3, timeout: float = 150.0):
+    visuals = _normalise_ai_images(images)
+    relation = str(relationship or "").strip()
+    if not relation:
+        raise ValueError("Describe the relationship between the images")
+    visual_map = "\n".join(f"Picture {item['slot']}: {item['name']} · role={item['role']}" for item in visuals)
+    payload = _multimodal_json_chat(provider, base_url, model, api_key,
+        VISUAL_STORY_SYSTEM_PROMPT + ("" if visuals else
+            "\nNo images supplied. Do not invent Picture references. Create one local shot per explicitly numbered prompt in the brief. Preserve those slot numbers and their individual instructions; do not collapse them into the global prompt. If no slots are numbered, choose a short consecutive shot sequence. Global defines shared identity, location and atmosphere; local prompts carry the chronological development."),
+        f"CURRENT IAMCCS MODE: {task_mode}\nVISUAL MAP:\n{visual_map}\n\nRELATIONSHIP / STORY INTENT:\n{relation}",
+        visuals, temperature, timeout)
+    shots = []
+    for raw in payload.get("shots") if isinstance(payload.get("shots"), list) else []:
+        if not isinstance(raw, dict):
+            continue
+        local = str(raw.get("local_prompt") or "").strip()
+        transition = str(raw.get("h3_transition_prompt") or "").strip()
+        if local:
+            shots.append({"slot": max(1, int(raw.get("slot") or len(shots) + 1)),
+                          "local_prompt": local, "h3_transition_prompt": transition})
+    if not shots:
+        raise RuntimeError("The AI returned no usable H3 shots")
+    slots = [shot["slot"] for shot in shots]
+    if len(slots) != len(set(slots)):
+        raise RuntimeError("The AI returned duplicate local prompt slots; retry the request.")
+    if not visuals:
+        requested_slots = {int(n) for n in re.findall(r"\b(?:prompt|shot|slot)\s*(\d+)\b", relation, flags=re.I)}
+        if requested_slots and set(slots) != requested_slots:
+            raise RuntimeError("The AI did not preserve the requested local prompt numbers; retry the request.")
+    shots.sort(key=lambda shot: shot["slot"])
+    mode = str(payload.get("recommended_mode") or "auto").strip().lower()
+    if mode not in {"auto", "i2va", "fl2va", "longvid_guides"}:
+        mode = "auto"
+    global_direction = str(payload.get("global_direction") or "").strip()
+    continuity_locks = str(payload.get("continuity_locks") or "").strip()
+    global_prompt = str(payload.get("global_prompt") or "").strip()
+    if not global_prompt:
+        shot_plan = "\n".join(
+            f"[Shot {shot['slot']}] <Picture {shot['slot']}>: {shot['local_prompt']}"
+            + (f" Transition: {shot['h3_transition_prompt']}" if shot['h3_transition_prompt'] else "")
+            for shot in shots
+        )
+        global_prompt = "\n\n".join(part for part in (
+            global_direction,
+            "Reference and guide authority:\n" + "\n".join(
+                f"<Picture {item['slot']}> is the ordered visual guide for [Shot {item['slot']}]." for item in visuals
+            ),
+            "Integrated chronological action:\n" + shot_plan,
+            f"Continuity locks:\n{continuity_locks}" if continuity_locks else "",
+        ) if part)
+    return {"global_prompt": global_prompt,
+            "global_direction": global_direction,
+            "recommended_mode": mode,
+            "continuity_locks": continuity_locks,
+            "shots": shots}, {"provider": provider, "model": model, "visual_references": len(visuals)}
+
+
+NEXTFRAME_H3_SYSTEM_PROMPT = """Convert a Qwen Next Scene still-image prompt and its visual references into MiniMax H3 video prompting. Return JSON only:
+{"h3_local_prompt":"...","h3_transition_prompt":"...","h3_continuity_locks":"...","recommended_mode":"auto|i2va|fl2va|longvid_guides"}
+The local prompt describes moving action, acting, camera, timing and audible visible events, not a static result. The transition prompt explains how the source image reaches the target while preserving identity, wardrobe, props, screen direction, geography, lighting and style. Choose FL2VA for start+end frames, I2VA for one source, LongVid only for a true ordered multi-shot sequence. English only, no Next Scene trigger, no Markdown."""
+
+
+def rewrite_nextframe_h3_with_ai(provider: str, base_url: str, model: str, api_key: str,
+                                 qwen_prompt: str, requested_mode: str = "auto", images: Any = None,
+                                 temperature: float = 0.25, timeout: float = 150.0):
+    prompt = str(qwen_prompt or "").strip()
+    if not prompt:
+        raise ValueError("Write or generate a NextFrame prompt first")
+    visuals = _normalise_ai_images(images)
+    payload = _multimodal_json_chat(provider, base_url, model, api_key,
+        NEXTFRAME_H3_SYSTEM_PROMPT,
+        f"REQUESTED MODE: {requested_mode}\nQWEN NEXT-FRAME PROMPT:\n{prompt}\n\nImages are ordered source first, target/extra references next.",
+        visuals, temperature, timeout)
+    local = str(payload.get("h3_local_prompt") or "").strip()
+    if not local:
+        raise RuntimeError("The AI returned no H3 local prompt")
+    mode = str(payload.get("recommended_mode") or requested_mode or "auto").strip().lower()
+    if mode not in {"auto", "i2va", "fl2va", "longvid_guides"}:
+        mode = "auto"
+    return {"h3_local_prompt": local,
+            "h3_transition_prompt": str(payload.get("h3_transition_prompt") or "").strip(),
+            "h3_continuity_locks": str(payload.get("h3_continuity_locks") or "").strip(),
+            "recommended_mode": mode}, {"provider": provider, "model": model, "visual_references": len(visuals)}
+
+
 NEXTFRAME_ASSISTANT_SYSTEM_PROMPT = """You are IAMCCS NextFrame Prompt Director, a specialist in Qwen-Image-Edit-2511 and the Next Scene LoRA.
 Return JSON only, with exactly this shape: {\"prompt\":\"...\"}.
 
@@ -1068,10 +1233,10 @@ def _append_prompter_stage(
         # independent local prompt targets in one CineLinX pass.
         "iamccs_prompter_injections": [dict(item) for item in injections],
         "iamccs_prompter_prompt": final_prompt,
+        "iamccs_prompter_queue_authority": "shotboard_visible_fields",
         "iamccs_prompter_project_json": project_json,
         "iamccs_prompter_audio_handoff_rule": AUDIO_HANDOFF_AUTHORING_RULE,
         "iamccs_prompter_audio_driven_dialogue_template": "<Subject 1> (S1): <d>[Language] ...</d>",
-        "cine_global_prompt": final_prompt if str(injection_target) == "global" else "",
         "cine_report": report,
     })
     out["resources"] = resources
@@ -1205,7 +1370,14 @@ def apply_prompter_to_minimax(
     global_prompt: str,
     timeline_data: Any,
 ) -> tuple[str, str, dict[str, Any]]:
-    """Apply legacy or multi-target Prompter requests to a known Shotboard."""
+    """Preserve Shotboard visible fields as the only queue-time prompt truth.
+
+    Prompter requests are authoring metadata. The UI's explicit INJECT action
+    writes the chosen text into Shotboard before Queue. Re-applying the
+    connected node's serialized project here made stale demo content override
+    later Shotboard edits, so queue-time auto-application is intentionally
+    disabled for both current and legacy Prompter payloads.
+    """
     resources = _linx_resources(cine_linx)
     requests = resources.get("iamccs_prompter_injections")
     if not isinstance(requests, list):
@@ -1217,28 +1389,17 @@ def apply_prompter_to_minimax(
             "applied": False,
             "reason": "no_prompter_cine_linx",
         }
-
-    resolved_global = str(global_prompt or "")
-    resolved_timeline = str(timeline_data or "")
-    applications: list[dict[str, Any]] = []
-    for request_index, request in enumerate(requests):
-        resolved_global, resolved_timeline, result = _apply_one_prompter_request(
-            resolved_global,
-            resolved_timeline,
-            request,
-        )
-        applications.append({"request_index": request_index, **result})
-
-    applied = [item for item in applications if item.get("applied")]
-    actual_targets = [str(item.get("actual_target")) for item in applied if item.get("actual_target")]
-    return resolved_global, resolved_timeline, {
-        "applied": bool(applied),
+    return str(global_prompt or ""), str(timeline_data or ""), {
+        "applied": False,
+        "reason": "shotboard_visible_fields_are_queue_truth",
         "requested_count": len(requests),
-        "applied_count": len(applied),
-        "actual_target": ",".join(actual_targets) if actual_targets else "none",
-        "actual_targets": actual_targets,
-        "applications": applications,
+        "ignored_stale_requests": len(requests),
+        "applied_count": 0,
+        "actual_target": "none",
+        "actual_targets": [],
+        "applications": [],
         "multi_target_contract": len(requests) > 1,
+        "queue_authority": "shotboard_visible_fields",
     }
 
 
@@ -1484,6 +1645,40 @@ def _register_prompter_routes() -> None:
                     r"\1=[redacted]",
                     str(exc),
                 )
+                return web.json_response({"ok": False, "error": safe_error}, status=400)
+
+        @routes.post("/iamccs/prompter/visual-story")
+        async def iamccs_prompter_visual_story(request):
+            try:
+                payload = await request.json()
+                plan, report = await asyncio.to_thread(
+                    build_visual_story_plan_with_ai,
+                    str(payload.get("provider", "ollama")), str(payload.get("base_url", "")),
+                    str(payload.get("model", "")), str(payload.get("api_key", "")),
+                    str(payload.get("relationship", "")), str(payload.get("task_mode", "i2va")),
+                    payload.get("images"), float(payload.get("temperature", 0.3)),
+                    float(payload.get("timeout", 150.0)),
+                )
+                return web.json_response({"ok": True, "plan": plan, "report": report})
+            except Exception as exc:
+                safe_error = re.sub(r"(?i)(api[_ -]?key|authorization)[^,;\n]*", r"\1=[redacted]", str(exc))
+                return web.json_response({"ok": False, "error": safe_error}, status=400)
+
+        @routes.post("/iamccs/nextframe/h3")
+        async def iamccs_nextframe_h3(request):
+            try:
+                payload = await request.json()
+                result, report = await asyncio.to_thread(
+                    rewrite_nextframe_h3_with_ai,
+                    str(payload.get("provider", "ollama")), str(payload.get("base_url", "")),
+                    str(payload.get("model", "")), str(payload.get("api_key", "")),
+                    str(payload.get("qwen_prompt", "")), str(payload.get("requested_mode", "auto")),
+                    payload.get("images"), float(payload.get("temperature", 0.25)),
+                    float(payload.get("timeout", 150.0)),
+                )
+                return web.json_response({"ok": True, **result, "report": report})
+            except Exception as exc:
+                safe_error = re.sub(r"(?i)(api[_ -]?key|authorization)[^,;\n]*", r"\1=[redacted]", str(exc))
                 return web.json_response({"ok": False, "error": safe_error}, status=400)
 
         @routes.post("/iamccs/nextframe/ideas")

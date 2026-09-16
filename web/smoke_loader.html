@@ -1,0 +1,9 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>IAMCCS smoke payload</title>
+<pre id="payload"></pre>
+<script>
+fetch('./smoke_payload.txt').then(r => r.text()).then(t => {
+  document.getElementById('payload').textContent = t;
+});
+</script>

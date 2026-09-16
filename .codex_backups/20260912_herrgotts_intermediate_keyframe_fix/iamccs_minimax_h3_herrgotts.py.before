@@ -1,0 +1,334 @@
+# SPDX-FileCopyrightText: 2026 Carmine Cristallo Scalzi (IAMCCS)
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+"""IAMCCS Shotboard adapter for Herrgotts H3 Infinite v1.2.
+
+This module deliberately does not reproduce the provider's continuation math.
+It delegates start, direct AV-latent continuation, freeze-tail analysis and
+context-aligned joining to the installed Herrgotts release nodes.  IAMCCS owns
+only the Shotboard-to-segment translation and its existing sampling profiles.
+"""
+
+from __future__ import annotations
+
+import copy
+import importlib
+import logging
+from typing import Any
+
+import torch
+
+from .iamccs_minimax_h3_atomic_backend import (
+    H3_FPS,
+    SUPERNODE_LINX_TYPE,
+    IAMCCS_MiniMaxH3GenerationBackendV2,
+    _load_image,
+    _resolve_shotplan,
+)
+from .iamccs_minimax_h3_motion_context_variant import _replace_plan
+
+
+LOG = logging.getLogger("IAMCCS.MiniMaxH3.Herrgotts")
+CATEGORY = "IAMCCS/MiniMax H3/Herrgotts Direct AV"
+PROVIDER = "Herrgotts-H3-Infinite-Continuation-Suite"
+
+
+def _provider_node(name: str):
+    import nodes as comfy_nodes
+
+    cls = comfy_nodes.NODE_CLASS_MAPPINGS.get(name)
+    if cls is None:
+        raise RuntimeError(
+            f"IAMCCS Herrgotts Direct AV requires {PROVIDER} v1.2.1 or newer; "
+            f"provider node '{name}' is unavailable. Enable/update the provider and restart ComfyUI."
+        )
+    return cls
+
+
+def _ensure_provider_runtime(provider_cls):
+    """Install Herrgotts' hooks before the first expensive H3 sample.
+
+    Herrgotts deliberately waits until Continue.build() to install its global
+    hooks.  An IAMCCS chain must preflight them before rendering clip one,
+    otherwise a conflicting node pack wastes a complete sample before the
+    error becomes visible.
+    """
+    module = importlib.import_module(provider_cls.__module__)
+    package = getattr(module, "__package__", "")
+    if not package:
+        raise RuntimeError("Herrgotts provider package could not be resolved for runtime preflight")
+    runtime = importlib.import_module(f"{package}.runtime_patches")
+    ensure = getattr(runtime, "ensure_h3_runtime_patches", None)
+    if not callable(ensure):
+        raise RuntimeError("Herrgotts provider has no compatible runtime preflight API")
+    try:
+        ensure()
+    except RuntimeError as exc:
+        raise RuntimeError(
+            "FL2VA Continuous AV runtime preflight failed before sampling. "
+            "Restart ComfyUI once so the unified IAMCCS H3 continuation hooks are loaded. "
+            f"Provider detail: {exc}"
+        ) from exc
+
+
+def _chunks(plan: dict[str, Any]) -> list[dict[str, Any]]:
+    chunks = plan.get("chunks")
+    if not isinstance(chunks, list) or not chunks:
+        raise ValueError("Herrgotts Direct AV received an empty Shotboard interval plan")
+    return [item for item in chunks if isinstance(item, dict)]
+
+
+def _contract(plan: dict[str, Any]) -> dict[str, Any]:
+    contract = plan.get("herrgotts_direct_av_chain")
+    if not isinstance(contract, dict) or not bool(contract.get("enabled")):
+        raise ValueError(
+            "Select HERRGOTTS DIRECT AV (the former Masked Loop button) in IAMCCS Settings/Shotboard."
+        )
+    return contract
+
+
+def _sampling(plan: dict[str, Any]) -> dict[str, Any]:
+    authored = plan.get("sampling") if isinstance(plan.get("sampling"), dict) else {}
+    return {
+        "seed": int(authored.get("seed", 42)),
+        "seed_stride": int(authored.get("seed_stride", 1)),
+        "steps": int(authored.get("steps", 20)),
+        "sampler_name": str(authored.get("sampler_name", "res_multistep")),
+        "scheduler": str(authored.get("scheduler", "simple")),
+        "denoise": float(authored.get("denoise", 1.0)),
+        "shift_video": float(authored.get("shift_video", 12.0)),
+        "shift_audio": float(authored.get("shift_audio", 3.0)),
+    }
+
+
+def _provider_plan(cine_linx: Any, plan: dict[str, Any]) -> Any:
+    """Make the existing sampler see FL2VA without changing the source plan."""
+    adapted = copy.deepcopy(plan)
+    adapted["task_mode"] = "fl2va"
+    adapted["generation_mode"] = "fl2va"
+    adapted.pop("masked_loop_guided", None)
+    for chunk in adapted.get("chunks", []):
+        if isinstance(chunk, dict):
+            chunk["task_mode"] = "fl2va"
+    return _replace_plan(cine_linx, adapted)
+
+
+class IAMCCS_MiniMaxH3HerrgottsSegment:
+    """Inspect one dynamic Shotboard A→B interval used by the provider chain."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "cine_linx": (SUPERNODE_LINX_TYPE,),
+                "segment_index": ("INT", {"default": 0, "min": 0, "max": 1000000, "step": 1}),
+            }
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "STRING", "INT", "INT", "FLOAT", "INT", "INT", "STRING")
+    RETURN_NAMES = (
+        "first_frame", "last_frame", "prompt", "width", "height", "duration_seconds",
+        "is_first", "total_segments", "report",
+    )
+    FUNCTION = "inspect"
+    CATEGORY = CATEGORY
+
+    def inspect(self, cine_linx, segment_index):
+        plan = _resolve_shotplan(cine_linx)
+        _contract(plan)
+        chunks = _chunks(plan)
+        index = int(segment_index)
+        if index < 0 or index >= len(chunks):
+            raise IndexError(f"Herrgotts segment_index={index} outside 0..{len(chunks) - 1}")
+        chunk = chunks[index]
+        first_path = str(chunk.get("first_image", "") or "")
+        last_path = str(chunk.get("last_image", "") or "")
+        first = _load_image(first_path) if first_path else None
+        last = _load_image(last_path) if last_path else None
+        if index == 0 and not torch.is_tensor(first):
+            raise ValueError("Herrgotts interval 1 requires the first chronological Shotboard image")
+        if not torch.is_tensor(last):
+            raise ValueError(f"Herrgotts interval {index + 1} requires its destination Shotboard image")
+        # A valid IMAGE is returned for the inspection socket on continuation
+        # intervals, although the provider correctly ignores it and consumes
+        # the prior full AV latent as its opening authority.
+        first_out = first if torch.is_tensor(first) else last[:1]
+        requested_frames = max(5, int(chunk.get("requested_frame_count", chunk.get("frame_count", 5))))
+        duration = requested_frames / float(H3_FPS)
+        report = (
+            f"IAMCCS → Herrgotts interval {index + 1}/{len(chunks)} | "
+            f"{'native FL2VA start' if index == 0 else 'direct previous AV latent'} -> authored destination | "
+            f"requested={requested_frames}f/{duration:.3f}s | {int(plan['width'])}x{int(plan['height'])}"
+        )
+        return (
+            first_out[:1], last[:1], str(chunk.get("prompt", "")), int(plan["width"]),
+            int(plan["height"]), float(duration), int(index == 0), len(chunks), report,
+        )
+
+
+class IAMCCS_MiniMaxH3HerrgottsDirectAVChain:
+    """Dynamic N-guide FL2VA chain delegated to Herrgotts v1.2 release nodes."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+                "video_vae": ("VAE",),
+                "audio_vae": ("VAE",),
+                "cine_linx": (SUPERNODE_LINX_TYPE,),
+            },
+            "optional": {
+                "reference_image": ("IMAGE", {
+                    "tooltip": "Optional Qwen-only <Picture 1> identity/style reference, exactly as in Herrgotts v1.2."
+                }),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "AUDIO", "IMAGE", "LATENT", "INT", "STRING")
+    RETURN_NAMES = ("frames", "audio", "bridge_last_frame", "sampled_latent", "fps", "report")
+    FUNCTION = "render"
+    CATEGORY = CATEGORY
+
+    def render(self, model, clip, video_vae, audio_vae, cine_linx, reference_image=None):
+        plan = _resolve_shotplan(cine_linx)
+        contract = _contract(plan)
+        chunks = _chunks(plan)
+        if str(plan.get("audio_mode", "h3_native_generated")) not in {
+            "h3_native_generated", "external_audio_post",
+        }:
+            raise ValueError(
+                "Herrgotts Direct AV v1.2 continues H3's native generated AV latent. "
+                "Choose H3 Generated Audio or Audio in Post; custom AudioBoard drive is a different pipeline."
+            )
+
+        context_frames = str(contract.get("context_frames", "22"))
+        if context_frames not in {"5", "22", "39"}:
+            raise ValueError("Herrgotts context must be one of 5, 22 or 39 frames")
+        width, height = int(plan["width"]), int(plan["height"])
+        authored = _sampling(plan)
+        provider_linx = _provider_plan(cine_linx, plan)
+        Start = _provider_node("H3ContinuousStartV11")
+        Continue = _provider_node("H3ContinuousContinueV11")
+        Analyze = _provider_node("H3ContinuousAnalyzeHandoverV11")
+        StitchOutput = _provider_node("H3ContinuousStitchOutputV11")
+        Join = _provider_node("H3ContinuousSeamlessJoinV11")
+        _ensure_provider_runtime(Continue)
+
+        previous_latent = None
+        previous_handover = None
+        previous_full_images = None
+        combined_images = None
+        combined_audio = None
+        reports: list[str] = []
+
+        for index, chunk in enumerate(chunks):
+            first_path = str(chunk.get("first_image", "") or "")
+            last_path = str(chunk.get("last_image", "") or "")
+            first = _load_image(first_path) if first_path else None
+            last = _load_image(last_path) if last_path else None
+            if index == 0 and not torch.is_tensor(first):
+                raise ValueError("Herrgotts clip 1 is missing the opening Shotboard guide")
+            if not torch.is_tensor(last):
+                raise ValueError(f"Herrgotts clip {index + 1} is missing its final Shotboard guide")
+            requested_frames = max(5, int(chunk.get("requested_frame_count", chunk.get("frame_count", 5))))
+            duration = requested_frames / float(H3_FPS)
+            prompt = str(chunk.get("prompt", "") or "")
+
+            if index == 0:
+                positive, latent = Start().build(
+                    clip=clip, vae=video_vae, prompt=prompt, width=width, height=height,
+                    duration=duration, first_frame=first[:1], last_frame=last[:1],
+                    ref_image_size=str(plan.get("ref_image_size", "match")),
+                    reference_image=reference_image,
+                )
+                actual_head = 0
+                handover_info = "native FL2VA start"
+            else:
+                positive, latent, actual_head, _ignored_tail, handover_info = Continue().build(
+                    clip=clip, vae=video_vae, previous_latent=previous_latent,
+                    prompt=prompt, width=width, height=height, duration=duration,
+                    context_frames=context_frames, handover_mode=str(contract.get("handover_mode", "auto")),
+                    alignment_mode=str(contract.get("alignment_mode", "phase_aligned_extended")),
+                    manual_landing_tail_frames=34,
+                    ref_image_size=str(plan.get("ref_image_size", "match")),
+                    handover=previous_handover, last_frame=last[:1], reference_image=reference_image,
+                )
+
+            full_images, full_audio, _bridge, sampled_latent, fps, sample_report = (
+                IAMCCS_MiniMaxH3GenerationBackendV2().render(
+                    model=model, positive=positive, latent=latent, video_vae=video_vae,
+                    audio_vae=audio_vae, cine_linx=provider_linx, chunk_index=index,
+                    seed=authored["seed"], seed_stride=authored["seed_stride"],
+                    steps=authored["steps"], sampler_name=authored["sampler_name"],
+                    scheduler=authored["scheduler"], denoise=authored["denoise"],
+                    shift_video=authored["shift_video"], shift_audio=authored["shift_audio"],
+                )
+            )
+            analyzed = Analyze().analyze(
+                images=full_images,
+                preset=str(contract.get("handover_preset", "Balanced")),
+                context_frames=context_frames,
+            )
+            handover = analyzed[0]
+            handover_status = str(analyzed[1])
+            is_final = index == len(chunks) - 1
+
+            if index == 0:
+                output_mode = "Final Clip" if is_final else "Stitch Ready"
+                combined_images, combined_audio, trim_info, _head, _tail = StitchOutput().prepare(
+                    images=full_images, output_mode=output_mode, handover=handover,
+                    audio=full_audio, head_context_frames=0,
+                )
+            else:
+                combined_images, combined_audio, trim_info = Join().join(
+                    previous_images=combined_images, next_images=full_images,
+                    next_output_mode="Final Clip" if is_final else "Stitch Ready",
+                    next_head_context_frames=int(actual_head),
+                    video_crossfade_frames=int(contract.get("video_crossfade_frames", 4)),
+                    audio_crossfade_ms=float(contract.get("audio_crossfade_ms", 15.0)),
+                    luminance_match=False,
+                    luminance_fade_frames=16,
+                    max_luminance_correction_percent=10.0,
+                    max_safe_tail_bridge_frames=int(contract.get("max_safe_tail_bridge_frames", 2)),
+                    previous_audio=combined_audio, next_audio=full_audio,
+                    next_handover=None if is_final else handover,
+                    previous_full_images=previous_full_images,
+                    previous_handover=previous_handover,
+                )
+
+            reports.append(
+                f"clip {index + 1}/{len(chunks)} | head={int(actual_head)}f | "
+                f"{handover_info} | {handover_status} | {trim_info} | {sample_report}"
+            )
+            previous_latent = sampled_latent
+            previous_handover = handover
+            previous_full_images = full_images.detach().to("cpu")
+            LOG.info(
+                "IAMCCS Herrgotts Direct AV | clip=%d/%d | head=%df | output=%df",
+                index + 1, len(chunks), int(actual_head), int(combined_images.shape[0]),
+            )
+
+        if not torch.is_tensor(combined_images) or int(combined_images.shape[0]) < 1:
+            raise RuntimeError("Herrgotts Direct AV produced no final frames")
+        bridge = combined_images[-1:].detach().clone()
+        report = (
+            "IAMCCS Herrgotts Direct AV chain complete | provider=Herrgotts v1.2 release nodes | "
+            f"guides={len(chunks) + 1} intervals={len(chunks)} frames={int(combined_images.shape[0])} | "
+            "latent_handover=full_native_AV | freeze_analysis=automatic | "
+            f"phase={contract.get('alignment_mode')} | safe_tail_bridge<={contract.get('max_safe_tail_bridge_frames')}f\n"
+            + "\n".join(reports)
+        )
+        return combined_images, combined_audio, bridge, previous_latent, int(fps), report
+
+
+NODE_CLASS_MAPPINGS = {
+    "IAMCCS_MiniMaxH3HerrgottsSegment": IAMCCS_MiniMaxH3HerrgottsSegment,
+    "IAMCCS_MiniMaxH3HerrgottsDirectAVChain": IAMCCS_MiniMaxH3HerrgottsDirectAVChain,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "IAMCCS_MiniMaxH3HerrgottsSegment": "MiniMax H3 · Herrgotts Shotboard Interval",
+    "IAMCCS_MiniMaxH3HerrgottsDirectAVChain": "MiniMax H3 · Herrgotts Direct AV Chain",
+}

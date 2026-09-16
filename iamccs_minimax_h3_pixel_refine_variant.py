@@ -273,7 +273,8 @@ class IAMCCS_MiniMaxH3PixelRefineR38B:
         if output.exists():
             raise FileExistsError(f"R38B segment already exists: {output}. Start a new render rather than overwriting it.")
         visible = int(native_frames.shape[0])
-        join = max(0, int(join_trim_frames))
+        from .iamccs_minimax_h3_shotboard import _delivery_join_frames
+        join = _delivery_join_frames(cine_linx, index, join_trim_frames)
         frames = visible - (1 if join == 1 else 0)
         audio = _trim_audio_frames(native_audio, 1, 24) if join == 1 else native_audio
         if enabled:
@@ -355,6 +356,11 @@ class IAMCCS_MiniMaxH3PixelRefineR38B:
 NODE_CLASS_MAPPINGS = {"IAMCCS_MiniMaxH3PixelRefineR38B": IAMCCS_MiniMaxH3PixelRefineR38B}
 NODE_DISPLAY_NAME_MAPPINGS = {"IAMCCS_MiniMaxH3PixelRefineR38B": "MiniMax H3 · Safe Windowed Pixel → H3 Delivery"}
 
-from .iamccs_minimax_h3_face_delivery_variant import IAMCCS_MiniMaxH3FaceDeliveryR38B
+from .iamccs_minimax_h3_face_delivery_variant import (
+    IAMCCS_MiniMaxH3FaceDeliveryR38B,
+    IAMCCS_MiniMaxH3WideCharacterDetailer12GB,
+)
 NODE_CLASS_MAPPINGS["IAMCCS_MiniMaxH3FaceDeliveryR38B"] = IAMCCS_MiniMaxH3FaceDeliveryR38B
 NODE_DISPLAY_NAME_MAPPINGS["IAMCCS_MiniMaxH3FaceDeliveryR38B"] = "MiniMax H3 · Optional FaceRefine · Before Upscale"
+NODE_CLASS_MAPPINGS["IAMCCS_MiniMaxH3WideCharacterDetailer12GB"] = IAMCCS_MiniMaxH3WideCharacterDetailer12GB
+NODE_DISPLAY_NAME_MAPPINGS["IAMCCS_MiniMaxH3WideCharacterDetailer12GB"] = "IAMCCS WIDE CHARACTER DETAILER · 12 GB"

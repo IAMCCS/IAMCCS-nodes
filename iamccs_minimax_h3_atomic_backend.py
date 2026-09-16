@@ -11,6 +11,7 @@ acceleration and delivery routing agree for each chunk.
 from __future__ import annotations
 
 import functools
+from .iamccs_h3_seed_policy import chunk_seed
 import gc
 import json
 import logging
@@ -26,6 +27,7 @@ from PIL import Image, ImageOps
 
 import comfy.utils
 import folder_paths
+from .iamccs_h3_advisor import describe_asset, validate_speed_asset
 
 
 SHOTPLAN_TYPE = "IAMCCS_MINIMAX_H3_SHOTPLAN"
@@ -314,7 +316,7 @@ def _h3_control_temporal_window(
 
 
 def _apply_h3_fun_controlnet(
-    positive,
+    model,
     *,
     cine_linx: Any,
     shotplan: dict[str, Any],
@@ -325,16 +327,29 @@ def _apply_h3_fun_controlnet(
 ):
     config = shotplan.get("fun_controlnet") if isinstance(shotplan.get("fun_controlnet"), dict) else {}
     if not bool(config.get("enabled", False)):
-        return positive, "off"
+        return model, "off"
 
     control_name = str(config.get("control_net_name", "") or "").strip()
     if not control_name:
         raise ValueError("H3 Fun ControlNet is enabled but no control_net model is selected in IAMCCS Settings")
-    control_path = folder_paths.get_full_path("controlnet", control_name)
-    if not control_path:
+    # Since ComfyUI 02aa7078/d3eaf6ad, MiniMax H3 Fun Union is a
+    # MODEL_PATCH, not a legacy CONTROL_NET. Prefer the official folder, while
+    # retaining a non-destructive compatibility route for existing IAMCCS
+    # installs that already keep the same checkpoint in models/controlnet.
+    model_patch_path = folder_paths.get_full_path("model_patches", control_name)
+    legacy_control_path = None
+    if not model_patch_path:
+        legacy_control_path = folder_paths.get_full_path("controlnet", control_name)
+        if legacy_control_path:
+            folder_paths.add_model_folder_path(
+                "model_patches", str(Path(legacy_control_path).parent), is_default=False
+            )
+            model_patch_path = folder_paths.get_full_path("model_patches", control_name)
+    if not model_patch_path:
         raise FileNotFoundError(
-            f"H3 Fun ControlNet model is not available: {control_name}. "
-            "Place the Kijai checkpoint in models/controlnet and refresh/restart ComfyUI."
+            f"H3 Fun ControlNet model patch is not available: {control_name}. "
+            "Place the MiniMax H3 Fun Union checkpoint in models/model_patches "
+            "(legacy models/controlnet is also accepted by IAMCCS) and refresh/restart ComfyUI."
         )
 
     _info, resources = _cine_info_h3(cine_linx)
@@ -371,12 +386,12 @@ def _apply_h3_fun_controlnet(
     source_window = _h3_control_temporal_window(source_video, label="source_video", **window_args)
 
     from comfy_extras.nodes_minimax_h3 import MiniMaxH3FunControlNetApply
+    from comfy_extras.nodes_model_patch import ModelPatchLoader
 
-    loader_cls = _node_class("ControlNetLoader")
-    control_net = loader_cls().load_controlnet(control_name)[0]
+    model_patch = ModelPatchLoader().load_model_patch(control_name)[0]
     applied = MiniMaxH3FunControlNetApply.execute(
-        positive=positive,
-        control_net=control_net,
+        model=model,
+        model_patch=model_patch,
         vae=video_vae,
         strength=float(config.get("strength", 1.0)),
         start_percent=float(config.get("start_percent", 0.0)),
@@ -385,14 +400,15 @@ def _apply_h3_fun_controlnet(
         mask=mask_window,
         source_video=source_window,
     )
-    conditioned = applied.result[0] if hasattr(applied, "result") else applied[0]
+    patched_model = applied.result[0] if hasattr(applied, "result") else applied[0]
     report = (
         f"{kind}:{control_name} | {int(target_frames)}f @ {target_fps:.3f}fps | "
         f"scope={config.get('frame_scope')} | strength={float(config.get('strength', 1.0)):.3f} | "
-        f"steps={float(config.get('start_percent', 0.0)):.3f}-{float(config.get('end_percent', 1.0)):.3f}"
+        f"steps={float(config.get('start_percent', 0.0)):.3f}-{float(config.get('end_percent', 1.0)):.3f} | "
+        f"loader=model_patch{' (legacy folder)' if legacy_control_path else ''}"
     )
     LOG.info("MiniMax H3 Fun ControlNet applied | %s", report)
-    return conditioned, report
+    return patched_model, report
 
 
 def _effective_task(cine_linx: Any, chunk: dict[str, Any]) -> str:
@@ -573,6 +589,39 @@ def _resize_reference_image(image, shotplan: dict[str, Any], label: str):
         return resized, f"{label}={source_w}x{source_h}->{target_w}x{target_h}:{float(settings.get('megapixels', 0.5)):.2f}MP/{method}"
 
     raise ValueError(f"Unknown MiniMax H3 reference resize policy: {policy}")
+
+
+def _flf_aspect_safe_plan(shotplan: dict[str, Any], task: str) -> dict[str, Any]:
+    """Give multi-chunk FLF keyframes an explicit aspect-safe fit.
+
+    ``reference_resize=off`` used to leave later FLF keyframes to the upstream
+    conditioner.  That path can stretch a keyframe whose source aspect differs
+    from the authored canvas.  Preserve an explicit user crop/pad policy, but
+    make the default FLF fit a centered crop so no chunk can be deformed.
+    """
+    if str(task or "").lower() != "fl2va" or len(shotplan.get("chunks", [])) <= 1:
+        return shotplan
+    result = dict(shotplan)
+    settings = dict(result.get("reference_resize") or {})
+    if str(settings.get("policy", "off") or "off").lower() == "off":
+        settings.update({"policy": "canvas_crop", "filter": settings.get("filter", "area"), "multiple_of": 32})
+        result["reference_resize"] = settings
+    return result
+
+
+def _fit_decoded_frames_to_canvas(images: torch.Tensor, width: int, height: int) -> torch.Tensor:
+    """Conform an unexpected decoded FLF canvas without ever stretching it."""
+    if not torch.is_tensor(images) or images.ndim != 4:
+        return images
+    source_h, source_w = int(images.shape[1]), int(images.shape[2])
+    target_w, target_h = max(1, int(width)), max(1, int(height))
+    if (source_w, source_h) == (target_w, target_h):
+        return images
+    scale = max(target_w / source_w, target_h / source_h)
+    scaled_w, scaled_h = max(1, round(source_w * scale)), max(1, round(source_h * scale))
+    resized = _interpolate_image(images, scaled_w, scaled_h, "bicubic")
+    left, top = max(0, (scaled_w - target_w) // 2), max(0, (scaled_h - target_h) // 2)
+    return resized[:, top:top + target_h, left:left + target_w, :]
 
 
 def _audio_slice(audio: dict[str, Any] | None, start_seconds: float, duration_seconds: float):
@@ -914,6 +963,49 @@ def _fasth3_settings(shotplan: dict[str, Any]) -> dict[str, Any]:
     return settings if isinstance(settings, dict) else {"requested": False, "enabled": False}
 
 
+def _fused_turbo_settings(shotplan: dict[str, Any]) -> dict[str, Any]:
+    settings = shotplan.get("fused_turbo_preview")
+    return settings if isinstance(settings, dict) else {"enabled": False}
+
+
+def _is_fused_turbo_preview(shotplan: dict[str, Any]) -> bool:
+    return bool(_fused_turbo_settings(shotplan).get("enabled")) and str(
+        shotplan.get("acceleration", "") or ""
+    ).lower() == "matlowai_fused_turbo_manual_sigma"
+
+
+def _load_fused_turbo_preview_model(shotplan: dict[str, Any]):
+    """Load the released fused model with the same Kijai loader contract.
+
+    This is isolated from the normal MODEL sockets because the fused INT8
+    checkpoint is a full trunk, not a LoRA patch for the base H3 model.
+    """
+    settings = _fused_turbo_settings(shotplan)
+    name = str(settings.get("model_name", "") or "").strip()
+    if not name or not folder_paths.get_full_path("diffusion_models", name):
+        raise ValueError("Fused Fast H3 model is unavailable in diffusion_models")
+    try:
+        import sageattention  # noqa: F401
+        from triton.runtime.build import get_cc
+        get_cc()
+    except Exception as exc:
+        raise RuntimeError(
+            "Fused Fast H3 requires SageAttention/Triton with a visible C compiler. "
+            "Restart ComfyUI from 'Start ComfyUI VENV cu130 SageAttention.bat'. "
+            f"Runtime preflight: {type(exc).__name__}: {exc}"
+        ) from exc
+    loader = _node_class("DiffusionModelLoaderKJ")()
+    model = loader.patch_and_load(
+        model_name=name,
+        weight_dtype="default",
+        compute_dtype="default",
+        patch_cublaslinear=False,
+        sage_attention="auto",
+        enable_fp16_accumulation=True,
+    )[0]
+    return model, f"Fused Fast H3 | Kijai loader | {name} | Sage auto + fp16 accumulation"
+
+
 @functools.lru_cache(maxsize=32)
 def _classify_h3_pdd_file(path_text: str, mtime_ns: int) -> tuple[bool, str]:
     del mtime_ns
@@ -1158,23 +1250,25 @@ def _apply_turbo_lora(model, shotplan: dict[str, Any]):
         return model, "off"
     lora_name = str(settings.get("lora_name", "") or "").strip()
     if not lora_name:
-        return model, "base H3 fallback (Turbo LoRA not selected)"
+        raise ValueError("Turbo is enabled but no LoRA is selected. Choose a compatible adapter or a native recipe.")
     try:
         lora_path = folder_paths.get_full_path("loras", lora_name)
     except Exception:
         lora_path = None
     if not lora_path:
-        return model, f"base H3 fallback (optional Turbo LoRA missing: {lora_name})"
+        raise ValueError(f"Turbo LoRA missing: {lora_name}")
     compatible, compatibility_report = _h3_lora_compatibility(lora_name)
     if not compatible:
-        return model, f"base H3 fallback ({lora_name}: {compatibility_report})"
-    strength = float(settings.get("strength", 1.0) or 1.0)
+        raise ValueError(f"Turbo LoRA incompatible: {lora_name}: {compatibility_report}")
+    strength = float(settings.get("strength", 1.0))
+    if strength == 0:
+        return model, "off (zero strength)"
 
-    # Kijai's Lightx2v conversion is a standard Comfy model-only LoRA.  Do not
-    # route it through Larry's custom sampler package: the proven high-quality
-    # graph uses the native loader at a moderate strength (normally 0.7).
+    # Generic Comfy conversions declare their loader in metadata, regardless
+    # of whether the filename retains the LightX2V publisher token.
     lower_name = lora_name.lower()
-    if "lightx2v" in lower_name:
+    descriptor = describe_asset(lora_name, lora_path)
+    if descriptor.get("native") and (descriptor.get("metadata", {}).get("target_format") == "ComfyUI generic LoRA" or descriptor.get("metadata", {}).get("converted_layout") == "comfyui_minimax_h3"):
         import nodes as comfy_nodes
 
         patched = comfy_nodes.LoraLoaderModelOnly().load_lora_model_only(
@@ -1296,6 +1390,10 @@ def _turbo_sampler(shotplan: dict[str, Any]):
 
 def _accelerate(model, shotplan: dict[str, Any]):
     mode = str(shotplan.get("acceleration", "native") or "native").lower()
+    if mode == "matlowai_fused_turbo_manual_sigma":
+        # Kijai's loader already applies the released model's Sage policy.
+        # Do not stack IAMCCS attention patches, cache approximations or LoRAs.
+        return model, "Fused Fast H3 | Kijai Sage auto (isolated; no LoRA/cache stacking)"
     if mode == "fasth3_dense_6step":
         # The converter's measured 8 GB reference path explicitly uses Sage
         # attention plus chunked feed-forward. FastH3 reduces denoising steps,
@@ -1358,13 +1456,10 @@ def _accelerate(model, shotplan: dict[str, Any]):
         chunk_rows = max(256, min(65536, int(exact.get("chunk_rows", 2048) or 2048)))
         result = H3MemoryOptimization.execute(
             model=model,
-            fused_qkv="Auto",
-            mlp_memory="Auto",
             chunk_rows=chunk_rows,
             preserve_precision=True,
             precision_mode=precision_mode,
             qkv_streaming_mode=qkv_streaming,
-            embedding_memory_mode="Auto",
             kitchen_v_memory_mode=attention_memory,
         )
         patched = result.result[0]
@@ -1379,20 +1474,32 @@ def _accelerate(model, shotplan: dict[str, Any]):
             try:
                 return _apply_h3_low_vram_exact(model), f"Low VRAM Auto -> exact Low VRAM (Sage/Triton unavailable: {triton_detail})"
             except Exception as low_vram_exc:
-                return model, f"Low VRAM Auto -> native (exact Low VRAM unavailable: {low_vram_exc})"
+                raise RuntimeError("Low VRAM Auto could not apply its required memory protection. Select an available H3 memory backend.") from low_vram_exc
         try:
             return _apply_h3_sage_low_vram(model), f"Low VRAM Auto -> H3 Sage + exact attention/FFN chunks (Triton compiler: {triton_detail})"
         except Exception as h3_exc:
             try:
                 return _apply_h3_memory_efficient_sage(model), f"Low VRAM Auto -> H3 Sage (exact chunks unavailable: {h3_exc})"
             except Exception as sage_exc:
-                return model, f"Low VRAM Auto -> native (H3 stack: {h3_exc}; H3 Sage: {sage_exc})"
+                raise RuntimeError(f"Low VRAM Auto memory backends failed: {h3_exc}; {sage_exc}") from sage_exc
     if mode == "comfy_kitchen":
         # ComfyKitchen is selected by ComfyUI's quantized ops at model-load
         # time.  It is not an attention patch and must not be stacked with Sol.
         return model, "ComfyKitchen native quantized ops (no extra attention patch)"
     if mode == "native":
         return model, "native"
+    if mode == "h3_sla":
+        available, detail = _h3_sage_triton_compiler_status()
+        if not available:
+            raise RuntimeError(f"H3 SLA requires a working CUDA/Triton compiler: {detail}")
+        config = shotplan.get("h3_sla", {})
+        patched = _node_class("MiniMaxChunkFeedForward").execute(model=model, chunks=2, seq_threshold=4096)[0]
+        result = _node_class("H3SLAAttention").execute(model=patched,
+            sparsity_ratio=float(config.get("sparsity", 0.85)), block_size="32", protect_audio=True,
+            dense_last_steps=int(config.get("dense_last_steps", 0)), dense_steps="", dense_backend="sage:auto")
+        if result[0] is patched:
+            raise RuntimeError("SLA patch failed; refusing to label an unchanged dense model as SLA.")
+        return result[0], f"H3 SLA sparsity={config.get('sparsity', 0.85)}; audio protected; chunked FFN"
     if mode in {"sage", "h3_sage"}:
         return _apply_h3_sage_or_exact_low_vram(model, "MiniMax H3 Sage + exact attention/FFN chunks")
     if mode in {"sage_sol", "sol_low_vram"}:
@@ -1503,12 +1610,17 @@ class IAMCCS_MiniMaxH3AtomicModelRouter:
 
     @staticmethod
     def _input_name(cine_linx, segment_index):
+        shotplan = _resolve_shotplan(cine_linx)
+        if _is_fused_turbo_preview(shotplan):
+            return "fused_turbo_model"
         chunk = _chunk(cine_linx, segment_index)
         task = _effective_task(cine_linx, chunk)
         return "ref2va_model" if _task_family(task) == "ref2va" else "fl2va_model"
 
     def check_lazy_status(self, cine_linx, segment_index, fl2va_model=None, ref2va_model=None, **kwargs):
         selected = self._input_name(cine_linx, segment_index)
+        if selected == "fused_turbo_model":
+            return []
         if selected == "ref2va_model" and ref2va_model is None:
             return ["ref2va_model"]
         if selected == "fl2va_model" and fl2va_model is None:
@@ -1516,6 +1628,18 @@ class IAMCCS_MiniMaxH3AtomicModelRouter:
         return []
 
     def select(self, cine_linx, segment_index, fl2va_model=None, ref2va_model=None):
+        shotplan = _resolve_shotplan(cine_linx)
+        if _is_fused_turbo_preview(shotplan):
+            chunk = _chunk(shotplan, segment_index)
+            task = _effective_task(shotplan, chunk)
+            fused_task = str(task).lower()
+            if fused_task != "t2va":
+                raise ValueError(
+                    "Fused Fast H3 supports T2VA only; "
+                    f"the resolved chunk requested {fused_task}."
+                )
+            model, report = _load_fused_turbo_preview_model(shotplan)
+            return model, f"fused_turbo_{fused_task}", f"{report} | task={fused_task}"
         chunk = _chunk(cine_linx, segment_index)
         task = _effective_task(cine_linx, chunk)
         selected = self._input_name(cine_linx, segment_index)
@@ -1604,6 +1728,9 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
         )
 
         shotplan = _effective_shotplan(cine_linx, _resolve_shotplan(cine_linx))
+        if shotplan.get("task_mode") == "v2va_face_swap":
+            from .iamccs_h3_face_swap import prepare_face_swap
+            return prepare_face_swap(model, clip, video_vae, audio_vae, cine_linx, segment_index, prompt_override)
         chunk = _chunk(shotplan, segment_index)
         task = _effective_task(cine_linx, chunk)
         width = int(shotplan.get("width", 960))
@@ -1714,16 +1841,17 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             last = ref_image_2[:1]
 
         resize_reports: list[str] = []
+        reference_shotplan = _flf_aspect_safe_plan(shotplan, task)
         if torch.is_tensor(first):
-            first, resized = _resize_reference_image(first[:1], shotplan, "first")
+            first, resized = _resize_reference_image(first[:1], reference_shotplan, "first")
             resize_reports.append(resized)
         if torch.is_tensor(last):
-            last, resized = _resize_reference_image(last[:1], shotplan, "last")
+            last, resized = _resize_reference_image(last[:1], reference_shotplan, "last")
             resize_reports.append(resized)
         resized_external_images = []
         for index, image in enumerate(external_images, start=1):
             if torch.is_tensor(image):
-                image, resized = _resize_reference_image(image[:1], shotplan, f"ref{index}")
+                image, resized = _resize_reference_image(image[:1], reference_shotplan, f"ref{index}")
                 resize_reports.append(resized)
             resized_external_images.append(image)
         external_images = resized_external_images
@@ -1753,7 +1881,17 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             )
             manifest.append({"label": "<Picture 1>", "role": "opening_keyframe"})
         elif task == "fl2va":
-            if last is None or (first is None and not isinstance(native_av_context, dict)):
+            external_motion_head = bool(
+                shotplan.get("task_mode") == "longvid_continuous_guided"
+                and int(segment_index) > 0
+                and isinstance(shotplan.get("motion_context_auto_chain"), dict)
+                and shotplan["motion_context_auto_chain"].get("enabled")
+            )
+            if last is None or (
+                first is None
+                and not isinstance(native_av_context, dict)
+                and not external_motion_head
+            ):
                 raise ValueError("FL2VA requires both opening and final images; connect ref_image_1/ref_image_2 or place two adjacent Shotboard keyframes")
             else:
                 result, text_encoder_report = _run_h3_conditioning_with_cpu_fallback(
@@ -1769,6 +1907,16 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                     manifest.extend([
                         {"label": "<Previous AV tail>", "role": "pinned_opening_motion_context"},
                         {"label": "<Picture 2>", "role": "final_keyframe"},
+                    ])
+                elif external_motion_head:
+                    # The downstream upstream-compatible Motion Context node
+                    # injects the saved predecessor AV tail after this L2VA
+                    # conditioning step.  With no first-frame image, the sole
+                    # encoded picture is correctly labelled Picture 1 and is
+                    # the destination at the end of this continuation scene.
+                    manifest.extend([
+                        {"label": "<Previous AV tail>", "role": "downstream_pinned_opening_motion_context"},
+                        {"label": "<Picture 1>", "role": "final_keyframe"},
                     ])
                 else:
                     manifest.extend([
@@ -1805,7 +1953,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 if not torch.is_tensor(image) and index < len(plan_paths):
                     image = _load_image(plan_paths[index])
                     if torch.is_tensor(image):
-                        image, resized = _resize_reference_image(image[:1], shotplan, f"ref{index + 1}")
+                        image, resized = _resize_reference_image(image[:1], reference_shotplan, f"ref{index + 1}")
                         resize_reports.append(resized)
                 if not torch.is_tensor(image):
                     continue
@@ -1818,7 +1966,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             ref_videos = None
             ref_video_audios = None
             if torch.is_tensor(ref_video) and video_role != "off":
-                ref_video, resized = _resize_reference_image(ref_video, shotplan, "ref_video")
+                ref_video, resized = _resize_reference_image(ref_video, reference_shotplan, "ref_video")
                 resize_reports.append(resized)
                 ref_videos = {"ref_video_1": ref_video}
                 if isinstance(ref_video_audio, dict) and not slot_lipsync_mode:
@@ -2030,8 +2178,8 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                     ", ".join(applied_guides),
                 )
         control_prefix_frames = int(native_av_context.get("context_frames", 0)) if isinstance(native_av_context, dict) else 0
-        positive, controlnet_report = _apply_h3_fun_controlnet(
-            positive,
+        model, controlnet_report = _apply_h3_fun_controlnet(
+            model,
             cine_linx=cine_linx,
             shotplan=shotplan,
             chunk=chunk,
@@ -2158,10 +2306,16 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
     ):
         import nodes as comfy_nodes
         from comfy_extras.nodes_audio import VAEDecodeAudio
-        from comfy_extras.nodes_custom_sampler import BasicGuider, BasicScheduler, KSamplerSelect, RandomNoise, SamplerCustomAdvanced
+        from comfy_extras.nodes_custom_sampler import BasicGuider, BasicScheduler, KSamplerSelect, ManualSigmas, RandomNoise, SamplerCustomAdvanced
         from comfy_extras.nodes_minimax_h3 import MiniMaxH3SigmaShift
 
         shotplan = _resolve_shotplan(cine_linx)
+        if str(shotplan.get("task_mode", "") or "").strip().lower() == "longvid_masked_loop_guided":
+            raise ValueError(
+                "MASKED LOOP GUIDED requires IAMCCS_MiniMaxH3MaskedLoopGuidedSampler. "
+                "The stable Generation V2 backend will not sample the full long latent directly. "
+                "Use the dedicated experimental workflow/branch."
+            )
         chunk = _chunk(shotplan, chunk_index)
         lipsync_lock_report = _audit_lipsync_audio_lock(shotplan, latent, int(chunk_index))
         sampling = shotplan.get("sampling") if isinstance(shotplan.get("sampling"), dict) else {}
@@ -2176,8 +2330,15 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
         shift_video = float(sampling.get("shift_video", shift_video))
         shift_audio = float(sampling.get("shift_audio", shift_audio))
         sampling_source = str(sampling.get("source", "backend_legacy_fallback"))
-        actual_seed = (int(seed) + int(chunk_index) * int(seed_stride)) & 0xFFFFFFFFFFFFFFFF
-        seed_contract = "shotboard_seed_stride"
+        fused_turbo = _fused_turbo_settings(shotplan)
+        fused_turbo_active = _is_fused_turbo_preview(shotplan)
+        if fused_turbo_active:
+            if str(sampler_name).lower() != "euler" or float(denoise) != 1.0:
+                raise ValueError("Fused Fast H3 requires the visible profile values: Euler and denoise 1.0")
+            if abs(float(shift_video) - 12.0) > 1e-6 or abs(float(shift_audio) - 3.0) > 1e-6:
+                raise ValueError("Fused Fast H3 requires the visible profile shifts: video 12.0 and audio 3.0")
+        actual_seed = chunk_seed(sampling, chunk_index, seed, seed_stride)
+        seed_contract = sampling.get("seed_policy", "fixed_per_generation")
         conditioning_cleanup = _release_conditioning_models(shotplan)
 
         turbo = _turbo_settings(shotplan)
@@ -2190,11 +2351,10 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
         turbo_compatible, turbo_compatibility_report = _h3_lora_compatibility(turbo_lora_name)
         turbo_enabled = turbo_requested and turbo_file_available and turbo_compatible
         if turbo_requested and not turbo_enabled:
-            LOG.warning(
-                "MiniMax H3 Turbo disabled before model cloning (%s: %s); retaining the authored %d sampling steps on base H3",
-                turbo_lora_name or "no LoRA selected", turbo_compatibility_report,
-                int(steps),
-            )
+            raise ValueError(f"Turbo cannot run: {turbo_lora_name or 'no LoRA selected'}: {turbo_compatibility_report}. Select a compatible adapter or explicitly apply a native model recipe.")
+        if turbo_enabled:
+            validate_speed_asset(describe_asset(turbo_lora_name, folder_paths.get_full_path("loras", turbo_lora_name)),
+                                 _effective_task(cine_linx, chunk))
         if turbo_enabled:
             turbo_mode = str(turbo.get("mode", "off") or "off").lower()
             minimum_steps = 6 if turbo_mode == "ckpt500_6_8" else 8
@@ -2206,6 +2366,13 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
                     int(steps),
                     turbo_lora_name,
                 )
+        for speed_settings, role in ((_pdd_settings(shotplan), "pdd"), (_fasth3_settings(shotplan), "fasth3")):
+            if speed_settings.get("requested"):
+                speed_name = speed_settings.get("lora_name", "")
+                speed_path = folder_paths.get_full_path("loras", speed_name) if speed_name else None
+                if not speed_path:
+                    raise ValueError(f"H3 {role}: missing adapter '{speed_name}'.")
+                validate_speed_asset(describe_asset(speed_name, speed_path), _effective_task(cine_linx, chunk), role)
         turbo_model, turbo_report = _apply_turbo_lora(model, shotplan)
         fasth3_model, fasth3_report = _apply_fasth3_dense_lora(turbo_model, shotplan)
         pdd_model, pdd_report = _apply_pdd_lora(fasth3_model, shotplan)
@@ -2249,16 +2416,34 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
         noise = RandomNoise.execute(noise_seed=actual_seed)[0]
         guider = BasicGuider.execute(model=active_model, conditioning=positive)[0]
         sampler_report = str(sampler_name)
-        if turbo_enabled and str(turbo.get("sampler_mode", "audio_fixed")).lower() == "audio_fixed":
+        if fused_turbo_active:
+            sigma_map = {
+                "4_step": "0.9999166, 0.9728326, 0.9230769, 0.8, 0.0",
+                "6_step": "0.9999166, 0.9868421, 0.9638554, 0.9230769, 0.8695652, 0.8, 0.0",
+                "8_step": "1.0, 0.9882352941, 0.9729729730, 0.9523809524, 0.9230769231, 0.8780487805, 0.8, 0.6315789474, 0.0",
+            }
+            preset = str(fused_turbo.get("sigma_preset", "4_step") or "4_step").lower()
+            if preset not in sigma_map:
+                raise ValueError(f"Unknown Fused Fast H3 sigma preset: {preset}")
+            sampler = KSamplerSelect.execute(sampler_name="euler")[0]
+            sigmas = ManualSigmas.execute(sigmas=sigma_map[preset])[0]
+            sampler_report = f"Euler + MATLOWAI manual sigmas ({preset})"
+        elif turbo_enabled and str(turbo.get("sampler_mode", "audio_fixed")).lower() == "audio_fixed":
             sampler, sampler_report = _turbo_sampler(shotplan)
+            sigmas = BasicScheduler.execute(
+                model=active_model,
+                scheduler=str(scheduler),
+                steps=int(steps),
+                denoise=float(denoise),
+            )[0]
         else:
             sampler = KSamplerSelect.execute(sampler_name=str(sampler_name))[0]
-        sigmas = BasicScheduler.execute(
-            model=active_model,
-            scheduler=str(scheduler),
-            steps=int(steps),
-            denoise=float(denoise),
-        )[0]
+            sigmas = BasicScheduler.execute(
+                model=active_model,
+                scheduler=str(scheduler),
+                steps=int(steps),
+                denoise=float(denoise),
+            )[0]
         acceleration_mode = str(shotplan.get("acceleration", "native") or "native").lower()
         if acceleration_mode.startswith("iamccs_progressive_"):
             from .iamccs_minimax_h3_progressive_spatial import sample_progressive_spatial
@@ -2319,23 +2504,31 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
                 str(shotplan.get("continuation_mode", "")) == "flf_image_center_bridges"
                 and str(shotplan.get("audio_mode", "")) == "h3_custom_audio_drive"
             )
+        if shotplan.get("task_mode") == "v2va_face_swap":
+            from .iamccs_h3_face_swap import restore_face_swap, FACE_SWAP_LATENT
+            native_frames, native_audio = restore_face_swap(native_frames, native_audio, latent)
+            sampled = {key: value for key, value in sampled.items() if key != FACE_SWAP_LATENT}
         if not torch.is_tensor(native_frames) or native_frames.ndim != 4 or native_frames.shape[0] < 1:
             raise RuntimeError("MiniMax H3 video VAE returned no frames")
         expected_width = max(1, int(shotplan.get("width", native_frames.shape[2]) or native_frames.shape[2]))
         expected_height = max(1, int(shotplan.get("height", native_frames.shape[1]) or native_frames.shape[1]))
         decoded_width = int(native_frames.shape[2])
         decoded_height = int(native_frames.shape[1])
-        resolution_contract = (
-            f"requested={expected_width}x{expected_height};decoded={decoded_width}x{decoded_height}"
-        )
+        resolution_contract = f"requested={expected_width}x{expected_height};decoded={decoded_width}x{decoded_height}"
         if decoded_width != expected_width or decoded_height != expected_height:
-            LOG.warning(
-                "MiniMax H3 native resolution mismatch | requested=%dx%d | decoded=%dx%d | no implicit IAMCCS resize was applied",
-                expected_width,
-                expected_height,
-                decoded_width,
-                decoded_height,
-            )
+            flf_chain = str(task or "").lower() == "fl2va" and len(shotplan.get("chunks", [])) > 1
+            if flf_chain:
+                native_frames = _fit_decoded_frames_to_canvas(native_frames, expected_width, expected_height)
+                resolution_contract += ";aspect_safe_canvas_crop_applied"
+                LOG.warning(
+                    "MiniMax H3 FLF canvas mismatch | requested=%dx%d | decoded=%dx%d | applied centered aspect-safe crop; never stretched",
+                    expected_width, expected_height, decoded_width, decoded_height,
+                )
+            else:
+                LOG.warning(
+                    "MiniMax H3 native resolution mismatch | requested=%dx%d | decoded=%dx%d | no implicit IAMCCS resize was applied",
+                    expected_width, expected_height, decoded_width, decoded_height,
+                )
         else:
             delivery_enabled = bool(shotplan.get("upscale_enabled", False))
             delivery_route = str(shotplan.get("upscale_mode", "off") or "off") if delivery_enabled else "off"

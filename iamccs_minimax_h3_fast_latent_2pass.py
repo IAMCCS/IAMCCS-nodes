@@ -278,7 +278,8 @@ class IAMCCS_MiniMaxH3FastLatent2PassR41:
             raise FileExistsError(f"FAST LATENT 2-PASS refuses to overwrite {output}.")
 
         visible = int(native_frames.shape[0])
-        join = max(0, int(join_trim_frames))
+        from .iamccs_minimax_h3_shotboard import _delivery_join_frames
+        join = _delivery_join_frames(cine_linx, index, join_trim_frames)
         frames = visible - (1 if join == 1 else 0)
         audio = _trim_audio_frames(native_audio, 1, 24) if join == 1 else native_audio
         trim = max(0, int(context_trim_frames))
@@ -393,7 +394,7 @@ class IAMCCS_MiniMaxH3FastLatent2PassR41:
         }
 
 
-def _provider_stream_save(latent, video_vae, run, index, groups):
+def _provider_stream_save(latent, video_vae, run, index, groups, route_folder="FAST_LATENT_2PASS"):
     # Reuse the audited streamed VAE/ffmpeg implementation already vendored by
     # the conservative R38B route; this avoids a full high-resolution IMAGE batch.
     from .iamccs_minimax_h3_pixel_refine_variant import _provider
@@ -403,7 +404,7 @@ def _provider_stream_save(latent, video_vae, run, index, groups):
         vae=video_vae,
         groups_per_chunk=max(1, int(groups)),
         fps=24.0,
-        filename_prefix=f"IAMCCS/MiniMaxH3/FAST_LATENT_2PASS/{run}/stage2_{index + 1:04d}",
+        filename_prefix=f"IAMCCS/MiniMaxH3/{route_folder}/{run}/stage2_{index + 1:04d}",
         crf=16,
         save_metadata=False,
     )[0]

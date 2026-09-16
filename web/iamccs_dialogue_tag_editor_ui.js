@@ -1784,7 +1784,7 @@ function install(node, reason = "install") {
     const minimaxModeBtn = button("MiniMax H3", "iamccs-minimax-mode");
     minimaxModeBtn.title = "Enable MiniMax H3 grammar for global and local Shotboard prompt truth. This never queues the workflow.";
     minimaxModeBtn.setAttribute("aria-pressed", data.settings?.minimax_truth_enabled !== false ? "true" : "false");
-    const multiShotModeBtn = button("Multi-Shot LipSync", "iamccs-multishot-mode");
+    const multiShotModeBtn = button("Long Multi-Shot", "iamccs-multishot-mode");
     multiShotModeBtn.title = "Load the editable guided-cuts + continuous AudioBoard lip-sync demo and enable MiniMax H3 prompt truth.";
     multiShotModeBtn.setAttribute("aria-pressed", data.settings?.minimax_mode === "multi_shot_lipsync" ? "true" : "false");
     const boldBtn = button("Bold", "");
@@ -2184,7 +2184,7 @@ function install(node, reason = "install") {
         : "<strong>Copy failed.</strong> Select the preview text and copy manually.";
     };
     minimaxActions.append(minimaxApply, minimaxCopy);
-    const assistMode = select([["multi_shot_lipsync","Multi-Shot LipSync"],["i2va","I2VA"],["t2va","T2VA"],["fl2va","FL2VA"],["ref2va","REF2VA / LipSync"],["longvid_guides","LongVid guides"],["audio_driven","Audio Driven"],["v2va_object_swap","V2VA"]], data.settings?.minimax_assist_mode || "multi_shot_lipsync");
+    const assistMode = select([["multi_shot_lipsync","Long Multi-Shot"],["i2va","I2VA"],["t2va","T2VA"],["fl2va","FL2VA"],["ref2va","REF2VA / LipSync"],["longvid_guides","LongVid guides"],["audio_driven","Audio Driven"],["v2va_object_swap","V2VA"]], data.settings?.minimax_assist_mode || "multi_shot_lipsync");
     const helperHost = document.createElement("div");
     helperHost.append(createModeHelper(assistMode.value));
     assistMode.onchange = () => { data.settings.minimax_assist_mode = assistMode.value; save(); helperHost.replaceChildren(createModeHelper(assistMode.value)); };
@@ -2216,7 +2216,7 @@ function install(node, reason = "install") {
     const globalHead = document.createElement("div");
     globalHead.className = "iamccs-minimax-field-head";
     const globalAI = button("✦ AI", "iamccs-minimax-field-ai");
-    globalAI.title = "Rewrite only the global direction using the MiniMax H3 Multi-Shot LipSync schema. No Queue.";
+    globalAI.title = "Rewrite only the global direction using the MiniMax H3 Long Multi-Shot schema. No Queue.";
     globalAI.onclick = () => runMiniMaxAIRewrite({
       key: "multishot_global_direction",
       text: global.value,
@@ -2504,7 +2504,7 @@ function install(node, reason = "install") {
         const localPromptHead = document.createElement("div");
         localPromptHead.className = "iamccs-minimax-field-head";
         const localAI = button("✦ AI", "iamccs-minimax-field-ai");
-        localAI.title = "Rewrite only this local shot direction using MiniMax H3 Multi-Shot LipSync prompting. No Queue.";
+        localAI.title = "Rewrite only this local shot direction using MiniMax H3 Long Multi-Shot prompting. No Queue.";
         localAI.onclick = () => {
           const speakerIndex = Math.max(0, speakerOptions.findIndex(([id]) => id === (speakerSel.value || line.speaker || "A")));
           const speaker = (data.speakers || [])[speakerIndex] || {};

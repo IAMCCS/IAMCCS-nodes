@@ -24,6 +24,8 @@ import torch
 from PIL import Image, ImageOps
 
 import folder_paths
+from .iamccs_h3_advisor import describe_asset, validate_settings
+from .iamccs_h3_face_swap import settings_schema as face_swap_schema, face_swap_settings, validate_plan as validate_face_swap_plan
 
 from .iamccs_minimax_h3_shotboard_core import (
     H3_FPS,
@@ -281,16 +283,35 @@ _H3_R40_SCOUT_SETTINGS_NODE_FIELDS = (
     "h3_r40_preview_max_frames", "h3_r40_sparse_enabled",
     "h3_r40_sparse_video_budget", "h3_r40_sparse_denser_edges",
 )
+# Append-only controls for the isolated MATLOWAI fused Turbo trunk.  They are
+# deliberately not folded into an existing LoRA field: this is a complete
+# diffusion model loaded through Kijai's loader, not a compatible H3 LoRA.
+_H3_FUSED_TURBO_SETTINGS_NODE_FIELDS = (
+    "fused_turbo_model_name", "fused_turbo_sigma_preset",
+)
 _H3_SETTINGS_SEED_CONTROL_COMPAT_FIELD = "seed_control_after_generate_compat"
 _H3_SETTINGS_NODE_EXCLUDED_FIELDS = frozenset(("global_prompt", "timeline_data", "image_paths"))
 # These are editor/legacy compatibility widgets rather than MiniMax H3
 # generation controls.  Keep their hidden inputs on the node for positional
 # workflow compatibility, but never publish them through the Settings CineLinX.
 _H3_SETTINGS_CINELINX_OMITTED_FIELDS = frozenset((
+    "h3_advisor_state",
     "frame_rate", "guide_policy", "min_guide_gap_seconds", "max_guides", "default_force",
     "promptrelay_epsilon", "ltx_round_mode", "image_width", "image_height",
     "image_resize_method", "image_multiple_of", "img_compression",
     _H3_SETTINGS_SEED_CONTROL_COMPAT_FIELD,
+))
+_H3_SETTINGS_SHOTBOARD_AUTHORITY_FIELDS = frozenset((
+    # Timeline extent and audio routing are authored Shotboard facts.  A stale
+    # Settings/AudioBoard payload must never turn native H3 audio back into a
+    # previously published custom soundtrack.
+    "duration_seconds", "audio_mode",
+))
+_H3_SETTINGS_PRO_SHOTBOARD_OWNED_FIELDS = frozenset((
+    # Only authored duration remains Shotboard-authoritative.  The remaining
+    # generation controls exposed by the proven Settings node are mapped into
+    # Settings PRO below without changing their backend meaning.
+    *_H3_SETTINGS_SHOTBOARD_AUTHORITY_FIELDS,
 ))
 _H3_SETTINGS_LINX_SCHEMA = "iamccs.minimax_h3.settings_cine_linx"
 
@@ -368,6 +389,32 @@ def _timeline_dict(timeline_data: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
+def _visible_shotboard_global_prompt(timeline_data: Any, widget_prompt: Any) -> str:
+    """Resolve the live overlay prompt without reviving a stale widget mirror.
+
+    Current Shotboard overlays stamp a truth revision into ``timeline_data``.
+    Once that marker exists, the prompt stored with the visible timeline is
+    authoritative even when it is intentionally empty.  Legacy boards without
+    a revision retain their historical standalone widget behaviour.
+    """
+    timeline = _timeline_dict(timeline_data)
+    candidates = [timeline]
+    nested = timeline.get("timeline")
+    if isinstance(nested, dict):
+        candidates.insert(0, nested)
+    for source in candidates:
+        revised = any(key in source for key in (
+            "_iamccs_v3_truth_revision", "truth_revision", "truth_updated_at"
+        ))
+        if not revised:
+            continue
+        if "global_prompt" in source:
+            return str(source.get("global_prompt") or "")
+        if "prompt" in source:
+            return str(source.get("prompt") or "")
+    return str(widget_prompt or "")
+
+
 def _nextframe_injection_from_linx(cine_linx: Any) -> dict[str, Any]:
     """Resolve the explicit NextFrame storyboard injection from CineLinX."""
     if not isinstance(cine_linx, dict):
@@ -439,7 +486,11 @@ def _nextframe_image_from_linx(cine_linx: Any, index: int = 0) -> torch.Tensor |
     return None
 
 
-def _apply_audioboard_to_minimax(cine_linx: Any, timeline_data: Any) -> tuple[str, dict[str, Any]]:
+def _apply_audioboard_to_minimax(
+    cine_linx: Any,
+    timeline_data: Any,
+    audio_mode: Any = "h3_native_generated",
+) -> tuple[str, dict[str, Any]]:
     """Merge the published AudioBoard lanes into an H3 timeline by field name.
 
     AudioBoard never replaces visual slots, prompts, duration or H3 settings.
@@ -447,6 +498,29 @@ def _apply_audioboard_to_minimax(cine_linx: Any, timeline_data: Any) -> tuple[st
     contract carried in CineLinX.
     """
     timeline = _timeline_dict(timeline_data)
+    selected_audio_mode = _normalise_h3_audio_mode(audio_mode)
+    if selected_audio_mode == "h3_native_generated":
+        # A workflow can legitimately retain a connected AudioBoard or an old
+        # serialized audio_data blob.  Native H3 is an explicit Shotboard
+        # choice, therefore remove those editorial sources before compiling
+        # guides and before publishing the downstream CineLinX contract.
+        timeline["audioSegments"] = []
+        timeline["audio_segments"] = []
+        timeline["sourceAudioSegments"] = []
+        timeline["use_custom_audio"] = False
+        timeline["audioSyncMode"] = "h3_native_generated"
+        timeline["audio_data"] = json.dumps({
+            "audioSegments": [],
+            "audioTrackCount": max(1, int(timeline.get("audioTrackCount", 1) or 1)),
+            "audioSyncMode": "h3_native_generated",
+            "use_custom_audio": False,
+        }, ensure_ascii=False)
+        return json.dumps(timeline, ensure_ascii=False), {
+            "applied": False,
+            "source": "shotboard",
+            "reason": "native_h3_audio_selected",
+            "discarded_stale_audioboard": True,
+        }
     if not isinstance(cine_linx, dict):
         return json.dumps(timeline, ensure_ascii=False), {"applied": False, "source": "none"}
     resources = cine_linx.get("resources") if isinstance(cine_linx.get("resources"), dict) else {}
@@ -910,8 +984,10 @@ def _encode_images(images: torch.Tensor, audio: dict[str, Any] | None, fps: floa
 def _concat_videos(paths: list[Path], output: Path) -> None:
     """Join independent H3 shots with exact video cuts and one audio master.
 
-    Video remains a stream-copy, so a hard cut cannot turn into a dissolve.
-    Audio is decoded per shot, conformed to stereo/48 kHz, given a 20 ms
+    Video is decoded through one PTS-reset concat filter and re-encoded at the
+    exact sidecar frame count, so encoder delay cannot become a freeze at a
+    hard cut and every segment shares one canvas. Audio is decoded per shot,
+    conformed to stereo/48 kHz, given a 20 ms
     equal-power edge fade at internal cuts, concatenated without overlap and
     finally normalised once as a complete programme.  The edge treatment
     removes AAC boundary clicks without shortening the edit or mixing two
@@ -946,20 +1022,38 @@ def _concat_videos(paths: list[Path], output: Path) -> None:
 
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
-            "-f", "concat", "-safe", "0", "-i", str(list_path),
         ]
         if frame_counts and len(frame_counts) == len(paths):
+            # Do not stream-copy independent MP4 timelines. H.264 encoder
+            # delay and non-zero segment PTS can make the concat demuxer hold
+            # the last frame for roughly one second before the next chunk.
+            # Decode each input through one exact frame clock, but never scale
+            # a later FLF segment at the seam: a stale canvas is an error and
+            # must be regenerated from the current Shotboard truth.
+            _require_identical_segment_canvas(paths)
             for path in paths:
                 command += ["-i", str(path)]
 
             filters: list[str] = []
             labels: list[str] = []
+            video_labels: list[str] = []
+            for index in range(len(paths)):
+                label = f"vsrc{index}"
+                filters.append(
+                    f"[{index}:v]setpts=PTS-STARTPTS,"
+                    f"format=yuv420p[{label}]"
+                )
+                video_labels.append(label)
+            filters.append(
+                f"{''.join(f'[{label}]' for label in video_labels)}"
+                f"concat=n={len(video_labels)}:v=1:a=0[vjoined]"
+            )
             edge_seconds = 0.020
             for index, frame_count in enumerate(frame_counts):
                 duration = max(1.0 / H3_FPS, float(frame_count) / H3_FPS)
                 fade = min(edge_seconds, duration / 4.0)
                 chain = (
-                    f"[{index + 1}:a]aresample=48000:async=1:first_pts=0,"
+                    f"[{index}:a]aresample=48000:async=1:first_pts=0,"
                     f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
                     f"atrim=duration={duration:.9f},asetpts=PTS-STARTPTS"
                 )
@@ -982,12 +1076,15 @@ def _concat_videos(paths: list[Path], output: Path) -> None:
             )
             command += [
                 "-filter_complex", ";".join(filters),
-                "-map", "0:v:0", "-map", "[amaster]",
-                "-fflags", "+genpts", "-avoid_negative_ts", "make_zero",
-                "-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
-                "-t", f"{exact_duration:.9f}", "-movflags", "+faststart", str(output),
+                "-map", "[vjoined]", "-map", "[amaster]",
+                "-frames:v", str(sum(frame_counts)), "-r", f"{H3_FPS:.6f}",
+                "-fps_mode", "cfr", "-c:v", "libx264", "-preset", "medium",
+                "-crf", "16", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                "-b:a", "192k", "-ar", "48000", "-t", f"{exact_duration:.9f}",
+                "-movflags", "+faststart", str(output),
             ]
         else:
+            command += ["-f", "concat", "-safe", "0", "-i", str(list_path)]
             command += [
                 "-fflags", "+genpts", "-avoid_negative_ts", "make_zero", "-c:v", "copy",
                 "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart", str(output),
@@ -1024,12 +1121,106 @@ def _read_segment_frame_count(path: Path) -> int:
     return count
 
 
+def _read_segment_dimensions(path: Path) -> tuple[int, int]:
+    """Read the encoded canvas without decoding the whole segment."""
+    try:
+        import av
+
+        with av.open(str(path)) as container:
+            if not container.streams.video:
+                raise ValueError(f"Segmento senza video: {path}")
+            stream = container.streams.video[0]
+            return max(2, int(stream.width)), max(2, int(stream.height))
+    except Exception as exc:
+        raise ValueError(f"Impossibile leggere la risoluzione del segmento {path}: {exc}") from exc
+
+
+def _require_identical_segment_canvas(paths: list[Path]) -> tuple[int, int]:
+    """Reject a stale chunk instead of silently resizing it at an FLF seam."""
+    dimensions = [_read_segment_dimensions(path) for path in paths]
+    target = dimensions[0]
+    mismatches = [
+        f"{path.name}={width}x{height}"
+        for path, (width, height) in zip(paths, dimensions)
+        if (width, height) != target
+    ]
+    if mismatches:
+        raise ValueError(
+            "FLF segment canvas mismatch: every chunk must be regenerated from the current "
+            f"Shotboard resolution {target[0]}x{target[1]}; automatic seam resizing is disabled. "
+            + ", ".join(mismatches)
+        )
+    return target
+
+
 def _read_segment_audio_join_policy(path: Path) -> str:
     try:
         data = json.loads(_segment_meta_path(path).read_text(encoding="utf-8"))
         return str(data.get("audio_join_policy", "crossfade") or "crossfade")
     except Exception:
         return "crossfade"
+
+
+def _checkpoint_join_contract(cine_linx, current_segment: int, trim_head_frames: int) -> dict[str, Any]:
+    """Resolve delivery stitching without confusing context trim with overlap.
+
+    Motion Context's provider Trim node removes its injected AV head before the
+    frames reach the checkpoint.  Its ``trim_frames`` output is therefore an
+    audit value, not a request to dissolve decoded clips.  A decoded overlap is
+    legal only when the Shotboard plan explicitly declares WAN overlap blend.
+
+    Older graphs do not connect ``cine_linx`` to the checkpoint.  In that case
+    a multi-frame trim must default to direct concat: inventing a crossfade from
+    the integer alone is precisely what creates the long frozen dissolve seam.
+    """
+    trim_count = max(0, int(trim_head_frames or 0))
+    plan = None
+    chunk: dict[str, Any] = {}
+    if isinstance(cine_linx, dict):
+        try:
+            plan = _resolve_shotplan(cine_linx)
+            chunks = plan.get("chunks") if isinstance(plan, dict) else None
+            if isinstance(chunks, list) and 0 <= int(current_segment) < len(chunks):
+                candidate = chunks[int(current_segment)]
+                if isinstance(candidate, dict):
+                    chunk = candidate
+        except Exception as exc:
+            LOG.warning("MiniMax H3 checkpoint could not inspect the explicit join contract: %s", exc)
+
+    plan_join = str((plan or {}).get("flf_join_mode", "") or "").strip().lower()
+    chunk_join = str(chunk.get("join_mode", "") or "").strip().lower()
+    planned_overlap = max(0, int(chunk.get("overlap_frames", 0) or 0))
+    decoded_overlap = bool(
+        plan_join == "wan_overlap_blend"
+        and chunk_join == "wan_overlap_blend"
+        and planned_overlap > 1
+    )
+    context_trim = max(0, int(chunk.get("motion_context_trim_frames", 0) or 0))
+    context_pretrimmed = bool(
+        trim_count > 1
+        and not decoded_overlap
+        and (
+            context_trim == trim_count
+            or chunk_join == "motion_context_native_av"
+            or not chunk
+        )
+    )
+    return {
+        "mode": "decoded_overlap" if decoded_overlap else "direct",
+        "overlap_frames": planned_overlap if decoded_overlap else 0,
+        "context_pretrimmed": context_pretrimmed,
+        "trim_head_frames": trim_count,
+        "plan_join_mode": plan_join,
+        "chunk_join_mode": chunk_join,
+    }
+
+
+def _delivery_join_frames(cine_linx, current_segment: int, trim_head_frames: int) -> int:
+    """Keep duplicate-frame trim; authorize dissolves only via the shotplan."""
+    trim = max(0, int(trim_head_frames or 0))
+    if trim <= 1:
+        return trim
+    return int(_checkpoint_join_contract(cine_linx, current_segment, trim)["overlap_frames"])
 
 
 def _concat_videos_overlap(paths: list[Path], output: Path, overlap_frames: int, fps: float) -> None:
@@ -1059,6 +1250,11 @@ def _concat_videos_overlap(paths: list[Path], output: Path, overlap_frames: int,
     for path in paths:
         command += ["-i", str(path)]
 
+    # A decoded overlap is legal only on identical canvases.  Resizing a later
+    # chunk here changes the authored FLF framing and was the visible regression
+    # reported after the delivery refactor.
+    _require_identical_segment_canvas(paths)
+
     overlaps = [
         min(requested_overlap, frame_counts[index] - 1, frame_counts[index + 1] - 1)
         for index in range(len(paths) - 1)
@@ -1068,8 +1264,13 @@ def _concat_videos_overlap(paths: list[Path], output: Path, overlap_frames: int,
 
     filters: list[str] = []
     video_parts: list[str] = []
+    for index in range(len(paths)):
+        filters.append(
+            f"[{index}:v]setpts=PTS-STARTPTS,"
+            f"format=yuv420p[vbase{index}]"
+        )
     first_prefix_end = frame_counts[0] - overlaps[0]
-    filters.append(f"[0:v]trim=end_frame={first_prefix_end},setpts=PTS-STARTPTS[vprefix0]")
+    filters.append(f"[vbase0]trim=end_frame={first_prefix_end},setpts=PTS-STARTPTS[vprefix0]")
     video_parts.append("vprefix0")
 
     for boundary, overlap in enumerate(overlaps):
@@ -1077,10 +1278,10 @@ def _concat_videos_overlap(paths: list[Path], output: Path, overlap_frames: int,
         right = boundary + 1
         left_start = frame_counts[left] - overlap
         filters.append(
-            f"[{left}:v]trim=start_frame={left_start},setpts=PTS-STARTPTS[vtail{boundary}]"
+            f"[vbase{left}]trim=start_frame={left_start},setpts=PTS-STARTPTS[vtail{boundary}]"
         )
         filters.append(
-            f"[{right}:v]trim=end_frame={overlap},setpts=PTS-STARTPTS[vhead{boundary}]"
+            f"[vbase{right}]trim=end_frame={overlap},setpts=PTS-STARTPTS[vhead{boundary}]"
         )
         denominator = overlap + 1
         filters.append(
@@ -1095,13 +1296,13 @@ def _concat_videos_overlap(paths: list[Path], output: Path, overlap_frames: int,
             middle_end = frame_counts[right] - overlaps[right]
             if middle_end > middle_start:
                 filters.append(
-                    f"[{right}:v]trim=start_frame={middle_start}:end_frame={middle_end},"
+                    f"[vbase{right}]trim=start_frame={middle_start}:end_frame={middle_end},"
                     f"setpts=PTS-STARTPTS[vbody{right}]"
                 )
                 video_parts.append(f"vbody{right}")
         else:
             filters.append(
-                f"[{right}:v]trim=start_frame={overlap},setpts=PTS-STARTPTS[vsuffix{right}]"
+                f"[vbase{right}]trim=start_frame={overlap},setpts=PTS-STARTPTS[vsuffix{right}]"
             )
             video_parts.append(f"vsuffix{right}")
 
@@ -1145,7 +1346,7 @@ def _concat_videos_overlap(paths: list[Path], output: Path, overlap_frames: int,
     command += [
         "-filter_complex", ";".join(filters),
         "-map", "[vjoined]", "-map", "[amaster]",
-        "-frames:v", str(accumulated_frames), "-r", f"{fps:.6f}",
+        "-frames:v", str(accumulated_frames), "-r", f"{fps:.6f}", "-fps_mode", "cfr",
         "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-t", f"{exact_duration:.9f}",
         "-movflags", "+faststart", str(output),
@@ -1641,7 +1842,10 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         ltx_detailer_loras = list(dict.fromkeys(("", *installed_ltx_detailer_loras)))
         installed_h3_controlnets = sorted(
             (
-                name for name in folder_paths.get_filename_list("controlnet")
+                name for name in dict.fromkeys((
+                    *folder_paths.get_filename_list("model_patches"),
+                    *folder_paths.get_filename_list("controlnet"),
+                ))
                 if (
                     ("minimax" in name.lower() and "h3" in name.lower() and "control" in name.lower())
                     or ("h3" in name.lower() and "fun" in name.lower() and "control" in name.lower())
@@ -1650,6 +1854,11 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             key=str.lower,
         )
         h3_controlnets = list(dict.fromkeys(("", *installed_h3_controlnets)))
+        fused_turbo_models = list(dict.fromkeys((
+            "",
+            *(name for name in folder_paths.get_filename_list("diffusion_models")
+              if "minimax" in name.lower() and "h3" in name.lower() and name.lower().endswith(".safetensors")),
+        )))
         if "res_multistep" in samplers:
             samplers.remove("res_multistep")
             samplers.insert(0, "res_multistep")
@@ -1663,14 +1872,15 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "duration_seconds": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 36000.0, "step": 0.01}),
                 "task_mode": ([
                     "auto_from_timeline", "t2va", "i2va", "fl2va", "ref2va",
-                    "v2va_object_swap", "longvid_guides", "longvid_guided_lipsync",
-                    "ref2vid_lipsync", "longvid_ref2vid_lipsync", "longvid_motion_context",
+                    "v2va_controlnet", "v2va_object_swap", "v2va_face_swap", "longvid_guides", "keyframe_joint_native", "latent_go_ahead", "longvid_guided_lipsync",
+                    "ref2vid_lipsync", "longvid_ref2vid_lipsync", "longvid_motion_context", "longvid_continuous_guided",
+                    "longvid_masked_loop_guided", "guided_av_loop_experimental",
                 ], {"default": "auto_from_timeline"}),
                 "audio_mode": (list(H3_AUDIO_MODES), {"default": "h3_native_generated"}),
                 "prompt_mapping": (["global_plus_local", "local_only", "global_only"], {"default": "global_plus_local"}),
                 "upscale_mode": ([
                     "off", "rtx_final", "h3_fast_latent_2pass", "h3_pixel_refine",
-                    "h3_latent_upres", "ltx23", "ltx23_per_chunk", "wan22_5b",
+                    "h3_ultimate_tiled", "h3_latent_upres", "ltx23", "ltx23_per_chunk", "wan22_5b",
                 ], {"default": "off"}),
                 # 0.5 MP / 16:9 is the practical Dynamic-VRAM default used by
                 # the proven H3 reference pipeline on a 12 GiB card.  The UI
@@ -1695,9 +1905,9 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 # H3-native backend controls.  The dedicated Shotboard UI
                 # renders these above the timeline and hides the raw widgets.
                 "acceleration": ([
-                    "low_vram_auto", "native", "h3_sage", "sol_low_vram", "sol_adaptive_safe",
+                    "low_vram_auto", "native", "h3_sage", "h3_sla", "sol_low_vram", "sol_adaptive_safe",
                     "sol_adaptive_balanced", "adaptive_safe", "spectrum", "sage_spectrum",
-                    "auto_3060", "sage", "sage_sol", "comfy_kitchen", "h3_exact", "pdd_native_8step", "fasth3_dense_6step",
+                    "auto_3060", "sage", "sage_sol", "comfy_kitchen", "h3_exact", "pdd_native_8step", "fasth3_dense_6step", "matlowai_fused_turbo_manual_sigma",
                     "iamccs_progressive_2stage", "iamccs_progressive_3stage", "iamccs_progressive_pdd_2stage",
                 ], {"default": default_acceleration}),
                 "ref_image_size": (["match", "max"], {"default": "match"}),
@@ -1731,7 +1941,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "performance_profile": ([
                     "rtx_xx60_safe", "rtx_xx70_balanced", "rtx_xx80_quality", "rtx_xx90_max",
                     "low_vram_draft", "low_vram_balanced", "low_vram_turbo", "h3_turbo_quality", "h3_native_quality", "custom",
-                    "rtx3060_draft", "rtx3060_balanced", "rtx3060_turbo",
+                    "rtx3060_draft", "rtx3060_balanced", "rtx3060_turbo", "wide_character_12gb",
                 ], {"default": "low_vram_balanced"}),
                 "seed": ("INT", {"default": 42, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "control_after_generate": True}),
                 "seed_stride": ("INT", {"default": 1, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "step": 1}),
@@ -1744,7 +1954,8 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 # Turbo is kept inside the typed shotplan so the selected LoRA,
                 # effective sampler and audio policy cannot drift apart.
                 "turbo_mode": (["off", "early_8_10", "ckpt500_6_8"], {"default": "off"}),
-                "turbo_lora_name": (turbo_loras, {"default": "", "iamccs_fasth3_values": installed_fasth3_loras}),
+                "turbo_lora_name": (turbo_loras, {"default": "", "iamccs_fasth3_values": installed_fasth3_loras,
+                    "iamccs_h3_assets": [describe_asset(name, folder_paths.get_full_path("loras", name)) for name in installed_turbo_loras]}),
                 "turbo_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.05}),
                 "turbo_sampler_mode": (["audio_fixed", "res_multistep_stock"], {"default": "audio_fixed"}),
                 # Preserve source pixels by default. The native H3 conditioner
@@ -1766,7 +1977,10 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "ltx_4k_quality": (["ULTRA", "HIGH", "MEDIUM", "LOW"], {"default": "ULTRA"}),
                 "ltx_seam_safe": ("BOOLEAN", {"default": True}),
                 "flf_join_mode": (["h3_keyframe_cut", "wan_overlap_blend"], {"default": "h3_keyframe_cut"}),
-                "flf_overlap_frames": ("INT", {"default": 9, "min": 1, "max": 24, "step": 1}),
+                # Decoded-frame overlap is opt-in and legal only with
+                # ``wan_overlap_blend``.  H3 keyframe cut uses its own single
+                # shared boundary-frame trim and never a visual crossfade.
+                "flf_overlap_frames": ("INT", {"default": 0, "min": 0, "max": 24, "step": 1}),
                 # The LTX temporal looper is the delivery sampler for long
                 # masters. These settings are Shotboard truth, not workflow
                 # constants, so a saved board reproduces its VRAM strategy.
@@ -1805,7 +2019,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 # result replaces the native master before the optional
                 # upscaler.
                 "face_detailer_enabled": ("BOOLEAN", {"default": False}),
-                "face_detailer_profile": (["balanced", "small_faces", "gentle", "sam_face_mask"], {"default": "balanced"}),
+                "face_detailer_profile": (["balanced", "small_faces", "gentle", "sam_face_mask", "wide_character_12gb"], {"default": "balanced"}),
                 "face_detailer_use_sam_mask": ("BOOLEAN", {"default": False}),
                 # Optional creative/style H3 LoRA. It is model-only and never
                 # changes the authored H3 sampling controls. These fields are
@@ -1828,6 +2042,10 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "h3_controlnet_end_percent": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "h3_controlnet_frame_scope": (["timeline_segment", "repeat_each_chunk"], {"default": "timeline_segment"}),
                 "h3_controlnet_end_policy": (["strict_match", "hold_last"], {"default": "strict_match"}),
+                # Append-only isolated fused-int8 Turbo trunk. The model is
+                # selected from diffusion_models, never inferred from a name.
+                "fused_turbo_model_name": (fused_turbo_models, {"default": ""}),
+                "fused_turbo_sigma_preset": (["4_step", "6_step", "8_step"], {"default": "4_step"}),
             },
             "optional": {
                 "cine_linx": (
@@ -1914,7 +2132,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         ltx_4k_quality="ULTRA",
         ltx_seam_safe=True,
         flf_join_mode="h3_keyframe_cut",
-        flf_overlap_frames=9,
+        flf_overlap_frames=0,
         ltx_looper_temporal_tile_size=80,
         ltx_looper_temporal_overlap=24,
         ltx_looper_guiding_strength=1.0,
@@ -1949,46 +2167,67 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         h3_controlnet_end_percent=1.0,
         h3_controlnet_frame_scope="timeline_segment",
         h3_controlnet_end_policy="strict_match",
+        fused_turbo_model_name="",
+        fused_turbo_sigma_preset="4_step",
         cine_linx=None,
     ):
         # Settings-less legacy workflows retain the original full H3 window.
         # The external Settings node can override this with a 12 GB-safe value
         # without appending another widget to the Shotboard itself.
         motion_context_window_frames = H3_MAX_TRAINED_FRAMES
-        nextframe_injection = _nextframe_injection_from_linx(cine_linx)
-        if nextframe_injection:
-            timeline_data, image_paths = _merge_nextframe_injection(
-                timeline_data, image_paths, nextframe_injection
-            )
-            timeline_meta = _timeline_dict(timeline_data)
-            if timeline_meta:
-                duration_seconds = timeline_meta.get("duration_seconds", duration_seconds)
-                frame_rate = timeline_meta.get("frame_rate", timeline_meta.get("fps", frame_rate))
-            injected_prompt = str(nextframe_injection.get("prompt", "") or "").strip()
-            if injected_prompt and not str(global_prompt or "").strip():
-                global_prompt = injected_prompt
+        import hashlib
+        # The Shotboard overlay is the Queue Truth.  Its revisioned timeline
+        # must win over the older standalone prompt widget, including when the
+        # user cleared the visible prompt.  This prevents prompts embedded in
+        # imported workflows from silently surviving later edits.
+        global_prompt = _visible_shotboard_global_prompt(timeline_data, global_prompt)
+        authored_snapshot = {
+            "global_prompt": str(global_prompt or ""),
+            "timeline": _timeline_dict(timeline_data),
+            "image_paths": str(image_paths or ""),
+            "duration_seconds": duration_seconds,
+            "task_mode": task_mode,
+        }
+        authored_digest = hashlib.sha256(json.dumps(
+            authored_snapshot, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        # Authoring tools must publish into the visible board before Queue.
+        # Never recover images, timing or dialogue from upstream stale state.
+        # AudioBoard/settings retain their separate, explicit bus contracts.
         global_prompt, timeline_data, prompter_injection = apply_prompter_to_minimax(
             cine_linx,
             global_prompt,
             timeline_data,
         )
-        global_prompt, timeline_data, dialogue_injection = apply_dialogue_to_minimax(
-            cine_linx,
-            global_prompt,
-            timeline_data,
-        )
+        dialogue_injection = {
+            "applied": False,
+            "actual_target": "none",
+            "reason": "shotboard_visible_fields_are_queue_truth_use_explicit_inject",
+        }
         timeline_data, audioboard_injection = _apply_audioboard_to_minimax(
             cine_linx,
             timeline_data,
+            audio_mode,
         )
-        # A connected IAMCCS_ShotboardH3Settings node is an explicit external
-        # control surface, so it takes precedence over the Shotboard's local
-        # saved snapshot.  The values remain named throughout the transport;
-        # no positional widget array is ever used here.
-        saved_settings = {
-            **_saved_h3_settings(timeline_data),
-            **_h3_settings_from_cine_linx(cine_linx),
+        # A connected IAMCCS_ShotboardH3Settings node is the exclusive
+        # generation-settings authority. Do not fill missing external fields
+        # from the Shotboard snapshot: that would resurrect stale local Turbo,
+        # model-family or delivery values and recreate a dual-truth regression.
+        external_settings = _h3_settings_from_cine_linx(cine_linx)
+        # Mode and duration always come from the Shotboard widgets/timeline.
+        # Ignore stale values produced by older Settings nodes so a saved T2VA
+        # selection cannot turn LongVid Motion Context into a T2V plan.
+        external_settings = {
+            name: value for name, value in external_settings.items()
+            if name not in _H3_SETTINGS_SHOTBOARD_AUTHORITY_FIELDS
         }
+        saved_settings = external_settings if external_settings else _saved_h3_settings(timeline_data)
+        if saved_settings:
+            saved_settings = {
+                name: value for name, value in saved_settings.items()
+                if name not in _H3_SETTINGS_SHOTBOARD_AUTHORITY_FIELDS
+            }
         if saved_settings:
             duration_seconds = saved_settings.get("duration_seconds", duration_seconds)
             frame_rate = saved_settings.get("frame_rate", frame_rate)
@@ -2087,6 +2326,8 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             h3_controlnet_end_percent = saved_settings.get("h3_controlnet_end_percent", h3_controlnet_end_percent)
             h3_controlnet_frame_scope = saved_settings.get("h3_controlnet_frame_scope", h3_controlnet_frame_scope)
             h3_controlnet_end_policy = saved_settings.get("h3_controlnet_end_policy", h3_controlnet_end_policy)
+            fused_turbo_model_name = saved_settings.get("fused_turbo_model_name", fused_turbo_model_name)
+            fused_turbo_sigma_preset = saved_settings.get("fused_turbo_sigma_preset", fused_turbo_sigma_preset)
             motion_context_window_frames = saved_settings.get(
                 "motion_context_window_frames", motion_context_window_frames
             )
@@ -2109,8 +2350,16 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         }
         motion_context_requested = requested_task_key in {
             "longvid_motion_context", "longvid_motion_context_auto_chain", "motion_context_auto_chain",
+            "longvid_continuous_guided", "long_continuous_guided",
         }
-        longvid_requested = requested_task_key in {"longvid_guides", "longvid", "long_video_guides"} or longvid_lipsync_requested or motion_context_requested
+        continuous_guided_requested = requested_task_key in {
+            "longvid_continuous_guided", "long_continuous_guided",
+        }
+        masked_loop_requested = requested_task_key in {
+            "longvid_masked_loop_guided", "masked_loop_guided", "long_masked_loop_guided",
+            "guided_av_loop_experimental", "longvid_guided_av_loop_experimental",
+        }
+        longvid_requested = requested_task_key in {"longvid_guides", "longvid", "long_video_guides", "keyframe_joint_native"} or longvid_lipsync_requested or motion_context_requested or masked_loop_requested
         lipsync_requested = requested_task_key in {"ref2vid_lipsync", "lipsync_ref2vid"} or longvid_lipsync_requested
         requested_legacy_audio_mode = audio_mode
         # LipSync uses one actual AudioBoard source in two compatible stock-H3
@@ -2180,6 +2429,11 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             face_detailer_profile = "balanced"
 
         requested_turbo_mode = str(turbo_mode or "off")
+        validate_settings({"task_mode": task_mode, "turbo_mode": requested_turbo_mode,
+                           "turbo_lora_name": turbo_lora_name, "pdd_lora_name": pdd_lora_name,
+                           "acceleration": acceleration, "audio_mode": audio_mode,
+                           "fused_turbo_model_name": fused_turbo_model_name,
+                           "secondary_lora_enabled": secondary_lora_enabled})
         selected_turbo_lora = str(turbo_lora_name or "").strip()
         fasth3_requested = str(acceleration or "").lower() == "fasth3_dense_6step"
         if fasth3_requested and requested_turbo_mode != "off":
@@ -2203,8 +2457,17 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         }
         pdd_available = _model_file_available("loras", selected_pdd_lora)
         selected_controlnet = str(h3_controlnet_name or "").strip()
-        controlnet_requested = bool(h3_controlnet_enabled)
-        controlnet_available = _model_file_available("controlnet", selected_controlnet)
+        # CONTROLNET V2V is a first-class filmmaker mode as well as an
+        # advanced optional patch. Selecting the mode must therefore activate
+        # the lazy branch even when an older serialized toggle is still OFF.
+        controlnet_mode_requested = requested_task_key in {
+            "v2va_controlnet", "controlnet_v2v", "h3_fun_controlnet",
+        }
+        controlnet_requested = bool(h3_controlnet_enabled) or controlnet_mode_requested
+        controlnet_available = (
+            _model_file_available("model_patches", selected_controlnet)
+            or _model_file_available("controlnet", selected_controlnet)
+        )
         controlnet_kind = str(h3_controlnet_kind or "pose_dwpose").strip().lower()
         if controlnet_kind not in {"pose_dwpose", "depth", "canny", "hed", "mlsd", "inpaint"}:
             controlnet_kind = "pose_dwpose"
@@ -2226,11 +2489,37 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         if controlnet_end_policy not in {"strict_match", "hold_last"}:
             controlnet_end_policy = "strict_match"
         requested_steps = max(1, int(_finite_float(steps, 16, 1, 100)))
-        # The settings box is the single source of truth.  Turbo profiles are
-        # recommendations, not hidden sampling contracts: an authored 8-step
-        # LongVid render must remain 8 steps even if its optional LoRA is
-        # missing or a user deliberately tests a non-standard Turbo schedule.
-        effective_steps = requested_steps
+        fused_turbo_requested = str(acceleration or "").lower() == "matlowai_fused_turbo_manual_sigma"
+        fused_turbo_model = str(fused_turbo_model_name or "").strip()
+        fused_turbo_sigma = str(fused_turbo_sigma_preset or "4_step").strip().lower()
+        if fused_turbo_sigma not in {"4_step", "6_step", "8_step"}:
+            fused_turbo_sigma = "4_step"
+        if fused_turbo_requested:
+            if not fused_turbo_model or not _model_file_available("diffusion_models", fused_turbo_model):
+                raise ValueError("Fused Fast H3 needs a selected installed MiniMax H3 model in diffusion_models")
+            if requested_turbo_mode != "off" or pdd_requested or secondary_lora_requested:
+                raise ValueError("Fused Fast H3 is a complete model profile: turn Turbo, PDD and secondary LoRA off")
+            if str(task_mode or "auto_from_timeline").lower() not in {
+                "t2va", "auto_from_timeline"
+            }:
+                raise ValueError(
+                    "Fused Fast H3 is restricted to T2VA. "
+                    "Use the standard H3 backend for every image, reference, V2VA, LongVid and Multi-Shot route."
+                )
+        # The settings box remains the visible source of truth.  The sole
+        # exception is an explicitly enabled adapter that declares an exact
+        # 3-step distilled contract in safetensors metadata (with a conservative
+        # filename fallback for older community files).  Such a model cannot be
+        # sampled correctly at an unrelated count, so compile the effective
+        # value to three.  Merely installing or listing the LoRA changes nothing.
+        turbo_asset = (
+            describe_asset(selected_turbo_lora, folder_paths.get_full_path("loras", selected_turbo_lora))
+            if turbo_requested and turbo_available and not fasth3_requested and not pdd_requested and not fused_turbo_requested
+            else {}
+        )
+        turbo_declared_steps = int(turbo_asset.get("declared_steps") or 0)
+        three_step_turbo_active = bool(effective_turbo_mode != "off" and turbo_declared_steps == 3)
+        effective_steps = 3 if three_step_turbo_active else requested_steps
         plan = build_shotplan(
             timeline_data=timeline_data,
             global_prompt=global_prompt,
@@ -2258,13 +2547,22 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             motion_context_tail_frames=flf_continuity_tail_frames,
             motion_context_audio=bool(flf_continuity_audio),
             motion_context_window_frames=motion_context_window_frames,
+            keyframe_joint_latent_new=bool(saved_settings.get("keyframe_joint_latent_new", False)),
         )
+        if str(task_mode) == "v2va_face_swap":
+            plan["face_swap"] = face_swap_settings(saved_settings)
+            validate_face_swap_plan({**plan, "face_detailer_enabled": face_detailer_enabled})
+        plan["h3_sla"] = {
+            "sparsity": max(0.0, min(0.95, float(saved_settings.get("h3_sla_sparsity", 0.85)))),
+            "dense_last_steps": max(0, min(20, int(saved_settings.get("h3_sla_dense_last_steps", 0)))),
+        }
         continuity_requested = flf_continuity_mode == "native_av_context"
         # Native AV tail injection is implemented only for true FL2VA chunks.
         # REF2VA audio/reference and V2VA are deliberately independent/hard
         # cut routes, even if an old board retains FLF widget values.
         continuity_enabled = bool(
             continuity_requested
+            and not continuous_guided_requested
             and bool(plan.get("flf_anchor_mode"))
             and int(plan.get("total_segments", 0)) > 1
             and all(str(chunk.get("task_mode", "")).lower() == "fl2va" for chunk in plan.get("chunks", []))
@@ -2280,10 +2578,19 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "source": "shotboard",
         }
         plan["prompter_injection"] = prompter_injection
+        plan["authored_source"] = {
+            "schema": "iamccs.h3.shotboard_queue_truth.v1",
+            "sha256": authored_digest,
+            "snapshot": authored_snapshot,
+            "upstream_visual_prompt_injection": False,
+        }
         plan["dialogue_injection"] = dialogue_injection
         plan["audioboard_injection"] = audioboard_injection
         plan["audio_mode"] = audio_mode
-        longvid_active = str(plan.get("task_mode", "")).lower() in {"longvid_guides", "longvid_ref2vid_lipsync", "longvid_motion_context"}
+        longvid_active = str(plan.get("task_mode", "")).lower() in {
+            "longvid_guides", "longvid_ref2vid_lipsync", "longvid_motion_context", "longvid_continuous_guided",
+            "longvid_masked_loop_guided", "guided_av_loop_experimental",
+        }
         longvid_lipsync_active = bool(longvid_active and longvid_guided_audio_drive)
         if longvid_lipsync_active:
             timeline_audio_contract = (
@@ -2292,6 +2599,16 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             )
         elif longvid_active and longvid_guided_audio_drive:
             timeline_audio_contract = "R31 LongVid Guided Audio Drive: timeline images remain positioned T2VA guides while each rebased AudioBoard chunk is both injected via MiniMaxH3AddGuide and locked into the native H3 AV latent before sampling"
+        elif str(plan.get("task_mode", "")).lower() == "longvid_continuous_guided":
+            timeline_audio_contract = "Long Continuous Guided: native H3 AV state is carried into every FL2VA interval; each following Shotboard image is the destination keyframe, never a new hard-cut shot"
+        elif str(plan.get("task_mode", "")).lower() in {
+            "longvid_masked_loop_guided", "guided_av_loop_experimental",
+        }:
+            timeline_audio_contract = (
+                "IAMCCS Continuous AV: every chronological Shotboard image is an FL2VA destination; "
+                "the complete generated video+audio latent passes into the next interval and the "
+                "phase-aligned engine owns the seam"
+            )
         elif longvid_active:
             timeline_audio_contract = "R31 LongVid: every imported main AudioBoard slot is sliced on the global 24fps clock and injected into the matching H3 chunk via MiniMaxH3AddGuide"
         elif str(plan.get("task_mode", "")).lower() in {"ref2vid_lipsync", "lipsync_ref2vid"}:
@@ -2316,6 +2633,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         }
         plan["performance_profile"] = str(performance_profile)
         plan["sampling"] = {
+            "seed_policy": str(saved_settings.get("seed_policy", "fixed_per_generation")),
             "seed": int(seed),
             "seed_stride": int(seed_stride),
             "steps": effective_steps,
@@ -2367,6 +2685,34 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "model_family": "ref2va",
             "source": "shotboard",
         }
+        plan["fused_turbo_preview"] = {
+            "schema": "iamccs.minimax_h3.fused_turbo_preview",
+            "enabled": fused_turbo_requested,
+            "model_name": fused_turbo_model,
+            "sigma_preset": fused_turbo_sigma,
+            "steps": {"4_step": 4, "6_step": 6, "8_step": 8}[fused_turbo_sigma],
+            "sampler": "euler",
+            "scheduler": "manual_sigmas",
+            "required_shifts": {"video": 12.0, "audio": 3.0},
+            "source": "shotboard",
+        }
+        if fused_turbo_requested:
+            unsupported = sorted({
+                str(chunk.get("task_mode", "")).lower()
+                for chunk in plan.get("chunks", [])
+                if str(chunk.get("task_mode", "")).lower() != "t2va"
+            })
+            if unsupported:
+                raise ValueError(
+                    "Fused Fast H3 supports only T2VA chunks; "
+                    f"the timeline resolved unsupported mode(s): {', '.join(unsupported)}."
+                )
+            # This profile is deliberately explicit, not a hidden override:
+            # the UI action populates exactly these values before Queue.
+            plan["sampling"].update({
+                "steps": plan["fused_turbo_preview"]["steps"], "sampler_name": "euler",
+                "scheduler": "simple", "denoise": 1.0, "shift_video": 12.0, "shift_audio": 3.0,
+            })
         plan["fasth3"] = {
             "schema": "iamccs.minimax_h3.fasth3_dense",
             "schema_version": 1,
@@ -2416,7 +2762,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "frame_scope": controlnet_scope,
             "end_policy": controlnet_end_policy,
             "media_resource": "iamccs_minimax_h3_control_video",
-            "loader": "ComfyUI ControlNetLoader + MiniMaxH3FunControlNetApply",
+            "loader": "ComfyUI ModelPatchLoader + MiniMaxH3FunControlNetApply",
             "source": "shotboard",
         }
         # Append-only Settings fields control this opt-in path.  The profile is
@@ -2640,7 +2986,11 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             warnings.append("Lightx2v Turbo strength is outside its tested 0.6-1.0 quality range")
         elif turbo_enabled and not lightx2v_turbo and not 0.8 <= float(turbo_strength) <= 1.8:
             warnings.append("Turbo LoRA strength is outside the tested 0.8-1.8 range")
-        if effective_turbo_mode == "early_8_10" and not 8 <= effective_steps <= 10:
+        if three_step_turbo_active:
+            warnings.append(
+                f"Active Turbo LoRA declares an exact 3-step schedule; sampling steps compiled from {requested_steps} to 3"
+            )
+        elif effective_turbo_mode == "early_8_10" and not 8 <= effective_steps <= 10:
             warnings.append("Early/non-ckpt500 Turbo is normally used at 8-10 steps")
         if effective_turbo_mode == "ckpt500_6_8" and not 6 <= effective_steps <= 8:
             warnings.append("Turbo ckpt500 is normally used at 6-8 steps")
@@ -2728,6 +3078,29 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             f"prompter={injection_summary} | dialogue={dialogue_summary} | audioboard={audioboard_summary} | "
             f"warnings={'; '.join(warnings) if warnings else 'none'}"
         )
+        # Queue-time audit trail.  These are the exact visible Shotboard values
+        # used to build the H3 conditioning for this execution.  Log filenames
+        # and text only (never image tensors/audio payloads), without truncating
+        # or silently substituting prompts from an imported workflow.
+        LOG.info(
+            "MiniMax H3 SHOTBOARD QUEUE TRUTH | sha256=%s | task=%s | global_prompt=%s",
+            authored_digest,
+            str(plan.get("task_mode", task_mode)),
+            json.dumps(str(global_prompt or ""), ensure_ascii=False),
+        )
+        for queue_chunk in plan.get("chunks", []):
+            if not isinstance(queue_chunk, dict):
+                continue
+            LOG.info(
+                "MiniMax H3 SHOTBOARD CHUNK TRUTH | chunk=%d/%d | slot=%s | first_image=%s | last_image=%s | local_prompt=%s | conditioning_prompt=%s",
+                int(queue_chunk.get("index", 0)) + 1,
+                max(1, int(plan.get("total_segments", len(plan.get("chunks", []))) or 1)),
+                json.dumps(str(queue_chunk.get("slot_id", "")), ensure_ascii=False),
+                json.dumps(str(queue_chunk.get("first_image", "")), ensure_ascii=False),
+                json.dumps(str(queue_chunk.get("last_image", "")), ensure_ascii=False),
+                json.dumps(str(queue_chunk.get("local_prompt", "")), ensure_ascii=False),
+                json.dumps(str(queue_chunk.get("prompt", "")), ensure_ascii=False),
+            )
         return (_build_minimax_cine_linx(cine_linx, plan, timeline_data, global_prompt, report),)
 
 
@@ -3281,7 +3654,10 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
             )
 
         trim_count = max(0, int(trim_head_frames or 0))
-        overlap_stitch = trim_count > 1
+        join_contract = _checkpoint_join_contract(cine_linx, current_segment, trim_count)
+        motion_context_pretrimmed = bool(join_contract["context_pretrimmed"])
+        overlap_stitch = join_contract["mode"] == "decoded_overlap"
+        decoded_overlap_frames = int(join_contract["overlap_frames"])
         images_to_save = images
         audio_to_save = audio
         if trim_count == 1 and int(images_to_save.shape[0]) > trim_count:
@@ -3292,7 +3668,11 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
         segment_path = output_folder / segment_name
         _require_new_output_path(segment_path)
         _encode_images(images_to_save, audio_to_save, fps, segment_path)
-        audio_join_policy = "trim_silent_tail" if bool(audio.get("iamccs_flf_locked_audio_handles", False)) else "crossfade"
+        audio_join_policy = (
+            "native_av_direct_join"
+            if motion_context_pretrimmed
+            else ("trim_silent_tail" if bool(audio.get("iamccs_flf_locked_audio_handles", False)) else "crossfade")
+        )
         _write_segment_metadata(segment_path, int(images_to_save.shape[0]), fps, audio_join_policy)
 
         bridge_source = bridge_images if torch.is_tensor(bridge_images) else images
@@ -3340,6 +3720,11 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
             effective_merge_segments = bool(editor_longvid)
 
         messages = [f"{safe_stage_label.upper()} checkpoint saved: {segment_name}"]
+        if motion_context_pretrimmed:
+            messages.append(
+                f"Motion Context direct join: {trim_count}f AV context already removed upstream; "
+                "decoded overlap/crossfade disabled"
+            )
         preview_path = segment_path
         if current_segment + 1 >= total_segments and effective_merge_segments:
             segment_paths = [
@@ -3350,7 +3735,7 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
             final_path = output_folder / final_name
             _require_new_output_path(final_path)
             if overlap_stitch:
-                _concat_videos_overlap(segment_paths, final_path, trim_count, fps)
+                _concat_videos_overlap(segment_paths, final_path, decoded_overlap_frames, fps)
             else:
                 _concat_videos(segment_paths, final_path)
             preview_path = final_path
@@ -3994,6 +4379,7 @@ class IAMCCS_ShotboardH3Settings:
                 and name not in _H3_SECONDARY_LORA_SETTINGS_NODE_FIELDS
                 and name not in _H3_PDD_SETTINGS_NODE_FIELDS
                 and name not in _H3_FUN_CONTROLNET_SETTINGS_NODE_FIELDS
+                and name not in _H3_FUSED_TURBO_SETTINGS_NODE_FIELDS
             ):
                 grouped.append(("08 · ADVANCED COMPATIBILITY", name))
 
@@ -4073,20 +4459,20 @@ class IAMCCS_ShotboardH3Settings:
         for name in _H3_SECONDARY_LORA_SETTINGS_NODE_FIELDS:
             value_type, source_options = copy.deepcopy(planner_inputs[name])
             options = dict(source_options) if isinstance(source_options, dict) else {}
-            options["display_name"] = f"09 · SECONDARY H3 LORA · {name.replace('secondary_lora_', '').replace('_', ' ')}"
+            options["display_name"] = f"09 · CREATIVE / PROJECTION H3 LORA · {name.replace('secondary_lora_', '').replace('_', ' ')}"
             required[name] = (value_type, options)
         # Append-only: existing serialized Settings widget indexes stay valid.
         required["motion_context_window_frames"] = (
             "INT",
             {
-                "default": H3_MIN_TRAINED_FRAMES,
+                "default": H3_MAX_TRAINED_FRAMES,
                 "min": 56,
                 "max": H3_MAX_TRAINED_FRAMES,
                 "step": 17,
                 "display_name": "10 · MOTION CONTEXT · native H3 window frames",
                 "tooltip": (
                     "Maximum native H3 sample window including the carried AV tail. "
-                    "124 is safe for 8–12 GB VRAM; 209 or 362 reduces chunk count on larger VRAM classes."
+                    "362 restores the proven R37/R41/R42 contract. Smaller values are explicit memory trade-offs."
                 ),
             },
         )
@@ -4251,7 +4637,7 @@ class IAMCCS_ShotboardH3Settings:
             required[name] = (value_type, options)
         controlnet_labels = {
             "h3_controlnet_enabled": ("14 · H3 FUN CONTROLNET · enable", "OFF preserves the standard generation path exactly. ON requires a preprocessed control-video CineLinX module and an installed H3 Fun ControlNet."),
-            "h3_controlnet_name": ("14 · H3 FUN CONTROLNET · model", "Select the Kijai MiniMax H3 Fun ControlNet Union checkpoint from models/controlnet."),
+            "h3_controlnet_name": ("14 · H3 FUN CONTROLNET · model patch", "Select the MiniMax H3 Fun Union checkpoint from models/model_patches. Existing IAMCCS installs in models/controlnet remain compatible."),
             "h3_controlnet_kind": ("14 · H3 FUN CONTROLNET · preprocessor kind", "Declare the already-preprocessed input: DWPose, depth, Canny, HED, MLSD or inpaint. This does not run a hidden preprocessor."),
             "h3_controlnet_strength": ("14 · H3 FUN CONTROLNET · strength", "1.0 is the reference pose-control baseline. Lower values release structure; higher values can over-constrain identity and texture."),
             "h3_controlnet_start_percent": ("14 · H3 FUN CONTROLNET · start percent", "Sampling interval start. 0.0 applies control from the first denoise step."),
@@ -4266,7 +4652,46 @@ class IAMCCS_ShotboardH3Settings:
             options["display_name"] = display_name
             options["tooltip"] = tooltip
             required[name] = (value_type, options)
-        return {"required": required}
+        fused_labels = {
+            "fused_turbo_model_name": (
+                "15 · FUSED FAST H3 · complete diffusion model",
+                "Select the installed MATLOWAI/Kijai fused MiniMax H3 INT8 ConvRot model from diffusion_models. This is a full model, not a LoRA, and is restricted to T2VA.",
+            ),
+            "fused_turbo_sigma_preset": (
+                "15 · FUSED FAST H3 · manual sigma profile",
+                "4, 6 or 8 exact manual-sigma steps. The Fast Preview button sets Euler, 12/3 shifts, denoise 1 and turns other acceleration LoRAs off.",
+            ),
+        }
+        for name in _H3_FUSED_TURBO_SETTINGS_NODE_FIELDS:
+            value_type, source_options = copy.deepcopy(planner_inputs[name])
+            options = dict(source_options) if isinstance(source_options, dict) else {}
+            options["display_name"], options["tooltip"] = fused_labels[name]
+            required[name] = (value_type, options)
+        # User preference for new configurations. Existing workflow widget values
+        # remain authoritative; no migration rewrites a saved sampling recipe.
+        from .iamccs_h3_advisor import preferred_sla_defaults, recipes
+        import nodes as comfy_nodes
+        required["turbo_lora_name"][1]["iamccs_h3_recipes"] = recipes()
+        required["turbo_lora_name"][1]["iamccs_sla_available"] = "H3SLAAttention" in comfy_nodes.NODE_CLASS_MAPPINGS
+        sla_defaults = preferred_sla_defaults(
+            required["turbo_lora_name"][1].get("iamccs_h3_assets", []),
+            required["task_mode"][1].get("default", "auto_from_timeline"),
+            comfy_nodes.NODE_CLASS_MAPPINGS if torch.cuda.is_available() else {},
+        )
+        for name, value in sla_defaults.items():
+            if name in required:
+                required[name][1]["default"] = value
+        return {"required": required, "optional": {
+            **face_swap_schema(),
+            "h3_sla_sparsity": ("FLOAT", {"default": 0.85, "min": 0.0, "max": 0.95, "step": 0.05,
+                "tooltip": "SLA attention only: fraction of key blocks skipped. LightX2V Turbo SLA training recipe uses 0.85."}),
+            "h3_sla_dense_last_steps": ("INT", {"default": 0, "min": 0, "max": 20,
+                "tooltip": "SLA attention only: optional final dense steps for an explicit quality comparison."}),
+            "h3_advisor_state": ("STRING", {"default": "{}", "multiline": False,
+                "tooltip": "Per-mode local advisor state. Proposals apply only after acceptance."}),
+            "seed_policy": (["fixed_per_generation", "random_per_generation", "fixed_per_chunk", "random_per_chunk"], {"default": "fixed_per_generation", "tooltip": "Fixed/random per generation: one seed for all chunks. Fixed per chunk: base + index × stride. Random per chunk: independent seeds derived from the randomized queue seed. Random policies choose a new base when you press Queue in Settings Pro; API clients must supply their base seed."}),
+            "keyframe_joint_latent_new": ("BOOLEAN", {"default": False, "tooltip": "Keyframe Joint only: chain original generated AV latent tails through the LatentGoAhead branch. Destination images remain guides. OFF keeps one joint sample."}),
+        }}
 
     RETURN_TYPES = (SUPERNODE_LINX_TYPE,)
     RETURN_NAMES = ("cine_linx",)
@@ -4274,11 +4699,13 @@ class IAMCCS_ShotboardH3Settings:
     CATEGORY = f"{CATEGORY}/Settings"
 
     def export(self, **kwargs):
+        validate_settings(kwargs)
         settings = {
             str(name): copy.deepcopy(value)
             for name, value in kwargs.items()
             if name not in _H3_SETTINGS_NODE_EXCLUDED_FIELDS
             and name not in _H3_SETTINGS_CINELINX_OMITTED_FIELDS
+            and name not in _H3_SETTINGS_SHOTBOARD_AUTHORITY_FIELDS
         }
         settings_payload = {
             "schema": _H3_SETTINGS_LINX_SCHEMA,
@@ -4307,10 +4734,31 @@ class IAMCCS_ShotboardH3Settings:
         return (cine_linx,)
 
 
+class IAMCCS_ShotboardH3SettingsPro(IAMCCS_ShotboardH3Settings):
+    """The standard H3 Settings contract presented through the PRO UI.
+
+    INPUT_TYPES and export deliberately delegate to the proven Settings node.
+    The two nodes therefore stay identical by field name, type, option list,
+    validation and CineLinX payload.  The JavaScript layer may group, mute or
+    hide compatibility controls, but it never creates a second backend truth.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        # Keep a distinct node class only so the frontend can mount the PRO
+        # layout.  The backend schema itself is a byte-for-byte deep copy of
+        # the standard node, including append-only compatibility fields.
+        return copy.deepcopy(super().INPUT_TYPES())
+
+    def export(self, **kwargs):
+        return super().export(**kwargs)
+
+
 NODE_CLASS_MAPPINGS = {
     "IAMCCS_MiniMaxH3GGUFLoader": IAMCCS_MiniMaxH3GGUFLoader,
     "IAMCCS_MiniMaxH3ShotPlanner": IAMCCS_MiniMaxH3ShotPlanner,
     "IAMCCS_ShotboardH3Settings": IAMCCS_ShotboardH3Settings,
+    "IAMCCS_ShotboardH3SettingsPro": IAMCCS_ShotboardH3SettingsPro,
     "IAMCCS_MiniMaxH3PromptRelayMap": IAMCCS_MiniMaxH3PromptRelayMap,
     "IAMCCS_MiniMaxH3LumosPrompt": IAMCCS_MiniMaxH3LumosPrompt,
     "IAMCCS_MiniMaxH3PlanFrames": IAMCCS_MiniMaxH3PlanFrames,
@@ -4331,6 +4779,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_MiniMaxH3GGUFLoader": "MiniMax H3 GGUF Loader + Spectrum",
     "IAMCCS_MiniMaxH3ShotPlanner": "MiniMax H3 Shotboard",
     "IAMCCS_ShotboardH3Settings": "MiniMax H3 Shotboard Settings → CineLinX",
+    "IAMCCS_ShotboardH3SettingsPro": "IAMCCS H3 Settings PRO → CineLinX",
     "IAMCCS_MiniMaxH3PromptRelayMap": "MiniMax H3 Prompt Map",
     "IAMCCS_MiniMaxH3LumosPrompt": "MiniMax H3 Lumos Prompt Enhancer",
     "IAMCCS_MiniMaxH3PlanFrames": "MiniMax H3 Plan Frames",
@@ -4419,8 +4868,23 @@ from .iamccs_minimax_h3_progressive_spatial import (
     NODE_CLASS_MAPPINGS as _H3_PROGRESSIVE_SPATIAL_NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as _H3_PROGRESSIVE_SPATIAL_NODE_DISPLAY_NAME_MAPPINGS,
 )
+from .iamccs_minimax_h3_masked_loop_guided import (
+    NODE_CLASS_MAPPINGS as _MASKED_LOOP_GUIDED_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _MASKED_LOOP_GUIDED_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_minimax_h3_herrgotts import (
+    NODE_CLASS_MAPPINGS as _HERRGOTTS_DIRECT_AV_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _HERRGOTTS_DIRECT_AV_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_minimax_h3_continuous_router import (
+    NODE_CLASS_MAPPINGS as _CONTINUOUS_ROUTER_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _CONTINUOUS_ROUTER_NODE_DISPLAY_NAME_MAPPINGS,
+)
 
 NODE_CLASS_MAPPINGS.update(_ATOMIC_NODE_CLASS_MAPPINGS)
+from .iamccs_minimax_h3_latent_go_ahead import NODE_CLASS_MAPPINGS as _LGA_CLASSES, NODE_DISPLAY_NAME_MAPPINGS as _LGA_NAMES
+NODE_CLASS_MAPPINGS.update(_LGA_CLASSES)
+NODE_DISPLAY_NAME_MAPPINGS.update(_LGA_NAMES)
 NODE_DISPLAY_NAME_MAPPINGS.update(_ATOMIC_NODE_DISPLAY_NAME_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(_CONTINUITY_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_CONTINUITY_NODE_DISPLAY_NAME_MAPPINGS)
@@ -4454,6 +4918,12 @@ NODE_CLASS_MAPPINGS.update(_H3_EDITOR_DELIVERY_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_H3_EDITOR_DELIVERY_NODE_DISPLAY_NAME_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(_H3_PROGRESSIVE_SPATIAL_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_H3_PROGRESSIVE_SPATIAL_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_MASKED_LOOP_GUIDED_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_MASKED_LOOP_GUIDED_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_HERRGOTTS_DIRECT_AV_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_HERRGOTTS_DIRECT_AV_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_CONTINUOUS_ROUTER_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_CONTINUOUS_ROUTER_NODE_DISPLAY_NAME_MAPPINGS)
 
 from .iamccs_minimax_h3_pixel_refine_variant import (
     NODE_CLASS_MAPPINGS as _PIXEL_REFINE_NODE_CLASS_MAPPINGS,

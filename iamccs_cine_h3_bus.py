@@ -540,6 +540,10 @@ class IAMCCS_CineH3AudioBus:
 
     # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     def publish(self, cine_linx):
+        face_source = _as_dict(cine_linx).get("resources", {}).get("iamccs_h3_face_swap_source")
+        if face_source is not None:
+            audio = face_source.get("audio") or _silent_transport_audio()
+            return (cine_linx, *([audio] * MAX_AUDIO_LANES), json.dumps({"source": "face_swap_video", "audio_owner": "masked_ref2va_backend"}))
         timeline = _audio_timeline(cine_linx)
         segments = [item for item in timeline.get("audioSegments", []) if isinstance(item, dict)]
         audio_mode = _shotplan_audio_mode(cine_linx)
