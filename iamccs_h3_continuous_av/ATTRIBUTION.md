@@ -1,16 +1,16 @@
 # IAMCCS FL2VA Continuous AV engine
 
-The continuation engine in this directory is derived from **Herrgotts H3
-Infinite Continuation Suite v1.2.1**, Copyright 2026 HerrgottMargott.
+Copyright 2026 Carmine Cristallo Scalzi (IAMCCS). Distributed under GPL-3.0.
 
-Upstream source: https://github.com/HerrgottMargott/Herrgotts-H3-Infinite-Continuation-Suite
+The implementation in this directory was independently developed for IAMCCS
+and is informed by continuation methods and public behavior documented by
+**Herrgotts H3 Infinite Continuation Suite v1.2.1**, Copyright 2026
+HerrgottMargott.
 
-Upstream license: GNU General Public License version 3. The original license
-text is retained as `LICENSE`. IAMCCS integration, Shotboard contracts and
-public node naming are Copyright 2026 Carmine Cristallo Scalzi and distributed
-under GPLv3.
+Upstream reference:
+https://github.com/HerrgottMargott/Herrgotts-H3-Infinite-Continuation-Suite
 
-The port is internal to IAMCCS-nodes and removes the runtime dependency on the
-separately installed custom-node package. Core AV-latent transport, phase
-alignment, freeze-tail analysis and seamless stitching remain attributable to
-the upstream project.
+No upstream source code is included in this directory. The upstream GPL-3.0
+license text is retained here as a reference and the upstream project remains
+credited for the relevant continuation-method lineage. IAMCCS integration,
+Shotboard contracts, public node naming and implementation are IAMCCS work.

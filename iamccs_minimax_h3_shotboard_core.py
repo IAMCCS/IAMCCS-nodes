@@ -760,9 +760,12 @@ def _longvid_guide_plan(
     voice_reference_picture_index: int,
     lipsync: bool = False,
     motion_context_tail_frames: int = 0,
+    latent_tail_context_frames: int = 0,
     motion_context_audio: bool = True,
     motion_context_window_frames: int = H3_MAX_TRAINED_FRAMES,
     motion_context_guide_boundary: str = "safe_handoff",
+    terminal_endpoint_mode: str = "hard_image",  # IAMCCS_LONGVID_TERMINAL_ENDPOINT_MODE_V1
+    pianosequenza_hd_context_frames: int = 22,
 ) -> dict[str, Any]:
     """Compile the long-video timeline into stock ``MiniMaxH3AddGuide`` events.
 
@@ -777,6 +780,16 @@ def _longvid_guide_plan(
     if motion_context_tail_frames not in {0, 22, 39, 56}:
         motion_context_tail_frames = 22
     motion_context_enabled = motion_context_tail_frames > 0
+
+    # IAMCCS LongVid Latent Tail Phase 2.
+    # Direct sampled-latent carry shares the 362f physical H3 window but
+    # remains standard longvid_guides, not Motion Context.
+    latent_tail_context_frames = int(latent_tail_context_frames or 0)
+    if latent_tail_context_frames not in {0, 22, 39, 56}:
+        latent_tail_context_frames = 22
+    latent_tail_planner_enabled = bool(
+        latent_tail_context_frames > 0 and not motion_context_enabled
+    )
     # A positioned AddGuide in the middle of a native AV sample is a known
     # source of full-frame flashes on the INT8/ComfyKitchen path.  The safe
     # default makes authored image guides technical handoff points: a chunk
@@ -785,6 +798,20 @@ def _longvid_guide_plan(
     guide_boundary_mode = _text(motion_context_guide_boundary).lower() or "safe_handoff"
     if guide_boundary_mode not in {"safe_handoff", "positioned"}:
         guide_boundary_mode = "safe_handoff"
+
+    # IAMCCS_LONGVID_PIANOSEQUENZA_V2_UPSTREAM_PARITY
+    terminal_endpoint_mode = _text(terminal_endpoint_mode).lower() or "hard_image"
+    if terminal_endpoint_mode == "latent_free":
+        terminal_endpoint_mode = "latent_free_closure"
+    if terminal_endpoint_mode not in {
+        "hard_image", "latent_free_closure",
+        "pianosequenza_linear", "pianosequenza_drift", "pianosequenza_native",
+        "pianosequenza_phase", "pianosequenza_frozen", "pianosequenza_2stage", "pianosequenza_hd",
+    }:
+        terminal_endpoint_mode = "hard_image"
+    pianosequenza_hd_context_frames = int(pianosequenza_hd_context_frames or 22)
+    if pianosequenza_hd_context_frames not in {22, 39, 56}:
+        pianosequenza_hd_context_frames = 22
     plan_mode = (
         "longvid_motion_context"
         if motion_context_enabled
@@ -793,6 +820,17 @@ def _longvid_guide_plan(
     chunk_task = "ref2va" if lipsync else "t2va"
     guided_audio_drive = bool(not lipsync and audio_mode == "h3_custom_audio_drive")
     positioned_guides_v2 = bool(plan_mode == "longvid_guides" and not guided_audio_drive)
+    # PIANOSEQUENZA_HD uses the ordinary selected H3 technical window (362f in
+    # the normal recipe), but continuation chunks reserve their inherited
+    # native tail *inside* that window.  This is independent from the optional
+    # Adaptive Guide Window policy: STANDARD 362 therefore remains available
+    # without counting inherited context as new editorial time.
+    pianosequenza_hd_standard_context = bool(
+        terminal_endpoint_mode == "pianosequenza_hd"
+        and positioned_guides_v2
+        and not motion_context_enabled
+        and not latent_tail_planner_enabled
+    )
     guide_prompt_header = (
         "[LONG MULTI-SHOT MOTION CONTEXT AUTO CHAIN]\n"
         "The previous chunk's native video/audio latent is pinned at the head of each continuation chunk. Preserve motion direction, identity, scene state and audio continuity across technical H3 joins while following the positioned Shotboard shot guides. Different image guides remain authored shot anchors, not a guaranteed continuous camera morph."
@@ -940,9 +978,17 @@ def _longvid_guide_plan(
         )
     )
     requested_motion_window = min(H3_MAX_TRAINED_FRAMES, requested_motion_window)
-    visible_capacity = (
-        max(H3_MIN_FRAMES, requested_motion_window - motion_context_tail_frames)
+    continuation_tail_frames = (
+        motion_context_tail_frames
         if motion_context_enabled
+        else (latent_tail_context_frames if latent_tail_planner_enabled else 0)
+    )
+    continuation_context_enabled = bool(
+        motion_context_enabled or latent_tail_planner_enabled
+    )
+    visible_capacity = (
+        max(H3_MIN_FRAMES, requested_motion_window - continuation_tail_frames)
+        if continuation_context_enabled
         else H3_MAX_TRAINED_FRAMES
     )
     while cursor < requested_frames:
@@ -984,6 +1030,52 @@ def _longvid_guide_plan(
                             minimum_tail = 0
 
             frame_count = align_h3_frames(visible_frame_count + hidden_tail)
+        elif latent_tail_planner_enabled:
+            # IAMCCS Adaptive Guide Windows.
+            #
+            # Keep the authored Shotboard clock global, but bound the H3 solve.
+            # Chunk 1 is a complete legal technical window.  Successor chunks
+            # reserve the leading latent-tail context *inside* the same window,
+            # so only the suffix advances editorial time.  Atomic later injects
+            # the previous sampled AV tail at this hidden prefix and removes the
+            # prefix from delivery.  This is the same window/continuation idea
+            # used by robust long-video H3 systems, while preserving IAMCCS
+            # absolute positioned guides instead of converting them into cuts.
+            context_prefix = int(latent_tail_context_frames) if chunks else 0
+            if chunks:
+                unique_capacity = max(1, int(requested_motion_window) - context_prefix)
+                visible_frame_count = min(unique_capacity, remaining)
+                frame_count = align_h3_frames(context_prefix + visible_frame_count)
+            else:
+                unique_capacity = int(requested_motion_window)
+                visible_frame_count = min(unique_capacity, remaining)
+                frame_count = align_h3_frames(visible_frame_count)
+            if frame_count > int(requested_motion_window):
+                # This can only occur on a malformed/non-grid context contract.
+                # Fail closed rather than silently exceeding the chosen window.
+                raise ValueError(
+                    "IAMCCS Adaptive Guide Window cannot fit the requested visible interval "
+                    f"inside {requested_motion_window}f (context={context_prefix}f, "
+                    f"visible={visible_frame_count}f, aligned={frame_count}f)."
+                )
+            trim_frames = 0
+        elif pianosequenza_hd_standard_context:
+            # HD STANDARD WINDOW contract.  Keep the ordinary technical window
+            # size, reserve the predecessor tail as a hidden prefix on chunk 2+,
+            # and advance the global Shotboard clock only by the newly generated
+            # suffix.  The atomic backend shifts positioned guides by the hidden
+            # prefix and removes it again at delivery.
+            context_prefix = int(pianosequenza_hd_context_frames) if chunks else 0
+            unique_capacity = max(1, int(requested_motion_window) - context_prefix)
+            visible_frame_count = min(unique_capacity, remaining)
+            frame_count = align_h3_frames(context_prefix + visible_frame_count)
+            if frame_count > int(requested_motion_window):
+                raise ValueError(
+                    "PIANOSEQUENZA_HD cannot fit hidden continuation context inside "
+                    f"the selected {requested_motion_window}f technical window "
+                    f"(context={context_prefix}f, visible={visible_frame_count}f, aligned={frame_count}f)."
+                )
+            trim_frames = 0
         else:
             requested_visible_frames = min(H3_MAX_TRAINED_FRAMES, remaining)
             frame_count = align_h3_frames(requested_visible_frames)
@@ -1047,6 +1139,7 @@ def _longvid_guide_plan(
                     }
                 )
         active_visual_guide = None
+        terminal_truth_guide = None
         terminal_reanchor = False
         if positioned_guides_v2:
             # Resolve the visual slot that owns the current Shotboard time.
@@ -1062,6 +1155,13 @@ def _longvid_guide_plan(
                 )
                 if candidate_start <= cursor < candidate_end:
                     active_visual_guide = candidate
+                # The last authored row can begin later inside this technical
+                # chunk and still own the requested global end frame.
+                if candidate_start < requested_frames <= candidate_end:
+                    terminal_truth_guide = candidate
+
+            if terminal_truth_guide is None:
+                terminal_truth_guide = active_visual_guide
 
             authored_image_starts_here = any(
                 str(item.get("kind", "")).strip().lower() == "image"
@@ -1071,9 +1171,8 @@ def _longvid_guide_plan(
             if (
                 chunk_index > 0
                 and is_final_technical_chunk
-                and not authored_image_starts_here
-                and isinstance(active_visual_guide, dict)
-                and int(active_visual_guide.get("end_frame", 0) or 0) >= requested_frames
+                and isinstance(terminal_truth_guide, dict)
+                and int(terminal_truth_guide.get("end_frame", 0) or 0) >= requested_frames
                 and visible_frame_count > 0
             ):
                 # The previous generated frame owns the opening; the exact
@@ -1081,10 +1180,10 @@ def _longvid_guide_plan(
                 # Re-using it at the END is intentionally different from the
                 # old bug that re-injected the same still at local frame zero.
                 terminal_local_frame = max(0, requested_frames - cursor - 1)
-                terminal_id = str(active_visual_guide.get("id") or "visual_guide")
+                terminal_id = str(terminal_truth_guide.get("id") or "visual_guide")
                 local_guides.append(
                     {
-                        **active_visual_guide,
+                        **terminal_truth_guide,
                         "id": f"{terminal_id}__terminal_reanchor",
                         "global_frame": requested_frames - 1,
                         "local_frame": terminal_local_frame,
@@ -1093,6 +1192,7 @@ def _longvid_guide_plan(
                         "continued_from_previous_chunk": True,
                         "point_anchor": True,
                         "terminal_reanchor": True,
+                        "terminal_endpoint_mode": terminal_endpoint_mode,
                     }
                 )
                 terminal_reanchor = True
@@ -1111,31 +1211,72 @@ def _longvid_guide_plan(
             positioned_guides_v2
             and chunk_index > 0
             and not authored_opening_guide
+            and terminal_endpoint_mode != "pianosequenza_hd"
         )
         effective_chunk_task = "i2va" if use_generated_bridge else chunk_task
 
         transition_prompt_lines: list[str] = []
         transition_contract = ""
+        prompt_guide_bindings: list[dict] = []
         if positioned_guides_v2:
-            # Positioned Guides keeps the backend structural only: the text
-            # encoder receives zero IAMCCS-authored prose.  Global/local text
-            # comes exclusively from live Shotboard prompt fields; labels,
-            # ids, timestamps, notes and camera metadata remain metadata.
-            local_prompt_lines = [
-                _text(item.get("prompt"))
-                for item in image_local_guides
-                if _text(item.get("prompt"))
-            ]
+            # Text follows authored intervals, images remain point anchors.
+            # In particular, an interval crossing a window boundary retains
+            # its text WITHOUT re-injecting its old image at frame zero.
+            # A synthetic terminal reanchor may intentionally give the final
+            # technical chunk sole semantic authority to its final authored
+            # Shotboard row. This is an explicit LongVid creative contract;
+            # the guide itself still remains an image endpoint.
+            timed_local_prompts = _bool(timeline.get("longvid_prompt_timing", True), True)
+            prompt_prefix_frames = (
+                (int(latent_tail_context_frames) if chunk_index > 0 else 0)
+                if latent_tail_planner_enabled
+                else (
+                    int(pianosequenza_hd_context_frames)
+                    if pianosequenza_hd_standard_context and chunk_index > 0
+                    else 0
+                )
+            ) + (1 if use_generated_bridge else 0)
+            local_prompt_lines = []
+            for item in visual_guides:
+                start = int(item["global_frame"])
+                end = int(item.get("end_frame", start + int(item.get("duration_frames", 1))))
+                overlap_start, overlap_end = max(cursor, start), min(chunk_end, end)
+                authored_text = _text(item.get("prompt"))
+                if overlap_start >= overlap_end or not authored_text:
+                    continue
+                if timed_local_prompts:
+                    local_start = (overlap_start - cursor + prompt_prefix_frames) / H3_FPS
+                    local_end = (overlap_end - cursor + prompt_prefix_frames) / H3_FPS
+                    local_prompt_lines.append(
+                        f"Timeline {local_start:.2f}s to {local_end:.2f}s: {authored_text}"
+                    )
+                else:
+                    local_start = (overlap_start - cursor + prompt_prefix_frames) / H3_FPS
+                    local_end = (overlap_end - cursor + prompt_prefix_frames) / H3_FPS
+                    local_prompt_lines.append(authored_text)
+                prompt_guide_bindings.append({
+                    "guide_id": str(item.get("id") or ""),
+                    "guide_global_frame": start,
+                    "guide_end_frame": end,
+                    "chunk_overlap_start_frame": overlap_start,
+                    "chunk_overlap_end_frame": overlap_end,
+                    "sample_local_start_seconds": round(local_start, 6),
+                    "sample_local_end_seconds": round(local_end, 6),
+                    "prompt": authored_text,
+                    "conditioning_active": True,
+                })
             terminal_truth_prompt = (
-                _text(active_visual_guide.get("prompt"))
-                if terminal_reanchor and isinstance(active_visual_guide, dict)
+                _text(terminal_truth_guide.get("prompt"))
+                if terminal_reanchor and isinstance(terminal_truth_guide, dict)
                 else ""
             )
-            if terminal_reanchor and terminal_truth_prompt:
-                # The active final Shotboard row owns the overflow tail. No
-                # backend wording is added and earlier row prompts are not
-                # replayed after the final authored checkpoint.
+            final_prompt_only = bool(terminal_reanchor and terminal_truth_prompt)
+            if final_prompt_only:
+                terminal_id = str(terminal_truth_guide.get("id") or "")
                 creative_prompt = terminal_truth_prompt
+                local_prompt_lines = [terminal_truth_prompt]
+                for item in prompt_guide_bindings:
+                    item["conditioning_active"] = str(item.get("guide_id") or "") == terminal_id
             else:
                 creative_prompt = _compose_prompt(
                     global_prompt=_text(global_prompt),
@@ -1172,7 +1313,11 @@ def _longvid_guide_plan(
             "slot_label": f"LongVid {chunk_index + 1:03d}",
             "task_mode": effective_chunk_task,
             "frame_count": frame_count,
-            "requested_frame_count": visible_frame_count if motion_context_enabled else min(H3_MAX_TRAINED_FRAMES, remaining),
+            "requested_frame_count": (
+                visible_frame_count
+                if (motion_context_enabled or latent_tail_planner_enabled or pianosequenza_hd_standard_context)
+                else min(H3_MAX_TRAINED_FRAMES, remaining)
+            ),
             **({
                 "visible_frame_count": visible_frame_count,
             "motion_context_trim_frames": trim_frames,
@@ -1182,9 +1327,43 @@ def _longvid_guide_plan(
             ),
             "motion_context_guide_boundary": guide_boundary_mode,
             } if motion_context_enabled else {}),
+            **({
+                "latent_tail_planner_context_frames": int(latent_tail_context_frames),
+                "latent_tail_visible_capacity": int(
+                    requested_motion_window - (latent_tail_context_frames if chunk_index > 0 else 0)
+                ),
+                "latent_tail_continuation_chunk": bool(chunk_index > 0),
+                "latent_tail_adaptive_window": True,
+                "latent_tail_sample_frames": int(frame_count),
+                "latent_tail_context_prefix_frames": int(latent_tail_context_frames if chunk_index > 0 else 0),
+                "latent_tail_padding_frames": max(
+                    0,
+                    int(frame_count)
+                    - int(latent_tail_context_frames if chunk_index > 0 else 0)
+                    - int(visible_frame_count),
+                ),
+                "latent_tail_window_frames": int(requested_motion_window),
+            } if latent_tail_planner_enabled else {}),
+            **({
+                "pianosequenza_hd_context_prefix_frames": int(
+                    pianosequenza_hd_context_frames if chunk_index > 0 else 0
+                ),
+                "pianosequenza_hd_continuation_chunk": bool(chunk_index > 0),
+                "pianosequenza_hd_hidden_context": bool(chunk_index > 0),
+                "pianosequenza_hd_sample_frames": int(frame_count),
+                "pianosequenza_hd_padding_frames": max(
+                    0,
+                    int(frame_count)
+                    - int(pianosequenza_hd_context_frames if chunk_index > 0 else 0)
+                    - int(visible_frame_count),
+                ),
+                "pianosequenza_hd_window_frames": int(requested_motion_window),
+            } if pianosequenza_hd_standard_context else {}),
             "fps": H3_FPS,
             "duration_seconds": frame_count / H3_FPS,
-            **({"visible_duration_seconds": visible_frame_count / H3_FPS} if motion_context_enabled else {}),
+            **({
+                "visible_duration_seconds": visible_frame_count / H3_FPS
+            } if (motion_context_enabled or latent_tail_planner_enabled or pianosequenza_hd_standard_context) else {}),
             "timeline_start_frame": cursor,
             "timeline_start_seconds": cursor / H3_FPS,
             "overlap_frames": 0,
@@ -1217,6 +1396,7 @@ def _longvid_guide_plan(
             "flf_anchor_contract": "longvid_positioned_guides",
             "frame_source": "longvid_global_timeline",
             "guides": local_guides,
+            **({"prompt_guide_bindings": prompt_guide_bindings} if positioned_guides_v2 else {}),
             **({
                 "positioned_guides_v2": {
                     "enabled": True,
@@ -1227,13 +1407,21 @@ def _longvid_guide_plan(
                     ),
                     "duplicate_cross_window_guides": False,
                     "transition_contract_lines": len(transition_prompt_lines),
-                    "truth_revision": 4,
-                    "labels_in_conditioning": False,
+                    "truth_revision": 7,
+                    "labels_in_conditioning": bool(
+                        timed_local_prompts and prompt_mapping != "global_only" and not final_prompt_only
+                    ),
+                    "prompt_timing": (
+                        "final_authored_prompt_only"
+                        if final_prompt_only
+                        else ("sample_local_intervals" if timed_local_prompts else "authored_text_only")
+                    ),
                     "hardcoded_conditioning_text": False,
                     "terminal_reanchor": bool(terminal_reanchor),
+                    "terminal_endpoint_mode": terminal_endpoint_mode,
                     "semantic_authority": (
-                        "active_shotboard_visual_prompt"
-                        if terminal_reanchor and terminal_truth_prompt
+                        "final_active_shotboard_visual_prompt_only"
+                        if final_prompt_only
                         else "shotboard_prompt_mapping"
                     ),
                 },
@@ -1266,7 +1454,7 @@ def _longvid_guide_plan(
         "backend": (
             "r37_iamccs_motion_context_upstream_v012"
             if motion_context_enabled
-            else ("r42_positioned_guides_v4_pure_shotboard_prompts" if positioned_guides_v2 else "r31_stock_minimax_h3_add_guide")
+            else (("r42_positioned_guides_v5_adaptive_windows" if latent_tail_planner_enabled else "r42_positioned_guides_v4_pure_shotboard_prompts") if positioned_guides_v2 else "r31_stock_minimax_h3_add_guide")
         ),
         "lipsync": bool(lipsync or guided_audio_drive),
         "guided_audio_drive": guided_audio_drive,
@@ -1274,11 +1462,12 @@ def _longvid_guide_plan(
     }
     return {
         "schema": "iamccs.minimax_h3.shotplan",
-        "schema_version": 12 if positioned_guides_v2 else 9,
+        "schema_version": 13 if positioned_guides_v2 else 9,
+        **({"prompt_contract_revision": "v7_final_prompt_only_bound_guides"} if positioned_guides_v2 else {}),
         "backend_revision": (
             "r37-motion-context-variant"
             if motion_context_enabled
-            else ("r42-positioned-guides-v4-pure-shotboard-prompts" if positioned_guides_v2 else "r31")
+            else ("r42-positioned-guides-v5-adaptive-windows" if (positioned_guides_v2 and latent_tail_planner_enabled) else ("r42-positioned-guides-v4-pure-shotboard-prompts" if positioned_guides_v2 else "r31"))
         ),
         "source_timeline_schema": _text(timeline.get("schema")),
         "fps": H3_FPS,
@@ -1318,6 +1507,7 @@ def _longvid_guide_plan(
         },
         } if motion_context_enabled else {}),
         "audio_mode": audio_mode,
+        "terminal_endpoint_mode": terminal_endpoint_mode,  # IAMCCS_LONGVID_ENDPOINT_STRATEGIES_V1
         "prompt_mapping": prompt_mapping,
         "flf_join_mode": "h3_keyframe_cut",
         "flf_overlap_frames": 0,
@@ -1345,7 +1535,11 @@ def _longvid_guide_plan(
         "chunk_policy": (
             f"longvid_motion_context_visible_{visible_capacity}_window_{requested_motion_window}_model_max_{H3_MAX_TRAINED_FRAMES}"
             if motion_context_enabled
-            else "longvid_global_clock_chunked_at_362_frames"
+            else (
+                f"longvid_adaptive_guides_window_{requested_motion_window}_latent_tail_{latent_tail_context_frames}"
+                if latent_tail_planner_enabled
+                else "longvid_global_clock_chunked_at_362_frames"
+            )
         ),
         "lipsync": {
             "enabled": bool(lipsync or guided_audio_drive),
@@ -1359,7 +1553,7 @@ def _longvid_guide_plan(
         "i2v_hard_cut_mode": False,
         "ref2v_hard_cut_mode": False,
         "legacy_explicit_last": False,
-        "chunk_max_frames": requested_motion_window if motion_context_enabled else H3_MAX_TRAINED_FRAMES,
+        "chunk_max_frames": requested_motion_window if (motion_context_enabled or latent_tail_planner_enabled) else H3_MAX_TRAINED_FRAMES,
         "global_prompt": _text(global_prompt),
         "slots": slots,
         "segments": slots,
@@ -1581,8 +1775,10 @@ def build_shotplan(
     generation_mode: str | None = None,
     chunk_seconds: float | None = None,
     motion_context_tail_frames: int = 22,
+    latent_tail_context_frames: int = 0,
     motion_context_audio: bool = True,
     motion_context_window_frames: int = H3_MAX_TRAINED_FRAMES,
+    longvid_terminal_endpoint_mode: str = "hard_image",
     keyframe_joint_latent_new: bool = False,
 ) -> dict[str, Any]:
     """Translate a Shotboard timeline into executable MiniMax H3 chunks.
@@ -1737,6 +1933,7 @@ def build_shotplan(
             motion_context_tail_frames=0,
             motion_context_audio=motion_context_audio,
             motion_context_window_frames=motion_context_window_frames,
+            terminal_endpoint_mode=longvid_terminal_endpoint_mode,
         )
         return _masked_loop_guided_plan(
             base,
@@ -1784,8 +1981,15 @@ def build_shotplan(
             # old REF2VA-reference + duplicated AddGuide image topology.
             lipsync=False,
             motion_context_tail_frames=(motion_context_tail_frames if motion_context_requested else 0),
+            latent_tail_context_frames=latent_tail_context_frames,
             motion_context_audio=motion_context_audio,
             motion_context_window_frames=motion_context_window_frames,
+            terminal_endpoint_mode=longvid_terminal_endpoint_mode,
+            pianosequenza_hd_context_frames=(
+                motion_context_tail_frames
+                if _text(longvid_terminal_endpoint_mode).lower() == "pianosequenza_hd"
+                else 22
+            ),
         )
         if joint_keyframes_requested:
             chunks = plan.get("chunks", [])
@@ -1977,6 +2181,10 @@ def build_shotplan(
         chunk_task = _chunk_task(task_mode, audio_mode, has_first, bool(last_path))
         start_frame = unique_frames_total
         unique_frames = frame_count - motion_trim_frames if continuous_guided_requested else frame_count - overlap
+        # The final-prompt-only contract belongs exclusively to LongVid's
+        # synthetic terminal reanchor.  Keyframe Joint / Latent New keeps the
+        # ordinary Shotboard contract on every interval: global + local +
+        # optional audio prompt.
         creative_prompt = _compose_prompt(
             global_prompt=_text(global_prompt),
             local_prompt=_text(slot.get("prompt")),
@@ -2058,6 +2266,14 @@ def build_shotplan(
             "audio_handoff_silence_tail_seconds": 0.0 if lipsync_requested or locked_audio_hard_cut or slot_index + 1 >= len(slots) else 1.0,
             "local_prompt": slot["prompt"],
             "audio_prompt": slot["audio_prompt"],
+            "prompt_guide_bindings": [{
+                "guide_id": slot["id"],
+                "guide_start_seconds": float(slot.get("start_seconds", 0.0)),
+                "guide_prompt": _text(slot.get("prompt")),
+                "destination_image": last_path,
+                "final_prompt_only": False,
+                "conditioning_active": True,
+            }],
             "transition": (
                 "motion_context_continuation"
                 if motion_trim_frames

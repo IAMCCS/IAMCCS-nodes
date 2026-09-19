@@ -1,4 +1,4 @@
-﻿# ==========================================================
+# ==========================================================
 # __init__.py — Registro nodi IAMCCS
 # ==========================================================
 
@@ -1449,6 +1449,336 @@ def setup_api_routes() -> None:
                     return web.json_response({"error": "Preview source is outside IAMCCS parking."}, status=400)
                 preview = ensure_parked_take_preview_video(source)
                 return web.json_response({"ok": True, **preview})
+            except Exception as exc:
+                return web.json_response({"error": str(exc)}, status=500)
+
+
+        # IAMCCS_VIDEO_EDITOR_SERVER_MEDIA_IMPORT_V2
+        @routes.post("/api/iamccs/cine/video_editor/upload_media")
+        async def iamccs_video_editor_upload_media(request):
+            """Upload Video Editor media without abusing ComfyUI's image endpoint."""
+            try:
+                import re as _re
+                import folder_paths
+
+                allowed_ext = {
+                    ".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpeg", ".mpg", ".ts", ".m2ts",
+                    ".wav", ".mp3", ".flac", ".ogg", ".m4a", ".aac", ".aif", ".aiff", ".wma", ".opus",
+                }
+                input_root = os.path.abspath(folder_paths.get_input_directory())
+                raw_subfolder = str(request.rel_url.query.get("subfolder", "") or "").replace("\\", "/").strip("/")
+                if raw_subfolder:
+                    pieces = [piece for piece in raw_subfolder.split("/") if piece and piece not in {".", ".."}]
+                    if len(pieces) != len([piece for piece in raw_subfolder.split("/") if piece]):
+                        return web.json_response({"error": "Invalid media subfolder."}, status=400)
+                    safe_pieces = [_re.sub(r"[^A-Za-z0-9._ -]+", "_", piece).strip(" .") or "media" for piece in pieces]
+                    subfolder = "/".join(safe_pieces)
+                else:
+                    subfolder = "IAMCCS_video_editor_manual"
+
+                destination_dir = os.path.abspath(os.path.join(input_root, subfolder.replace("/", os.sep)))
+                if os.path.commonpath([input_root, destination_dir]) != input_root:
+                    return web.json_response({"error": "Media destination is outside ComfyUI input."}, status=400)
+                os.makedirs(destination_dir, exist_ok=True)
+
+                reader = await request.multipart()
+                media_field = None
+                while True:
+                    field = await reader.next()
+                    if field is None:
+                        break
+                    if field.name in {"media", "image", "file"} and getattr(field, "filename", None):
+                        media_field = field
+                        break
+                if media_field is None:
+                    return web.json_response({"error": "Missing media upload field."}, status=400)
+
+                original_name = os.path.basename(str(media_field.filename or "media.bin"))
+                original_name = _re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", original_name).strip(" .") or "media.bin"
+                ext = os.path.splitext(original_name)[1].lower()
+                if ext not in allowed_ext:
+                    return web.json_response({"error": f"Unsupported Video Editor media extension: {ext or '(none)'}"}, status=400)
+
+                stem, suffix = os.path.splitext(original_name)
+                filename = original_name
+                destination = os.path.join(destination_dir, filename)
+                counter = 1
+                while os.path.exists(destination):
+                    filename = f"{stem}_{counter}{suffix}"
+                    destination = os.path.join(destination_dir, filename)
+                    counter += 1
+
+                temporary = destination + ".uploading"
+                try:
+                    with open(temporary, "wb") as handle:
+                        while True:
+                            chunk = await media_field.read_chunk(size=1024 * 1024)
+                            if not chunk:
+                                break
+                            handle.write(chunk)
+                    if not os.path.isfile(temporary) or os.path.getsize(temporary) <= 0:
+                        raise ValueError("Uploaded media is empty.")
+                    os.replace(temporary, destination)
+                finally:
+                    if os.path.exists(temporary):
+                        try:
+                            os.remove(temporary)
+                        except Exception:
+                            pass
+
+                return web.json_response({
+                    "ok": True,
+                    "name": filename,
+                    "subfolder": subfolder,
+                    "type": "input",
+                    "path": "/".join(part for part in (subfolder, filename) if part),
+                    "size": int(os.path.getsize(destination)),
+                })
+            except Exception as exc:
+                return web.json_response({"error": str(exc)}, status=500)
+
+        @routes.post("/api/iamccs/cine/video_editor/probe_manual_media")
+        async def iamccs_video_editor_probe_manual_media(request):
+            """Probe an uploaded video server-side and materialize browser/audio proxies."""
+            try:
+                import hashlib
+                import subprocess
+                import wave
+                import shutil as _shutil
+                import folder_paths
+                from .cine_multigeneration import _input_media_path
+
+                try:
+                    payload = await request.json()
+                except Exception:
+                    payload = {}
+                media_path = str(payload.get("path") or payload.get("media_path") or "").strip()
+                if not media_path:
+                    return web.json_response({"error": "Missing uploaded media path."}, status=400)
+                source = _input_media_path(media_path)
+                if not source or not os.path.isfile(source):
+                    return web.json_response({"error": f"Uploaded media not found: {media_path}"}, status=404)
+
+                duration = 0.0
+                fps = 0.0
+                width = 0
+                height = 0
+                frame_count = 0
+                probe_method = []
+                source_has_audio = None
+                try:
+                    import av
+                    with av.open(source) as media_container:
+                        source_has_audio = any(stream.type == "audio" for stream in media_container.streams)
+                except Exception:
+                    pass
+
+                try:
+                    import cv2  # type: ignore
+                    cap = cv2.VideoCapture(source)
+                    if cap.isOpened():
+                        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+                        frame_count = max(0, int(round(float(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0))))
+                        width = max(0, int(round(float(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0.0))))
+                        height = max(0, int(round(float(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0.0))))
+                        if fps > 0 and frame_count > 0:
+                            duration = frame_count / fps
+                        probe_method.append("opencv")
+                    cap.release()
+                except Exception:
+                    pass
+
+                if duration <= 0 or width <= 0 or height <= 0:
+                    try:
+                        import av  # type: ignore
+                        with av.open(source) as container:
+                            video_stream = next((stream for stream in container.streams if stream.type == "video"), None)
+                            if video_stream is not None:
+                                if fps <= 0:
+                                    try:
+                                        fps = float(video_stream.average_rate or video_stream.base_rate or 0.0)
+                                    except Exception:
+                                        fps = 0.0
+                                width = width or int(getattr(video_stream.codec_context, "width", 0) or 0)
+                                height = height or int(getattr(video_stream.codec_context, "height", 0) or 0)
+                                if frame_count <= 0:
+                                    frame_count = max(0, int(getattr(video_stream, "frames", 0) or 0))
+                                if duration <= 0 and video_stream.duration is not None and video_stream.time_base is not None:
+                                    duration = float(video_stream.duration * video_stream.time_base)
+                                if duration <= 0 and container.duration:
+                                    duration = float(container.duration) / 1_000_000.0
+                                if duration <= 0 and fps > 0 and frame_count > 0:
+                                    duration = frame_count / fps
+                                probe_method.append("pyav")
+                    except Exception:
+                        pass
+
+                if duration <= 0:
+                    return web.json_response({
+                        "error": "Server could not determine video duration. OpenCV/PyAV could not probe this file.",
+                        "path": media_path,
+                    }, status=422)
+
+                input_root = os.path.abspath(folder_paths.get_input_directory())
+                cache_dir = os.path.join(input_root, "IAMCCS_video_editor_manual_cache")
+                os.makedirs(cache_dir, exist_ok=True)
+                stat = os.stat(source)
+                digest = hashlib.sha1(
+                    f"{os.path.abspath(source)}|{stat.st_size}|{stat.st_mtime_ns}".encode("utf-8", "ignore")
+                ).hexdigest()[:14]
+                stem = os.path.splitext(os.path.basename(source))[0]
+                safe_stem = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in stem)[:80] or "video"
+
+                def _ffmpeg_exe():
+                    candidate = _shutil.which("ffmpeg")
+                    if candidate:
+                        return candidate
+                    try:
+                        import imageio_ffmpeg  # type: ignore
+                        candidate = imageio_ffmpeg.get_ffmpeg_exe()
+                        if candidate and os.path.isfile(candidate):
+                            return candidate
+                    except Exception:
+                        pass
+                    return ""
+
+                def _descriptor(path):
+                    if not path or not os.path.isfile(path):
+                        return None
+                    absolute = os.path.abspath(path)
+                    try:
+                        if os.path.commonpath([input_root, absolute]) != input_root:
+                            return None
+                    except Exception:
+                        return None
+                    relative = os.path.relpath(absolute, input_root).replace(os.sep, "/")
+                    parts = relative.split("/")
+                    return {
+                        "path": relative,
+                        "filename": parts[-1],
+                        "subfolder": "/".join(parts[:-1]),
+                        "type": "input",
+                    }
+
+                ffmpeg = _ffmpeg_exe()
+                creationflags = 0x08000000 if os.name == "nt" else 0
+                preview_path = ""
+                audio_path = ""
+                ffmpeg_errors = []
+
+                if ffmpeg:
+                    preview_path = os.path.join(cache_dir, f"{safe_stem}_{digest}_preview.mp4")
+                    if not os.path.isfile(preview_path) or os.path.getmtime(preview_path) < stat.st_mtime:
+                        commands = [
+                            [
+                                ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                                "-i", source, "-map", "0:v:0", "-an",
+                                "-c:v", "libx264", "-preset", "veryfast", "-crf", "27",
+                                "-pix_fmt", "yuv420p", "-movflags", "+faststart", preview_path,
+                            ],
+                            [
+                                ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                                "-i", source, "-map", "0:v:0", "-an",
+                                "-c:v", "mpeg4", "-q:v", "5", "-movflags", "+faststart", preview_path,
+                            ],
+                        ]
+                        ok = False
+                        for command in commands:
+                            try:
+                                subprocess.run(
+                                    command,
+                                    stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL,
+                                    timeout=300,
+                                    check=True,
+                                    creationflags=creationflags,
+                                )
+                                if os.path.isfile(preview_path) and os.path.getsize(preview_path) > 1024:
+                                    ok = True
+                                    break
+                            except Exception as exc:
+                                ffmpeg_errors.append(f"preview:{exc}")
+                        if not ok:
+                            try:
+                                os.remove(preview_path)
+                            except Exception:
+                                pass
+                            preview_path = ""
+
+                    audio_path = os.path.join(cache_dir, f"{safe_stem}_{digest}_embedded.wav")
+                    if not os.path.isfile(audio_path) or os.path.getmtime(audio_path) < stat.st_mtime:
+                        try:
+                            subprocess.run(
+                                [
+                                    ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+                                    "-i", source, "-map", "0:a:0?", "-vn",
+                                    "-ac", "2", "-ar", "48000", "-c:a", "pcm_s16le", audio_path,
+                                ],
+                                stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL,
+                                timeout=300,
+                                check=True,
+                                creationflags=creationflags,
+                            )
+                        except Exception as exc:
+                            ffmpeg_errors.append(f"audio:{exc}")
+                    if not os.path.isfile(audio_path) or os.path.getsize(audio_path) <= 44:
+                        try:
+                            os.remove(audio_path)
+                        except Exception:
+                            pass
+                        audio_path = ""
+
+                if not audio_path:
+                    try:
+                        import torchaudio  # type: ignore
+                        waveform, sample_rate = torchaudio.load(source)
+                        if torch.is_tensor(waveform) and int(waveform.numel()) > 0:
+                            if waveform.dim() == 1:
+                                waveform = waveform.unsqueeze(0)
+                            if int(waveform.shape[0]) == 1:
+                                waveform = waveform.repeat(2, 1)
+                            elif int(waveform.shape[0]) > 2:
+                                waveform = waveform[:2]
+                            audio_path = os.path.join(cache_dir, f"{safe_stem}_{digest}_embedded.wav")
+                            torchaudio.save(audio_path, waveform.detach().cpu(), int(sample_rate or 48000))
+                    except Exception:
+                        audio_path = ""
+
+                preview = _descriptor(preview_path) or _descriptor(source)
+                audio = None
+                if audio_path:
+                    try:
+                        with wave.open(audio_path, "rb") as wav:
+                            audio_frames = int(wav.getnframes())
+                            sample_rate = int(wav.getframerate() or 48000)
+                            channels = int(wav.getnchannels() or 2)
+                        audio = {
+                            **(_descriptor(audio_path) or {}),
+                            "duration": audio_frames / max(1, sample_rate),
+                            "sample_rate": sample_rate,
+                            "channels": channels,
+                        }
+                    except Exception as exc:
+                        ffmpeg_errors.append(f"audio_meta:{exc}")
+                        audio = _descriptor(audio_path)
+
+                return web.json_response({
+                    "ok": True,
+                    "path": media_path,
+                    "duration": float(duration),
+                    "fps": float(fps or 0.0),
+                    "frame_count": int(frame_count),
+                    "width": int(width),
+                    "height": int(height),
+                    "probe_method": "+".join(probe_method) or "unknown",
+                    "preview_video": preview,
+                    "audio": audio,
+                    "has_audio": bool(audio),
+                    "source_has_audio": source_has_audio,
+                    "ffmpeg_available": bool(ffmpeg),
+                    "ffmpeg_warnings": ffmpeg_errors[-4:],
+                })
             except Exception as exc:
                 return web.json_response({"error": str(exc)}, status=500)
 

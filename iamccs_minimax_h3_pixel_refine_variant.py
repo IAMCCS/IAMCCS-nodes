@@ -141,6 +141,120 @@ def _finish_segment(intermediate, output, audio, trim, frames, width, height, fp
             raise RuntimeError("R38B delivery encode failed: " + completed.stderr.decode("utf8", "replace")[-2000:])
 
 
+def _remove_audio_frame_slice(audio, frame_index: int, fps: float = 24.0):
+    """Remove one video-frame-equivalent slice from native audio."""
+    if not isinstance(audio, dict) or not torch.is_tensor(audio.get("waveform")):
+        return audio
+    result = dict(audio)
+    waveform = result["waveform"]
+    sample_rate = max(1, int(result.get("sample_rate", 32000) or 32000))
+    start = max(0, int(round(float(frame_index) * sample_rate / float(fps))))
+    end = max(start, int(round(float(frame_index + 1) * sample_rate / float(fps))))
+    start = min(start, int(waveform.shape[-1]))
+    end = min(end, int(waveform.shape[-1]))
+    result["waveform"] = torch.cat(
+        (waveform[..., :start], waveform[..., end:]), dim=-1
+    )
+    return result
+
+
+def _concat_videos_incoming_overlap(paths, output, overlap_frames: int, fps: float = 24.0):
+    """TimelineDirector-style assembly: incoming segment owns the overlap.
+
+    Every continuation segment contains [incoming overlap + unique frames].
+    Therefore each non-final segment loses its LAST overlap, while the complete
+    incoming segment is retained.  No dissolve and no duplicated timeline.
+    """
+    from .iamccs_minimax_h3_shotboard import (
+        _find_ffmpeg, _read_segment_frame_count, _require_identical_segment_canvas,
+    )
+
+    ffmpeg = _find_ffmpeg()
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg non trovato: impossibile fare incoming-overlap assembly")
+    if len(paths) < 2:
+        from .iamccs_minimax_h3_shotboard import _concat_videos
+        return _concat_videos(paths, output)
+
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        raise FileNotFoundError("Segmenti mancanti: " + ", ".join(missing))
+
+    _require_identical_segment_canvas(paths)
+    counts = [_read_segment_frame_count(path) for path in paths]
+    overlap = max(1, int(overlap_frames))
+    if any(count <= overlap for count in counts[:-1]):
+        raise ValueError(
+            f"Incoming overlap {overlap}f non valido per segmenti {counts}"
+        )
+
+    keep_counts = [
+        count - overlap if index < len(counts) - 1 else count
+        for index, count in enumerate(counts)
+    ]
+    output_frames = sum(keep_counts)
+    exact_duration = output_frames / float(fps)
+
+    command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n"]
+    for path in paths:
+        command += ["-i", str(path)]
+
+    filters = []
+    video_labels = []
+    audio_labels = []
+    for index, keep in enumerate(keep_counts):
+        vlabel = f"vin{index}"
+        alabel = f"ain{index}"
+        duration = keep / float(fps)
+        filters.append(
+            f"[{index}:v]trim=start_frame=0:end_frame={keep},"
+            f"setpts=PTS-STARTPTS,format=yuv420p[{vlabel}]"
+        )
+        filters.append(
+            f"[{index}:a]aresample=48000:async=1:first_pts=0,"
+            f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"atrim=duration={duration:.9f},asetpts=PTS-STARTPTS[{alabel}]"
+        )
+        video_labels.append(vlabel)
+        audio_labels.append(alabel)
+
+    filters.append(
+        "".join(f"[{label}]" for label in video_labels)
+        + f"concat=n={len(video_labels)}:v=1:a=0[vjoined]"
+    )
+    filters.append(
+        "".join(f"[{label}]" for label in audio_labels)
+        + f"concat=n={len(audio_labels)}:v=0:a=1[ajoined]"
+    )
+
+    command += [
+        "-filter_complex", ";".join(filters),
+        "-map", "[vjoined]", "-map", "[ajoined]",
+        "-frames:v", str(output_frames),
+        "-r", f"{float(fps):.6f}",
+        "-fps_mode", "cfr",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "16",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+        "-t", f"{exact_duration:.9f}",
+        "-movflags", "+faststart",
+        str(output),
+    ]
+    result = subprocess.run(
+        command, capture_output=True, text=True, stdin=subprocess.DEVNULL
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            "incoming-overlap ffmpeg concat failed: "
+            + (result.stderr.strip() or result.stdout.strip())
+        )
+    LOG.info(
+        "R38B incoming-overlap concat complete | chunks=%d | overlap=%df | "
+        "segments=%s | kept=%s | output_frames=%d | fps=%.3f",
+        len(paths), overlap, counts, keep_counts, output_frames, float(fps),
+    )
+
+
 def _rtx_finish_segment(intermediate, output, audio, trim, frames, crop_width, crop_height,
                         width, height, fps, quality):
     """Final RTX pass from a file, one frame at a time; no UHD IMAGE batch."""
@@ -267,16 +381,103 @@ class IAMCCS_MiniMaxH3PixelRefineR38B:
         if index < 0 or index >= total:
             raise ValueError("R38B received an invalid segment index.")
         run = _safe_render_id(resolved_render_id)
+
+        # IAMCCS LongVid Latent Tail A/B v1.4 R38B cache owner.
+        # IAMCCS_PHASE2_V4_EDITORIAL_HANDOFF
+        # Cache the tail ending at the SAME editorial endpoint delivered to film.
+        tail_cfg = (
+            plan.get("longvid_latent_tail")
+            if isinstance(plan.get("longvid_latent_tail"), dict)
+            else {}
+        )
+        if bool(tail_cfg.get("enabled", False)) and index < total - 1:
+            from .iamccs_minimax_h3_continuity import save_longvid_sampled_latent_tail
+            chunks = plan.get("chunks") if isinstance(plan.get("chunks"), list) else []
+            if index >= len(chunks) or not isinstance(chunks[index], dict):
+                raise RuntimeError(
+                    "LONGVID LATENT TAIL Phase 2 v4 cannot resolve current chunk plan."
+                )
+            handoff_chunk = chunks[index]
+            tail_frames = max(5, int(tail_cfg.get("tail_frames", 22) or 22))
+            unique_frames = max(1, int(handoff_chunk.get("unique_frames", 0) or 0))
+            # seg1 has no incoming overlap; continuation segments deliver
+            # [incoming overlap + unique] after the 1f RGB bridge is removed.
+            handoff_endpoint_frames = int(unique_frames + (tail_frames if index > 0 else 0))
+            saved_tail = save_longvid_sampled_latent_tail(
+                run,
+                index,
+                sampled_latent,
+                tail_frames=tail_frames,
+                endpoint_frames=handoff_endpoint_frames,
+            )
+            if not saved_tail:
+                raise RuntimeError(
+                    "LONGVID LATENT TAIL Phase 2 v4 could not persist editorial-aligned tail."
+                )
+            LOG.info(
+                "MiniMax H3 Latent Tail editorial handoff saved | "
+                "render=%s | segment=%d/%d | tail=%df | unique=%df | "
+                "endpoint=%df | rule=editorial_endpoint",
+                run, index + 1, total, tail_frames, unique_frames, handoff_endpoint_frames,
+            )
+
         root = Path(folder_paths.get_output_directory()) / "IAMCCS" / "MiniMaxH3" / "R38B" / run
         root.mkdir(parents=True, exist_ok=True)
         output = root / f"segment_{index + 1:04d}.mp4"
         if output.exists():
             raise FileExistsError(f"R38B segment already exists: {output}. Start a new render rather than overwriting it.")
         visible = int(native_frames.shape[0])
-        from .iamccs_minimax_h3_shotboard import _delivery_join_frames
-        join = _delivery_join_frames(cine_linx, index, join_trim_frames)
-        frames = visible - (1 if join == 1 else 0)
-        audio = _trim_audio_frames(native_audio, 1, 24) if join == 1 else native_audio
+        tail_cfg = plan.get("longvid_latent_tail")
+        latent_tail_segment = bool(
+            index > 0
+            and isinstance(tail_cfg, dict)
+            and bool(tail_cfg.get("enabled", False))
+        )
+        latent_tail_overlap = (
+            max(0, int(tail_cfg.get("tail_frames", 0) or 0))
+            if latent_tail_segment else 0
+        )
+        if latent_tail_segment:
+            if enabled:
+                raise ValueError(
+                    "LongVid latent-tail incoming-overlap assembly is currently "
+                    "validated only at native delivery. Disable upscale for this test."
+                )
+            chunk = (plan.get("chunks") or [])[index]
+            unique_frames = max(1, int(chunk.get("unique_frames", 0) or 0))
+            expected = latent_tail_overlap + 1 + unique_frames
+            if visible < expected:
+                raise ValueError(
+                    f"Latent-tail segment {index + 1} decoded {visible}f, "
+                    f"needs at least {expected}f "
+                    f"({latent_tail_overlap} overlap + 1 bridge + {unique_frames} unique)."
+                )
+            # Sample layout is:
+            # [carried overlap][1f RGB bridge][unique continuation][grid padding].
+            # Keep the real incoming overlap, remove only the duplicate RGB bridge.
+            native_frames = native_frames[:expected, ...]
+            bridge_index = latent_tail_overlap
+            native_frames = torch.cat(
+                (
+                    native_frames[:bridge_index, ...],
+                    native_frames[bridge_index + 1:, ...],
+                ),
+                dim=0,
+            )
+            audio = _remove_audio_frame_slice(native_audio, bridge_index, 24.0)
+            frames = int(native_frames.shape[0])
+            join = 0
+            LOG.info(
+                "R38B latent-tail segment prepared | segment=%d/%d | "
+                "overlap=%df | bridge_removed_at=%df | unique=%df | saved=%df",
+                index + 1, total, latent_tail_overlap, bridge_index,
+                unique_frames, frames,
+            )
+        else:
+            from .iamccs_minimax_h3_shotboard import _delivery_join_frames
+            join = _delivery_join_frames(cine_linx, index, join_trim_frames)
+            frames = visible - (1 if join == 1 else 0)
+            audio = _trim_audio_frames(native_audio, 1, 24) if join == 1 else native_audio
         if enabled:
             settings = _upres_settings(plan)
             width, height = _delivery_size(plan)
@@ -336,7 +537,19 @@ class IAMCCS_MiniMaxH3PixelRefineR38B:
             preview = root / "final_film.mp4"
             if preview.exists():
                 raise FileExistsError(f"R38B final film already exists: {preview}")
-            if join > 1:
+            final_tail_cfg = plan.get("longvid_latent_tail")
+            if (
+                isinstance(final_tail_cfg, dict)
+                and bool(final_tail_cfg.get("enabled", False))
+                and int(final_tail_cfg.get("tail_frames", 0) or 0) > 0
+            ):
+                _concat_videos_incoming_overlap(
+                    paths,
+                    preview,
+                    int(final_tail_cfg.get("tail_frames", 0) or 0),
+                    24.0,
+                )
+            elif join > 1:
                 _concat_videos_overlap(paths, preview, join, 24)
             else:
                 _concat_videos(paths, preview)

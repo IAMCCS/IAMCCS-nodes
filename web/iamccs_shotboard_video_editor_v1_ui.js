@@ -4,7 +4,7 @@ import { api } from "../../scripts/api.js";
 const TYPE = "IAMCCS_ShotboardVideoEditorV1";
 const RENDER_TYPE = "IAMCCS_ShotboardVideoEditorRenderV1";
 const STYLE_ID = "iamccs-shotboard-video-editor-v1-style-monitor-compatible";
-const UI_VERSION = "20260911-audio-hard-cut-truth";
+const UI_VERSION = "20260918-server-media-import-v2";
 const NODE_SIZE = [1600, 1560];
 const CHROME_HEIGHT = 156;
 const WIDGET_HEIGHT = NODE_SIZE[1] - CHROME_HEIGHT;
@@ -1095,22 +1095,45 @@ function makeButton(label, fn, cls = "") {
   return b;
 }
 
+// IAMCCS_VIDEO_EDITOR_SERVER_MEDIA_IMPORT_V2
 async function uploadEditorMediaFile(file, options = {}) {
+  const subfolder = String(options.subfolder || "IAMCCS_video_editor_manual");
+  const query = new URLSearchParams({ subfolder, type: String(options.type || "input") });
   const body = new FormData();
-  body.append("image", file);
-  if (options.subfolder) body.append("subfolder", String(options.subfolder));
-  body.append("type", String(options.type || "input"));
-  body.append("overwrite", "false");
-  const resp = await api.fetchApi("/upload/image", { method: "POST", body });
-  if (!resp || resp.status !== 200) throw new Error(`upload failed: ${resp?.status || "no response"}`);
+  body.append("media", file, file?.name || "media.bin");
+
+  let resp = await api.fetchApi(`/api/iamccs/cine/video_editor/upload_media?${query.toString()}`, {
+    method: "POST",
+    body,
+  });
+
+  // Compatibility fallback only for an installation where Python has not yet
+  // been restarted after the frontend patch.
+  if (resp?.status === 404) {
+    const legacyBody = new FormData();
+    legacyBody.append("image", file);
+    if (subfolder) legacyBody.append("subfolder", subfolder);
+    legacyBody.append("type", String(options.type || "input"));
+    legacyBody.append("overwrite", "false");
+    resp = await api.fetchApi("/upload/image", { method: "POST", body: legacyBody });
+  }
+
+  if (!resp || resp.status !== 200) {
+    let detail = "";
+    try {
+      const payload = await resp?.json?.();
+      detail = payload?.error ? ` · ${payload.error}` : "";
+    } catch {}
+    throw new Error(`media upload failed: ${resp?.status || "no response"}${detail}`);
+  }
   const data = await resp.json();
-  const filename = data?.name || file.name;
-  const subfolder = data?.subfolder || "";
+  const filename = data?.name || data?.filename || file.name;
+  const returnedSubfolder = data?.subfolder ?? subfolder ?? "";
   return {
-    path: subfolder ? `${subfolder}/${filename}` : filename,
+    path: data?.path || (returnedSubfolder ? `${returnedSubfolder}/${filename}` : filename),
     type: data?.type || "input",
     filename,
-    subfolder,
+    subfolder: returnedSubfolder,
   };
 }
 
@@ -1191,8 +1214,9 @@ async function inspectVideoFile(file) {
   });
   try {
     await new Promise((resolve, reject) => {
-      video.onloadedmetadata = resolve;
-      video.onerror = () => reject(new Error("video metadata could not be read"));
+      const timeout = setTimeout(() => reject(new Error("video metadata timed out")), 8000);
+      video.onloadedmetadata = () => { clearTimeout(timeout); resolve(); };
+      video.onerror = () => { clearTimeout(timeout); reject(new Error("video metadata could not be read")); };
       video.load();
     });
     const duration = Number.isFinite(video.duration) ? Math.max(0, video.duration) : 0;
@@ -2432,6 +2456,7 @@ function installEditor(node, reason = "install") {
 
   function play() {
     if (playing) return;
+    if (playhead >= timelineDuration()) playhead = 0;
     // Program transport owns the program monitor and its timeline audio.
     // A previously-running Source transport must not keep advancing beside it.
     stopSourcePlayback(false);
@@ -2510,37 +2535,83 @@ function installEditor(node, reason = "install") {
     });
   }
 
-  function addManual(kind, button = null) {
+function addManual(kind, button = null) {
     showManualMediaPicker(button, kind, async (file) => {
       try {
-        if (status) status.textContent = `Reading ${kind} ${file.name || "file"}...`;
-        const details = kind === "video"
-          ? await inspectVideoFile(file)
-          : { duration: await audioFileDuration(file), preview_strip: [] };
-        const duration = Math.max(0, Number(details.duration || 0));
-        if (!(duration > 0)) throw new Error(`Could not read ${kind} duration.`);
-        // Manual media is inserted at the editorial playhead.  The selected
-        // compatible lane is authoritative; never silently reroute a clip to
-        // another lane merely because the project already has a later end.
+        const isVideo = kind === "video";
         const startTime = Math.max(0, Number(playhead || 0));
+
+        if (status) status.textContent = `Uploading ${kind} ${file.name || "file"}...`;
+        const browserProbePromise = isVideo
+          ? inspectVideoFile(file).catch((error) => {
+              console.info("[IAMCCS VideoEditor] browser probe unavailable; server probe will own import", error);
+              return { duration: 0, preview_strip: [] };
+            })
+          : Promise.resolve({ duration: 0, preview_strip: [] });
+
+        const uploaded = await uploadEditorMediaFile(file, {
+          subfolder: isVideo ? "IAMCCS_video_editor_manual" : "IAMCCS_video_editor_manual_audio",
+          type: "input",
+        });
+
+        let serverProbe = null;
+        let browserProbe;
+        if (isVideo) {
+          if (status) status.textContent = `Probing video ${file.name || "file"} on IAMCCS backend...`;
+          try {
+            const response = await api.fetchApi("/api/iamccs/cine/video_editor/probe_manual_media", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ path: uploaded.path }),
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (response.ok && !payload?.error) serverProbe = payload;
+            else console.warn("[IAMCCS VideoEditor] server media probe failed", payload?.error || response.status);
+          } catch (error) {
+            console.warn("[IAMCCS VideoEditor] server media probe unavailable", error);
+          }
+        }
+
+        browserProbe = await browserProbePromise;
+        if (isVideo && serverProbe?.source_has_audio === true && !serverProbe?.audio?.path) {
+          throw new Error("This video contains audio, but extraction failed. Check FFmpeg/backend logs; no silent video-only import was made.");
+        }
+        const measuredAudioDuration = isVideo ? 0 : await audioFileDuration(file);
+        const duration = Math.max(
+          0,
+          Number(serverProbe?.duration || 0),
+          Number(browserProbe?.duration || 0),
+          Number(measuredAudioDuration || 0),
+        );
+        if (!(duration > 0)) {
+          throw new Error(
+            isVideo
+              ? "Could not determine video duration with either IAMCCS backend or browser probe."
+              : "Could not read audio duration."
+          );
+        }
+
+        // Manual media is inserted at the editorial playhead. The selected
+        // compatible lane is authoritative; never silently reroute video.
         const selectedLane = String(selectedLaneId() || "").trim().toUpperCase();
         const selectedTrack = manualTrackFromSelection(kind, selectedLane);
         if (selectedLane && !selectedTrack) {
-          throw new Error(`Selected lane ${selectedLane} cannot contain ${kind}. Select a ${kind === "video" ? "V1-V5" : "A1-A5"} lane.`);
+          throw new Error(`Selected lane ${selectedLane} cannot contain ${kind}. Select a ${isVideo ? "V1-V5" : "A1-A5"} lane.`);
         }
         const track = selectedTrack || firstFreeManualTrack(kind, startTime, duration);
-        if (!track) throw new Error(`All ${kind === "video" ? "V1-V5" : "A1-A5"} lanes are occupied at the insertion point.`);
+        if (!track) throw new Error(`All ${isVideo ? "V1-V5" : "A1-A5"} lanes are occupied at the insertion point.`);
         if (selectedTrack && manualTrackOccupied(track.trackId, kind, startTime, duration)) {
-          throw new Error(`Selected lane ${track.trackId} is occupied at ${fmtTime(startTime)}. Move the playhead/clip or choose another ${kind === "video" ? "V" : "A"} lane.`);
+          throw new Error(`Selected lane ${track.trackId} is occupied at ${fmtTime(startTime)}. Move the playhead/clip or choose another ${isVideo ? "V" : "A"} lane.`);
         }
-        if (status) status.textContent = `Uploading ${kind} ${file.name || "file"}...`;
-        const uploaded = await uploadEditorMediaFile(file, {
-          subfolder: "IAMCCS_video_editor_manual",
-          type: "input",
-        });
+
+        const stamp = Date.now();
         const index = (manifest.clips || []).length + 1;
-        const clipId = `clip_manual_${kind}_${Date.now()}_${index}`;
-        const assetId = `manual_${kind}_${Date.now()}_${index}`;
+        const clipId = `clip_manual_${kind}_${stamp}_${index}`;
+        const assetId = `manual_${kind}_${stamp}_${index}`;
+        const laneNumber = Math.max(1, Math.min(5, Number(String(track.trackId || "").replace(/\D/g, "")) || 1));
+        const timelineId = `T${String(laneNumber).padStart(2, "0")}`;
+        const audioLane = `A${laneNumber}`;
+
         const asset = {
           id: assetId,
           type: kind,
@@ -2552,12 +2623,38 @@ function installEditor(node, reason = "install") {
           uploadType: uploaded.type || "input",
           duration,
           source_duration: duration,
+          timeline_duration: duration,
+          takeIndex: laneNumber,
+          timelineId,
+          audioLane,
           manual: true,
         };
-        if (kind === "video") {
+
+        if (isVideo) {
+          const preview = serverProbe?.preview_video || {
+            filename: uploaded.filename, subfolder: uploaded.subfolder || "", type: uploaded.type || "input",
+          };
           asset.videoFile = uploaded.path;
           asset.videoUploadType = uploaded.type || "input";
-          asset.preview_strip = Array.isArray(details.preview_strip) ? details.preview_strip : [];
+          asset.preview_strip = Array.isArray(browserProbe?.preview_strip) ? browserProbe.preview_strip : [];
+          asset.fps = Number(serverProbe?.fps || manifest.fps || 24);
+          asset.width = Number(serverProbe?.width || 0);
+          asset.height = Number(serverProbe?.height || 0);
+          asset.frame_count = Number(serverProbe?.frame_count || 0);
+          asset.probe_method = String(serverProbe?.probe_method || (browserProbe?.duration ? "browser" : "unknown"));
+          if (preview?.filename) {
+            asset.preview_video = {
+              filename: preview.filename,
+              subfolder: preview.subfolder || "",
+              type: preview.type || "input",
+            };
+            asset.preview_video_file = preview.filename;
+            asset.preview_video_subfolder = preview.subfolder || "";
+            asset.preview_video_type = preview.type || "input";
+            asset.preview_video_fps = Number(serverProbe?.fps || manifest.fps || 24);
+            asset.preview_video_schema = 2;
+            asset.preview_video_codec = preview.path === uploaded.path ? "source_browser_native_or_fallback" : "iamccs_h264_proxy";
+          }
         } else {
           asset.audioFile = uploaded.path;
           asset.audioUploadType = uploaded.type || "input";
@@ -2566,14 +2663,22 @@ function installEditor(node, reason = "install") {
           asset.audio_preview_type = uploaded.type || "input";
           asset.waveformReal = false;
         }
+
         manifest.assets = manifest.assets && typeof manifest.assets === "object" ? manifest.assets : {};
+        manifest.clips = Array.isArray(manifest.clips) ? manifest.clips : [];
         manifest.assets[assetId] = asset;
-        manifest.clips.push({
+
+        const clip = {
           id: clipId,
           assetId,
           type: kind,
+          takeIndex: laneNumber,
+          timelineId,
+          audioLane,
           startTime,
           duration,
+          sourceDuration: duration,
+          sourceDurationLimit: duration,
           trimStart: 0,
           trimEnd: duration,
           trackId: track.trackId,
@@ -2581,14 +2686,100 @@ function installEditor(node, reason = "install") {
           manual: true,
           muted: false,
           volume: 1,
-        });
+          linked: false,
+          linkedClipIds: [],
+        };
+        manifest.clips.push(clip);
+
+        let companionAudioClipId = "";
+        if (isVideo && serverProbe?.audio?.path) {
+          const embedded = serverProbe.audio;
+          const audioDuration = Math.min(
+            duration,
+            Math.max(0.001, Number(embedded.duration || duration))
+          );
+          const preferredTrackId = `A${laneNumber}`;
+          let audioTrack = null;
+          if (!manualTrackOccupied(preferredTrackId, "audio", startTime, audioDuration)) {
+            audioTrack = { trackId: preferredTrackId, trackIndex: 5 + laneNumber - 1 };
+          } else {
+            audioTrack = firstFreeManualTrack("audio", startTime, audioDuration);
+          }
+          if (!audioTrack) {
+            // Roll back the pending video insertion: an AV import is atomic.
+            manifest.clips = manifest.clips.filter(item => item.id !== clipId);
+            delete manifest.assets[assetId];
+            throw new Error("Embedded audio was found, but all A1-A5 lanes are occupied at the insertion point.");
+          }
+
+          const audioAssetId = `manual_audio_${stamp}_${index}`;
+          companionAudioClipId = `clip_manual_audio_${stamp}_${index}`;
+          manifest.assets[audioAssetId] = {
+            id: audioAssetId,
+            type: "audio",
+            path: embedded.path,
+            mediaPath: embedded.path,
+            media_path: embedded.path,
+            audioFile: embedded.path,
+            audioUploadType: embedded.type || "input",
+            uploadType: embedded.type || "input",
+            fileName: embedded.filename || "embedded_audio.wav",
+            filename: embedded.filename || "embedded_audio.wav",
+            audio_preview_file: embedded.filename || "embedded_audio.wav",
+            audio_preview_subfolder: embedded.subfolder || "",
+            audio_preview_type: embedded.type || "input",
+            preview_type: embedded.type || "input",
+            duration: audioDuration,
+            duration_seconds: audioDuration,
+            source_duration: audioDuration,
+            sample_rate: Number(embedded.sample_rate || 48000),
+            channels: Number(embedded.channels || 2),
+            takeIndex: laneNumber,
+            timelineId,
+            audioLane: audioTrack.trackId,
+            waveformReal: false,
+            waveform_source: "iamccs_server_embedded_audio_extract",
+            manual: true,
+          };
+          manifest.clips.push({
+            id: companionAudioClipId,
+            assetId: audioAssetId,
+            type: "audio",
+            takeIndex: laneNumber,
+            timelineId,
+            audioLane: audioTrack.trackId,
+            startTime,
+            duration: audioDuration,
+            sourceDuration: audioDuration,
+            sourceDurationLimit: audioDuration,
+            trimStart: 0,
+            trimEnd: audioDuration,
+            trackId: audioTrack.trackId,
+            trackIndex: audioTrack.trackIndex,
+            manual: true,
+            muted: false,
+            volume: 1,
+            linked: true,
+            linkedClipIds: [clipId],
+          });
+          clip.linked = true;
+          clip.linkedClipIds = [companionAudioClipId];
+        }
+
         manifest.duration_seconds = Math.max(Number(manifest.duration_seconds || 0), startTime + duration);
         selectedTrackId = track.trackId;
         selectedClipId = clipId;
         syncLinkedClipPairs(manifest);
         persist();
         renderTimeline();
-        if (status) status.textContent = `${kind === "video" ? "Video" : "Audio"} added to ${track.trackId}. Duration ${fmtTime(duration)}.`;
+
+        if (status) {
+          status.textContent = isVideo
+            ? companionAudioClipId
+              ? `Video + embedded audio added to ${track.trackId}/${audioLane}. Duration ${fmtTime(duration)}.`
+              : `Video added to ${track.trackId}. Duration ${fmtTime(duration)}.${!serverProbe ? " Embedded audio could not be checked: restart/update the IAMCCS backend and import again." : ""}`
+            : `Audio added to ${track.trackId}. Duration ${fmtTime(duration)}.`;
+        }
       } catch (error) {
         if (status) status.textContent = `Add ${kind} failed: ${error?.message || error}`;
         console.warn(`[IAMCCS ShotboardVideoEditorV1] add ${kind} failed`, error);
@@ -3519,6 +3710,328 @@ function installEditor(node, reason = "install") {
     reader.readAsText(file);
   }
 
+
+  // IAMCCS_TRANSITIONS_PRO_V1
+  function transitionEnsureStyle() {
+    if (document.getElementById("iamccs-transitions-pro-v1-style")) return;
+    const style = document.createElement("style");
+    style.id = "iamccs-transitions-pro-v1-style";
+    style.textContent = `
+      .iamccs-transitions-pro-panel {
+        position:fixed; z-index:2147483600; width:340px; max-width:calc(100vw - 16px);
+        padding:10px; border:1px solid #d7b667; background:linear-gradient(180deg,#263033,#0d1315);
+        color:#edf4ef; box-shadow:0 14px 34px rgba(0,0,0,.62),0 0 0 1px rgba(255,226,168,.10) inset;
+        font:11px/1.35 Inter,system-ui,sans-serif;
+      }
+      .iamccs-transitions-pro-panel .head { display:flex; align-items:center; gap:8px; margin-bottom:9px; }
+      .iamccs-transitions-pro-panel .head strong { color:#ffe4a2; font-size:12px; font-weight:900; }
+      .iamccs-transitions-pro-panel .head .clip { margin-left:auto; max-width:180px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:#9fc5c8; }
+      .iamccs-transitions-pro-panel .grid { display:grid; grid-template-columns:94px 1fr; gap:7px 8px; align-items:center; }
+      .iamccs-transitions-pro-panel label { color:#b8c9c7; font-weight:800; }
+      .iamccs-transitions-pro-panel select,
+      .iamccs-transitions-pro-panel input {
+        width:100%; height:27px; border:1px solid #58696d; background:#111b1d; color:#eef7f2; padding:0 7px;
+        font:11px Consolas,monospace;
+      }
+      .iamccs-transitions-pro-panel .hint { margin-top:8px; color:#91a7aa; font-size:10px; min-height:28px; }
+      .iamccs-transitions-pro-panel .actions { display:flex; justify-content:flex-end; gap:6px; margin-top:10px; }
+      .iamccs-transitions-pro-panel button {
+        min-width:74px; height:27px; border:1px solid #687b7e; background:#182326; color:#e7f1e8;
+        font-size:10px; font-weight:900; cursor:pointer;
+      }
+      .iamccs-transitions-pro-panel button.apply { border-color:#e0a85d; background:linear-gradient(180deg,#70451f,#3b2415); color:#ffe8bd; }
+      .iamccs-transitions-pro-panel button.clear { border-color:#a96b6b; color:#ffc8c8; }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function transitionSelectedVideoClip() {
+    const selected = (manifest.clips || []).find((clip) => clip?.id === selectedClipId && clip?.type === "video");
+    return selected || clipAtTime("video");
+  }
+
+  function transitionSameLaneVideos(clip) {
+    if (!clip) return [];
+    const lane = String(trackIdForClip(clip) || clip.trackId || "");
+    return (manifest.clips || [])
+      .filter((item) => item?.type === "video" && String(trackIdForClip(item) || item.trackId || "") === lane)
+      .sort((a, b) => Number(a.startTime || 0) - Number(b.startTime || 0));
+  }
+
+  function transitionLinkedAudio(videoClip) {
+    if (!videoClip) return [];
+    const ids = new Set(Array.isArray(videoClip.linkedClipIds) ? videoClip.linkedClipIds.map(String) : []);
+    const take = Number(videoClip.takeIndex || 0);
+    const slot = Number(videoClip.clipIndex || 0);
+    return (manifest.clips || []).filter((clip) => {
+      if (!clip || clip.type !== "audio" || isMasterClip(clip)) return false;
+      if (ids.has(String(clip.id || ""))) return true;
+      if (take > 0 && Number(clip.takeIndex || 0) !== take) return false;
+      if (slot > 0 && Number(clip.clipIndex || 0) !== slot) return false;
+      return take > 0 || slot > 0;
+    });
+  }
+
+  function transitionSuite(clip) {
+    clip.suite_edit = clip.suite_edit && typeof clip.suite_edit === "object" ? clip.suite_edit : {};
+    clip.suite_edit.transitions = clip.suite_edit.transitions && typeof clip.suite_edit.transitions === "object"
+      ? clip.suite_edit.transitions
+      : {};
+    return clip.suite_edit.transitions;
+  }
+
+  function transitionPayload(type, frames, fpsValue, audioMode, microBlend) {
+    const frameCount = Math.max(1, Math.min(240, Math.round(Number(frames) || 1)));
+    const fpsSafe = Math.max(1, Number(fpsValue || manifest.fps || 24));
+    return {
+      schema: "iamccs.editor.transition.v2",
+      type: String(type || "cut"),
+      duration_frames: frameCount,
+      duration: frameCount / fpsSafe,
+      alignment: "edit_point",
+      video_curve: "half_cosine",
+      audio_curve: String(audioMode || "equal_power"),
+      audio_mode: String(audioMode || "equal_power"),
+      owner: String(type || "") === "continuity" ? "incoming" : "blend",
+      micro_blend_frames: Math.max(0, Math.min(frameCount, Math.round(Number(microBlend) || 0))),
+      created_by: "IAMCCS_TRANSITIONS_PRO_V1",
+    };
+  }
+
+  function transitionShiftLinkedSequence(incoming, deltaSeconds) {
+    if (!incoming || !deltaSeconds) return;
+    const laneVideos = transitionSameLaneVideos(incoming);
+    const boundary = Number(incoming.startTime || 0);
+    const affectedVideos = laneVideos.filter((clip) => Number(clip.startTime || 0) >= boundary - 1e-6);
+    const ids = new Set();
+    for (const clip of affectedVideos) {
+      clip.startTime = Math.max(0, Number(clip.startTime || 0) + deltaSeconds);
+      ids.add(String(clip.id || ""));
+      for (const audio of transitionLinkedAudio(clip)) ids.add(String(audio.id || ""));
+    }
+    for (const clip of manifest.clips || []) {
+      if (!clip || clip.type !== "audio" || isMasterClip(clip)) continue;
+      if (ids.has(String(clip.id || ""))) {
+        const videoMatch = affectedVideos.some((video) => {
+          const linked = new Set(Array.isArray(video.linkedClipIds) ? video.linkedClipIds.map(String) : []);
+          return linked.has(String(clip.id || "")) ||
+            (Number(video.takeIndex || 0) > 0 && Number(clip.takeIndex || 0) === Number(video.takeIndex || 0) &&
+             Number(video.clipIndex || 0) === Number(clip.clipIndex || 0));
+        });
+        if (videoMatch) clip.startTime = Math.max(0, Number(clip.startTime || 0) + deltaSeconds);
+      }
+    }
+  }
+
+  function transitionRestoreIncomingShift(incoming) {
+    if (!incoming) return 0;
+    const current = transitionSuite(incoming).in;
+    const shift = Math.max(0, Number(current?.timeline_shift_seconds || 0));
+    if (!(shift > 0)) return 0;
+    transitionShiftLinkedSequence(incoming, shift);
+    return shift;
+  }
+
+  function transitionMirrorToAudio(videoClip, side, payload) {
+    for (const audio of transitionLinkedAudio(videoClip)) {
+      const transitions = transitionSuite(audio);
+      if (payload) transitions[side] = JSON.parse(JSON.stringify(payload));
+      else delete transitions[side];
+    }
+  }
+
+  function transitionPairFor(selected, side) {
+    if (!selected) return { outgoing: null, incoming: null };
+    const lane = transitionSameLaneVideos(selected);
+    const index = lane.findIndex((clip) => clip.id === selected.id);
+    if (index < 0) return { outgoing: null, incoming: null };
+    if (side === "out") return { outgoing: selected, incoming: lane[index + 1] || null };
+    return { outgoing: lane[index - 1] || null, incoming: selected };
+  }
+
+  function transitionRefreshDuration() {
+    const end = Math.max(0, ...(manifest.clips || [])
+      .filter((clip) => clip && !isMasterClip(clip))
+      .map((clip) => Number(clip.startTime || 0) + Number(clip.duration || 0)));
+    manifest.duration_seconds = Math.max(end, 0);
+  }
+
+  function transitionClearPair(outgoing, incoming) {
+    if (!incoming) return false;
+    transitionRestoreIncomingShift(incoming);
+    const inTransitions = transitionSuite(incoming);
+    delete inTransitions.in;
+    transitionMirrorToAudio(incoming, "in", null);
+    if (outgoing) {
+      const outTransitions = transitionSuite(outgoing);
+      delete outTransitions.out;
+      transitionMirrorToAudio(outgoing, "out", null);
+    }
+    transitionRefreshDuration();
+    persist();
+    renderTimeline();
+    return true;
+  }
+
+  function transitionApplyPair(outgoing, incoming, type, frames, audioMode, microBlend) {
+    if (!incoming) throw new Error("No incoming video clip exists on this lane.");
+    const fpsValue = Math.max(1, Number(manifest.fps || 24));
+    transitionRestoreIncomingShift(incoming);
+    const payload = transitionPayload(type, frames, fpsValue, audioMode, microBlend);
+    const needsOverlap = payload.type === "dissolve" || payload.type === "continuity";
+    if (needsOverlap) {
+      if (!outgoing) throw new Error("This transition needs a previous clip on the same video lane.");
+      const seconds = payload.duration;
+      payload.timeline_shift_seconds = seconds;
+      payload.timeline_shift_policy = "consume_timeline_overlap";
+      transitionShiftLinkedSequence(incoming, -seconds);
+    } else {
+      payload.timeline_shift_seconds = 0;
+      payload.timeline_shift_policy = "edit_point_no_overlap";
+    }
+
+    const inTransitions = transitionSuite(incoming);
+    inTransitions.in = JSON.parse(JSON.stringify(payload));
+    transitionMirrorToAudio(incoming, "in", payload);
+
+    if (outgoing) {
+      const outPayload = { ...payload, owner: payload.type === "continuity" ? "outgoing_trimmed_by_incoming" : "blend" };
+      const outTransitions = transitionSuite(outgoing);
+      outTransitions.out = JSON.parse(JSON.stringify(outPayload));
+      transitionMirrorToAudio(outgoing, "out", outPayload);
+    }
+
+    transitionRefreshDuration();
+    persist();
+    renderTimeline();
+    return payload;
+  }
+
+  function createTransitionsProButton() {
+    const button = makeButton("TRANS", (trigger) => {
+      transitionEnsureStyle();
+      document.querySelectorAll(".iamccs-transitions-pro-panel").forEach((item) => item.remove());
+      const selected = transitionSelectedVideoClip();
+      if (!selected) {
+        if (status) status.textContent = "TRANSITIONS: select a video clip first.";
+        return;
+      }
+
+      const panel = document.createElement("div");
+      panel.className = "iamccs-transitions-pro-panel";
+      const currentIn = transitionSuite(selected).in || {};
+      const defaultFrames = Math.max(1, Math.round(Number(currentIn.duration_frames || 12)));
+      const currentType = String(currentIn.type || "cut");
+      const currentAudio = String(currentIn.audio_mode || currentIn.audio_curve || "equal_power");
+      const currentMicro = Math.max(0, Math.round(Number(currentIn.micro_blend_frames || 6)));
+      panel.innerHTML = `
+        <div class="head"><strong>TRANSITIONS PRO</strong><span class="clip">${selected.timelineId || selected.id || "clip"}</span></div>
+        <div class="grid">
+          <label>Apply to</label>
+          <select data-field="side"><option value="in">IN of selected</option><option value="out">OUT of selected</option></select>
+          <label>Transition</label>
+          <select data-field="type">
+            <option value="cut">Cut</option>
+            <option value="dissolve">Cross Dissolve</option>
+            <option value="dip_black">Dip to Black</option>
+            <option value="dip_white">Dip to White</option>
+            <option value="continuity">Continuity Join</option>
+            <option value="motion_blend" disabled>Motion Blend / Optical Flow (reserved)</option>
+          </select>
+          <label>Duration</label>
+          <input data-field="frames" type="number" min="1" max="240" step="1" value="${defaultFrames}">
+          <label>Audio</label>
+          <select data-field="audio">
+            <option value="equal_power">Equal Power</option>
+            <option value="follow_video">Follow Video Curve</option>
+            <option value="hard_cut">Hard Cut / Incoming Owns</option>
+            <option value="soft_av">Soft AV</option>
+          </select>
+          <label>Micro blend</label>
+          <input data-field="micro" type="number" min="0" max="48" step="1" value="${currentMicro}">
+        </div>
+        <div class="hint"></div>
+        <div class="actions">
+          <button type="button" class="clear">Clear</button>
+          <button type="button" class="cancel">Cancel</button>
+          <button type="button" class="apply">Apply</button>
+        </div>
+      `;
+      document.body.appendChild(panel);
+
+      const side = panel.querySelector('[data-field="side"]');
+      const type = panel.querySelector('[data-field="type"]');
+      const frames = panel.querySelector('[data-field="frames"]');
+      const audio = panel.querySelector('[data-field="audio"]');
+      const micro = panel.querySelector('[data-field="micro"]');
+      const hint = panel.querySelector(".hint");
+      type.value = ["cut","dissolve","dip_black","dip_white","continuity"].includes(currentType) ? currentType : "cut";
+      audio.value = ["equal_power","follow_video","hard_cut","soft_av"].includes(currentAudio) ? currentAudio : "equal_power";
+
+      const updateHint = () => {
+        const value = String(type.value || "cut");
+        if (value === "continuity") {
+          hint.textContent = "Incoming clip owns the overlap. Micro blend only repairs the first seam frames; ideal for generated chunk handles.";
+          if (Number(frames.value || 0) === 12) frames.value = "22";
+        } else if (value === "dissolve") {
+          hint.textContent = "Creates a real timeline overlap and renders a half-cosine video blend with equal-power audio.";
+        } else if (value === "dip_black" || value === "dip_white") {
+          hint.textContent = "No timeline overlap: outgoing fades to the dip colour, incoming fades out of it around the edit point.";
+        } else {
+          hint.textContent = "Frame-accurate hard cut. Existing transition metadata on this edit is replaced.";
+        }
+        micro.disabled = value !== "continuity";
+      };
+      type.addEventListener("change", updateHint);
+      updateHint();
+
+      const close = () => panel.remove();
+      panel.querySelector(".cancel").onclick = close;
+      panel.querySelector(".clear").onclick = () => {
+        try {
+          const pair = transitionPairFor(selected, String(side.value || "in"));
+          transitionClearPair(pair.outgoing, pair.incoming);
+          if (status) status.textContent = "Transition cleared.";
+          close();
+        } catch (error) {
+          if (status) status.textContent = `Transition clear failed: ${error?.message || error}`;
+        }
+      };
+      panel.querySelector(".apply").onclick = () => {
+        try {
+          const pair = transitionPairFor(selected, String(side.value || "in"));
+          const payload = transitionApplyPair(
+            pair.outgoing,
+            pair.incoming,
+            String(type.value || "cut"),
+            Number(frames.value || 1),
+            String(audio.value || "equal_power"),
+            Number(micro.value || 0),
+          );
+          if (status) status.textContent =
+            `Transition ${payload.type} applied (${payload.duration_frames}f, audio ${payload.audio_mode}).`;
+          close();
+        } catch (error) {
+          if (status) status.textContent = `Transition failed: ${error?.message || error}`;
+        }
+      };
+
+      const rect = trigger?.getBoundingClientRect?.();
+      const place = () => {
+        if (!panel.isConnected) return;
+        const width = panel.offsetWidth || 340;
+        const left = Math.max(8, Math.min(Number(rect?.left || 8), window.innerWidth - width - 8));
+        const top = Math.max(8, Math.min(Number(rect?.bottom || 8) + 7, window.innerHeight - panel.offsetHeight - 8));
+        panel.style.left = `${left}px`;
+        panel.style.top = `${top}px`;
+      };
+      place();
+      requestAnimationFrame(place);
+    }, "gold");
+    button.title = "Professional transition controls for the selected edit. Opens a floating box without changing the editor layout.";
+    return button;
+  }
+
   function resetEditorProject(reason = "clear") {
     stop();
     stopSourcePlayback();
@@ -3640,6 +4153,7 @@ function installEditor(node, reason = "install") {
   }
   takesActions.append(
     linkButton,
+    createTransitionsProButton(),
     makeButton("Add Video", (button) => addManual("video", button), "gold"),
     makeButton("Add Audio", (button) => addManual("audio", button), "gold"),
     makeButton("Add MA", () => addMasterAudioClip(), "gold"),

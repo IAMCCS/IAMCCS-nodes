@@ -13,10 +13,14 @@ FACE_SWAP_LATENT = "iamccs_h3_face_swap_crop"
 
 def settings_schema():
     checkpoints = [name for name in folder_paths.get_filename_list("checkpoints") if "sam3" in name.lower()]
+    sam3 = next(
+        (name for name in checkpoints if "multiplex" in name.lower()),
+        checkpoints[0] if checkpoints else "",
+    )
     background_models = [name for name in folder_paths.get_filename_list("background_removal") if name.lower().endswith(".safetensors")]
     birefnet = next((name for name in background_models if "birefnet" in name.lower()), background_models[0] if background_models else "")
     return {
-        "h3_faceswap_sam_model": (["", *checkpoints], {"default": "", "tooltip": "Installed SAM3 checkpoint. Required only when no source mask is connected."}),
+        "h3_faceswap_sam_model": (["", *checkpoints], {"default": sam3, "tooltip": "Installed SAM3 multiplex checkpoint. Required only when no source mask is connected."}),
         "h3_faceswap_birefnet_model": (["", *background_models], {"default": birefnet, "tooltip": "BiRefNet model used by FACE SWAP v1 to place both identity views on white before stitching them."}),
         "h3_faceswap_mask_prompt": ("STRING", {"default": "head", "tooltip": "Tracked identity region. Keep head for hair, ears, jaw and profile stability."}),
         "h3_faceswap_threshold": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Production default for complete-head tracking."}),
@@ -214,11 +218,23 @@ def prepare_face_swap(model, clip, video_vae, audio_vae, cine_linx, segment_inde
     if directed_prompt:
         prompt += " " + directed_prompt
     ref_audios = None
+    sliced_source_audio = None
     if plan.get("audio_mode") == "h3_custom_audio_drive" and isinstance(source.get("audio"), dict):
-        # Ref2VA must hear the same sliced source audio that is later locked
-        # into the output. Locking only after sampling preserves sound but
-        # cannot drive mouth timing.
-        ref_audios = {"ref_audio_1": source["audio"]}
+        # Ref2VA must hear the exact same timeline slice that is later locked
+        # into this chunk. Passing the full programme here makes chunk 2+ hear
+        # the opening phonemes again even though the output audio is sliced.
+        sliced_source_audio = _slice_audio(
+            source["audio"],
+            start_seconds=start,
+            requested_frames=requested,
+            aligned_frames=aligned,
+        )
+        sliced_source_audio = {
+            **sliced_source_audio,
+            "iamccs_pre_sliced": True,
+            "iamccs_source_start_seconds": start,
+        }
+        ref_audios = {"ref_audio_1": sliced_source_audio}
         prompt += " Use <Audio 1> as the timing authority for mouth, jaw and facial articulation; preserve the source performance and do not invent dialogue."
     result, encoder_report = _run_h3_conditioning_with_cpu_fallback(clip, plan,
         lambda active_clip: MiniMaxH3ReferenceToVideo.execute(clip=active_clip, vae=video_vae, audio_vae=audio_vae,
@@ -236,11 +252,27 @@ def prepare_face_swap(model, clip, video_vae, audio_vae, cine_linx, segment_inde
     latent = LTXVConcatAVLatent.execute(video_latent=video, audio_latent=audio_stream)[0]
     original_audio = None
     if plan.get("audio_mode") == "h3_custom_audio_drive":
-        if source.get("audio") is not None:
-            original_audio = _slice_audio(source["audio"], start_seconds=start, requested_frames=requested, aligned_frames=aligned)
+        if sliced_source_audio is not None:
+            original_audio = sliced_source_audio
+        elif source.get("audio") is not None:
+            original_audio = _slice_audio(
+                source["audio"],
+                start_seconds=start,
+                requested_frames=requested,
+                aligned_frames=aligned,
+            )
+            original_audio = {
+                **original_audio,
+                "iamccs_pre_sliced": True,
+                "iamccs_source_start_seconds": start,
+            }
         else:
             original_audio = {"waveform": torch.zeros(1, 2, round(aligned / 24 * 32000)), "sample_rate": 32000}
-        original_audio = {**original_audio, "iamccs_pre_sliced": True, "iamccs_source_start_seconds": start}
+            original_audio = {
+                **original_audio,
+                "iamccs_pre_sliced": True,
+                "iamccs_source_start_seconds": start,
+            }
         latent, _ = _lock_audio_stream(latent, original_audio, audio_vae)
     latent[FACE_SWAP_LATENT] = {"original": raw, "masks": crop_masks.cpu(), "boxes": boxes,
             "requested": requested, "audio": original_audio, "feather": int(config.get("feather", 16))}

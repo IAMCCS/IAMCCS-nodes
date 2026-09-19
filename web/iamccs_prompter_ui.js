@@ -358,6 +358,8 @@ function safeProject(raw) {
         visual_story_relationship: String(parsed.visual_story_relationship || ""),
         visual_story_plan: parsed.visual_story_plan && typeof parsed.visual_story_plan === "object" ? { ...parsed.visual_story_plan } : {},
         request: String(parsed.request || ""),
+        audio_transcript: String(parsed.audio_transcript || ""),
+        audio_dialogue_tag: String(parsed.audio_dialogue_tag || ""),
         local_prompts: Array.isArray(parsed.local_prompts) ? parsed.local_prompts.map(row => ({...row})) : [],
         authority_map: parsed.authority_map && typeof parsed.authority_map === "object" ? { ...parsed.authority_map } : {},
         sections: parsed.sections && typeof parsed.sections === "object" ? { ...parsed.sections } : {},
@@ -497,7 +499,7 @@ function mountPrompter(node) {
     if (node._iamccsPrompterMounted) return;
     node._iamccsPrompterMounted = true;
 
-    const rawNames = ["project_data", "task_mode", "injection_target", "writing_mode", "merge_policy", "character_budget"];
+    const rawNames = ["project_data", "task_mode", "injection_target", "writing_mode", "merge_policy", "character_budget", "audio_transcription_model", "audio_transcription_language", "audio_dialogue_language", "audio_dialogue_subject"];
     rawNames.forEach((name) => hideWidget(widget(node, name)));
 
     let project = safeProject(widget(node, "project_data")?.value);
@@ -600,6 +602,53 @@ function mountPrompter(node) {
     injectBtn.title = "Write the composed prompt into the connected MiniMax Shotboard. A connected Prompter never overrides Shotboard during Queue; the visible Shotboard boxes are final truth.";
     const injectStatus = el("div", "iamccs-pr-inject-status", "Connect CineLinX to a MiniMax Shotboard, choose a target, then inject.");
     left.append(injectBtn, injectStatus);
+    const audioPanel = el("section", "iamccs-pr-ai show");
+    const audioHead = el("div", "iamccs-pr-ai-title", "AUDIO → H3 DIALOGUE · WHISPER");
+    const audioModel = el("select"), audioSourceLanguage = el("select"), audioDialogueLanguage = el("select"), audioSubject = el("select");
+    ["tiny", "base", "small", "medium", "medium.en", "large-v2", "large-v3", "large-v3-turbo"].forEach(value => audioModel.add(new Option(value, value)));
+    [["auto","Auto detect"],["de","German"],["en","English"],["es","Spanish"],["fr","French"],["it","Italian"],["ja","Japanese"],["ko","Korean"],["nl","Dutch"],["pt","Portuguese"],["ru","Russian"],["zh","Chinese"]].forEach(([value,label]) => audioSourceLanguage.add(new Option(label,value)));
+    ["English", "Italian", "French", "German", "Spanish", "Portuguese", "Arabic", "Chinese", "Japanese", "Korean", "Russian"].forEach(value => audioDialogueLanguage.add(new Option(value,value)));
+    [1,2,3,4].forEach(value => audioSubject.add(new Option(`<Subject ${value}> · S${value}`,String(value))));
+    audioModel.value = String(widget(node,"audio_transcription_model")?.value || "tiny");
+    audioSourceLanguage.value = String(widget(node,"audio_transcription_language")?.value || "auto");
+    audioDialogueLanguage.value = String(widget(node,"audio_dialogue_language")?.value || "English");
+    audioSubject.value = String(widget(node,"audio_dialogue_subject")?.value || "1");
+    const audioTranscriptDraft = el("textarea");
+    audioTranscriptDraft.placeholder = "Connect AUDIO and Queue once to transcribe, or paste/edit a transcript here.";
+    audioTranscriptDraft.value = project.audio_transcript || "";
+    const audioStatus = el("div", "iamccs-pr-ai-status", project.audio_dialogue_tag ? "H3 dialogue tag ready for cursor insertion." : "Connect the Prompter AUDIO input, then Queue once. Whisper text returns here without auto-injecting Shotboard.");
+    const audioInsertGlobal = button("INSERT DIALOGUE AT GLOBAL CURSOR");
+    const refreshAudioDialogueTag = () => {
+        const transcript = String(audioTranscriptDraft.value || "").replace(/\s+/g," ").trim();
+        project.audio_transcript = transcript;
+        project.audio_dialogue_tag = transcript ? `<Subject ${audioSubject.value}> (S${audioSubject.value}): <d>[${audioDialogueLanguage.value}] ${transcript}</d>` : "";
+        audioStatus.textContent = transcript ? `Ready: ${project.audio_dialogue_tag}` : "No transcript is available yet.";
+    };
+    const persistAudioControls = () => {
+        setWidget(node,"audio_transcription_model",audioModel.value);
+        setWidget(node,"audio_transcription_language",audioSourceLanguage.value);
+        setWidget(node,"audio_dialogue_language",audioDialogueLanguage.value);
+        setWidget(node,"audio_dialogue_subject",audioSubject.value);
+        refreshAudioDialogueTag();
+        commit();
+    };
+    audioModel.onchange = persistAudioControls; audioSourceLanguage.onchange = persistAudioControls;
+    audioDialogueLanguage.onchange = persistAudioControls; audioSubject.onchange = persistAudioControls;
+    audioTranscriptDraft.oninput = () => { refreshAudioDialogueTag(); commit(); };
+    audioInsertGlobal.onclick = () => {
+        refreshAudioDialogueTag();
+        if (!project.audio_dialogue_tag) { audioStatus.textContent = "Queue with a connected AUDIO input or paste a transcript first."; return; }
+        let area = activePromptArea;
+        if (!area || String(activePromptKey || "").startsWith("local_")) {
+            const preferred = ({audio_driven:"audio_dialogue_map",multi_shot_lipsync:"multishot_dialogue_map",ref2va:"detailed_description"})[project.task_mode] || "dialogue";
+            area = center.querySelector(`textarea[data-section-key="${preferred}"]`) || center.querySelector("textarea[data-section-key]");
+        }
+        activePromptArea = area; activePromptKey = area?.dataset?.sectionKey || activePromptKey;
+        insertIntoActiveField(project.audio_dialogue_tag);
+        audioStatus.textContent = `Inserted at the GLOBAL cursor. Review wording, then inject Shotboard.`;
+    };
+    audioPanel.append(audioHead, fieldLabel("Whisper model",audioModel), fieldLabel("Audio language",audioSourceLanguage), fieldLabel("H3 dialogue language",audioDialogueLanguage), fieldLabel("Speaker / subject",audioSubject), fieldLabel("Transcript",audioTranscriptDraft), audioInsertGlobal, audioStatus);
+    left.append(audioPanel);
     left.appendChild(el("div", "iamccs-pr-kicker", "Writing mode"));
     const writing = el("div", "iamccs-pr-writing");
     const writingLabels = { manual: "Manual", guided: "Guided checklist", assistant_fill: "AI rewrite fields" };
@@ -1184,7 +1233,16 @@ function mountPrompter(node) {
                 project.ai_scope = key;
                 runAIRewrite({ directTargetKeys: [key], triggerButton: fieldAIButton });
             };
-            head.appendChild(fieldAIButton);
+            const fieldAudioButton = button("AUDIO LINE", "iamccs-pr-field-ai");
+            fieldAudioButton.title = "Insert the last Whisper transcript as an official MiniMax H3 <d> dialogue block at this field's cursor.";
+            fieldAudioButton.addEventListener("pointerdown", (event) => event.preventDefault());
+            fieldAudioButton.onclick = (event) => {
+                event.preventDefault(); event.stopPropagation(); refreshAudioDialogueTag();
+                if (!project.audio_dialogue_tag) { audioStatus.textContent = "No transcript available. Connect AUDIO and Queue once, or paste a transcript."; return; }
+                activePromptArea = area; activePromptKey = key; insertIntoActiveField(project.audio_dialogue_tag);
+                audioStatus.textContent = `Inserted into GLOBAL · ${label}.`;
+            };
+            head.append(fieldAIButton, fieldAudioButton);
             card.append(head, area, el("div", "iamccs-pr-tip", tip));
             center.appendChild(card);
             refreshState();
@@ -1409,7 +1467,7 @@ function mountPrompter(node) {
         };
         locals.forEach((row,index) => {
             const card = el("div","iamccs-pr-section"); card.style.marginTop = "8px";
-            const head = el("div","iamccs-pr-section-head"), slot = el("input"), enabled = el("input"), ai = button("✦ AI"), remove = button("REMOVE");
+            const head = el("div","iamccs-pr-section-head"), slot = el("input"), enabled = el("input"), ai = button("✦ AI"), audioLine = button("AUDIO LINE"), inject = button("INJECT"), remove = button("REMOVE");
             head.style.cssText="height:auto;min-height:38px;flex-wrap:wrap;padding:6px 10px";
             slot.type="number"; slot.min="1"; slot.step="1"; slot.value=String(row.slot || index+1); slot.style.cssText="width:64px;min-width:0";
             slot.title="One-based chronological visual slot. Editing this removes the previous stable slot binding.";
@@ -1425,6 +1483,29 @@ function mountPrompter(node) {
                 tagHint.textContent=`Active field: LOCAL SLOT ${row.slot || index+1}`;
             });
             remove.onclick=()=>{locals.splice(index,1);commit();renderSections();};
+            audioLine.onclick=()=>{
+                refreshAudioDialogueTag();
+                if(!project.audio_dialogue_tag){audioStatus.textContent="No transcript available. Connect AUDIO and Queue once, or paste a transcript.";return;}
+                activePromptArea=area;activePromptKey=`local_${row.slot || index+1}`;insertIntoActiveField(project.audio_dialogue_tag);
+                audioStatus.textContent=`Inserted into LOCAL SLOT ${row.slot || index+1}.`;
+            };
+            inject.onclick=()=>{
+                try {
+                    commit();
+                    const shotboard = shotboardsForPrompter(node)[0];
+                    if (typeof shotboard?._iamccsMiniMaxInjectPrompt !== "function") throw Error("Connect a ready Shotboard first.");
+                    const result = shotboard._iamccsMiniMaxInjectPrompt({
+                        prompt: area.value, target: `local_${Number(row.slot) || index+1}`,
+                        slotId: row.slot_id || "", strictSlot: true, createMissing: true,
+                        taskMode: project.task_mode, mergePolicy: project.merge_policy,
+                    });
+                    injectStatus.className = "iamccs-pr-inject-status ok";
+                    injectStatus.textContent = `Injected ${result.actualTarget}.`;
+                } catch(error) {
+                    injectStatus.className = "iamccs-pr-inject-status error";
+                    injectStatus.textContent = `Injection failed: ${error.message}`;
+                }
+            };
             ai.onclick=async()=>{
                 if(node._iamccsPromptAiBusy) {aiStatus.textContent="An AI rewrite is already running.";return;}
                 const rough=area.value, requestMode=project.task_mode;
@@ -1441,7 +1522,7 @@ function mountPrompter(node) {
                 } catch(error){aiStatus.textContent=`Local rewrite failed: ${error.message}`;}
                 finally{done();node._iamccsPromptAiBusy=false;aiApiKey.value="";}
             };
-            head.append(enabled,el("span","","SLOT"),slot,ai,remove);card.append(head,area);panel.append(card);
+            head.append(enabled,el("span","","SLOT"),slot,ai,audioLine,inject,remove);card.append(head,area);panel.append(card);
         });
         return panel;
     };
@@ -1496,8 +1577,8 @@ function mountPrompter(node) {
                 for (const row of activeLocals) {
                     const bound = row.slot_id ? slots.findIndex(slot => String(slot.id) === String(row.slot_id)) : -1;
                     const index = bound >= 0 ? bound : Number(row.slot)-1;
-                    if (!Number.isInteger(index) || index < 0 || index >= slots.length || used.has(index)) {
-                        throw Error(`Local prompt ${row.slot}: missing or duplicate Shotboard slot. Read Shotboard slots before injecting; nothing changed.`);
+                    if (!Number.isInteger(index) || index < 0 || used.has(index)) {
+                        throw Error(`Local prompt ${row.slot}: invalid or duplicate Shotboard slot; nothing changed.`);
                     }
                     used.add(index);
                 }
@@ -1522,7 +1603,7 @@ function mountPrompter(node) {
             const result = targetIsGlobal && prompt.trim()
                 ? shotboard._iamccsMiniMaxInjectPrompt({prompt,target:"global",mergePolicy:project.merge_policy})
                 : (!activeLocals.length && (localFallback || prompt.trim())
-                    ? shotboard._iamccsMiniMaxInjectPrompt({prompt:localFallback || prompt,target:project.injection_target,mergePolicy:project.merge_policy})
+                    ? shotboard._iamccsMiniMaxInjectPrompt({prompt:localFallback || prompt,target:project.injection_target,createMissing:true,taskMode:project.task_mode,mergePolicy:project.merge_policy})
                     : null);
             // A Shotboard rebuild can legitimately replace segment ids while
             // preserving the visible chronological slots.  Treat the stable id
@@ -1530,7 +1611,7 @@ function mountPrompter(node) {
             // the deterministic fallback.  This keeps LOCAL prompts attached to
             // the boxes the filmmaker sees instead of failing on a stale id.
             const localResults = activeLocals.map(row =>
-                shotboard._iamccsMiniMaxInjectPrompt({prompt:row.prompt,target:`local_${Math.max(1, Number(row.slot) || 1)}`,slotId:row.slot_id || "",strictSlot:true,mergePolicy:project.merge_policy}));
+                shotboard._iamccsMiniMaxInjectPrompt({prompt:row.prompt,target:`local_${Math.max(1, Number(row.slot) || 1)}`,slotId:row.slot_id || "",strictSlot:true,createMissing:true,taskMode:project.task_mode,mergePolicy:project.merge_policy}));
             if (!result && !localResults.length) throw new Error("LOCAL target selected: fill or enable at least one LOCAL slot action.");
             injectStatus.className = "iamccs-pr-inject-status ok";
             injectStatus.textContent = `Injected into ${[result,...localResults].filter(Boolean).map(r => r.actualTarget).join(", ")}.${visualPaths.length ? ` ${visualPaths.length} visual path(s) synchronized to Shotboard.` : ""} Shotboard visible boxes are now the only Queue truth; Queue was not started.`;
@@ -1619,6 +1700,24 @@ function mountPrompter(node) {
         renderControls();
         renderSections();
         return result;
+    };
+
+    const originalExecuted = node.onExecuted;
+    node.onExecuted = function(message) {
+        try { originalExecuted?.apply(this, arguments); } catch {}
+        const transcript = Array.isArray(message?.iamccs_audio_transcript) ? message.iamccs_audio_transcript[0] : message?.iamccs_audio_transcript;
+        const dialogueTag = Array.isArray(message?.iamccs_h3_dialogue_tag) ? message.iamccs_h3_dialogue_tag[0] : message?.iamccs_h3_dialogue_tag;
+        if (transcript != null) {
+            project.audio_transcript = String(transcript || "");
+            project.audio_dialogue_tag = String(dialogueTag || "");
+            audioTranscriptDraft.value = project.audio_transcript;
+            refreshAudioDialogueTag();
+            commit();
+            audioStatus.className = `iamccs-pr-ai-status${project.audio_dialogue_tag ? " ok" : " error"}`;
+            audioStatus.textContent = project.audio_dialogue_tag
+                ? "Whisper transcript ready. Use AUDIO LINE in the desired GLOBAL or LOCAL prompt; Shotboard is not changed until INJECT."
+                : "No usable transcript returned. Check comfy-mtb Whisper nodes/model and the connected audio.";
+        }
     };
 
     renderControls();

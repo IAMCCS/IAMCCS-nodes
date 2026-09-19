@@ -11,6 +11,7 @@ acceleration and delivery routing agree for each chunk.
 from __future__ import annotations
 
 import functools
+import hashlib
 from .iamccs_h3_seed_policy import chunk_seed
 import gc
 import json
@@ -35,6 +36,36 @@ SUPERNODE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX"
 CATEGORY = "IAMCCS/MiniMax H3/Atomic Backend"
 H3_FPS = 24
 LOG = logging.getLogger("IAMCCS.MiniMaxH3.AtomicBackend")
+
+
+def _debug_sha256_file(path_value: Any) -> str:
+    """Return a stable source-file fingerprint for LongVid guide diagnostics."""
+    try:
+        path = Path(str(path_value or "")).expanduser()
+        if not path.is_file():
+            return "missing"
+        digest = hashlib.sha256()
+        with path.open("rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        return digest.hexdigest()
+    except Exception as exc:
+        return f"error:{type(exc).__name__}"
+
+
+def _debug_image_fingerprint(image: Any) -> str:
+    """Fingerprint the actual pixel tensor handed to MiniMaxH3AddGuide."""
+    try:
+        if not torch.is_tensor(image):
+            return "not-tensor"
+        normalized = (
+            torch.nan_to_num(image.detach().float(), nan=0.0, posinf=1.0, neginf=0.0)
+            .mul(255.0).round().clamp(0, 255).to(torch.uint8).cpu().contiguous()
+        )
+        digest = hashlib.sha256(normalized.numpy().tobytes()).hexdigest()
+        return f"{digest}|shape={tuple(int(v) for v in image.shape)}"
+    except Exception as exc:
+        return f"error:{type(exc).__name__}"
 
 
 def _context_owned_fl2va_prompt(prompt: str) -> str:
@@ -1411,6 +1442,29 @@ def _accelerate(model, shotplan: dict[str, Any]):
         )
         return patched, f"FastH3 Dense 6-step + {memory_report} (no cache approximation)"
     if mode == "pdd_native_8step":
+        # Pianosequenza 2 Stage may combine the native ComfyUI PDD 8-step
+        # LoRA/head bank with the progressive spatial schedule.  The LoRA
+        # itself is already applied before _accelerate(); here we only add the
+        # same exact low-VRAM attention/FFN policy used by IAMCCS progressive
+        # spatial modes so the two full-resolution terminal NFEs do not fall
+        # back to stock SDPA on 8-12 GB cards.  Ordinary one-stage PDD stays
+        # byte-for-byte on its historical acceleration path.
+        if bool(shotplan.get("pianosequenza_2stage_enabled", False)):
+            try:
+                patched = _apply_h3_low_vram_exact(model)
+                return patched, "PDD native 8-step LoRA + Pianosequenza 2 Stage + exact low-VRAM attention/FFN"
+            except Exception as exact_exc:
+                try:
+                    patched = _apply_h3_memory_efficient_sage(model)
+                    return patched, (
+                        "PDD native 8-step LoRA + Pianosequenza 2 Stage + H3 memory-efficient attention "
+                        f"(exact unavailable: {exact_exc})"
+                    )
+                except Exception as sage_exc:
+                    raise RuntimeError(
+                        "PDD + Pianosequenza 2 Stage requires a working low-VRAM H3 attention path. "
+                        "Neither IAMCCS exact low-VRAM attention/FFN nor memory-efficient H3 attention could be applied."
+                    ) from sage_exc
         return model, "PDD native core head-bank integration"
     if mode in {
         "iamccs_progressive_2stage",
@@ -1739,10 +1793,73 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
         task = _effective_task(cine_linx, chunk)
         width = int(shotplan.get("width", 960))
         height = int(shotplan.get("height", 544))
-        visible_frames = max(5, int(chunk.get("frame_count", 124)))
-        while visible_frames % 17 != 5:
-            visible_frames += 1
-        frames = visible_frames
+        adaptive_guide_window = bool(chunk.get("latent_tail_adaptive_window", False))
+        hd_context_prefix_frames = max(0, int(chunk.get("pianosequenza_hd_context_prefix_frames", 0) or 0))
+        hd_hidden_context_window = bool(
+            str(shotplan.get("terminal_endpoint_mode", "") or "").strip().lower() == "pianosequenza_hd"
+            and hd_context_prefix_frames > 0
+        )
+        if adaptive_guide_window or hd_hidden_context_window:
+            # Planner owns the legal H3 technical window.  The visible editorial
+            # suffix can be non-grid because an inherited latent tail occupies
+            # the hidden prefix on continuation chunks.
+            visible_frames = max(1, int(chunk.get("unique_frames", chunk.get("requested_frame_count", 0)) or 0))
+            frames = max(5, int(chunk.get("frame_count", 0) or 0))
+            if frames % 17 != 5:
+                label = "Adaptive Guide Window" if adaptive_guide_window else "PIANOSEQUENZA_HD"
+                raise ValueError(f"IAMCCS {label} emitted non-H3-grid sample length {frames}f")
+        else:
+            visible_frames = max(5, int(chunk.get("frame_count", 124)))
+            while visible_frames % 17 != 5:
+                visible_frames += 1
+            frames = visible_frames
+        latent_tail_cfg = (
+            shotplan.get("longvid_latent_tail")
+            if isinstance(shotplan.get("longvid_latent_tail"), dict)
+            else {}
+        )
+        latent_tail_requested = bool(latent_tail_cfg.get("enabled", False))
+        LOG.info(
+            "MiniMax H3 Latent Tail A/B plan | chunk=%d/%d | enabled=%s | tail=%df",
+            int(segment_index) + 1,
+            len(shotplan.get("chunks", [])),
+            latent_tail_requested,
+            int(latent_tail_cfg.get("tail_frames", 22) or 22),
+        )
+        latent_tail_active = bool(latent_tail_requested and int(segment_index) > 0)
+        latent_tail_context_frames = 0
+        if latent_tail_active:
+            latent_tail_context_frames = max(
+                5, int(latent_tail_cfg.get("tail_frames", 22) or 22)
+            )
+            while latent_tail_context_frames > 5 and latent_tail_context_frames % 17 != 5:
+                latent_tail_context_frames -= 1
+            if adaptive_guide_window:
+                planned_prefix = max(0, int(chunk.get("latent_tail_context_prefix_frames", 0) or 0))
+                if planned_prefix != latent_tail_context_frames:
+                    raise ValueError(
+                        "IAMCCS Adaptive Guide Window context mismatch: "
+                        f"planner={planned_prefix}f runtime={latent_tail_context_frames}f"
+                    )
+                if frames < latent_tail_context_frames + visible_frames:
+                    raise ValueError(
+                        "IAMCCS Adaptive Guide Window sample is shorter than context + visible suffix: "
+                        f"sample={frames}f context={latent_tail_context_frames}f visible={visible_frames}f"
+                    )
+            else:
+                frames = visible_frames + latent_tail_context_frames
+                while frames % 17 != 5:
+                    frames += 1
+            if frames > 362:
+                raise ValueError(
+                    "LONGVID LATENT TAIL needs "
+                    f"{frames} H3 sample frames ({visible_frames} visible + "
+                    f"{latent_tail_context_frames} context/padding), above H3's 362f limit."
+                )
+            if int(segment_index) <= 0:
+                raise ValueError(
+                    "LONGVID LATENT TAIL continuation was requested for the first chunk."
+                )
         native_av_context = None
         try:
             from .iamccs_minimax_h3_continuity import (
@@ -1773,7 +1890,15 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             "export_frames": visible_frames,
             "sample_frames": frames,
             "segment_index": int(segment_index),
-            "method": "native_av_context" if native_av_context else "planned_fl2va_keyframes",
+            "method": (
+                "native_av_context"
+                if native_av_context
+                else (
+                    "longvid_latent_tail_experimental"
+                    if latent_tail_active
+                    else "planned_fl2va_keyframes"
+                )
+            ),
             "render_id": str(render_id or ""),
             "carry": None,
             # Native Checkpoint receives this state in current FL2VA graphs.
@@ -1789,6 +1914,31 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 "sample_frames": int(native_av_context["sample_frames"]),
                 "context_frames": int(native_av_context["context_frames"]),
                 "previous_tail_trim": 0,
+            })
+        elif latent_tail_active:
+            motion_state.update({
+                "active": True,
+                "trim_frames": int(latent_tail_context_frames),
+                "export_frames": int(visible_frames),
+                "sample_frames": int(frames),
+                "context_frames": int(latent_tail_context_frames),
+                "junction_overlap_frames": int(latent_tail_context_frames),
+                "previous_tail_trim": 0,
+                "experimental": True,
+                "adaptive_guide_window": bool(adaptive_guide_window),
+            })
+        elif hd_hidden_context_window:
+            motion_state.update({
+                "active": True,
+                "method": "pianosequenza_hd",
+                "trim_frames": int(hd_context_prefix_frames),
+                "export_frames": int(visible_frames),
+                "sample_frames": int(frames),
+                "context_frames": int(hd_context_prefix_frames),
+                "junction_overlap_frames": int(hd_context_prefix_frames),
+                "previous_tail_trim": 0,
+                "pianosequenza_hd": True,
+                "adaptive_guide_window": False,
             })
         # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
         # Prompter changes are already baked into the chunk before execution.
@@ -2114,6 +2264,41 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             raise ValueError(f"Unsupported atomic H3 task: {task}")
 
         positive, latent = result[0], result[1]
+        if latent_tail_active:
+            if not str(render_id or "").strip():
+                raise RuntimeError(
+                    "LONGVID LATENT TAIL Phase 2 continuation chunk has no render_id. "
+                    "Start from chunk 1 and let Native Checkpoint queue chunk 2."
+                )
+            from .iamccs_minimax_h3_continuity import (
+                apply_longvid_sampled_latent_tail,
+                load_longvid_sampled_latent_tail,
+            )
+            previous_tail = load_longvid_sampled_latent_tail(
+                str(render_id or ""),
+                int(segment_index) - 1,
+            )
+            if previous_tail is None:
+                raise RuntimeError(
+                    "LONGVID LATENT TAIL Phase 2 could not load the previous sampled latent tail. "
+                    "Start the render from chunk 1; do not run continuation chunks manually."
+                )
+            latent, latent_tail_details = apply_longvid_sampled_latent_tail(
+                latent,
+                previous_tail,
+                tail_frames=latent_tail_context_frames,
+            )
+            motion_state["latent_tail_details"] = latent_tail_details
+            LOG.info(
+                "MiniMax H3 Latent Tail A/B applied | chunk=%d/%d | tail=%df | "
+                "video_tokens=%d | taper=%.2f->%.2f | RGB bridge preserved=yes",
+                int(segment_index) + 1,
+                len(shotplan.get("chunks", [])),
+                int(latent_tail_details["frames"]),
+                int(latent_tail_details["video_tokens"]),
+                float(latent_tail_details["mask_start"]),
+                float(latent_tail_details["mask_end"]),
+            )
         if task.startswith("ref2va"):
             meta = positive[0][1] if (
                 isinstance(positive, (list, tuple)) and positive and isinstance(positive[0], (list, tuple))
@@ -2156,27 +2341,98 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
         guide_events = chunk.get("guides") if shotboard_task in {"longvid_guides", "longvid_ref2vid_lipsync"} else []
         applied_guides: list[str] = []
         if isinstance(guide_events, list):
-            native_context_frames = int(native_av_context.get("context_frames", 0)) if isinstance(native_av_context, dict) else 0
+            native_context_frames = (
+                int(native_av_context.get("context_frames", 0))
+                if isinstance(native_av_context, dict)
+                else (
+                    int(latent_tail_context_frames)
+                    if latent_tail_active
+                    else int(hd_context_prefix_frames)
+                )
+            )
             positioned_bridge_head = (
                 max(0, int(chunk.get("trim_head_frames", 0) or 0))
                 if shotboard_task == "longvid_guides" and bool(chunk.get("uses_bridge_first_frame"))
                 else 0
             )
-            for guide in guide_events:
+            seen_debug_image_hashes: dict[str, str] = {}
+            for guide_index, guide in enumerate(guide_events):
                 if not isinstance(guide, dict):
                     continue
                 kind = str(guide.get("kind", "")).strip().lower()
                 source_path = str(guide.get("source_path", "")).strip()
-                local_frame = (
-                    max(0, int(guide.get("local_frame", 0)))
-                    + native_context_frames
-                    + positioned_bridge_head
-                )
+                authored_local_frame = max(0, int(guide.get("local_frame", 0)))
+                local_frame = authored_local_frame + native_context_frames + positioned_bridge_head
                 guide_id = str(guide.get("id", "guide")).strip() or "guide"
                 if kind == "image":
                     image = _load_image(source_path)
                     if image is None:
                         raise ValueError(f"LongVid image guide '{guide_id}' has no source image")
+                    raw_global_frame = guide.get("global_frame", -1)
+                    global_frame = int(-1 if raw_global_frame is None else raw_global_frame)
+                    chunk_start = int(chunk.get("timeline_start_frame", 0) or 0)
+                    expected_authored_local = global_frame - chunk_start if global_frame >= 0 else authored_local_frame
+                    mapping_status = "OK" if expected_authored_local == authored_local_frame else "MISMATCH"
+                    file_sha256 = _debug_sha256_file(source_path)
+                    tensor_fingerprint = _debug_image_fingerprint(image)
+                    duplicate_of = seen_debug_image_hashes.get(file_sha256, "") if file_sha256 not in {"", "missing"} else ""
+                    if file_sha256 not in {"", "missing"}:
+                        seen_debug_image_hashes.setdefault(file_sha256, guide_id)
+                    LOG.info(
+                        "MiniMax H3 GUIDE DEBUG | chunk=%d/%d | guide_order=%d | id=%s | source=%s | "
+                        "file_sha256=%s | pixel_sha256=%s | global_frame=%d | chunk_start=%d | "
+                        "authored_local=%d | expected_local=%d | effective_local=%d | native_context=%d | "
+                        "bridge_head=%d | terminal_reanchor=%s | continued=%s | map=%s%s",
+                        int(segment_index) + 1,
+                        len(shotplan.get("chunks", [])),
+                        int(guide_index),
+                        guide_id,
+                        source_path or "<empty>",
+                        file_sha256,
+                        tensor_fingerprint,
+                        global_frame,
+                        chunk_start,
+                        authored_local_frame,
+                        expected_authored_local,
+                        local_frame,
+                        native_context_frames,
+                        positioned_bridge_head,
+                        bool(guide.get("terminal_reanchor", False)),
+                        bool(guide.get("continued_from_previous_chunk", False)),
+                        mapping_status,
+                        f" | duplicate_source_of={duplicate_of}" if duplicate_of and duplicate_of != guide_id else "",
+                    )
+                    if mapping_status != "OK":
+                        LOG.warning(
+                            "MiniMax H3 GUIDE DEBUG mapping mismatch | id=%s | global=%d | chunk_start=%d | "
+                            "planner_local=%d | expected=%d",
+                            guide_id, global_frame, chunk_start, authored_local_frame, expected_authored_local,
+                        )
+                    if local_frame < 0 or local_frame >= int(frames):
+                        LOG.warning(
+                            "MiniMax H3 GUIDE DEBUG effective frame outside sample | id=%s | effective_local=%d | sample_frames=%d",
+                            guide_id, local_frame, int(frames),
+                        )
+                    if shotboard_task == "longvid_guides" and bool(guide.get("terminal_reanchor")):
+                        # IAMCCS_LONGVID_PIANOSEQUENZA_V2_UPSTREAM_PARITY
+                        endpoint_mode = str(
+                            shotplan.get("terminal_endpoint_mode", guide.get("terminal_endpoint_mode", "hard_image"))
+                            or "hard_image"
+                        ).strip().lower()
+                        if endpoint_mode == "latent_free":
+                            endpoint_mode = "latent_free_closure"
+                        if endpoint_mode == "latent_free_closure":
+                            from .iamccs_minimax_h3_terminal_closure import attach_terminal_closure
+                            latent = attach_terminal_closure(
+                                latent, source_path=source_path, frame_idx=local_frame, guide_id=guide_id,
+                                chunk_index=int(segment_index), total_chunks=len(shotplan.get("chunks", [])),
+                            )
+                            applied_guides.append(f"terminal-latent-closure:{guide_id}@{local_frame}")
+                            continue
+                        # HARD IMAGE and every PIANOSEQUENZA v2 mode deliberately
+                        # fall through to stock MiniMaxH3AddGuide.  Pianosequenza
+                        # owns the final chunk's *incoming latent transport*, not
+                        # the authored terminal image keyframe.
                     positive = MiniMaxH3AddGuide.execute(
                         positive=positive,
                         latent=latent,
@@ -2185,6 +2441,10 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                         image=image,
                     )[0]
                     applied_guides.append(f"image:{guide_id}@{local_frame}")
+                    LOG.info(
+                        "MiniMax H3 GUIDE DEBUG applied | chunk=%d/%d | id=%s | effective_local=%d | source_sha256=%s",
+                        int(segment_index) + 1, len(shotplan.get("chunks", [])), guide_id, local_frame, file_sha256,
+                    )
                 elif kind == "audio":
                     if shotboard_task == "longvid_guides" and str(shotplan.get("audio_mode", "")) == "h3_custom_audio_drive":
                         # v20 forced-audio parity: T2VA/I2VA receive source
@@ -2488,8 +2748,107 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
                 steps=int(steps),
                 denoise=float(denoise),
             )[0]
+        # IAMCCS_LONGVID_PIANOSEQUENZA_V2_UPSTREAM_PARITY
+        pianosequenza_report = "off"
+        endpoint_mode = str(shotplan.get("terminal_endpoint_mode", "hard_image") or "hard_image").strip().lower()
+        two_stage_enabled = bool(shotplan.get("pianosequenza_2stage_enabled", False))
+        hd_enabled = bool(endpoint_mode == "pianosequenza_hd")
+        if endpoint_mode == "latent_free":
+            endpoint_mode = "latent_free_closure"
+        if endpoint_mode == "pianosequenza_2stage":
+            # Legacy enum migration only. The explicit Settings/PRO boolean is
+            # authoritative from v1.9 onward: OFF must always mean one-stage.
+            endpoint_mode = "pianosequenza_drift"
+            LOG.info(
+                "Pianosequenza legacy endpoint migrated to DRIFT | multi_stage_toggle=%s | "
+                "explicit boolean remains authoritative",
+                bool(two_stage_enabled),
+            )
+        if endpoint_mode in {
+            "pianosequenza_linear", "pianosequenza_drift", "pianosequenza_native",
+            "pianosequenza_phase", "pianosequenza_frozen", "pianosequenza_hd",
+        } or bool(two_stage_enabled):
+            from .iamccs_minimax_h3_terminal_strategies import prepare_pianosequenza_before_sample
+            terminal_prepare_mode = endpoint_mode
+            positive, latent, active_model, pianosequenza_report = prepare_pianosequenza_before_sample(
+                mode=terminal_prepare_mode,
+                positive=positive,
+                target_latent=latent,
+                model=active_model,
+                sigmas=sigmas,
+                shotplan=shotplan,
+                chunk_index=int(chunk_index),
+                render_id=(
+                    str(motion_state.get("render_id", "") or "")
+                    if isinstance(motion_state, dict) else ""
+                ),
+            )
+            guider = BasicGuider.execute(model=active_model, conditioning=positive)[0]
+            LOG.info(
+                "MiniMax H3 Pianosequenza v2 PRE-SAMPLE | chunk=%d/%d | %s",
+                int(chunk_index) + 1, len(shotplan.get("chunks", [])), pianosequenza_report,
+            )
         acceleration_mode = str(shotplan.get("acceleration", "native") or "native").lower()
-        if acceleration_mode.startswith("iamccs_progressive_"):
+        if bool(hd_enabled):
+            if bool(two_stage_enabled):
+                LOG.info("PIANOSEQUENZA_HD owns its two-stage contract; separate Multi-Stage Spatial toggle is ignored")
+            if acceleration_mode.startswith("iamccs_progressive_"):
+                raise RuntimeError(
+                    "PIANOSEQUENZA_HD already owns progressive spatial sampling; "
+                    "select Native/FastH3/PDD/Sage/low-VRAM acceleration instead of stacking IAMCCS Progressive."
+                )
+            if acceleration_mode == "matlowai_fused_turbo_manual_sigma":
+                raise RuntimeError(
+                    "PIANOSEQUENZA_HD has not been validated with the fused full-checkpoint Turbo route; "
+                    "use Native/FastH3/PDD-8Step/Sage/low-VRAM."
+                )
+            from .iamccs_minimax_h3_pianosequenza_2stage import sample_pianosequenza_hd
+            import comfy.utils
+            sampled, hd_report = sample_pianosequenza_hd(
+                model=active_model,
+                conditioning=positive,
+                sigmas=sigmas,
+                latent=latent,
+                seed=actual_seed,
+                shotplan=shotplan,
+                disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
+            )
+            sampler_report = hd_report
+        elif bool(two_stage_enabled):
+            if acceleration_mode.startswith("iamccs_progressive_"):
+                raise RuntimeError(
+                    "Pianosequenza 2 Stage already owns progressive spatial sampling; "
+                    "select Native/FastH3/Sage/low-VRAM acceleration instead of stacking IAMCCS Progressive."
+                )
+            if acceleration_mode == "matlowai_fused_turbo_manual_sigma":
+                raise RuntimeError(
+                    "Pianosequenza 2 Stage has not been validated with the fused full-checkpoint Turbo route; "
+                    "use Native/FastH3/PDD-8Step/Sage/low-VRAM for this mode."
+                )
+            if acceleration_mode.startswith("pdd"):
+                sampling_contract = shotplan.get("sampling") if isinstance(shotplan.get("sampling"), dict) else {}
+                total_steps = int(sampling_contract.get("steps", 0) or 0)
+                stage_settings = shotplan.get("pianosequenza_2stage_settings") if isinstance(shotplan.get("pianosequenza_2stage_settings"), dict) else {}
+                LOG.info(
+                    "Pianosequenza 2 Stage PDD-capable route | schedule=%s | stage_count=%s | split_mode=%s | profile=%s | same patched H3 model reused across spatial stages",
+                    total_steps,
+                    str(stage_settings.get("stage_count", "2_stage")),
+                    str(stage_settings.get("split_mode", "auto")),
+                    str(stage_settings.get("auto_profile", "balanced")),
+                )
+            from .iamccs_minimax_h3_pianosequenza_2stage import sample_pianosequenza_2stage
+            import comfy.utils
+            sampled, two_stage_report = sample_pianosequenza_2stage(
+                model=active_model,
+                conditioning=positive,
+                sigmas=sigmas,
+                latent=latent,
+                seed=actual_seed,
+                shotplan=shotplan,
+                disable_pbar=not comfy.utils.PROGRESS_BAR_ENABLED,
+            )
+            sampler_report = two_stage_report
+        elif acceleration_mode.startswith("iamccs_progressive_"):
             from .iamccs_minimax_h3_progressive_spatial import sample_progressive_spatial
             import comfy.utils
 
@@ -2513,6 +2872,96 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
                 latent_image=latent,
             )[0]
 
+        terminal_closure_report = "off"
+        endpoint_mode = str(shotplan.get("terminal_endpoint_mode", "hard_image") or "hard_image").strip().lower()
+        if endpoint_mode == "latent_free":
+            endpoint_mode = "latent_free_closure"
+        from .iamccs_minimax_h3_terminal_closure import (
+            build_terminal_closure_latent,
+            finalize_terminal_closure,
+            get_terminal_closure_contract,
+        )
+        terminal_closure = get_terminal_closure_contract(latent)
+        if terminal_closure is not None and endpoint_mode == "latent_free_closure":
+            # IAMCCS_TERMINAL_LATENT_CLOSURE_V1
+            # Refine the SAME sampled final-chunk AV latent. There is no new
+            # technical chunk and no task-mode transition to T2V/I2V/FL2VA.
+            if str(shotplan.get("task_mode", "") or "").strip().lower() != "longvid_guides":
+                raise RuntimeError("Terminal Latent Closure is restricted to LongVid Positioned Guides.")
+            if int(chunk_index) != len(shotplan.get("chunks", [])) - 1:
+                raise RuntimeError("Terminal Latent Closure was attached outside the final technical chunk.")
+            if acceleration_mode.startswith("iamccs_progressive_"):
+                raise RuntimeError(
+                    "Terminal Latent Closure v1 does not compose with Progressive Spatial sampling yet; "
+                    "refusing an unvalidated terminal sampling path."
+                )
+
+            from comfy_extras.nodes_minimax_h3 import MiniMaxH3AddGuide
+
+            target_image = _load_image(str(terminal_closure.get("source_path", "") or ""))
+            if target_image is None:
+                raise RuntimeError("Terminal Latent Closure could not reload the authored final image.")
+            closure_positive = MiniMaxH3AddGuide.execute(
+                positive=positive,
+                latent=sampled,
+                frame_idx=int(terminal_closure["frame_idx"]),
+                vae=video_vae,
+                image=target_image,
+            )[0]
+            closure_latent, closure_guard = build_terminal_closure_latent(sampled, terminal_closure)
+            closure_seed = (int(actual_seed) + 0x54434C31) & 0xFFFFFFFFFFFFFFFF
+            closure_noise = RandomNoise.execute(noise_seed=closure_seed)[0]
+            closure_guider = BasicGuider.execute(model=active_model, conditioning=closure_positive)[0]
+            closure_sampler = KSamplerSelect.execute(sampler_name="euler")[0]
+            closure_sigmas = BasicScheduler.execute(
+                model=active_model,
+                scheduler="simple",
+                steps=int(terminal_closure.get("steps", 6)),
+                denoise=float(terminal_closure.get("denoise", 0.30)),
+            )[0]
+            closure_sampled = SamplerCustomAdvanced.execute(
+                noise=closure_noise,
+                guider=closure_guider,
+                sampler=closure_sampler,
+                sigmas=closure_sigmas,
+                latent_image=closure_latent,
+            )[0]
+            sampled, closure_audit = finalize_terminal_closure(
+                sampled,
+                closure_sampled,
+                closure_guard,
+            )
+            terminal_closure_report = (
+                f"on[{closure_audit}; denoise={float(terminal_closure.get('denoise', 0.30)):.2f}; "
+                f"steps={int(terminal_closure.get('steps', 6))}; seed={closure_seed}]"
+            )
+            LOG.info(
+                "MiniMax H3 Terminal Latent Closure v1 | chunk=%d/%d | %s",
+                int(chunk_index) + 1,
+                len(shotplan.get("chunks", [])),
+                terminal_closure_report,
+            )
+            del (
+                target_image,
+                closure_positive,
+                closure_latent,
+                closure_guard,
+                closure_noise,
+                closure_guider,
+                closure_sampler,
+                closure_sigmas,
+                closure_sampled,
+            )
+
+        # IAMCCS_LONGVID_PIANOSEQUENZA_V2_UPSTREAM_PARITY cache-only handoff.
+        if endpoint_mode in {
+            "pianosequenza_linear", "pianosequenza_drift", "pianosequenza_native",
+            "pianosequenza_phase", "pianosequenza_frozen", "pianosequenza_2stage",
+        }:
+            from .iamccs_minimax_h3_terminal_strategies import cache_penultimate
+            _pz_cache_report = cache_penultimate(sampled, shotplan, int(chunk_index))
+            if _pz_cache_report not in {"off", "not-penultimate"}:
+                LOG.info("MiniMax H3 Pianosequenza v2 cache | %s", _pz_cache_report)
         cleanup_report = "disabled"
         if bool(shotplan.get("vram_clean_before_decode", True)):
             del noise, guider, sampler, sigmas
@@ -2520,7 +2969,96 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
 
         native_frames = comfy_nodes.VAEDecode().decode(vae=video_vae, samples=sampled)[0]
         native_audio = VAEDecodeAudio.execute(vae=audio_vae, samples=sampled)[0]
-        if isinstance(motion_state, dict) and bool(motion_state.get("active")) and str(motion_state.get("method")) == "native_av_context":
+        if (
+            isinstance(motion_state, dict)
+            and bool(motion_state.get("active"))
+            and str(motion_state.get("method")) == "longvid_latent_tail_experimental"
+        ):
+            overlap_frames = max(0, int(motion_state.get("junction_overlap_frames", 0) or 0))
+            export_frames = max(1, int(motion_state.get("export_frames", 0) or 0))
+            if not torch.is_tensor(native_frames) or native_frames.ndim != 4:
+                raise RuntimeError("IAMCCS latent-tail junction decoded no usable frames.")
+            if bool(motion_state.get("adaptive_guide_window", False)):
+                # The previous native AV tail is hidden sampling context.  Remove
+                # it before delivery, then keep exactly the new editorial suffix.
+                head = overlap_frames
+                stop = head + export_frames
+                if int(native_frames.shape[0]) < stop:
+                    raise RuntimeError(
+                        "IAMCCS Adaptive Guide Window decoded too few frames: "
+                        f"decoded={int(native_frames.shape[0])} need={stop} "
+                        f"({head} context + {export_frames} visible)."
+                    )
+                native_frames = native_frames[head:stop, ...]
+                if isinstance(native_audio, dict) and torch.is_tensor(native_audio.get("waveform")):
+                    native_audio = dict(native_audio)
+                    sample_rate = max(1, int(native_audio.get("sample_rate", 32000) or 32000))
+                    start_sample = max(0, int(round(head * sample_rate / H3_FPS)))
+                    visible_samples = max(1, int(round(export_frames * sample_rate / H3_FPS)))
+                    native_audio["waveform"] = native_audio["waveform"][..., start_sample:start_sample + visible_samples]
+                LOG.info(
+                    "MiniMax H3 ADAPTIVE GUIDE WINDOW delivery | chunk=%d/%d | sample=%df | context_head=%df | visible=%df | padding=%df",
+                    int(chunk_index) + 1,
+                    len(shotplan.get("chunks", [])),
+                    int(chunk.get("frame_count", 0) or 0),
+                    head,
+                    export_frames,
+                    max(0, int(chunk.get("latent_tail_padding_frames", 0) or 0)),
+                )
+            else:
+                if int(native_frames.shape[0]) < export_frames:
+                    raise RuntimeError("IAMCCS latent-tail junction decoded too few frames.")
+                keep_frames = min(int(native_frames.shape[0]), export_frames + overlap_frames)
+                native_frames = native_frames[:keep_frames, ...]
+                if isinstance(native_audio, dict) and torch.is_tensor(native_audio.get("waveform")):
+                    native_audio = dict(native_audio)
+                    sample_rate = max(1, int(native_audio.get("sample_rate", 32000) or 32000))
+                    target_samples = max(1, int(round(keep_frames * sample_rate / H3_FPS)))
+                    native_audio["waveform"] = native_audio["waveform"][..., :target_samples]
+                LOG.info(
+                    "MiniMax H3 latent-tail junction preserved visible overlap | overlap=%df | visible=%df | kept=%df",
+                    overlap_frames,
+                    export_frames,
+                    keep_frames,
+                )
+        elif (
+            isinstance(motion_state, dict)
+            and bool(motion_state.get("active"))
+            and str(motion_state.get("method")) == "pianosequenza_hd"
+        ):
+            # PIANOSEQUENZA_HD carries the previous native HIGH tail only as
+            # hidden denoising context.  Its editorial frames have already been
+            # delivered by the preceding chunk, so remove the prefix exactly
+            # once and export only the new Shotboard suffix.
+            head = max(0, int(motion_state.get("context_frames", 0) or 0))
+            export_frames = max(1, int(motion_state.get("export_frames", 0) or 0))
+            stop = head + export_frames
+            if not torch.is_tensor(native_frames) or native_frames.ndim != 4 or int(native_frames.shape[0]) < stop:
+                raise RuntimeError(
+                    "PIANOSEQUENZA_HD decoded too few frames for hidden-context delivery: "
+                    f"decoded={int(native_frames.shape[0]) if torch.is_tensor(native_frames) else 0} "
+                    f"need={stop} ({head} context + {export_frames} visible)."
+                )
+            native_frames = native_frames[head:stop, ...]
+            if isinstance(native_audio, dict) and torch.is_tensor(native_audio.get("waveform")):
+                native_audio = dict(native_audio)
+                sample_rate = max(1, int(native_audio.get("sample_rate", 32000) or 32000))
+                start_sample = max(0, int(round(head * sample_rate / H3_FPS)))
+                visible_samples = max(1, int(round(export_frames * sample_rate / H3_FPS)))
+                native_audio["waveform"] = native_audio["waveform"][..., start_sample:start_sample + visible_samples]
+            LOG.info(
+                "MiniMax H3 PIANOSEQUENZA_HD delivery | chunk=%d/%d | sample=%df | hidden_context=%df | visible=%df",
+                int(chunk_index) + 1,
+                len(shotplan.get("chunks", [])),
+                int(chunk.get("frame_count", 0) or 0),
+                head,
+                export_frames,
+            )
+        elif (
+            isinstance(motion_state, dict)
+            and bool(motion_state.get("active"))
+            and str(motion_state.get("method")) == "native_av_context"
+        ):
             trim_frames = max(0, int(motion_state.get("trim_frames", 0)))
             export_frames = max(5, int(motion_state.get("export_frames", 0)))
             if not torch.is_tensor(native_frames) or native_frames.ndim != 4 or int(native_frames.shape[0]) <= trim_frames:
@@ -2561,7 +3099,24 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
         ):
             visible_frames = max(1, int(chunk.get("unique_frames", 0) or 0))
             head_frames = max(0, int(chunk.get("trim_head_frames", 0) or 0))
-            planned_decoded_frames = visible_frames + head_frames
+            latent_tail_cfg = shotplan.get("longvid_latent_tail")
+            latent_tail_overlap = 0
+            if (
+                int(chunk_index) > 0
+                and isinstance(latent_tail_cfg, dict)
+                and bool(latent_tail_cfg.get("enabled", False))
+                and not bool(chunk.get("latent_tail_adaptive_window", False))
+            ):
+                latent_tail_overlap = max(
+                    0, int(latent_tail_cfg.get("tail_frames", 0) or 0)
+                )
+            # Pianosequenza incoming-overlap semantics: the carried prefix is part
+            # of the delivered continuation segment.  It is NOT discarded by
+            # the editorial crop; assembly later lets the incoming segment own
+            # exactly this overlap.
+            planned_decoded_frames = (
+                visible_frames + head_frames + latent_tail_overlap
+            )
             decoded_before_crop = int(native_frames.shape[0])
             if decoded_before_crop < planned_decoded_frames:
                 raise RuntimeError(
@@ -2624,8 +3179,10 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
             f"controls={sampling_source} | shifts={shift_video:.2f}/{shift_audio:.2f} | denoise={denoise:.2f} | "
             f"lipsync_lock={lipsync_lock_report} | "
             f"pre_sample_cleanup={conditioning_cleanup} | "
+            f"terminal_closure={terminal_closure_report} | "
             f"pre_decode_cleanup={cleanup_report} | native_last_frame=captured | "
             f"resolution={resolution_contract} | "
+            f"pianosequenza={pianosequenza_report} | "
             f"motion_context={'on' if isinstance(motion_state, dict) and motion_state.get('active') else 'off'}"
         )
         return native_frames, native_audio, bridge_last_frame, sampled, H3_FPS, report

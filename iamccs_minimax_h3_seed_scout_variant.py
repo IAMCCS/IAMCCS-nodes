@@ -415,6 +415,105 @@ class IAMCCS_MiniMaxH3SelectedDecodeR40:
         return frames, audio, bridge, sampled_latent, int(H3_FPS), report
 
 
+class IAMCCS_MiniMaxH3ScoutDeliveryLazyRouterR43:
+    """Choose ordinary universal delivery or the cacheable Scout take.
+
+    Scout stays outside R43-only temporal engines: replacing one of those
+    engines with a standalone candidate would discard its latent history.
+    Classic R42 paths, including REF2VID, remain eligible.
+    """
+
+    _TEMPORAL_ENGINE_MODES = {
+        "keyframe_joint_native",
+        "latent_go_ahead",
+        "longvid_continuous_guided",
+        "longvid_masked_loop_guided",
+        "guided_av_loop_experimental",
+        "longvid_guided_av_loop_experimental",
+        "viggle_animation",
+    }
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        lazy_image = ("IMAGE", {"lazy": True})
+        lazy_audio = ("AUDIO", {"lazy": True})
+        lazy_latent = ("LATENT", {"lazy": True})
+        lazy_int = ("INT", {"lazy": True})
+        lazy_string = ("STRING", {"lazy": True})
+        return {
+            "required": {"cine_linx": (SUPERNODE_LINX_TYPE,)},
+            "optional": {
+                "original_frames": lazy_image,
+                "original_audio": lazy_audio,
+                "original_bridge": lazy_image,
+                "original_latent": lazy_latent,
+                "original_fps": lazy_int,
+                "original_report": lazy_string,
+                "original_current_segment": lazy_int,
+                "original_total_segments": lazy_int,
+                "original_trim_head_frames": lazy_int,
+                "scout_frames": lazy_image,
+                "scout_audio": lazy_audio,
+                "scout_bridge": lazy_image,
+                "scout_latent": lazy_latent,
+                "scout_fps": lazy_int,
+                "scout_report": lazy_string,
+                "scout_current_segment": lazy_int,
+                "scout_total_segments": lazy_int,
+                "scout_trim_head_frames": lazy_int,
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "AUDIO", "IMAGE", "LATENT", "INT", "STRING", "INT", "INT", "INT")
+    RETURN_NAMES = (
+        "frames", "audio", "bridge", "sampled_latent", "fps", "report",
+        "current_segment", "total_segments", "trim_head_frames",
+    )
+    FUNCTION = "select"
+    CATEGORY = CATEGORY
+
+    @classmethod
+    def _selection(cls, cine_linx):
+        plan = _resolve_shotplan(cine_linx)
+        settings = _scout_settings(plan)
+        mode = str(plan.get("task_mode", "") or "").strip().lower()
+        requested = bool(settings.get("enabled", False))
+        allowed = mode not in cls._TEMPORAL_ENGINE_MODES
+        prefix = "scout" if requested and allowed else "original"
+        if requested and not allowed:
+            reason = f"Scout bypassed: {mode or 'unknown'} owns continuous/native latent history"
+        elif requested:
+            reason = f"Scout selected for {mode or 'auto'}"
+        else:
+            reason = "Scout disabled"
+        return prefix, reason
+
+    @classmethod
+    def _names(cls, cine_linx):
+        prefix, _ = cls._selection(cine_linx)
+        return [
+            f"{prefix}_{suffix}"
+            for suffix in (
+                "frames", "audio", "bridge", "latent", "fps", "report",
+                "current_segment", "total_segments", "trim_head_frames",
+            )
+        ]
+
+    def check_lazy_status(self, cine_linx, **kwargs):
+        return [name for name in self._names(cine_linx) if kwargs.get(name) is None]
+
+    def select(self, cine_linx, **kwargs):
+        names = self._names(cine_linx)
+        missing = [name for name in names if kwargs.get(name) is None]
+        if missing:
+            raise ValueError("R42/R43 Scout delivery branch is incomplete: " + ", ".join(missing))
+        prefix, reason = self._selection(cine_linx)
+        values = [kwargs[name] for name in names]
+        values[5] = f"{values[5]} | {reason}"
+        LOG.info("IAMCCS MiniMax H3 delivery route: %s", reason)
+        return tuple(values)
+
+
 def _stage2_lora(model, shot_lab):
     if not bool(shot_lab.get("stage2_lora_enabled", False)):
         return model, "off"
@@ -512,6 +611,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_MiniMaxH3SeedSelectR40": IAMCCS_MiniMaxH3SeedSelectR40,
     "IAMCCS_MiniMaxH3SeedPreviewR40": IAMCCS_MiniMaxH3SeedPreviewR40,
     "IAMCCS_MiniMaxH3SelectedDecodeR40": IAMCCS_MiniMaxH3SelectedDecodeR40,
+    "IAMCCS_MiniMaxH3ScoutDeliveryLazyRouterR43": IAMCCS_MiniMaxH3ScoutDeliveryLazyRouterR43,
     "IAMCCS_MiniMaxH3LatentUpresSamplingR40": IAMCCS_MiniMaxH3LatentUpresSamplingR40,
 }
 
@@ -522,5 +622,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_MiniMaxH3SeedSelectR40": "MiniMax H3 R40 · Cached Candidate Selector",
     "IAMCCS_MiniMaxH3SeedPreviewR40": "MiniMax H3 R40 · Candidate Preview",
     "IAMCCS_MiniMaxH3SelectedDecodeR40": "MiniMax H3 R40 · Selected AV Decode",
+    "IAMCCS_MiniMaxH3ScoutDeliveryLazyRouterR43": "MiniMax H3 · Universal / Scout Lazy Delivery",
     "IAMCCS_MiniMaxH3LatentUpresSamplingR40": "MiniMax H3 R40 · Isolated Stage-2 Sampling",
 }

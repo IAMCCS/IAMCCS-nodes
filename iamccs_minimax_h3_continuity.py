@@ -582,6 +582,337 @@ def build_reference_carry_over(
     return result
 
 
+# ---------------------------------------------------------------------------
+# IAMCCS LongVid Direct Latent Tail A/B v1
+#
+# Experimental, opt-in only. The stable longvid_guides RGB bridge path is
+# untouched. This v1 intentionally supports ONE handoff (exactly 2 chunks)
+# and VIDEO only, so the A/B test changes one variable at a time.
+#
+# Direct-latent continuation research lineage and GPL attribution are recorded
+# in the repository THIRD_PARTY notices. This implementation remains IAMCCS'
+# fail-closed native-tail path and has no runtime plugin dependency.
+# ---------------------------------------------------------------------------
+
+LONGVID_LATENT_TAIL_EXPERIMENTAL = "longvid_latent_tail_experimental"
+
+
+def _longvid_latent_tail_cache_path(render_id: str, segment_index: int) -> Path | None:
+    safe = str(render_id or "").strip()
+    if not safe or int(segment_index) < 0:
+        return None
+    return (
+        Path(folder_paths.get_output_directory())
+        / "minimax_h3_shotboard"
+        / "latent_tail_experimental"
+        / f"{safe}_seg_{int(segment_index):04d}_latent_tail.pt"
+    )
+
+
+def _longvid_h3_streams(latent: Any, label: str) -> tuple[torch.Tensor, torch.Tensor]:
+    samples = latent.get("samples") if isinstance(latent, dict) else None
+    if hasattr(samples, "unbind"):
+        streams = list(samples.unbind())
+    elif hasattr(samples, "tensors"):
+        streams = list(samples.tensors)
+    elif isinstance(samples, (tuple, list)):
+        streams = list(samples)
+    else:
+        streams = []
+    if len(streams) != 2:
+        raise ValueError(f"{label} is not a nested MiniMax H3 AV latent")
+    video, audio = streams
+    if not torch.is_tensor(video) or video.ndim != 5:
+        raise ValueError(f"{label} has an invalid H3 video latent")
+    if not torch.is_tensor(audio) or audio.ndim != 4:
+        raise ValueError(f"{label} has an invalid H3 audio latent")
+    return video, audio
+
+
+def _normalise_longvid_tail_frames(requested: int) -> int:
+    frames = max(5, int(requested))
+    while frames > 5 and frames % 17 != 5:
+        frames -= 1
+    return max(5, frames)
+
+
+def _longvid_video_tokens_for_frames(frame_count: int) -> int:
+    frames = _normalise_longvid_tail_frames(frame_count)
+    return 2 if frames <= 5 else ((frames - 5) // 17) * 5 + 2
+
+
+def save_longvid_sampled_latent_tail(
+    render_id: str,
+    segment_index: int,
+    sampled_latent: dict[str, Any],
+    *,
+    tail_frames: int = 22,
+    endpoint_frames: int | None = None,
+) -> bool:
+    # IAMCCS_LONGVID_NATIVE_AUDIOCON_V1
+    # Persist VIDEO + AUDIO native latent tails at the exact editorial endpoint.
+    path = _longvid_latent_tail_cache_path(render_id, segment_index)
+    if path is None:
+        return False
+
+    video, audio = _longvid_h3_streams(sampled_latent, "sampled_latent")
+    tail_frames_legal = _normalise_longvid_tail_frames(tail_frames)
+    video_tail_tokens = _longvid_video_tokens_for_frames(tail_frames_legal)
+    sample_video_tokens = int(video.shape[2])
+
+    if video_tail_tokens > sample_video_tokens:
+        raise ValueError(
+            f"IAMCCS AudioCon needs {video_tail_tokens} video tokens "
+            f"({tail_frames_legal}f), but sampled chunk has {sample_video_tokens}."
+        )
+
+    if endpoint_frames is None:
+        requested_endpoint_frames = 0
+        endpoint_frames_legal = 0
+        endpoint_video_tokens = sample_video_tokens
+        endpoint_audio_ticks = int(audio.shape[-1])
+    else:
+        requested_endpoint_frames = max(int(tail_frames_legal), int(endpoint_frames))
+        endpoint_frames_legal = _normalise_longvid_tail_frames(requested_endpoint_frames)
+        endpoint_video_tokens = _longvid_video_tokens_for_frames(endpoint_frames_legal)
+        if endpoint_video_tokens > sample_video_tokens:
+            raise ValueError(
+                "IAMCCS AudioCon editorial endpoint exceeds sampled video latent: "
+                f"requested={requested_endpoint_frames}f, "
+                f"tokens={endpoint_video_tokens}, sample={sample_video_tokens}."
+            )
+        endpoint_audio_ticks = int(round(requested_endpoint_frames * 40.0 / 24.0))
+        if endpoint_audio_ticks > int(audio.shape[-1]):
+            raise ValueError(
+                "IAMCCS AudioCon editorial endpoint exceeds sampled audio latent: "
+                f"endpoint={endpoint_audio_ticks} ticks, sample={int(audio.shape[-1])}."
+            )
+
+    if endpoint_video_tokens < video_tail_tokens:
+        raise ValueError("IAMCCS AudioCon video endpoint is shorter than requested tail.")
+
+    video_start = endpoint_video_tokens - video_tail_tokens
+    video_tail = (
+        video[:1, :, video_start:endpoint_video_tokens, :, :]
+        .detach().to(device="cpu", copy=True).contiguous()
+    )
+
+    audio_tail_ticks = max(1, int(round(tail_frames_legal * 40.0 / 24.0)))
+    audio_start = endpoint_audio_ticks - audio_tail_ticks
+    if audio_start < 0:
+        raise ValueError("IAMCCS AudioCon audio endpoint is shorter than requested tail.")
+
+    audio_tail = (
+        audio[:1, :, :, audio_start:endpoint_audio_ticks]
+        .detach().to(device="cpu", copy=True).contiguous()
+    )
+
+    if int(video_tail.shape[2]) != video_tail_tokens:
+        raise RuntimeError("IAMCCS AudioCon extracted wrong video-tail extent.")
+    if int(audio_tail.shape[-1]) != audio_tail_ticks:
+        raise RuntimeError("IAMCCS AudioCon extracted wrong audio-tail extent.")
+
+    low_carry = sampled_latent.get("iamccs_pianosequenza_2stage_low_carry") if isinstance(sampled_latent, dict) else None
+    low_tail = None
+    if torch.is_tensor(low_carry) and low_carry.ndim == 5:
+        # The low-resolution carry follows the exact same EDITORIAL endpoint
+        # as the full-resolution AV tail.  Never take the raw technical end:
+        # a sampled LongVid chunk may contain a hidden suffix beyond the last
+        # frame that survives editorial concat.
+        if int(low_carry.shape[2]) < endpoint_video_tokens:
+            raise ValueError(
+                "Pianosequenza 2 Stage low-resolution carry is shorter than the "
+                f"editorial endpoint: carry={int(low_carry.shape[2])}t, "
+                f"endpoint={endpoint_video_tokens}t."
+            )
+        low_tail = (
+            low_carry[:1, :, video_start:endpoint_video_tokens, :, :]
+            .detach().to(device="cpu", copy=True).contiguous()
+        )
+        if int(low_tail.shape[2]) != video_tail_tokens:
+            raise RuntimeError(
+                "Pianosequenza 2 Stage extracted the wrong low-resolution editorial tail extent."
+            )
+
+    payload = {
+        "schema": "iamccs.h3.longvid_latent_tail_ab.v1",
+        "segment_index": int(segment_index),
+        "tail_frames": int(tail_frames_legal),
+        "video_tokens": int(video_tail_tokens),
+        "video_tail": video_tail,
+        "audio_ticks": int(audio_tail_ticks),
+        "audio_tail": audio_tail,
+        "audio_latent_hz": 40,
+        "audiocon": True,
+        "editorial_handoff_v4": True,
+        "sample_video_tokens": int(sample_video_tokens),
+        "requested_endpoint_frames": int(requested_endpoint_frames),
+        "endpoint_frames": int(endpoint_frames_legal),
+        "endpoint_tokens": int(endpoint_video_tokens),
+        "tail_start_token": int(video_start),
+        "audio_endpoint_ticks": int(endpoint_audio_ticks),
+        "audio_tail_start_tick": int(audio_start),
+        "strategy": "editorial_endpoint_aligned_native_av_tail",
+    }
+    if low_tail is not None:
+        payload["pianosequenza_2stage_low_video_tail"] = low_tail
+        payload["pianosequenza_2stage_low_video_tokens"] = int(low_tail.shape[2])
+        payload["pianosequenza_2stage_low_spatial"] = (int(low_tail.shape[-2]), int(low_tail.shape[-1]))
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    torch.save(payload, temporary)
+    temporary.replace(path)
+    return True
+
+
+def load_longvid_sampled_latent_tail(
+    render_id: str,
+    segment_index: int,
+) -> dict[str, Any] | None:
+    path = _longvid_latent_tail_cache_path(render_id, segment_index)
+    if path is None or not path.is_file():
+        return None
+    try:
+        payload = torch.load(path, map_location="cpu", weights_only=True)
+    except Exception:
+        return None
+
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema") != "iamccs.h3.longvid_latent_tail_ab.v1"
+        or int(payload.get("segment_index", -1)) != int(segment_index)
+        or not torch.is_tensor(payload.get("video_tail"))
+        or not torch.is_tensor(payload.get("audio_tail"))
+        or not bool(payload.get("audiocon", False))
+    ):
+        return None
+
+    return payload
+
+
+
+def apply_longvid_sampled_latent_tail(
+    target_latent: dict[str, Any],
+    previous_tail: dict[str, Any],
+    *,
+    tail_frames: int = 22,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    # IAMCCS_LONGVID_NATIVE_AUDIOCON_V1
+    # Incoming chunk owns the overlap:
+    # video keeps the proven 0->1 taper;
+    # audio tail is copied and protected, then released with half-cosine.
+    from comfy.nested_tensor import NestedTensor
+
+    target_video, target_audio = _longvid_h3_streams(target_latent, "target_latent")
+    source_video_tail = previous_tail.get("video_tail")
+    source_audio_tail = previous_tail.get("audio_tail")
+
+    if not torch.is_tensor(source_video_tail) or source_video_tail.ndim != 5:
+        raise ValueError("IAMCCS AudioCon cache has no valid video tail.")
+    if not torch.is_tensor(source_audio_tail) or source_audio_tail.ndim != 4:
+        raise ValueError("IAMCCS AudioCon cache has no valid audio tail.")
+
+    frames = _normalise_longvid_tail_frames(tail_frames)
+    cached_frames = int(previous_tail.get("tail_frames", 0) or 0)
+    if cached_frames != frames:
+        raise ValueError(
+            f"IAMCCS AudioCon cache mismatch: cached={cached_frames}f, requested={frames}f"
+        )
+
+    video_tokens = _longvid_video_tokens_for_frames(frames)
+    if int(source_video_tail.shape[2]) != video_tokens:
+        raise ValueError("IAMCCS AudioCon video token mismatch.")
+    if video_tokens > int(target_video.shape[2]):
+        raise ValueError("IAMCCS AudioCon target video latent is too short.")
+    if tuple(source_video_tail.shape[3:]) != tuple(target_video.shape[3:]):
+        raise ValueError("IAMCCS AudioCon requires matching H3 video latent spatial size.")
+
+    audio_ticks = int(previous_tail.get("audio_ticks", 0) or 0)
+    expected_audio_ticks = max(1, int(round(frames * 40.0 / 24.0)))
+    if audio_ticks != expected_audio_ticks:
+        raise ValueError(
+            f"IAMCCS AudioCon audio tick mismatch: cached={audio_ticks}, "
+            f"expected={expected_audio_ticks}"
+        )
+    if int(source_audio_tail.shape[-1]) != audio_ticks:
+        raise ValueError("IAMCCS AudioCon audio-tail tensor length mismatch.")
+    if audio_ticks >= int(target_audio.shape[-1]):
+        raise ValueError("IAMCCS AudioCon protected audio prefix would consume whole target latent.")
+    if tuple(source_audio_tail.shape[1:3]) != tuple(target_audio.shape[1:3]):
+        raise ValueError("IAMCCS AudioCon source/target audio geometry differs.")
+
+    video = target_video.clone()
+    video_tail = source_video_tail.to(device=video.device, dtype=video.dtype)
+    video[:, :, :video_tokens, :, :] = video_tail.expand(video.shape[0], -1, -1, -1, -1)
+
+    audio = target_audio.clone()
+    audio_tail = source_audio_tail.to(device=audio.device, dtype=audio.dtype)
+    audio[:, :, :, :audio_ticks] = audio_tail.expand(audio.shape[0], -1, -1, -1)
+
+    video_mask = torch.ones(
+        (1, 1, int(target_video.shape[2]), 1, 1),
+        dtype=torch.float32,
+        device=target_video.device,
+    )
+    video_ramp = torch.linspace(
+        0.0,
+        1.0,
+        steps=video_tokens,
+        dtype=video_mask.dtype,
+        device=video_mask.device,
+    )
+    video_mask[:, :, :video_tokens, :, :] = video_ramp.reshape(1, 1, -1, 1, 1)
+
+    audio_mask = torch.ones(
+        (1, 1, int(target_audio.shape[2]), int(target_audio.shape[-1])),
+        dtype=torch.float32,
+        device=target_audio.device,
+    )
+
+    feather_ticks = max(1, min(8, audio_ticks))
+    hard_ticks = audio_ticks - feather_ticks
+
+    if hard_ticks > 0:
+        audio_mask[..., :hard_ticks] = 0.0
+
+    i = torch.arange(
+        1,
+        feather_ticks + 1,
+        device=audio_mask.device,
+        dtype=audio_mask.dtype,
+    )
+    release = 0.5 - 0.5 * torch.cos(torch.pi * i / float(feather_ticks))
+    audio_mask[..., hard_ticks:audio_ticks] = release.reshape(1, 1, 1, -1)
+
+    result = dict(target_latent)
+    result["samples"] = NestedTensor((video, audio))
+    result["noise_mask"] = NestedTensor((video_mask, audio_mask))
+    result["iamccs_longvid_latent_tail_ab"] = True
+    result["iamccs_audiocon"] = True
+    low_tail = previous_tail.get("pianosequenza_2stage_low_video_tail")
+    if torch.is_tensor(low_tail) and low_tail.ndim == 5:
+        result["iamccs_pianosequenza_2stage_previous_low_tail"] = low_tail.detach().to(device="cpu", copy=True)
+
+    return result, {
+        "frames": int(frames),
+        "video_tokens": int(video_tokens),
+        # IAMCCS_AUDIOCON_SCHEMA_COMPAT_V1
+        # Backward-compatible metadata contract for atomic_backend.
+        # AudioCon keeps video_* names; legacy consumers get identical aliases.
+        "mask_start": float(video_ramp[0].item()),
+        "mask_end": float(video_ramp[-1].item()),
+        "video_mask_start": float(video_ramp[0].item()),
+        "video_mask_end": float(video_ramp[-1].item()),
+        "audio_continuation": True,
+        "audio_ticks": int(audio_ticks),
+        "audio_hard_ticks": int(hard_ticks),
+        "audio_release_ticks": int(feather_ticks),
+        "audio_release": "half_cosine",
+        "strategy": "native_av_tail_video_ramp_audio_protect_release",
+    }
+
+
 NODE_CLASS_MAPPINGS = {
     "IAMCCS_MiniMaxH3MotionContext": IAMCCS_MiniMaxH3MotionContext,
 }

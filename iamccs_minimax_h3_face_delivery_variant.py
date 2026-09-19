@@ -84,12 +84,41 @@ class IAMCCS_MiniMaxH3FaceDeliveryR38B:
         mm.unload_all_models()
         mm.soft_empty_cache()
         try:
-            # Refine the complete source extent, including context and grid padding;
-            # trim only delivery pixels, exactly once, with the native trim value.
-            source = nodes.VAEDecode().decode(vae=video_vae, samples=sampled_latent)[0]
+            # R43 face isolation:
+            # decode the native latent, but NEVER feed LongVid/Motion-Context
+            # technical head/padding into the second H3 FaceRefine pass.
+            # Native generation remains the sole authority for temporal continuity.
+            source_full = nodes.VAEDecode().decode(
+                vae=video_vae, samples=sampled_latent
+            )[0]
+            source = source_full[trim:trim + visible].clone()
+            if len(source) != visible:
+                raise ValueError(
+                    "Face delivery could not isolate the native visible frame range."
+                )
+
+            # MiniMax H3 AV latents must live on the 17k+5 temporal grid.
+            # Pad ONLY with copies of the final visible frame: never borrow
+            # LongVid context/padding from sampled_latent for the FaceRefine pass.
+            refine_count = max(5, int(visible))
+            while refine_count % 17 != 5:
+                refine_count += 1
+            face_pad = refine_count - int(visible)
+            if face_pad:
+                source_refine = torch.cat(
+                    (source, source[-1:].expand(face_pad, -1, -1, -1).clone()),
+                    dim=0,
+                )
+            else:
+                source_refine = source
+
+            LOG.info(
+                "R43 Face visible-only | visible=%df | refine_grid=%df | synthetic_tail_pad=%df",
+                visible, refine_count, face_pad,
+            )
             track = _face_node_class("H3FaceTrackCrop")
             crops, transform, _, _, cw, ch = track().run(**{
-                **_defaults(track), "images":source, "detector":detector,
+                **_defaults(track), "images":source_refine, "detector":detector,
                 "canvas_width":canvas_width, "canvas_height":canvas_height,
                 "crop_factor":crop_factor,"confidence":confidence,
                 "identity_track":False,  # no hidden InsightFace download
@@ -99,12 +128,19 @@ class IAMCCS_MiniMaxH3FaceDeliveryR38B:
                 mask_class = _face_node_class("H3FaceMaskSAM")
                 mask = mask_class().run(**{**_defaults(mask_class),"crops":crops,
                     "transform":transform,"sam_model":sam_model})[0]
-            template = EmptyMiniMaxH3LatentAV.execute(width=cw,height=ch,length=source_count)[0]
-            template_v, _ = common.unpack_av(template, "face canvas")
-            template = common.pack_av({}, template_v.to(source_v), source_a)
+            # Build an isolated AV latent whose temporal extent is ONLY the
+            # visible delivery range. Its temporary audio is discarded later.
+            template = EmptyMiniMaxH3LatentAV.execute(
+                width=cw, height=ch, length=refine_count
+            )[0]
+            template_v, template_a = common.unpack_av(template, "face visible canvas")
+            template = common.pack_av(
+                {}, template_v.to(source_v),
+                template_a.to(source_a) if source_a is not None else template_a
+            )
             inject = _face_node_class("H3InjectVideoLatent")
             cropped = inject().run(av_latent=template,images=crops,vae=video_vae)[0]
-            del template, template_v
+            del template, template_v, template_a
             per_frame = _face_node_class("H3PerFrameDenoise")
             cropped = per_frame().run(**{**_defaults(per_frame),"av_latent":cropped,
                 "transform":transform,"strength_small_face":strength_small_face,
@@ -120,23 +156,66 @@ class IAMCCS_MiniMaxH3FaceDeliveryR38B:
             mm.soft_empty_cache()
             pixels = nodes.VAEDecode().decode(vae=video_vae,samples=refined)[0]
             del refined
-            if len(pixels) != len(source):
-                raise ValueError("FaceRefine changed frame count; refusing an audio offset.")
+            if len(pixels) != refine_count:
+                raise ValueError(
+                    f"FaceRefine changed the H3-aligned frame count: "
+                    f"expected {refine_count}, got {len(pixels)}."
+                )
+
+            # Stitch on the same H3-legal padded range so tracker transforms,
+            # optional SAM masks and refined crops remain frame-aligned.
             stitch = _face_node_class("H3FaceStitch")
-            stitched = stitch().run(**{**_defaults(stitch),"base_images":source,"refined_crops":pixels,
-                "transform":transform,"masks":mask,"blend":blend,"paste_region":paste_region,"feather":feather})[0]
-            del source, pixels, crops, mask
-            delivery_frames = stitched[trim:trim+visible].clone()
+            stitched_refine = stitch().run(**{
+                **_defaults(stitch),
+                "base_images": source_refine,
+                "refined_crops": pixels,
+                "transform": transform,
+                "masks": mask,
+                "blend": blend,
+                "paste_region": paste_region,
+                "feather": feather,
+            })[0]
+            del pixels, crops, mask
+
+            if len(stitched_refine) != refine_count:
+                raise ValueError(
+                    f"Face stitch changed the H3-aligned frame count: "
+                    f"expected {refine_count}, got {len(stitched_refine)}."
+                )
+
+            # Synthetic tail exists only to satisfy H3's 17k+5 grid.
+            # It is never delivered and never enters LongVid continuity.
+            stitched = stitched_refine[:visible].clone()
+            del stitched_refine, source_refine, source
+            delivery_frames = stitched.clone()
+
             # The upscaler must receive the stitched video, not the untouched native
-            # latent. Use FaceRefine's own injector; audio remains byte-identical.
+            # latent. If upscale is enabled, restore only the refined VISIBLE pixels
+            # into the original full native extent AFTER FaceRefine has finished.
             upscale = bool(face_plan.get("upscale_enabled")) and face_plan.get("upscale_mode", "off") != "off"
-            delivery = inject().run(av_latent=sampled_latent,images=stitched,vae=video_vae)[0] if upscale else dict(sampled_latent)
-            del stitched
+            if upscale:
+                stitched_full = source_full.clone()
+                stitched_full[trim:trim + visible] = stitched
+                delivery = inject().run(
+                    av_latent=sampled_latent,
+                    images=stitched_full,
+                    vae=video_vae,
+                )[0]
+                del stitched_full
+            else:
+                delivery = dict(sampled_latent)
+            del stitched, source_full
             out_v, out_a = common.unpack_av(delivery, "face delivery")
-            if out_v.shape != source_v.shape or not torch.equal(out_a, source_a):
+            if out_v.shape != source_v.shape or (
+                source_a is not None and not torch.equal(out_a, source_a)
+            ):
                 raise ValueError("Face delivery changed native AV extent or audio.")
             delivery["iamccs_r38b_face_applied"] = True
-            return delivery, delivery_frames, f"Face delivery complete: {visible}f, audio/context timing unchanged; optional upscale next."
+            return delivery, delivery_frames, (
+                f"Face delivery complete: {visible} visible frames refined in isolation; "
+                f"H3 synthetic tail pad={face_pad}f; native LongVid context/padding excluded; "
+                "audio/context timing unchanged."
+            )
         finally:
             mm.unload_all_models()
             mm.soft_empty_cache()

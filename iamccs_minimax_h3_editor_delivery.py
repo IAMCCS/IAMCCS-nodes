@@ -80,6 +80,18 @@ class IAMCCS_MiniMaxH3EditorDeliveryMedia:
         upscale_enabled = bool(plan.get("upscale_enabled", False))
         upscale_mode = str(plan.get("upscale_mode", "off") or "off").strip().lower()
         editorial_per_shot = upscale_enabled and upscale_mode == "ltx23_per_chunk"
+        if task_mode == "viggle_animation":
+            if not torch.is_tensor(native_frames) or native_frames.ndim != 4 or int(native_frames.shape[0]) < 1:
+                raise ValueError("H3 editor delivery received no Viggle IMAGE frames")
+            if not _audio_ok(native_audio):
+                raise ValueError("H3 editor delivery received no Viggle source AUDIO")
+            return (
+                native_frames,
+                native_audio,
+                True,
+                "",
+                f"H3 editor delivery | Viggle in-memory asset | frames={int(native_frames.shape[0])}",
+            )
         # A normal LongVid remains one editorial asset.  The explicit LTX
         # per-shot contract is the exception: every generated H3 chunk is a
         # separately decoded roll so pre/post-roll and cut decisions remain

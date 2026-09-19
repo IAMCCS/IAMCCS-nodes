@@ -25,7 +25,7 @@ from typing import Any
 SUPERNODE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX"
 CATEGORY = "IAMCCS/MiniMax H3/Prompting"
 PROJECT_SCHEMA = "iamccs.minimax_h3.prompter_project"
-PROJECT_VERSION = 3
+PROJECT_VERSION = 4
 H3_ABSOLUTE_CHAR_LIMIT = 7000
 AI_IMAGE_LIMIT = 4
 AI_IMAGE_MAX_BYTES = 16 * 1024 * 1024
@@ -201,6 +201,8 @@ def default_project() -> dict[str, Any]:
         "ai_direction": "",
         "ai_scope": "active_field",
         "ai_visual_roles": {},
+        "audio_transcript": "",
+        "audio_dialogue_tag": "",
         # Examples remain available through Load Example, but a newly added
         # Prompter must never carry a character/story into Shotboard merely
         # because its CineLinX socket is connected.
@@ -1445,6 +1447,22 @@ class IAMCCS_Prompter:
                 ),
                 "merge_policy": (["replace", "append"], {"default": "replace"}),
                 "character_budget": ("INT", {"default": 6800, "min": 1000, "max": H3_ABSOLUTE_CHAR_LIMIT, "step": 100}),
+                "audio_transcription_model": (
+                    ["tiny", "base", "small", "medium", "medium.en", "large-v2", "large-v3", "large-v3-turbo"],
+                    {"default": "tiny", "tooltip": "Whisper model used by comfy-mtb when an AUDIO input is connected. Tiny is the installed low-VRAM default; larger models are optional."},
+                ),
+                "audio_transcription_language": (
+                    ["auto", "de", "en", "es", "fr", "it", "ja", "ko", "nl", "pt", "ru", "zh"],
+                    {"default": "auto"},
+                ),
+                "audio_dialogue_language": (
+                    ["English", "Italian", "French", "German", "Spanish", "Portuguese", "Arabic", "Chinese", "Japanese", "Korean", "Russian"],
+                    {"default": "English", "tooltip": "Language label written inside the H3 <d> block. It does not translate the transcript."},
+                ),
+                "audio_dialogue_subject": (
+                    ["1", "2", "3", "4"],
+                    {"default": "1", "tooltip": "Stable H3 <Subject N> / (SN) identity used by the transcript insertion button."},
+                ),
             },
             "optional": {
                 "cine_linx": (
@@ -1465,11 +1483,19 @@ class IAMCCS_Prompter:
                         "tooltip": "Optional structured draft from any text source. In Assistant Fill mode it fills only empty structured boxes.",
                     },
                 ),
+                "audio": (
+                    "AUDIO",
+                    {
+                        "tooltip": (
+                            "Optional speech audio. On Queue, IAMCCS reuses the comfy-mtb Whisper path and returns an H3-ready dialogue tag for cursor insertion."
+                        ),
+                    },
+                ),
             },
         }
 
-    RETURN_TYPES = (SUPERNODE_LINX_TYPE, "STRING", "STRING", "STRING")
-    RETURN_NAMES = ("cine_linx", "final_prompt", "project_json", "report")
+    RETURN_TYPES = (SUPERNODE_LINX_TYPE, "STRING", "STRING", "STRING", "STRING", "STRING")
+    RETURN_NAMES = ("cine_linx", "final_prompt", "project_json", "report", "audio_transcript", "h3_dialogue_tag")
     FUNCTION = "compose"
     CATEGORY = CATEGORY
 
@@ -1485,8 +1511,13 @@ class IAMCCS_Prompter:
         writing_mode,
         merge_policy,
         character_budget,
+        audio_transcription_model="tiny",
+        audio_transcription_language="auto",
+        audio_dialogue_language="English",
+        audio_dialogue_subject="1",
         assistant_draft="",
         cine_linx=None,
+        audio=None,
     ):
         project = _safe_project(project_data)
         mode = _normalise_task_mode(task_mode or project.get("task_mode") or "t2va")
@@ -1545,6 +1576,32 @@ class IAMCCS_Prompter:
                 "project_name": injection["project_name"],
                 "source": "iamccs_cine_h3_vision_info",
             })
+        transcript = ""
+        dialogue_tag = ""
+        transcription_error = ""
+        if audio is not None:
+            try:
+                try:
+                    from .iamccs_cine_audio_dialogue import IAMCCS_CineAudioTranscriptPromptCompiler
+                except ImportError:
+                    from iamccs_cine_audio_dialogue import IAMCCS_CineAudioTranscriptPromptCompiler
+                transcript = IAMCCS_CineAudioTranscriptPromptCompiler._clean(
+                    IAMCCS_CineAudioTranscriptPromptCompiler._transcribe(
+                        audio,
+                        str(audio_transcription_model or "tiny"),
+                        str(audio_transcription_language or "auto"),
+                        False,
+                        False,
+                    )
+                )
+                if transcript:
+                    subject_index = max(1, min(4, int(audio_dialogue_subject or 1)))
+                    language_label = str(audio_dialogue_language or "English").strip() or "English"
+                    dialogue_tag = f"<Subject {subject_index}> (S{subject_index}): <d>[{language_label}] {transcript}</d>"
+            except Exception as exc:
+                transcription_error = repr(exc)
+        project["audio_transcript"] = transcript
+        project["audio_dialogue_tag"] = dialogue_tag
         project_json = json.dumps(project, ensure_ascii=False, indent=2)
         report_data = {
             "node": "IAMCCS_Prompter",
@@ -1561,6 +1618,17 @@ class IAMCCS_Prompter:
             "vision_context": vision_report,
             "audio_handoff_authoring_rule": AUDIO_HANDOFF_AUTHORING_RULE,
             "audio_driven_dialogue_template": "<Subject 1> (S1): <d>[Language] ...</d>",
+            "audio_transcription": {
+                "requested": audio is not None,
+                "engine": "comfy-mtb Whisper",
+                "model": str(audio_transcription_model),
+                "source_language": str(audio_transcription_language),
+                "dialogue_language": str(audio_dialogue_language),
+                "subject": str(audio_dialogue_subject),
+                "characters": len(transcript),
+                "error": transcription_error,
+                "cursor_insertion_required": bool(dialogue_tag),
+            },
             **details,
             "truth": "The MiniMax Shotboard resolves local_auto only after reading its own timeline slots.",
         }
@@ -1576,7 +1644,24 @@ class IAMCCS_Prompter:
             str(injection_target),
             char_count,
         )
-        return out_linx, final_prompt, project_json, report
+        resources = out_linx.setdefault("resources", {})
+        resources["iamccs_prompter_audio_transcript"] = transcript
+        resources["iamccs_prompter_h3_dialogue_tag"] = dialogue_tag
+        out_linx.setdefault("outputs", {})["audio_transcript"] = transcript
+        out_linx["outputs"]["h3_dialogue_tag"] = dialogue_tag
+        ui_status = (
+            f"Whisper transcript ready ({len(transcript)} characters). Insert the H3 dialogue tag at the desired cursor."
+            if dialogue_tag else
+            (f"Whisper transcription failed: {transcription_error}" if transcription_error else "No AUDIO input connected; transcript stage skipped.")
+        )
+        return {
+            "ui": {
+                "iamccs_audio_transcript": [transcript],
+                "iamccs_h3_dialogue_tag": [dialogue_tag],
+                "text": [ui_status],
+            },
+            "result": (out_linx, final_prompt, project_json, report, transcript, dialogue_tag),
+        }
 
 
 def _register_prompter_routes() -> None:

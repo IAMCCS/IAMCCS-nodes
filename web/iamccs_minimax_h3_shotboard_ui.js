@@ -1444,7 +1444,7 @@ function resolveLinkedH3SettingsNode(shotboard) {
         if (visited.has(current.id)) return null;
         visited.add(current.id);
         const klass = nodeClassName(current);
-        if (klass === "IAMCCS_ShotboardH3Settings" || klass === "IAMCCS_ShotboardH3SettingsPro") return current;
+        if (["IAMCCS_ShotboardH3Settings", "IAMCCS_ShotboardH3SettingsPro", "IAMCCS_LongVid-v1"].includes(klass)) return current;
         if (klass === "IAMCCS_CineH3Input") {
             current = getLinkedOriginNode(current, "iamccs_h3_settings");
             continue;
@@ -9878,7 +9878,7 @@ function renderShotboardV3(node) {
     // Public bridge used by IAMCCS_Prompter's explicit Inject button.  The
     // CineLinX backend injection remains available at queue time, while this
     // bridge makes the change visible immediately in the Shotboard editor.
-    node._iamccsMiniMaxInjectPrompt = ({ prompt = "", target = "global", mergePolicy = "replace", strictSlot = false, slotId = "" } = {}) => {
+    node._iamccsMiniMaxInjectPrompt = ({ prompt = "", target = "global", mergePolicy = "replace", strictSlot = false, slotId = "", createMissing = false, taskMode = "" } = {}) => {
         const incoming = String(prompt || "").trim();
         if (!incoming) throw new Error("The composed MiniMax prompt is empty");
         const requested = String(target || "global").toLowerCase();
@@ -9900,23 +9900,48 @@ function renderShotboardV3(node) {
             return { actualTarget: "global", mergePolicy: policy };
         }
 
+        syncTimelineTextFromDom();
         const visual = (timeline.segments || [])
             .filter((seg) => !seg?.placeholder && !["audio", "motion", "video"].includes(String(seg?.type || "image").toLowerCase()))
             .sort((a, b) => Number(a.start || 0) - Number(b.start || 0))
-            .slice(0, strictSlot ? undefined : 3);
-        if (strictSlot) {
+            .slice();
+        if (strictSlot || createMissing) {
             const match = requested.match(/^local_([1-9][0-9]*)$/);
             const idIndex = slotId ? visual.findIndex(seg => String(seg.id) === String(slotId)) : -1;
             // Segment ids can change after replacing/reordering media.  The
             // visible chronological slot remains the queue truth, so a stale id
             // falls back only to the explicitly requested slot (never to an
             // arbitrary empty box).
-            const requestedIndex = match ? Number(match[1]) - 1 : -1;
+            const emptyIndex = visual.findIndex(seg => !String(seg.prompt ?? seg.local_prompt ?? seg.relay_prompt ?? "").trim());
+            const requestedIndex = match ? Number(match[1]) - 1 : requested === "local_auto" ? (emptyIndex >= 0 ? emptyIndex : visual.length) : -1;
             const wanted = idIndex >= 0 ? idIndex : requestedIndex;
+            if (createMissing && wanted >= visual.length) {
+                syncTimelineTextFromDom();
+                const boardMode = String(node.widgets?.find(w => w.name === "task_mode")?.value || "").toLowerCase();
+                const mode = !boardMode || boardMode.startsWith("auto") ? String(taskMode || boardMode).toLowerCase() : boardMode;
+                const textOnly = /^(t2v|ref2v|longvid_t2v|longvid_ref2v)/.test(mode);
+                const paths = refPaths();
+                while (visual.length <= wanted) {
+                    const index = visual.length;
+                    const path = textOnly ? "" : String(paths[index] || "");
+                    const seg = {
+                        id: newId(textOnly ? "text" : "seg"), type: textOnly ? "text" : "image",
+                        start: endOfSegments(timeline.segments), length: defaultLen(),
+                        label: `local_${index + 1}`, placeholder: false,
+                        prompt: "", local_prompt: "", relay_prompt: "", use_prompt: true,
+                        transition: "continuous", camera: "", use_guide: Boolean(path),
+                        guideStrength: path ? 1 : 0, imageLockStrength: path ? 1 : 0,
+                        ...(textOnly ? {} : { ref: index + 1, imageFile: path, path, imageTruthPath: path }),
+                    };
+                    timeline.segments.push(seg);
+                    visual.push(seg);
+                }
+            }
             if (wanted < 0 || wanted >= visual.length) throw new Error(`Local target ${slotId || requested} no longer exists. Read Shotboard slots again; no arbitrary fallback applied.`);
             const selected = visual[wanted], merged = merge(selected.prompt ?? selected.local_prompt ?? selected.relay_prompt ?? "");
             Object.assign(selected, {prompt:merged,local_prompt:merged,relay_prompt:merged,use_prompt:true,relay_manual_off:false,promptrelay_manual_off:false});
-            writeTimeline({force:true}); draw();
+            timeline.globalPromptOnly = false;
+            writeTimeline({force:true,skipDomSync:true}); draw();
             return {actualTarget:`local_${wanted+1}`,mergePolicy:policy};
         }
         if (!visual.length) {
@@ -9935,7 +9960,7 @@ function renderShotboardV3(node) {
             selectedIndex = emptyIndex >= 0 ? emptyIndex : visual.length - 1;
             if (emptyIndex < 0) effectivePolicy = "append";
         } else {
-            const match = requested.match(/^local_([123])$/);
+            const match = requested.match(/^local_([1-9][0-9]*)$/);
             const wanted = match ? Number(match[1]) - 1 : 0;
             if (wanted < visual.length) {
                 selectedIndex = wanted;
@@ -9952,7 +9977,8 @@ function renderShotboardV3(node) {
         selected.use_prompt = true;
         selected.relay_manual_off = false;
         selected.promptrelay_manual_off = false;
-        writeTimeline({ force: true });
+        timeline.globalPromptOnly = false;
+        writeTimeline({ force: true, skipDomSync: true });
         draw();
         return { actualTarget: `local_${selectedIndex + 1}`, mergePolicy: effectivePolicy };
     };

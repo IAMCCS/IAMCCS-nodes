@@ -26,7 +26,8 @@ def image_row(index, start, length, transition="continuous"):
 
 def plan(rows, *, duration_frames, tail=22, window=362):
     return CORE._longvid_guide_plan(
-        timeline={"rows": rows, "fps": 24, "duration_seconds": duration_frames / 24},
+        timeline={"rows": rows, "fps": 24, "duration_seconds": duration_frames / 24,
+                  "longvid_prompt_timing": False},
         global_prompt="One uninterrupted continuous action.",
         duration_seconds=duration_frames / 24,
         prompt_mapping="global_plus_local",
@@ -92,6 +93,7 @@ class LongVidPositionedGuidesV2RegressionTests(unittest.TestCase):
         self.assertEqual(second["trim_head_frames"], 1)
         self.assertEqual(second["creative_prompt"], "Continuous action pose 4.")
         self.assertNotIn("One uninterrupted continuous action.", second["creative_prompt"])
+        self.assertEqual([item["guide_id"] for item in second["prompt_guide_bindings"]], ["pose_4"])
         self.assertTrue(second["positioned_guides_v2"]["terminal_reanchor"])
         self.assertFalse(second["positioned_guides_v2"]["labels_in_conditioning"])
 
@@ -148,7 +150,12 @@ class LongVidPositionedGuidesV2RegressionTests(unittest.TestCase):
         ]
         result = plan(rows, duration_frames=408, tail=0)
         second = result["chunks"][1]
-        images = [guide for guide in second["guides"] if guide["kind"] == "image"]
+        # The terminal closure is an additional endpoint, not an opening guide.
+        images = [guide for guide in second["guides"]
+                  if guide["kind"] == "image" and not guide.get("terminal_reanchor")]
+        terminal = [guide for guide in second["guides"] if guide.get("terminal_reanchor")]
+        self.assertEqual(len(terminal), 1)
+        self.assertEqual(terminal[0]["global_frame"], 407)
 
         self.assertEqual(len(images), 1)
         self.assertEqual(images[0]["id"], "pose_2")
@@ -301,6 +308,29 @@ class LongContinuousGuidedContractTests(unittest.TestCase):
         self.assertEqual([chunk["requested_frame_count"] for chunk in result["chunks"]], [115, 185])
         self.assertEqual([chunk["first_image"] for chunk in result["chunks"]], ["pose_1.png", ""])
         self.assertEqual([chunk["last_image"] for chunk in result["chunks"]], ["pose_2.png", "pose_3.png"])
+
+
+class KeyframeJointPromptBindingTests(unittest.TestCase):
+    def test_latent_new_keeps_global_plus_local_on_final_chunk(self):
+        rows = [image_row(index + 1, index * 102, 102, "start" if index == 0 else "continuous")
+                for index in range(4)]
+        result = CORE.build_shotplan(
+            timeline_data={"rows": rows, "fps": 24, "duration_seconds": 17,
+                           "final_chunk_prompt_only": True},
+            global_prompt="GLOBAL IDENTITY CONTRACT",
+            duration_seconds=17,
+            task_mode="keyframe_joint_native",
+            keyframe_joint_latent_new=True,
+            width=640,
+            height=384,
+        )
+        self.assertEqual(result["task_mode"], "latent_go_ahead")
+        self.assertIn("GLOBAL IDENTITY CONTRACT", result["chunks"][0]["creative_prompt"])
+        final = result["chunks"][-1]
+        self.assertIn("GLOBAL IDENTITY CONTRACT", final["creative_prompt"])
+        self.assertIn(final["local_prompt"], final["creative_prompt"])
+        self.assertFalse(final["prompt_guide_bindings"][0]["final_prompt_only"])
+        self.assertEqual(final["prompt_guide_bindings"][0]["guide_id"], final["slot_id"])
 
 
 class HerrgottsDirectAVContractTests(unittest.TestCase):

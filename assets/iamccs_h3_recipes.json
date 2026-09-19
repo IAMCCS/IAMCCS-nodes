@@ -1,27 +1,140 @@
 {
   "lightx_768_sla_4": {
-    "values": {"acceleration":"h3_sla","turbo_mode":"early_8_10","turbo_strength":1.0,"steps":4,"sampler_name":"euler","scheduler":"simple","denoise":1.0,"shift_video":6.0,"shift_audio":3.0,"turbo_sampler_mode":"res_multistep_stock","h3_sla_sparsity":0.85,"h3_sla_dense_last_steps":0},
-    "note":"768p FL2VA, 4-step SLA distillation. Requires H3 SLA attention; this ComfyUI kernel is not the LightX2V runtime benchmark. Validate speech and image quality before delivery.",
-    "source":"https://huggingface.co/lightx2v/Minimax-h3-Turbo-SLA"
+    "values": {
+      "acceleration": "h3_sla",
+      "turbo_mode": "early_8_10",
+      "turbo_strength": 1.0,
+      "steps": 4,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "shift_video": 6.0,
+      "shift_audio": 3.0,
+      "turbo_sampler_mode": "res_multistep_stock",
+      "h3_sla_sparsity": 0.85,
+      "h3_sla_dense_last_steps": 0
+    },
+    "note": "768p FL2VA, 4-step SLA distillation. Requires H3 SLA attention; this ComfyUI kernel is not the LightX2V runtime benchmark. Validate speech and image quality before delivery.",
+    "source": "https://huggingface.co/lightx2v/Minimax-h3-Turbo-SLA"
   },
   "lightx_544_4": {
-    "values": {"turbo_mode":"early_8_10","turbo_strength":1.0,"steps":4,"sampler_name":"euler","scheduler":"simple","denoise":1.0,"shift_video":12.0,"shift_audio":3.0,"turbo_sampler_mode":"res_multistep_stock"},
-    "note":"544p training recipe; larger native canvases require quality validation.",
-    "source":"https://github.com/ModelTC/Minimax-H3-Turbo"
+    "values": {
+      "turbo_mode": "early_8_10",
+      "turbo_strength": 1.0,
+      "steps": 4,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "shift_video": 12.0,
+      "shift_audio": 3.0,
+      "turbo_sampler_mode": "res_multistep_stock"
+    },
+    "note": "544p training recipe; larger native canvases require quality validation.",
+    "source": "https://github.com/ModelTC/Minimax-H3-Turbo"
   },
   "lightx_768_8": {
-    "values": {"turbo_mode":"early_8_10","turbo_strength":1.0,"steps":8,"sampler_name":"euler","scheduler":"simple","denoise":1.0,"shift_video":6.0,"shift_audio":3.0,"turbo_sampler_mode":"res_multistep_stock"},
-    "note":"768p training recipe. Header format and base family must match.",
-    "source":"https://github.com/ModelTC/Minimax-H3-Turbo"
+    "values": {
+      "turbo_mode": "early_8_10",
+      "turbo_strength": 1.0,
+      "steps": 8,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "shift_video": 6.0,
+      "shift_audio": 3.0,
+      "turbo_sampler_mode": "res_multistep_stock"
+    },
+    "note": "768p training recipe. Header format and base family must match.",
+    "source": "https://github.com/ModelTC/Minimax-H3-Turbo"
   },
   "pdd_8": {
-    "values": {"acceleration":"pdd_native_8step","turbo_mode":"off","pdd_strength":1.0,"steps":8,"sampler_name":"euler","scheduler":"simple","denoise":1.0,"shift_video":12.0,"shift_audio":3.0},
-    "note":"Requires native ComfyUI PDD head banks; memory behavior is owned by that backend.",
-    "source":"https://github.com/Jalen-Brunson/ComfyUI-MiniMax-H3-PDD-Acc"
+    "values": {
+      "acceleration": "pdd_native_8step",
+      "turbo_mode": "off",
+      "pdd_strength": 1.0,
+      "steps": 8,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "shift_video": 12.0,
+      "shift_audio": 3.0
+    },
+    "note": "Official Alibaba-PAI PDD 8-NFE contract: Euler path, full denoise, shifts 12/3, PDD strength 1.0. IAMCCS native head-bank backend supplies the trained PDD boundaries.",
+    "source": "https://huggingface.co/alibaba-pai/MiniMax-H3-Acc-LoRAs"
   },
   "fasth3_6": {
-    "values": {"acceleration":"fasth3_dense_6step","turbo_mode":"off","turbo_strength":1.0,"steps":6,"sampler_name":"euler","scheduler":"simple","denoise":1.0,"shift_video":12.0,"shift_audio":3.0},
-    "note":"Existing IAMCCS six-step Dense backend; converted metadata required.",
-    "source":"https://github.com/NikoDemon80/ComfyUI-FastH3-Lora-Converter"
+    "values": {
+      "acceleration": "fasth3_dense_6step",
+      "turbo_mode": "off",
+      "turbo_strength": 1.0,
+      "steps": 6,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "shift_video": 12.0,
+      "shift_audio": 3.0
+    },
+    "note": "IAMCCS six-step converted Dense FastH3 profile: 6 NFE at strength 1.0; uses H3 12/3 modality shifts. This is the converted community six-step contract, not FastVideo preview-v1 4-step.",
+    "source": "https://huggingface.co/lpiao3825/FastH3-ComfyUI-Community-Workflow"
+  },
+  "lightx_fl2_768_4": {
+    "values": {
+      "turbo_mode": "early_8_10",
+      "turbo_strength": 1.0,
+      "steps": 4,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "shift_video": 6.0,
+      "shift_audio": 3.0,
+      "turbo_sampler_mode": "res_multistep_stock"
+    },
+    "note": "Official LightX2V FL2VA/T2VA 768p four-step contract. Distilled on video/audio shifts 6/3.",
+    "source": "https://github.com/ModelTC/Minimax-H3-Turbo"
+  },
+  "lightx_fl2_768_8": {
+    "values": {
+      "turbo_mode": "early_8_10",
+      "turbo_strength": 1.0,
+      "steps": 8,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "shift_video": 6.0,
+      "shift_audio": 3.0,
+      "turbo_sampler_mode": "res_multistep_stock"
+    },
+    "note": "Official LightX2V FL2VA/T2VA 768p eight-step contract. Distilled on video/audio shifts 6/3.",
+    "source": "https://github.com/ModelTC/Minimax-H3-Turbo"
+  },
+  "lightx_ref2_544_4": {
+    "values": {
+      "turbo_mode": "early_8_10",
+      "turbo_strength": 1.0,
+      "steps": 4,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "shift_video": 12.0,
+      "shift_audio": 3.0,
+      "turbo_sampler_mode": "res_multistep_stock"
+    },
+    "note": "Official LightX2V Ref2VA v0.1 four-step contract. Uses the base 12/3 shifts.",
+    "source": "https://github.com/ModelTC/Minimax-H3-Turbo"
+  },
+  "lightx_ref2_768_8": {
+    "values": {
+      "turbo_mode": "early_8_10",
+      "turbo_strength": 1.0,
+      "steps": 8,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "denoise": 1.0,
+      "shift_video": 12.0,
+      "shift_audio": 3.0,
+      "turbo_sampler_mode": "res_multistep_stock"
+    },
+    "note": "LightX2V Ref2VA v1.0 eight-step contract. Ref2VA keeps video/audio shifts 12/3.",
+    "source": "https://github.com/ModelTC/Minimax-H3-Turbo"
   }
 }

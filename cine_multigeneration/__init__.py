@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import copy
 import json
@@ -2589,33 +2589,74 @@ def _manifest_has_active_master_audio_clip(manifest: Dict[str, Any]) -> bool:
 
 
 def _load_manual_video_clip(item: Dict[str, Any]) -> Any:
+    # IAMCCS_VIDEO_EDITOR_SERVER_MEDIA_IMPORT_V2
+    # Manual Video Editor imports must not depend on one decoder only.
     path = _input_media_path(item.get("mediaPath") or item.get("media_path") or item.get("path"))
     if not path:
-        raise ValueError(f"IAMCCS Shotboard Video Editor: manual video file not found: {item.get('mediaPath') or item.get('path')}")
+        raise ValueError(
+            f"IAMCCS Shotboard Video Editor: manual video file not found: "
+            f"{item.get('mediaPath') or item.get('path')}"
+        )
+
+    max_frames = max(1, _safe_int(item.get("maxFrames", 0), 0) or 3600)
+    frames: List[torch.Tensor] = []
+    fps = 0.0
+    cv2_error = None
+    pyav_error = None
+
     try:
         import cv2  # type: ignore
+
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            raise ValueError("OpenCV could not open the file.")
+        fps = float(cap.get(cv2.CAP_PROP_FPS) or 0.0)
+        while len(frames) < max_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames.append(torch.from_numpy(frame).float().div_(255.0))
+        cap.release()
     except Exception as exc:
-        raise ValueError("IAMCCS Shotboard Video Editor: OpenCV is required to load manual video files.") from exc
-    cap = cv2.VideoCapture(path)
-    if not cap.isOpened():
-        raise ValueError(f"IAMCCS Shotboard Video Editor: could not open manual video file: {path}")
-    fps = float(cap.get(cv2.CAP_PROP_FPS) or 24.0)
-    frames = []
-    max_frames = max(1, _safe_int(item.get("maxFrames", 0), 0) or 3600)
-    while len(frames) < max_frames:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        frames.append(torch.from_numpy(frame).float().div_(255.0))
-    cap.release()
+        cv2_error = exc
+        frames = []
+
     if not frames:
-        raise ValueError(f"IAMCCS Shotboard Video Editor: manual video has no readable frames: {path}")
+        try:
+            import av  # type: ignore
+
+            with av.open(path) as container:
+                stream = next((entry for entry in container.streams if entry.type == "video"), None)
+                if stream is None:
+                    raise ValueError("PyAV found no video stream.")
+                try:
+                    fps = float(stream.average_rate or stream.base_rate or fps or 24.0)
+                except Exception:
+                    fps = fps or 24.0
+                for frame in container.decode(stream):
+                    array = frame.to_ndarray(format="rgb24")
+                    frames.append(torch.from_numpy(array).float().div_(255.0))
+                    if len(frames) >= max_frames:
+                        break
+        except Exception as exc:
+            pyav_error = exc
+            frames = []
+
+    if not frames:
+        raise ValueError(
+            f"IAMCCS Shotboard Video Editor: manual video has no readable frames: {path!r}; "
+            f"opencv={cv2_error!r}; pyav={pyav_error!r}"
+        )
+
     images = torch.stack(frames, dim=0).contiguous()
-    frame_rate = Fraction(round(max(1.0, fps) * 1000), 1000)
+    frame_rate = Fraction(round(max(1.0, fps or 24.0) * 1000), 1000)
+
+    # Embedded audio is materialized by the Video Editor probe endpoint as a
+    # separate linked A-lane asset. Keep VIDEO.audio empty here to avoid a
+    # double mix when that companion exists.
     audio = None
     return Types.VideoComponents(images=images, audio=audio, frame_rate=frame_rate)
-
 
 def _crop_audio_to_video_frames(audio: Any, frame_count: int, fps: float) -> Any:
     if not isinstance(audio, dict) or audio.get("waveform") is None:
@@ -2895,6 +2936,258 @@ def _audio_with_gain(audio: Any, gain: float) -> Any:
     return out
 
 
+def _audio_fx_number(value: Any, fallback: float = 0.0) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError, OverflowError):
+        result = float(fallback)
+    return result if math.isfinite(result) else float(fallback)
+
+
+def _audio_fx_biquad(
+    waveform: torch.Tensor,
+    sample_rate: int,
+    kind: str,
+    frequency: float,
+    *,
+    gain_db: float = 0.0,
+    q: float = 0.707,
+) -> torch.Tensor:
+    """Apply one stable torchaudio biquad while protecting legal cutoffs."""
+    nyquist = max(20.0, float(sample_rate) * 0.5)
+    frequency = max(20.0, min(nyquist * 0.98, float(frequency)))
+    q = max(0.1, min(12.0, float(q)))
+    try:
+        if kind == "highpass":
+            return torchaudio.functional.highpass_biquad(waveform, sample_rate, frequency, q)
+        if kind == "lowpass":
+            return torchaudio.functional.lowpass_biquad(waveform, sample_rate, frequency, q)
+        return torchaudio.functional.equalizer_biquad(
+            waveform,
+            sample_rate,
+            frequency,
+            float(gain_db),
+            q,
+        )
+    except Exception:
+        # An editor mix must remain renderable even when an optional backend
+        # ships a torchaudio build without one of the accelerated filters.
+        return waveform
+
+
+def _audio_fx_delay(
+    waveform: torch.Tensor,
+    sample_rate: int,
+    seconds: float,
+    feedback: float,
+    mix: float,
+) -> torch.Tensor:
+    samples = max(1, min(int(waveform.shape[-1]) - 1, int(round(max(0.01, seconds) * sample_rate))))
+    if int(waveform.shape[-1]) < 2 or samples <= 0:
+        return waveform
+    feedback = max(0.0, min(0.85, float(feedback)))
+    mix = max(0.0, min(1.0, float(mix)))
+    wet = torch.zeros_like(waveform)
+    wet[..., samples:] = waveform[..., :-samples]
+    second = samples * 2
+    if second < int(waveform.shape[-1]) and feedback > 0.0:
+        wet[..., second:] += waveform[..., :-second] * feedback
+    return waveform * (1.0 - mix) + (waveform + wet * (0.7 + 0.3 * feedback)) * mix
+
+
+def _audio_fx_stereo_width(waveform: torch.Tensor, width: float) -> torch.Tensor:
+    if int(waveform.shape[-2]) < 2:
+        return waveform
+    width = max(0.0, min(2.0, float(width)))
+    result = waveform.clone()
+    left = waveform[..., 0, :]
+    right = waveform[..., 1, :]
+    mid = (left + right) * 0.5
+    side = (left - right) * 0.5 * width
+    result[..., 0, :] = mid + side
+    result[..., 1, :] = mid - side
+    return result
+
+
+def _audio_fx_pan(waveform: torch.Tensor, pan: float) -> torch.Tensor:
+    if int(waveform.shape[-2]) < 2:
+        return waveform
+    pan = max(-1.0, min(1.0, float(pan)))
+    if abs(pan) < 1e-8:
+        return waveform
+    angle = (pan + 1.0) * math.pi / 4.0
+    result = waveform.clone()
+    result[..., 0, :] *= math.cos(angle) * math.sqrt(2.0)
+    result[..., 1, :] *= math.sin(angle) * math.sqrt(2.0)
+    return result
+
+
+def _audio_fx_compressor(
+    waveform: torch.Tensor,
+    threshold_db: float,
+    ratio: float,
+    makeup_db: float = 0.0,
+) -> torch.Tensor:
+    threshold = 10.0 ** (max(-80.0, min(0.0, float(threshold_db))) / 20.0)
+    ratio = max(1.0, min(30.0, float(ratio)))
+    magnitude = waveform.abs()
+    compressed = torch.where(
+        magnitude > threshold,
+        threshold + (magnitude - threshold) / ratio,
+        magnitude,
+    )
+    return waveform.sign() * compressed * (10.0 ** (max(-24.0, min(24.0, float(makeup_db))) / 20.0))
+
+
+def _audio_with_effect_chain(
+    audio: Any,
+    effect_chain: Any,
+    fallback: Dict[str, Any] | None = None,
+) -> Any:
+    """Bake AudioBoard insert FX into an AUDIO value for editor delivery.
+
+    The browser AudioBoard remains the authoring surface. This deterministic
+    CPU path implements its portable render subset (EQ/cuts, dynamics, gate,
+    delay/reverb, stereo/utility, saturation and limiter) so the Video Editor
+    receives sound, not merely an effect-graph description.
+    """
+    waveform, sample_rate = _audio_waveform(audio)
+    if waveform is None:
+        return audio
+    original_dtype = waveform.dtype
+    original_device = waveform.device
+    work = waveform.to(dtype=torch.float32)
+    fallback = fallback if isinstance(fallback, dict) else {}
+    chain = [item for item in effect_chain if isinstance(item, dict)] if isinstance(effect_chain, list) else []
+
+    if not chain:
+        hpf = _audio_fx_number(fallback.get("hpfHz"), 0.0)
+        lpf = _audio_fx_number(fallback.get("lpfHz"), 22000.0)
+        if hpf > 20.0:
+            work = _audio_fx_biquad(work, sample_rate, "highpass", hpf)
+        if 20.0 < lpf < sample_rate * 0.49:
+            work = _audio_fx_biquad(work, sample_rate, "lowpass", lpf)
+        for frequency, key in ((140.0, "eqLowDb"), (1200.0, "eqMidDb"), (6200.0, "eqHighDb")):
+            gain = _audio_fx_number(fallback.get(key), 0.0)
+            if abs(gain) > 0.01:
+                work = _audio_fx_biquad(work, sample_rate, "equalizer", frequency, gain_db=gain, q=1.0)
+
+    for effect in chain:
+        if effect.get("enabled", True) is False:
+            continue
+        kind = str(effect.get("type") or "").strip().lower()
+        params = effect.get("params") if isinstance(effect.get("params"), dict) else {}
+        amount = max(0.0, min(1.0, _audio_fx_number(effect.get("amount"), 1.0)))
+        if kind == "eq":
+            q = _audio_fx_number(params.get("q"), 1.2)
+            if bool(params.get("lowCut", False)):
+                work = _audio_fx_biquad(work, sample_rate, "highpass", _audio_fx_number(params.get("lowCutFreq"), 80.0), q=q)
+            if bool(params.get("highCut", False)):
+                work = _audio_fx_biquad(work, sample_rate, "lowpass", _audio_fx_number(params.get("highCutFreq"), 12000.0), q=q)
+            for default_frequency, gain_key, frequency_key in (
+                (140.0, "low", "lowFreq"),
+                (1200.0, "mid", "midFreq"),
+                (6200.0, "high", "highFreq"),
+            ):
+                gain = _audio_fx_number(params.get(gain_key), 0.0)
+                if abs(gain) > 0.01:
+                    work = _audio_fx_biquad(
+                        work,
+                        sample_rate,
+                        "equalizer",
+                        _audio_fx_number(params.get(frequency_key), default_frequency),
+                        gain_db=gain,
+                        q=q,
+                    )
+        elif kind == "compressor":
+            work = _audio_fx_compressor(
+                work,
+                _audio_fx_number(params.get("threshold"), -18.0),
+                _audio_fx_number(params.get("ratio"), 4.0),
+                _audio_fx_number(params.get("makeup"), 0.0),
+            )
+        elif kind in {"gate", "denoise"}:
+            threshold_db = _audio_fx_number(params.get("threshold"), _audio_fx_number(fallback.get("noiseGateDb"), -60.0))
+            threshold = 10.0 ** (max(-90.0, min(-1.0, threshold_db)) / 20.0)
+            work = torch.where(work.abs() >= threshold, work, work * max(0.0, 1.0 - amount))
+        elif kind == "deesser":
+            reduction = -abs(_audio_fx_number(params.get("amount"), 4.0))
+            work = _audio_fx_biquad(work, sample_rate, "equalizer", _audio_fx_number(params.get("frequency"), 6500.0), gain_db=reduction, q=2.0)
+        elif kind == "delay":
+            work = _audio_fx_delay(
+                work,
+                sample_rate,
+                _audio_fx_number(params.get("time"), 0.18),
+                _audio_fx_number(params.get("feedback"), 0.25),
+                _audio_fx_number(params.get("mix"), amount * 0.35),
+            )
+        elif kind == "reverb":
+            mix = max(0.0, min(0.8, _audio_fx_number(params.get("mix"), amount * 0.3)))
+            wet = _audio_fx_delay(work, sample_rate, 0.037, 0.35, 0.5)
+            wet = _audio_fx_delay(wet, sample_rate, 0.071, 0.25, 0.45)
+            work = work * (1.0 - mix) + wet * mix
+        elif kind in {"stereo", "utility"}:
+            work = _audio_fx_stereo_width(work, _audio_fx_number(params.get("width"), 1.0))
+            work = _audio_fx_pan(work, _audio_fx_number(params.get("pan"), 0.0))
+            work *= 10.0 ** (_audio_fx_number(params.get("gainDb"), 0.0) / 20.0)
+        elif kind in {"saturator", "tape"}:
+            drive = 1.0 + max(0.0, _audio_fx_number(params.get("drive"), amount * 2.0))
+            work = torch.tanh(work * drive) / max(1.0, math.tanh(drive))
+        elif kind == "transient":
+            strength = max(-1.0, min(1.0, _audio_fx_number(params.get("amount"), amount)))
+            difference = torch.zeros_like(work)
+            difference[..., 1:] = work[..., 1:] - work[..., :-1]
+            work = work + difference * strength
+        elif kind == "limiter":
+            ceiling_db = _audio_fx_number(params.get("ceiling"), -1.0)
+            ceiling = 10.0 ** (max(-24.0, min(0.0, ceiling_db)) / 20.0)
+            work = torch.clamp(work, -ceiling, ceiling)
+
+    if not chain:
+        compressor = max(0.0, min(1.0, _audio_fx_number(fallback.get("compressor"), 0.0)))
+        if compressor > 0.0:
+            work = _audio_fx_compressor(work, -8.0 - compressor * 28.0, 1.0 + compressor * 7.0)
+        delay_send = max(0.0, min(1.0, _audio_fx_number(fallback.get("delaySend"), 0.0)))
+        if delay_send > 0.0:
+            work = _audio_fx_delay(work, sample_rate, 0.18, delay_send * 0.45, delay_send * 0.7)
+        reverb_send = max(0.0, min(1.0, _audio_fx_number(fallback.get("reverbSend"), 0.0)))
+        if reverb_send > 0.0:
+            wet = _audio_fx_delay(work, sample_rate, 0.043, 0.35, 0.55)
+            wet = _audio_fx_delay(wet, sample_rate, 0.079, 0.25, 0.45)
+            work = work * (1.0 - reverb_send * 0.55) + wet * (reverb_send * 0.55)
+        work = _audio_fx_stereo_width(work, _audio_fx_number(fallback.get("stereoWidth"), 1.0))
+
+    if bool(fallback.get("normalize", fallback.get("normalizeAudio", False))) and work.numel():
+        peak = float(work.abs().max().item())
+        if peak > 1e-8:
+            work = work * (0.98 / peak)
+    out = dict(audio)
+    out["waveform"] = work.to(device=original_device, dtype=original_dtype).contiguous()
+    out["sample_rate"] = int(sample_rate)
+    return out
+
+
+def _audio_with_editor_track_mix(audio: Any, clip: Dict[str, Any], track: Dict[str, Any]) -> Any:
+    """Bake the Video Editor lane mixer and imported AudioBoard track FX."""
+    if not isinstance(audio, dict) or audio.get("waveform") is None:
+        return audio
+    clip_gain = max(0.0, _audio_fx_number(clip.get("volume"), 1.0))
+    track_gain = max(0.0, _audio_fx_number(track.get("volume"), 1.0))
+    track_gain *= 10.0 ** (_audio_fx_number(track.get("gainDb"), 0.0) / 20.0)
+    mixed = _audio_with_gain(audio, clip_gain * track_gain)
+    if not bool(track.get("bypassEffects", False)):
+        mixed = _audio_with_effect_chain(mixed, track.get("effectChain"), track)
+    waveform, _sample_rate = _audio_waveform(mixed)
+    if waveform is not None:
+        out = dict(mixed)
+        out["waveform"] = _audio_fx_pan(
+            waveform,
+            _audio_fx_number(clip.get("pan"), 0.0) + _audio_fx_number(track.get("pan"), 0.0),
+        ).contiguous()
+        mixed = out
+    return mixed
+
+
 def _trim_audio_to_editor_clip(audio: Any, clip: Dict[str, Any]) -> Any:
     """Apply the audio clip's own source trim and timeline duration."""
     waveform, sample_rate = _audio_waveform(audio)
@@ -2963,6 +3256,16 @@ def _mix_manual_audio_into_timeline(
             continue
         audio = _load_manual_audio_clip(asset)
         if isinstance(audio, dict) and audio.get("waveform") is not None:
+            track_fx = clip.get("_iamccs_track_fx") if isinstance(clip.get("_iamccs_track_fx"), dict) else {}
+            if track_fx and not bool(track_fx.get("bypassEffects", False)):
+                audio = _audio_with_effect_chain(audio, track_fx.get("effectChain"), track_fx)
+            waveform, _sample_rate = _audio_waveform(audio)
+            if waveform is not None:
+                audio = dict(audio)
+                audio["waveform"] = _audio_fx_pan(
+                    waveform,
+                    _audio_fx_number(clip.get("pan"), 0.0) + _audio_fx_number(track_fx.get("pan"), 0.0),
+                ).contiguous()
             loaded.append((clip, audio))
     base_waveform, base_rate = _audio_waveform(base_audio)
     if base_waveform is None and not loaded:
@@ -3383,16 +3686,18 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             str(plan.get("task_mode", "") or "").strip().lower().startswith("longvid")
             and not per_shot_ltx
         )
-        if not longvid:
+        latent_go_ahead = str(plan.get("task_mode", "") or "").strip().lower() == "latent_go_ahead"
+        one_master = bool(longvid or latent_go_ahead)
+        if not one_master:
             missing = []
             if slot_frames is None:
                 missing.append("slot_frames")
             if slot_audio is None:
                 missing.append("slot_audio")
             return missing
-        if master_ready is None:
+        if longvid and master_ready is None:
             return ["master_ready"]
-        if not bool(master_ready):
+        if longvid and not bool(master_ready):
             return []
         missing = []
         if master_frames is None:
@@ -3427,10 +3732,12 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             and str(plan.get("upscale_mode", "off") or "off").strip().lower() == "ltx23_per_chunk"
         )
         longvid = task_mode.startswith("longvid") and not per_shot_ltx
+        latent_go_ahead = task_mode == "latent_go_ahead"
+        one_master = bool(longvid or latent_go_ahead)
         selected_identity = _shotboard_timeline_identity_from_linx(cine_linx) or _active_identity_from_linx(cine_linx)
         selected_timeline = max(1, min(5, _safe_int(selected_identity.get("take_index"), 1)))
         take_index = selected_timeline
-        clip_index = 1 if longvid else current + 1
+        clip_index = 1 if one_master else current + 1
 
         if longvid and not bool(master_ready):
             blocker = ExecutionBlocker(None)
@@ -3443,7 +3750,7 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             })
             return blocker, blocker, blocker, blocker, report
 
-        if longvid:
+        if one_master:
             media_frames = master_frames
             media_audio = master_audio
             nominal_frames = max(
@@ -3455,7 +3762,7 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
                 _safe_int(plan.get("total_unique_frames"), nominal_frames),
             )
             global_start = 0
-            slot_label = "LongVid programme"
+            slot_label = "LatentGoAhead programme" if latent_go_ahead else "LongVid programme"
             chunk = {}
         else:
             if current >= len(chunks):
@@ -3543,6 +3850,7 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             "audioTrackCount": 1,
             "slot_label": slot_label,
             "longvid_single_asset": bool(longvid),
+            "continuous_single_asset": bool(one_master),
             "editor_clip_index": int(clip_index),
             "editor_lane_index": int(take_index),
         }
@@ -3551,13 +3859,17 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             "schema_version": 2,
             "source": "IAMCCS_MiniMaxH3EditorTakeRoute",
             "frame_rate": float(frame_rate),
-            "take_count": 1 if longvid else int(total),
+            "take_count": 1 if one_master else int(total),
             "active_take": int(take_index),
             "active_timeline_id": timeline_id,
             "active_audio_lane": audio_lane,
             "takes": [active_take],
             "tail_trim_frames": 0,
-            "editor_delivery_policy": "longvid_single_master" if longvid else "one_asset_per_generated_slot",
+            "editor_delivery_policy": (
+                "latent_go_ahead_single_master"
+                if latent_go_ahead
+                else ("longvid_single_master" if longvid else "one_asset_per_generated_slot")
+            ),
             "editor_lane_policy": "accumulate_all_slots_on_selected_timeline",
         }
         out_linx = _clone_linx(cine_linx, "iamccs_minimax_h3_editor_take_route")
@@ -3572,6 +3884,7 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             "roll_contract": roll_contract,
             "source": "IAMCCS_MiniMaxH3EditorTakeRoute",
             "longvid_single_asset": bool(longvid),
+            "continuous_single_asset": bool(one_master),
             "editor_clip_index": int(clip_index),
             "editor_lane_index": int(take_index),
             "editor_session_key": _safe_slug(f"iamccs_h3_{resolved_render_id}"),
@@ -3592,7 +3905,11 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             "take_index": int(take_index),
             "clip_index": int(clip_index),
             "timeline_id": timeline_id,
-            "delivery": "longvid_single_master" if longvid else "independent_generated_slot",
+            "delivery": (
+                "latent_go_ahead_single_master"
+                if latent_go_ahead
+                else ("longvid_single_master" if longvid else "independent_generated_slot")
+            ),
         })
         _refresh_linx_index(out_linx)
         report = _json_dump({
@@ -3606,8 +3923,8 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             "nominal_frames": int(nominal_frames),
             "pre_roll_frames": int(pre_roll),
             "post_roll_frames": int(post_roll),
-            "automatic_concat": bool(longvid),
-            "truth": "Every H3 slot is a distinct editor clip accumulated on the selected T/A lane. LongVid is one clip on that same selected lane. The Video Editor alone assembles and exports the film.",
+            "automatic_concat": bool(one_master),
+            "truth": "Every independent H3 slot is a distinct editor clip. LongVid and LatentGoAhead publish their completed programme once on the selected T/A lane. The Video Editor alone assembles and exports the film.",
         })
         return out_linx, package_json, media_frames, media_audio, report
 
@@ -4519,22 +4836,55 @@ class IAMCCS_ShotboardVideoEditorV1:
         manifest = _editor_manifest_for_session(editor_input_manifest, session_key, fps)
         mixer_settings: List[Dict[str, Any]] = []
         mixer_source = ""
-        if isinstance(cine_editor_linx, dict):
-            editor_mixer_payload = editor_input_resources.get("cine_payload") if isinstance(editor_input_resources.get("cine_payload"), dict) else {}
-            mixer_candidates = (
-                ("cine_audio_mixer", editor_input_resources.get("cine_audio_mixer")),
-                ("cine_audio_tracks", editor_input_resources.get("cine_audio_tracks")),
-                ("cine_payload.audioMixer", editor_mixer_payload.get("audioMixer")),
-                ("cine_payload", editor_mixer_payload),
+        imported_effect_graph: Dict[str, Any] = {}
+        imported_master_bus: Dict[str, Any] = {}
+        # Prefer the explicit editorial bus, then fall back to the generation
+        # CineLinX so older workflows also retain AudioBoard mixer/FX truth.
+        mixer_linx_candidates = (
+            ("cine_editor_linx", cine_editor_linx),
+            ("cine_linx", cine_linx),
+        )
+        for linx_name, linx_value in mixer_linx_candidates:
+            if not isinstance(linx_value, dict):
+                continue
+            linx_resources = _resources(linx_value)
+            linx_outputs = _outputs(linx_value)
+            linx_payload = linx_resources.get("cine_payload") if isinstance(linx_resources.get("cine_payload"), dict) else {}
+            graph_value = (
+                linx_resources.get("cine_audio_effect_graph_json")
+                or linx_resources.get("cine_audio_bus_effect_graph_json")
+                or linx_outputs.get("audio_effect_graph_json")
+                or linx_payload.get("audio_effect_graph")
             )
-            for candidate_source, candidate in mixer_candidates:
-                if not isinstance(candidate, dict):
-                    continue
-                raw_settings = candidate.get("trackSettings", candidate.get("track_settings"))
-                if isinstance(raw_settings, list) and raw_settings:
-                    mixer_settings = [item for item in raw_settings if isinstance(item, dict)]
-                    mixer_source = candidate_source
-                    break
+            graph = _safe_json_loads(graph_value, graph_value if isinstance(graph_value, dict) else {})
+            if not imported_effect_graph and isinstance(graph, dict) and graph:
+                imported_effect_graph = copy.deepcopy(graph)
+            tracks_value = linx_resources.get("cine_audio_tracks")
+            if isinstance(tracks_value, dict) and not imported_master_bus:
+                candidate_master_bus = tracks_value.get("master_bus")
+                if isinstance(candidate_master_bus, dict):
+                    imported_master_bus = copy.deepcopy(candidate_master_bus)
+            mixer_candidates = (
+                ("cine_audio_mixer", linx_resources.get("cine_audio_mixer")),
+                ("cine_audio_tracks", tracks_value),
+                ("cine_payload.audioMixer", linx_payload.get("audioMixer")),
+                ("cine_payload", linx_payload),
+            )
+            if not mixer_settings:
+                for candidate_source, candidate in mixer_candidates:
+                    if not isinstance(candidate, dict):
+                        continue
+                    raw_settings = candidate.get("trackSettings", candidate.get("track_settings"))
+                    if isinstance(raw_settings, list) and raw_settings:
+                        mixer_settings = [copy.deepcopy(item) for item in raw_settings if isinstance(item, dict)]
+                        mixer_source = f"{linx_name}.{candidate_source}"
+                        break
+        if imported_effect_graph:
+            manifest["audio_effect_graph"] = imported_effect_graph
+            if not imported_master_bus and isinstance(imported_effect_graph.get("masterBus"), dict):
+                imported_master_bus = copy.deepcopy(imported_effect_graph["masterBus"])
+        if imported_master_bus:
+            manifest["audio_master_bus"] = imported_master_bus
         if mixer_settings:
             manifest_tracks = manifest.get("tracks") if isinstance(manifest.get("tracks"), list) else []
             tracks_by_id = {
@@ -4547,13 +4897,25 @@ class IAMCCS_ShotboardVideoEditorV1:
                 if not isinstance(track, dict):
                     continue
                 track["volume"] = max(0.0, min(2.0, _safe_float(settings.get("volume", 1.0), 1.0)))
+                track["gainDb"] = max(-24.0, min(24.0, _safe_float(settings.get("gainDb", 0.0), 0.0)))
+                track["pan"] = max(-1.0, min(1.0, _safe_float(settings.get("pan", 0.0), 0.0)))
                 track["muted"] = bool(settings.get("mute", settings.get("muted", False)))
                 track["solo"] = bool(settings.get("solo", False))
+                track["normalize"] = bool(settings.get("normalize", False))
+                track["bypassEffects"] = bool(settings.get("bypassEffects", False))
+                track["reverb"] = bool(settings.get("reverb", False))
+                track["reverbSend"] = max(0.0, min(1.0, _safe_float(settings.get("reverbSend", 0.0), 0.0)))
+                track["effectChain"] = copy.deepcopy(settings.get("effectChain")) if isinstance(settings.get("effectChain"), list) else []
             manifest["editor_audio_mixer_sync"] = {
                 "source": mixer_source,
                 "track_count": min(5, len(mixer_settings)),
-                "fields": ["volume", "muted", "solo"],
-                "truth": "cine_editor_linx AudioBoard Mixer settings imported without replacing the H3 generation cine_linx",
+                "fields": [
+                    "volume", "gainDb", "pan", "muted", "solo", "normalize",
+                    "bypassEffects", "reverb", "reverbSend", "effectChain",
+                ],
+                "effect_graph_imported": bool(imported_effect_graph),
+                "master_bus_imported": bool(imported_master_bus),
+                "truth": "AudioBoard mixer, insert FX and master bus imported without replacing the H3 generation cine_linx",
             }
         active_identity = _active_identity_from_linx(out_linx)
         videos = [video_1, video_2, video_3, video_4, video_5]
@@ -4832,16 +5194,63 @@ def _editor_transition(clip: Dict[str, Any], side: str) -> Dict[str, Any]:
     return value
 
 
+def _iamccs_transition_frame_count(transition: Dict[str, Any], fps: float, fallback: int = 1) -> int:
+    """IAMCCS_TRANSITIONS_PRO_V1: resolve one transition duration to frames."""
+    if not isinstance(transition, dict):
+        return max(1, int(fallback))
+    explicit = _safe_int(transition.get("duration_frames"), 0)
+    if explicit > 0:
+        return max(1, explicit)
+    seconds = max(0.0, _safe_float(transition.get("duration"), 0.0))
+    if seconds > 0:
+        return max(1, int(round(seconds * max(1.0, fps))))
+    return max(1, int(fallback))
+
+
+def _iamccs_transition_curve(count: int, device: Any, dtype: Any, mode: str = "half_cosine") -> torch.Tensor:
+    count = max(1, int(count))
+    if count == 1:
+        return torch.ones((1, 1, 1, 1), device=device, dtype=dtype)
+    t = torch.linspace(0.0, 1.0, count, device=device, dtype=torch.float32)
+    mode = str(mode or "half_cosine").strip().lower()
+    if mode in {"linear", "lin"}:
+        alpha = t
+    else:
+        alpha = 0.5 - 0.5 * torch.cos(t * math.pi)
+    return alpha.view(-1, 1, 1, 1).to(dtype=dtype)
+
+
+def _iamccs_audio_curve(count: int, device: Any, dtype: Any, incoming: bool, mode: str) -> torch.Tensor:
+    count = max(1, int(count))
+    if count == 1:
+        return torch.ones((1,), device=device, dtype=dtype)
+    t = torch.linspace(0.0, 1.0, count, device=device, dtype=torch.float32)
+    mode = str(mode or "equal_power").strip().lower()
+    if mode in {"equal_power", "soft_av"}:
+        gain = torch.sin(t * (math.pi / 2.0)) if incoming else torch.cos(t * (math.pi / 2.0))
+    elif mode in {"follow_video", "half_cosine"}:
+        alpha = 0.5 - 0.5 * torch.cos(t * math.pi)
+        gain = alpha if incoming else (1.0 - alpha)
+    else:
+        gain = torch.ones_like(t)
+    return gain.to(device=device, dtype=dtype)
+
+
 def _assemble_editor_timeline_frames(entries: List[Tuple[Dict[str, Any], Any]], fps: float) -> Tuple[torch.Tensor, int]:
-    """Place edited clips at manifest time and render declared cross dissolves."""
+    """Place edited clips at manifest time and render IAMCCS Transitions Pro."""
     canvas = None
     cross_dissolves = 0
     for clip, comp in entries:
         images = comp.images
         if not torch.is_tensor(images) or images.ndim != 4 or int(images.shape[0]) <= 0:
             continue
+
         start = max(0, int(round(_safe_float(clip.get("startTime"), 0.0) * max(1.0, fps))))
         end = start + int(images.shape[0])
+        incoming = _editor_transition(clip, "in")
+        transition_type = str(incoming.get("type") or "cut").strip().lower()
+        requested_frames = _iamccs_transition_frame_count(incoming, fps, 1)
+
         if canvas is None:
             previous_length = 0
             canvas = torch.zeros((end, *images.shape[1:]), dtype=images.dtype, device=images.device)
@@ -4851,31 +5260,85 @@ def _assemble_editor_timeline_frames(entries: List[Tuple[Dict[str, Any], Any]], 
                 raise ValueError("IAMCCS ShotboardVideoEditorRenderV1: all parked clips must share width/height for V1 assembly.")
             images = images.to(device=canvas.device, dtype=canvas.dtype)
             if end > int(canvas.shape[0]):
-                canvas = torch.cat((canvas, torch.zeros((end - int(canvas.shape[0]), *canvas.shape[1:]), dtype=canvas.dtype, device=canvas.device)), dim=0)
+                canvas = torch.cat((
+                    canvas,
+                    torch.zeros(
+                        (end - int(canvas.shape[0]), *canvas.shape[1:]),
+                        dtype=canvas.dtype,
+                        device=canvas.device,
+                    ),
+                ), dim=0)
+
         occupied_end = min(previous_length, start + int(images.shape[0]))
         overlap = max(0, min(int(images.shape[0]), occupied_end - start))
-        incoming = _editor_transition(clip, "in")
-        dissolve = str(incoming.get("type") or "cut") == "dissolve" and overlap > 0
-        if dissolve:
-            requested = max(1, int(round(_safe_float(incoming.get("duration"), overlap / max(1.0, fps)) * max(1.0, fps))))
-            blend_count = min(overlap, requested)
+
+        if transition_type in {"dip_black", "dip_white"} and canvas is not None:
+            dip_value = 1.0 if transition_type == "dip_white" else 0.0
+            total = max(2, requested_frames)
+            out_count = max(1, total // 2)
+            in_count = max(1, total - out_count)
+
+            actual_out = min(out_count, max(0, min(start, previous_length)))
+            if actual_out > 0:
+                alpha_out = _iamccs_transition_curve(
+                    actual_out, canvas.device, canvas.dtype, incoming.get("video_curve", "half_cosine")
+                )
+                dip = torch.full_like(canvas[start - actual_out:start], float(dip_value))
+                canvas[start - actual_out:start] = (
+                    canvas[start - actual_out:start] * (1.0 - alpha_out)
+                    + dip * alpha_out
+                )
+
+            actual_in = min(in_count, int(images.shape[0]))
+            if actual_in > 0:
+                alpha_in = _iamccs_transition_curve(
+                    actual_in, images.device, images.dtype, incoming.get("video_curve", "half_cosine")
+                )
+                dip = torch.full_like(images[:actual_in], float(dip_value))
+                images = images.clone()
+                images[:actual_in] = dip * (1.0 - alpha_in) + images[:actual_in] * alpha_in
+
+        if transition_type == "dissolve" and overlap > 0:
+            blend_count = min(overlap, requested_frames)
             if blend_count > 0:
                 blend_start = start
-                alpha = torch.linspace(0.0, 1.0, blend_count, device=canvas.device, dtype=torch.float32).view(-1, 1, 1, 1).to(canvas.dtype)
-                canvas[blend_start:blend_start + blend_count] = canvas[blend_start:blend_start + blend_count] * (1.0 - alpha) + images[:blend_count] * alpha
+                alpha = _iamccs_transition_curve(
+                    blend_count, canvas.device, canvas.dtype, incoming.get("video_curve", "half_cosine")
+                )
+                canvas[blend_start:blend_start + blend_count] = (
+                    canvas[blend_start:blend_start + blend_count] * (1.0 - alpha)
+                    + images[:blend_count] * alpha
+                )
                 if overlap > blend_count:
                     canvas[blend_start + blend_count:blend_start + overlap] = images[blend_count:overlap]
                 cross_dissolves += 1
+        elif transition_type == "continuity" and overlap > 0:
+            micro = max(0, _safe_int(incoming.get("micro_blend_frames"), 0))
+            micro = min(overlap, micro)
+            if micro > 0:
+                alpha = _iamccs_transition_curve(
+                    micro, canvas.device, canvas.dtype, incoming.get("video_curve", "half_cosine")
+                )
+                canvas[start:start + micro] = (
+                    canvas[start:start + micro] * (1.0 - alpha)
+                    + images[:micro] * alpha
+                )
+            if overlap > micro:
+                canvas[start + micro:start + overlap] = images[micro:overlap]
         elif overlap > 0:
+            # CUT and unknown transitions are incoming-owned in an overlap.
             canvas[start:start + overlap] = images[:overlap]
+
         if int(images.shape[0]) > overlap:
             canvas[start + overlap:end] = images[overlap:]
+
     if canvas is None:
         raise ValueError("IAMCCS ShotboardVideoEditorRenderV1: no readable video frames found in editor manifest.")
     return canvas.contiguous(), cross_dissolves
 
 
 def _mix_editor_video_audio(entries: List[Tuple[Dict[str, Any], Any]], frame_count: int, fps: float) -> Dict[str, Any] | None:
+    """Mix editor audio with equal-power/dip/continuity transition envelopes."""
     audio_entries = []
     target_rate = 0
     target_channels = 1
@@ -4886,30 +5349,71 @@ def _mix_editor_video_audio(entries: List[Tuple[Dict[str, Any], Any]], frame_cou
         target_rate = target_rate or sample_rate
         target_channels = max(target_channels, int(waveform.shape[-2]))
         audio_entries.append((clip, waveform, sample_rate))
+
     if not audio_entries:
         return None
+
     target_samples = max(1, int(round(frame_count / max(1.0, fps) * target_rate)))
     mixed = torch.zeros((1, target_channels, target_samples), dtype=torch.float32)
+
     for clip, waveform, sample_rate in audio_entries:
         if sample_rate != target_rate:
             waveform = torchaudio.functional.resample(waveform, sample_rate, target_rate)
         waveform = _normalize_audio_channels(waveform, target_channels).to(dtype=torch.float32, device=mixed.device)
+
         destination = max(0, int(round(_safe_float(clip.get("startTime"), 0.0) * target_rate)))
         count = min(int(waveform.shape[-1]), target_samples - destination)
         if count <= 0:
             continue
+
         piece = waveform[..., :count].clone()
         incoming = _editor_transition(clip, "in")
-        if str(incoming.get("type") or "cut") == "dissolve":
-            fade_samples = min(count, max(1, int(round(_safe_float(incoming.get("duration"), 0.0) * target_rate))))
-            piece[..., :fade_samples] *= torch.linspace(0.0, 1.0, fade_samples, dtype=piece.dtype, device=piece.device)
-        outgoing = _editor_transition(clip, "out")
-        if str(outgoing.get("type") or "cut") == "dissolve":
-            fade_samples = min(count, max(1, int(round(_safe_float(outgoing.get("duration"), 0.0) * target_rate))))
-            piece[..., count - fade_samples:count] *= torch.linspace(1.0, 0.0, fade_samples, dtype=piece.dtype, device=piece.device)
-        mixed[..., destination:destination + count] += piece
-    return {"waveform": mixed.clamp(-1.0, 1.0), "sample_rate": int(target_rate)}
+        transition_type = str(incoming.get("type") or "cut").strip().lower()
+        audio_mode = str(incoming.get("audio_mode") or incoming.get("audio_curve") or "equal_power").strip().lower()
+        transition_frames = _iamccs_transition_frame_count(incoming, fps, 1)
+        transition_samples = max(1, int(round((transition_frames / max(1.0, fps)) * target_rate)))
 
+        if transition_type in {"dissolve", "continuity"}:
+            fade_samples = min(count, transition_samples, max(0, target_samples - destination))
+            if fade_samples > 0:
+                if audio_mode == "hard_cut" or (
+                    transition_type == "continuity" and audio_mode not in {"equal_power", "soft_av", "follow_video"}
+                ):
+                    mixed[..., destination:destination + fade_samples] = 0.0
+                else:
+                    outgoing_gain = _iamccs_audio_curve(
+                        fade_samples, mixed.device, mixed.dtype, incoming=False, mode=audio_mode
+                    ).view(1, 1, -1)
+                    incoming_gain = _iamccs_audio_curve(
+                        fade_samples, piece.device, piece.dtype, incoming=True, mode=audio_mode
+                    ).view(1, 1, -1)
+                    mixed[..., destination:destination + fade_samples] *= outgoing_gain
+                    piece[..., :fade_samples] *= incoming_gain
+
+        elif transition_type in {"dip_black", "dip_white"}:
+            total_samples = min(max(2, transition_samples), target_samples)
+            out_count = max(1, total_samples // 2)
+            in_count = max(1, total_samples - out_count)
+
+            actual_out = min(out_count, destination)
+            if actual_out > 0:
+                gain_out = _iamccs_audio_curve(
+                    actual_out, mixed.device, mixed.dtype, incoming=False,
+                    mode="equal_power" if audio_mode == "soft_av" else audio_mode
+                ).view(1, 1, -1)
+                mixed[..., destination - actual_out:destination] *= gain_out
+
+            actual_in = min(in_count, count)
+            if actual_in > 0:
+                gain_in = _iamccs_audio_curve(
+                    actual_in, piece.device, piece.dtype, incoming=True,
+                    mode="equal_power" if audio_mode == "soft_av" else audio_mode
+                ).view(1, 1, -1)
+                piece[..., :actual_in] *= gain_in
+
+        mixed[..., destination:destination + count] += piece
+
+    return {"waveform": mixed.clamp(-1.0, 1.0), "sample_rate": int(target_rate)}
 
 class IAMCCS_ShotboardVideoEditorRenderV1:
     """Render a manifest-based editor assembly back to a Comfy VIDEO."""
@@ -5013,14 +5517,6 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
                 return True
             return bool(clip.get("solo", False)) or bool(editor_track(clip).get("solo", False))
 
-        def editor_audio_gain(clip: Dict[str, Any]) -> float:
-            track = editor_track(clip)
-            return max(
-                0.0,
-                _safe_float(clip.get("volume", 1.0), 1.0)
-                * _safe_float(track.get("volume", 1.0), 1.0),
-            )
-
         def companion_audio_clip(video_clip: Dict[str, Any]) -> Dict[str, Any] | None:
             take_index = _safe_int(video_clip.get("takeIndex"), 0)
             clip_index = _safe_int(video_clip.get("clipIndex"), 0)
@@ -5065,7 +5561,11 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
             audio_clip = companion_audio_clip(clip)
             if audio_clip is not None:
                 audio = _trim_audio_to_editor_clip(comp.audio, audio_clip)
-                audio = _audio_with_gain(audio, editor_audio_gain(audio_clip)) if editor_audio_enabled(audio_clip) else None
+                audio = (
+                    _audio_with_editor_track_mix(audio, audio_clip, editor_track(audio_clip))
+                    if editor_audio_enabled(audio_clip)
+                    else None
+                )
                 audio_mix_clip = audio_clip
             elif editor_solo_active:
                 # A legacy video without a published companion audio clip must
@@ -5123,12 +5623,7 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
             if master_muted:
                 audio = None
             elif isinstance(master_clip, dict):
-                master_gain = max(
-                    0.0,
-                    _safe_float(master_clip.get("volume", 1.0), 1.0)
-                    * _safe_float(master_track.get("volume", 1.0), 1.0),
-                )
-                audio = _audio_with_gain(audio, master_gain)
+                audio = _audio_with_editor_track_mix(audio, master_clip, master_track)
         elif effective_audio_policy == "first_video_audio":
             audio = first.audio
         elif effective_audio_policy == "concat_clip_audio":
@@ -5145,10 +5640,31 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
                 asset = assets.get(str(clip.get("assetId"))) if isinstance(assets.get(str(clip.get("assetId"))), dict) else {}
                 if bool(asset.get("manual")) and editor_audio_enabled(clip):
                     mix_clip = copy.deepcopy(clip)
-                    mix_clip["volume"] = editor_audio_gain(clip)
+                    track = editor_track(clip)
+                    mix_clip["volume"] = max(
+                        0.0,
+                        _safe_float(clip.get("volume", 1.0), 1.0)
+                        * _safe_float(track.get("volume", 1.0), 1.0)
+                        * (10.0 ** (_safe_float(track.get("gainDb", 0.0), 0.0) / 20.0)),
+                    )
+                    mix_clip["_iamccs_track_fx"] = copy.deepcopy(track)
                     manual_audio_items.append((mix_clip, asset))
             if manual_audio_items:
                 audio = _mix_manual_audio_into_timeline(audio, manual_audio_items, int(frames.shape[0]), fps)
+        master_bus = manifest.get("audio_master_bus") if isinstance(manifest.get("audio_master_bus"), dict) else {}
+        if audio is not None and master_bus:
+            audio = _audio_with_effect_chain(audio, master_bus.get("effectChain"), master_bus)
+            master_width = _safe_float(master_bus.get("width", 1.0), 1.0)
+            waveform, _sample_rate = _audio_waveform(audio)
+            if waveform is not None and abs(master_width - 1.0) > 1e-8:
+                audio = dict(audio)
+                audio["waveform"] = _audio_fx_stereo_width(waveform, master_width).contiguous()
+            if bool(master_bus.get("limiter", False)):
+                ceiling = 10.0 ** (max(-24.0, min(0.0, _safe_float(master_bus.get("ceilingDb", -1.0), -1.0))) / 20.0)
+                waveform, _sample_rate = _audio_waveform(audio)
+                if waveform is not None:
+                    audio = dict(audio)
+                    audio["waveform"] = torch.clamp(waveform, -ceiling, ceiling).contiguous()
         video = InputImpl.VideoFromComponents(Types.VideoComponents(
             images=frames,
             audio=audio,
@@ -5167,6 +5683,15 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
             "tail_trim_source": "render_widget" if max(0, _safe_int(tail_trim_frames_per_clip, 0)) > 0 else "editor_manifest",
             "has_audio": audio is not None,
             "editor_audio_solo_active": bool(editor_solo_active),
+            "audioboard_effect_graph_imported": bool(manifest.get("audio_effect_graph")),
+            "audioboard_master_bus_baked": bool(master_bus),
+            "audioboard_track_fx_baked": sum(
+                1 for track in tracks_by_id.values()
+                if isinstance(track, dict)
+                and not bool(track.get("bypassEffects", False))
+                and isinstance(track.get("effectChain"), list)
+                and bool(track.get("effectChain"))
+            ),
             "cross_dissolve_count": int(cross_dissolve_count),
             "timeline_placement": "manifest_start_time",
             "editor_muted_audio_tracks": sorted(
@@ -5388,6 +5913,3 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_VideoHardConcat": "IAMCCS Video Hard Concat",
     "IAMCCS_VideoColorCorrectionControl": "IAMCCS Video Color Correction Control",
 }
-
-
-

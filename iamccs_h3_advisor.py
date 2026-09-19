@@ -83,11 +83,21 @@ def describe_asset(name, path):
         result.update(role="fasth3", recipe="fasth3_6", family=result["family"] or "fl2va")
     elif "turbo" in lower and result["native"]:
         result["role"] = "turbo"
-        if "768p" in lower and "4step" in lower and "_sla_" in lower and "ComfyUI generic LoRA" in str(meta.get("target_format", "")):
+        target_format = str(meta.get("target_format", ""))
+        generic_comfy = "ComfyUI generic LoRA" in target_format
+        family = result.get("family") or ""
+        if "768p" in lower and "4step" in lower and "_sla_" in lower and generic_comfy:
             result.update(recipe="lightx_768_sla_4", requires_backend="H3SLAAttention")
-        elif "768p" in lower and "8step" in lower and "ComfyUI generic LoRA" in str(meta.get("target_format", "")):
-            result["recipe"] = "lightx_768_8"
+        elif "768p" in lower and "4step" in lower and family == "fl2va" and generic_comfy:
+            result["recipe"] = "lightx_fl2_768_4"
+        elif "768p" in lower and "8step" in lower and family == "fl2va" and generic_comfy:
+            result["recipe"] = "lightx_fl2_768_8"
+        elif "768p" in lower and "8step" in lower and family == "ref2va" and generic_comfy:
+            result["recipe"] = "lightx_ref2_768_8"
+        elif "4step" in lower and "v0.1" in lower and family == "ref2va" and generic_comfy:
+            result["recipe"] = "lightx_ref2_544_4"
         elif "lightx2v" in lower and "4step" in lower and "v0.1" in lower and meta.get("converted_layout") == "comfyui_minimax_h3":
+            # Historical converter metadata did not always retain family text.
             result["recipe"] = "lightx_544_4"
     if result["conflict"]:
         result["error"] = "Filename and base-model metadata disagree; verify provenance before use."

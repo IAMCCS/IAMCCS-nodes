@@ -1,5 +1,10 @@
 # IAMCCS Nodes - Changelog
 
+## 2026-09-19 - version 1.5.5 - IAMCCS MiniMax H3 Engine
+
+- Added MiniMax H3 Engine from the IAMCCS architecture.
+- Documented GPL-3.0-or-later project licensing and third-party attribution.
+
 ## 2026-08-24 - version 1.5.2 - MiniMax H3 utilities and workflow polish
 
 - Added MiniMax H3 audio-drive, audio-timeline and Shotboard utilities, including improved multi-chunk lane handling and long-video lip-sync support.
