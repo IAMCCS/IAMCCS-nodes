@@ -12586,7 +12586,7 @@ function renderShotboardV3(node) {
             caption.spellcheck = false;
             caption.dataset.iamccsV3SegmentId = String(seg.id);
             caption.dataset.iamccsV3Key = "prompt";
-            caption.style.cssText = `position:absolute;left:${innerLeft}px;right:${innerRight}px;top:${promptTop}px;height:${promptHeight}px;box-sizing:border-box;padding:7px 9px;background:${purple.valueBg};border:1px solid ${purple.border};border-radius:5px;color:${purple.valueText};font:${promptFontSize(10)}/1.28 monospace;font-weight:700;outline:none;resize:none;overflow-y:auto;overflow-x:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.66);`;
+            caption.style.cssText = `position:absolute;left:${innerLeft}px;right:${innerRight}px;top:${promptTop}px;height:${promptHeight}px;box-sizing:border-box;padding:7px 34px 7px 9px;background:${purple.valueBg};border:1px solid ${purple.border};border-radius:5px;color:${purple.valueText};font:${promptFontSize(10)}/1.28 monospace;font-weight:700;outline:none;resize:none;overflow-y:auto;overflow-x:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.66);`;
             caption.onpointerdown = (event) => event.stopPropagation();
             caption.onclick = (event) => event.stopPropagation();
             caption.ondblclick = (event) => event.stopPropagation();
@@ -12638,7 +12638,61 @@ function renderShotboardV3(node) {
                 logPromptPersistence(seg, "timeline_caption_compositionend");
             };
             protectControlDrag(caption);
-            block.appendChild(caption);
+            const expandPrompt = document.createElement("button");
+            expandPrompt.type = "button";
+            expandPrompt.textContent = "+";
+            expandPrompt.title = "Open this prompt in a full-frame editor";
+            expandPrompt.setAttribute("aria-label", "Open prompt full frame");
+            expandPrompt.style.cssText = `position:absolute;right:${innerRight + 4}px;top:${promptTop + 4}px;width:24px;height:24px;padding:0;border:1px solid ${purple.border};border-radius:4px;background:#17251F;color:#F3D59B;font:900 17px/22px Arial,sans-serif;cursor:pointer;z-index:22;box-shadow:0 2px 8px rgba(0,0,0,.38);`;
+            expandPrompt.onpointerdown = (event) => { event.preventDefault(); event.stopPropagation(); };
+            expandPrompt.onmousedown = (event) => { event.preventDefault(); event.stopPropagation(); };
+            expandPrompt.onclick = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+
+                const overlay = document.createElement("div");
+                overlay.style.cssText = `position:fixed;inset:0;z-index:${CINE_FULLSCREEN_Z_INDEX + 40};display:flex;flex-direction:column;padding:20px;box-sizing:border-box;background:rgba(3,7,9,.90);pointer-events:auto;`;
+                const editorPanel = document.createElement("div");
+                editorPanel.style.cssText = `width:min(1500px,96vw);height:calc(100vh - 40px);margin:auto;display:flex;flex-direction:column;min-height:0;padding:16px;box-sizing:border-box;border:1px solid ${purple.border};border-radius:10px;background:#101A16;box-shadow:0 24px 90px rgba(0,0,0,.72);`;
+                const editorBar = document.createElement("div");
+                editorBar.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;color:#F3D59B;font:900 13px/1.2 Arial,sans-serif;letter-spacing:.05em;";
+                const editorTitle = document.createElement("div");
+                editorTitle.textContent = `${String(seg.label || "SHOT PROMPT")} · FULL FRAME`;
+                const closeEditor = document.createElement("button");
+                closeEditor.type = "button";
+                closeEditor.textContent = "DONE";
+                closeEditor.style.cssText = `height:32px;padding:0 18px;border:1px solid ${purple.border};border-radius:5px;background:#234F40;color:#F7F1E7;font:900 11px/1 Arial,sans-serif;cursor:pointer;`;
+                const largePrompt = document.createElement("textarea");
+                largePrompt.value = caption.value;
+                largePrompt.spellcheck = false;
+                largePrompt.placeholder = caption.placeholder;
+                largePrompt.style.cssText = `flex:1;min-height:0;width:100%;box-sizing:border-box;padding:22px 24px;border:1px solid ${purple.border};border-radius:7px;background:${purple.valueBg};color:${purple.valueText};font:${promptFontSize(20)}/1.42 monospace;font-weight:700;outline:none;resize:none;overflow:auto;white-space:pre-wrap;`;
+                const close = () => {
+                    document.removeEventListener("keydown", keyHandler, true);
+                    overlay.remove();
+                    caption.dispatchEvent(new Event("change", { bubbles: true }));
+                    caption.focus({ preventScroll: true });
+                };
+                const keyHandler = (keyEvent) => {
+                    if (keyEvent.key === "Escape" || (keyEvent.key === "Enter" && (keyEvent.ctrlKey || keyEvent.metaKey))) {
+                        keyEvent.preventDefault();
+                        close();
+                    }
+                };
+                largePrompt.oninput = () => {
+                    caption.value = largePrompt.value;
+                    caption.dispatchEvent(new Event("input", { bubbles: true }));
+                };
+                closeEditor.onclick = close;
+                overlay.onclick = (overlayEvent) => { if (overlayEvent.target === overlay) close(); };
+                document.addEventListener("keydown", keyHandler, true);
+                editorBar.append(editorTitle, closeEditor);
+                editorPanel.append(editorBar, largePrompt);
+                overlay.appendChild(editorPanel);
+                document.body.appendChild(overlay);
+                requestAnimationFrame(() => largePrompt.focus());
+            };
+            block.append(caption, expandPrompt);
         }
         const label = document.createElement("div");
         label.style.cssText = `position:absolute;left:${innerLeft}px;top:${truthRailHeight + 4}px;right:${topRightSafe}px;color:#fff;font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-shadow:0 1px 2px #000;`;

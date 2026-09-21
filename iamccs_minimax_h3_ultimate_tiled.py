@@ -224,7 +224,13 @@ class IAMCCS_MiniMaxH3UltimateTiledDelivery(IAMCCS_MiniMaxH3FastLatent2PassR41):
             gc.collect()
             mm.soft_empty_cache()
 
-        _write_segment_metadata(output, frames, 24, "h3_ultimate_tiled_native_audio")
+        source_workflow = extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None
+        _write_segment_metadata(
+            output, frames, 24, "h3_ultimate_tiled_native_audio",
+            provenance={"render_id": run, "stage": "h3_ultimate_tiled", "segment_index": index,
+                        "total_segments": total, "shotplan": plan},
+            source_workflow=source_workflow,
+        )
         preview = output
         if index == total - 1:
             paths = [root / f"segment_{part + 1:04d}.mp4" for part in range(total)]
@@ -235,6 +241,15 @@ class IAMCCS_MiniMaxH3UltimateTiledDelivery(IAMCCS_MiniMaxH3FastLatent2PassR41):
                 _concat_videos_overlap(paths, preview, join, 24)
             else:
                 _concat_videos(paths, preview)
+            from .iamccs_minimax_h3_shotboard import _joined_frame_count
+            _write_segment_metadata(
+                preview, _joined_frame_count(paths, join if join > 1 else 0), 24,
+                "crossfade" if join > 1 else "direct",
+                provenance={"render_id": run, "stage": "h3_ultimate_tiled_master",
+                            "total_segments": total, "segment_files": [path.name for path in paths],
+                            "shotplan": plan},
+                source_workflow=source_workflow,
+            )
 
         queued = False
         if bool(queue_next_segment) and index + 1 < total:

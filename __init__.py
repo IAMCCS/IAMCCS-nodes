@@ -2896,6 +2896,12 @@ def setup_api_routes() -> None:
             except (ValueError, TypeError) as exc:
                 return web.json_response({"error": str(exc)}, status=400)
 
+        try:
+            from .iamccs_minimax_h3_asset_library import register_routes as register_h3_asset_routes
+            register_h3_asset_routes(routes, web)
+        except Exception as exc:
+            logging.getLogger("IAMCCS.API").warning("H3 asset library routes unavailable: %r", exc)
+
     except Exception as e:
         # Never hard-fail ComfyUI startup due to optional API endpoints.
         logging.getLogger("IAMCCS.API").warning("Could not setup IAMCCS API routes: %r", e)
@@ -3123,3 +3129,15 @@ try:
     _register_ahead_seams()
 except Exception as _ahead_seam_error:
     log.exception("[IAMCCS] Ahead seam editor registration failed: %s", _ahead_seam_error)
+
+# Standalone H3 disk-upscale building blocks. Deliberately not wired into
+# Settings PRO, Shotboard routing or the R42/R43 generation backend yet.
+try:
+    from .iamccs_h3_disk_upscale import (
+        NODE_CLASS_MAPPINGS as _H3_DISK_UPSCALE_CLASSES,
+        NODE_DISPLAY_NAME_MAPPINGS as _H3_DISK_UPSCALE_NAMES,
+    )
+    NODE_CLASS_MAPPINGS.update(_H3_DISK_UPSCALE_CLASSES)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_H3_DISK_UPSCALE_NAMES)
+except Exception as _h3_disk_upscale_error:
+    log.exception("[IAMCCS] H3 standalone disk-upscale registration failed: %s", _h3_disk_upscale_error)

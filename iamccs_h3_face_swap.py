@@ -1,4 +1,4 @@
-"""FACE SWAP v1: lazy two-view identity branch for the universal R42 backend."""
+"""SAM3 tracked subject swap: lazy crop/inpaint/uncrop branch for universal H3."""
 from __future__ import annotations
 
 import json
@@ -23,7 +23,7 @@ def settings_schema():
         "h3_faceswap_sam_model": (["", *checkpoints], {"default": sam3, "tooltip": "Installed SAM3 multiplex checkpoint. Required only when no source mask is connected."}),
         "h3_faceswap_birefnet_model": (["", *background_models], {"default": birefnet, "tooltip": "BiRefNet model used by FACE SWAP v1 to place both identity views on white before stitching them."}),
         "h3_faceswap_mask_prompt": ("STRING", {"default": "head", "tooltip": "Tracked identity region. Keep head for hair, ears, jaw and profile stability."}),
-        "h3_faceswap_threshold": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Production default for complete-head tracking."}),
+        "h3_faceswap_threshold": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Foxydits reference threshold for stable single-subject SAM3 tracking."}),
         "h3_faceswap_objects": ("STRING", {"default": "", "tooltip": "Leave empty for one subject. For multi-person footage, enter the intended tracked-object index explicitly."}),
         "h3_faceswap_cleanup_threshold": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01}),
         "h3_faceswap_cleanup_shrink": ("INT", {"default": 12, "min": 1, "max": 128, "step": 1}),
@@ -77,7 +77,7 @@ class IAMCCS_H3FaceSwapInput:
         from .iamccs_minimax_h3_atomic_backend import _resolve_shotplan
         if _resolve_shotplan(cine_linx).get("task_mode") != FACE_SWAP_MODE:
             return []
-        return [name for name, value in kwargs.items() if value is None]
+        return [name for name in ("source_video", "reference_face") if kwargs.get(name) is None]
 
     def attach(self, cine_linx, source_fps, source_video=None, reference_face=None, source_audio=None, source_mask=None, reference_face_2=None):
         from .iamccs_minimax_h3_atomic_backend import _resolve_shotplan
@@ -87,23 +87,24 @@ class IAMCCS_H3FaceSwapInput:
             return (cine_linx,)
         validate_plan(plan)
         if not torch.is_tensor(source_video) or not torch.is_tensor(reference_face) or source_video.ndim != 4 or not len(source_video) or reference_face.ndim != 4 or not len(reference_face):
-            raise ValueError("FACE SWAP v1 requires a non-empty source video plus two identity views: reference_face and reference_face_2.")
-        if not torch.is_tensor(reference_face_2) or reference_face_2.ndim != 4 or not len(reference_face_2):
-            raise ValueError("FACE SWAP v1 requires reference_face_2. Use a second coherent view of the same identity, ideally three-quarter or profile.")
+            raise ValueError("SAM3 Subject Swap requires a non-empty source video and one reference identity image.")
         if source_mask is not None and (source_mask.ndim != 3 or len(source_mask) != len(source_video)):
             raise ValueError("Face Swap source masks must contain one mask for every source video frame.")
         for name in ("MVEx_SubjectCrop", "MVEx_SubjectUncrop", "MVEx_MaskCleanup", "MVEx_MaskToLatentSpace"):
             _mvex(name)
         config = plan.get("face_swap", {})
+        reference_mode = "two_view_birefnet_legacy" if (
+            torch.is_tensor(reference_face_2) and reference_face_2.ndim == 4 and len(reference_face_2)
+        ) else "single_reference_sam3"
         if source_mask is None and not folder_paths.get_full_path("checkpoints", config.get("sam_model", "")):
             raise ValueError("Select an installed SAM3 checkpoint in Face Swap settings, or connect source_mask.")
-        if not folder_paths.get_full_path("background_removal", config.get("birefnet_model", "")):
-            raise ValueError("FACE SWAP v1 requires birefnet.safetensors in models/background_removal to build its white multiview identity card.")
+        if reference_mode == "two_view_birefnet_legacy" and not folder_paths.get_full_path("background_removal", config.get("birefnet_model", "")):
+            raise ValueError("Two-view BiRefNet legacy mode requires its model in models/background_removal.")
         data = {"video": source_video, "fps": float(source_fps), "reference": reference_face,
                 "reference_2": reference_face_2, "audio": source_audio, "mask": source_mask}
         return (build_stage_linx_payload(cine_linx, stage_name="H3 Face Swap input", stage_kind="minimax_h3_face_swap",
                 payload={"source_frames": len(source_video), "source_fps": source_fps},
-                report="FACE SWAP v1 source · lazy universal identity branch", resources={FACE_SWAP_RESOURCE: data}),)
+                report="SAM3 Subject Swap source · lazy single-reference tracked branch", resources={FACE_SWAP_RESOURCE: data}),)
 
 
 def _build_white_multiview_reference(reference_a, reference_b, model_name):
@@ -188,7 +189,8 @@ def prepare_face_swap(model, clip, video_vae, audio_vae, cine_linx, segment_inde
         sam_model, sam_clip, _ = nodes.CheckpointLoaderSimple().load_checkpoint(checkpoint)
         conditioning = nodes.CLIPTextEncode().encode(sam_clip, str(config.get("mask_prompt", "head")))[0]
         tracks = SAM3_VideoTrack.execute(images=raw, model=sam_model, conditioning=conditioning,
-                detection_threshold=float(config.get("threshold", 0.5)), max_objects=0, detect_interval=1)[0]
+                detection_threshold=float(config.get("threshold", 0.5)),
+                max_objects=1, detect_interval=1)[0]
         masks = SAM3_TrackToMask.execute(track_data=tracks, object_indices=str(config.get("objects", "")))[0].cpu()
         del sam_model, sam_clip, conditioning, tracks
         mm.unload_all_models()
@@ -203,16 +205,19 @@ def prepare_face_swap(model, clip, video_vae, audio_vae, cine_linx, segment_inde
             mode={"mode": "tracked", "crop_scale": float(config.get("crop_scale", 1.75)), "padding": "firm", "prefer": "stillness", "aspect_ratio": 0.0, "seamless_loop": False},
             divisible_by=32, upscale_megapixels=float(config.get("crop_megapixels", 0.5)))
     width, height = int(crops.shape[2]), int(crops.shape[1])
-    # The identity card is independent of the chunk.  Cache it on the
-    # per-take resource so LongVid/multishot does not rerun BiRefNet for
-    # every segment (which would turn a safe CPU fallback into an hour-long
-    # preprocessing loop).
-    identity_card = source.get("identity_card")
-    if identity_card is None:
-        identity_card = _build_white_multiview_reference(source["reference"], source["reference_2"],
-                str(config.get("birefnet_model", "")))
-        source["identity_card"] = identity_card
-    ref_images = {"ref_image_1": identity_card}
+    reference_mode = "two_view_birefnet_legacy" if source.get("reference_2") is not None else "single_reference_sam3"
+    if reference_mode == "two_view_birefnet_legacy":
+        # Compatibility path only. The default SAM3 workflow uses Picture 1
+        # directly and therefore has no BiRefNet dependency or second image.
+        identity_card = source.get("identity_card")
+        if identity_card is None:
+            identity_card = _build_white_multiview_reference(source["reference"], source["reference_2"],
+                    str(config.get("birefnet_model", "")))
+            source["identity_card"] = identity_card
+        reference = identity_card
+    else:
+        reference = source["reference"][:1]
+    ref_images = {"ref_image_1": reference}
     directed_prompt = str(prompt_override or chunk.get("prompt", "")).strip()
     prompt = "<Subject 1> is the character represented in <Picture 1>. The video is a close up face of <Subject 1>."
     if directed_prompt:
@@ -276,7 +281,8 @@ def prepare_face_swap(model, clip, video_vae, audio_vae, cine_linx, segment_inde
         latent, _ = _lock_audio_stream(latent, original_audio, audio_vae)
     latent[FACE_SWAP_LATENT] = {"original": raw, "masks": crop_masks.cpu(), "boxes": boxes,
             "requested": requested, "audio": original_audio, "feather": int(config.get("feather", 16))}
-    report = f"FACE SWAP v1 · two-view identity pipeline | SAM3 head@{float(config.get('threshold', 0.5)):.2f} | BiRefNet 2-view white card | source={plan['width']}x{plan['height']} | crop={width}x{height} | frames={requested}/{aligned} | encoder={encoder_report}"
+    identity_report = "BiRefNet 2-view legacy card" if reference_mode == "two_view_birefnet_legacy" else "single Picture 1 reference"
+    report = f"SAM3 SUBJECT SWAP · tracked crop/inpaint/uncrop | SAM3 {config.get('mask_prompt', 'head')}@{float(config.get('threshold', 0.5)):.2f} max=1 interval=1 | {identity_report} | source={plan['width']}x{plan['height']} | crop={width}x{height} | frames={requested}/{aligned} | encoder={encoder_report}"
     return (model, positive, latent, raw[:1], raw[-1:], json.dumps({"task": FACE_SWAP_MODE, "source": index_report}),
             prompt, int(segment_index), len(plan["chunks"]), 0, report, {"active": False})
 
@@ -299,4 +305,4 @@ def restore_face_swap(images, audio, latent):
 
 
 NODE_CLASS_MAPPINGS = {"IAMCCS_H3FaceSwapInput": IAMCCS_H3FaceSwapInput}
-NODE_DISPLAY_NAME_MAPPINGS = {"IAMCCS_H3FaceSwapInput": "FACE SWAP v1 · SAM3 + BiRefNet multiview"}
+NODE_DISPLAY_NAME_MAPPINGS = {"IAMCCS_H3FaceSwapInput": "SAM3 SUBJECT SWAP · tracked crop + H3 inpaint"}

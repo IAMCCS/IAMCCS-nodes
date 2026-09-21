@@ -120,6 +120,8 @@ def _upscale_video_latent(video_latent, plan, width, height):
         model_name=model_name,
         mode=dynamic_mode,
         align=32,
+        enable_temporal_chunking=True,
+        force_unload=True,
         device=device,
         precision=precision,
     )
@@ -136,6 +138,38 @@ def _locked_av_latent(upscaled_video, original_audio):
     return _concat_av(video, audio)
 
 
+def _check_segment_parity(plan, index, total, native_frames, native_audio):
+    """Fail before HD sampling if the visible/audio source is not chunk i."""
+    chunks = plan.get("chunks") or []
+    if len(chunks) != total or not 0 <= index < len(chunks):
+        raise ValueError(
+            f"FAST LATENT 2-PASS segment count disagrees with Shotboard: "
+            f"queue={total}, plan={len(chunks)}, index={index}"
+        )
+    chunk = chunks[index]
+    if int(chunk.get("index", index)) != index:
+        raise ValueError("FAST LATENT 2-PASS chunk index is not the Shotboard index")
+    visible = int(native_frames.shape[0])
+    if str(plan.get("task_mode", "")).lower() == "longvid_motion_context":
+        expected = int(chunk.get("visible_frame_count", visible))
+        if visible != expected:
+            raise ValueError(
+                f"FAST LATENT 2-PASS chunk {index + 1}: native {visible}f "
+                f"does not match Shotboard visible {expected}f"
+            )
+    waveform = native_audio.get("waveform") if isinstance(native_audio, dict) else None
+    rate = int(native_audio.get("sample_rate", 0) or 0) if isinstance(native_audio, dict) else 0
+    if not torch.is_tensor(waveform) or rate <= 0:
+        raise ValueError("FAST LATENT 2-PASS needs the matching native AUDIO for this chunk")
+    audio_frames = float(waveform.shape[-1]) / rate * 24.0
+    if abs(audio_frames - visible) > 1.0:
+        raise ValueError(
+            f"FAST LATENT 2-PASS chunk {index + 1}: audio spans {audio_frames:.2f}f "
+            f"but native video spans {visible}f"
+        )
+    return chunk
+
+
 def _target_conditioning(model, clip, video_vae, audio_vae, cine_linx, segment_index,
                          stage_width, stage_height, stage1_conditioning,
                          bridge_frame=None, first_frame_override=None, last_frame_override=None,
@@ -144,13 +178,24 @@ def _target_conditioning(model, clip, video_vae, audio_vae, cine_linx, segment_i
                          motion_state=None, render_id=""):
     plan = _resolve_shotplan(cine_linx)
     # Conditioning tensors that contain image/guide latents are spatially
-    # authored.  Never reuse the native-resolution Stage-1 object on the
-    # larger Stage-2 canvas.  Re-materialize the same named Shotboard mode at
-    # the target grid; the upscaled sampled latent already carries the native
-    # motion-context history, while denoise controls how much Stage 2 may move.
+    # authored. Re-materialize them at the Stage-2 grid. Atomic deliberately
+    # leaves R37 Motion Context positioned guides to its separate condition
+    # node, so that mode needs the same guide pass again at target resolution.
     target_plan = dict(plan)
     target_plan["width"] = int(stage_width)
     target_plan["height"] = int(stage_height)
+    if (
+        isinstance(motion_state, dict)
+        and str(motion_state.get("method", "")) == "external_saved_av_continuation"
+    ):
+        # The source checkpoint has the Stage-1 latent grid and cannot be
+        # reloaded as direct context on a larger Stage-2 grid. The upscaled
+        # sampled latent already carries that AV history; rebuild only the
+        # new Shotboard mode/endpoint conditioning at the target canvas.
+        target_plan["continuation_settings"] = {
+            **dict(target_plan.get("continuation_settings") or {}),
+            "enabled": False,
+        }
     target_plan["upscale_enabled"] = False
     target_plan["upscale_mode"] = "off"
     target_linx = _replace_plan(cine_linx, target_plan)
@@ -173,7 +218,27 @@ def _target_conditioning(model, clip, video_vae, audio_vae, cine_linx, segment_i
         ref_video_audio=ref_video_audio,
         ref_audio=ref_audio,
     )
-    return result[0], result[1], f"mode-matched target conditioning {stage_width}x{stage_height}; Stage-1 context retained in latent"
+    target_conditioning = result[1]
+    guide_report = "none"
+    task_mode = str(plan.get("task_mode", "") or "").lower()
+    if task_mode == "longvid_motion_context":
+        from .iamccs_minimax_h3_motion_context_variant import _apply_positioned_guides
+
+        chunks = plan.get("chunks") or []
+        if not 0 <= int(segment_index) < len(chunks):
+            raise IndexError("FAST LATENT 2-PASS Motion Context segment is outside the Shotboard plan")
+        chunk = chunks[int(segment_index)]
+        context_offset = max(0, int(chunk.get("motion_context_trim_frames", 0) or 0))
+        target_conditioning, applied = _apply_positioned_guides(
+            target_conditioning, result[2], video_vae, audio_vae,
+            target_plan, chunk, context_offset,
+        )
+        guide_report = ",".join(applied) if applied else "none"
+    return (
+        result[0], target_conditioning,
+        f"mode-matched target conditioning {stage_width}x{stage_height}; "
+        f"Stage-1 context retained in latent; R37 target guides={guide_report}",
+    )
 
 
 def _sample_stage2(model, conditioning, latent, cine_linx, segment_index):
@@ -256,6 +321,7 @@ class IAMCCS_MiniMaxH3FastLatent2PassR41:
             _current_prompt,
             _encode_images,
             _enqueue,
+            _joined_frame_count,
             _trim_audio_frames,
             _write_segment_metadata,
         )
@@ -270,6 +336,16 @@ class IAMCCS_MiniMaxH3FastLatent2PassR41:
         index, total = int(current_segment), max(1, int(total_segments))
         if index < 0 or index >= total:
             raise ValueError("FAST LATENT 2-PASS received an invalid segment index.")
+        chunk = _check_segment_parity(plan, index, total, native_frames, native_audio)
+        if (
+            isinstance(motion_state, dict)
+            and str(motion_state.get("method", "")) == "external_saved_av_continuation"
+        ):
+            raise ValueError(
+                "FAST LATENT 2-PASS does not yet upscale an external saved-AV continuation: "
+                "the source checkpoint lives on the native latent grid. Use native or Pixel Safe delivery "
+                "for this continuation render; existing Shotboard/LongVid modes remain supported by Fast Latent."
+            )
         run = _safe_render_id(resolved_render_id)
         root = Path(folder_paths.get_output_directory()) / "IAMCCS" / "MiniMaxH3" / "FAST_LATENT_2PASS" / run
         root.mkdir(parents=True, exist_ok=True)
@@ -297,8 +373,9 @@ class IAMCCS_MiniMaxH3FastLatent2PassR41:
             )
 
         LOG.info(
-            "FAST LATENT 2-PASS start | segment=%d/%d | native=%dx%d | stage2=%dx%d | delivery=%dx%d | audio=locked",
-            index + 1, total, int(plan.get("width", 0)), int(plan.get("height", 0)),
+            "FAST LATENT 2-PASS start | segment=%d/%d | shotboard_start=%sf | native=%dx%d | stage2=%dx%d | delivery=%dx%d | audio=locked",
+            index + 1, total, int(chunk.get("timeline_start_frame", 0)),
+            int(plan.get("width", 0)), int(plan.get("height", 0)),
             stage_width, stage_height, delivery_width, delivery_height,
         )
 
@@ -356,7 +433,18 @@ class IAMCCS_MiniMaxH3FastLatent2PassR41:
             gc.collect()
             mm.soft_empty_cache()
 
-        _write_segment_metadata(output, frames, 24, "fast_latent_2pass_audio_locked")
+        provenance = {
+            "render_id": run, "stage": "fast_latent_2pass", "segment_index": index,
+            "total_segments": total, "native_visible_frames": visible,
+            "delivery_frames": frames, "context_trim_frames": trim,
+            "join_trim_frames": join, "native_audio_locked": True,
+            "stage2_canvas": [stage_width, stage_height],
+            "delivery_canvas": [delivery_width, delivery_height],
+            "chunk": chunk, "shotplan": plan,
+        }
+        source_workflow = extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None
+        _write_segment_metadata(output, frames, 24, "fast_latent_2pass_audio_locked",
+                                provenance=provenance, source_workflow=source_workflow)
         preview = output
         if index == total - 1:
             paths = [root / f"segment_{part + 1:04d}.mp4" for part in range(total)]
@@ -367,6 +455,14 @@ class IAMCCS_MiniMaxH3FastLatent2PassR41:
                 _concat_videos_overlap(paths, preview, join, 24)
             else:
                 _concat_videos(paths, preview)
+            master_frames = _joined_frame_count(paths, join if join > 1 else 0)
+            _write_segment_metadata(
+                preview, master_frames,
+                24, "fast_latent_2pass_audio_locked",
+                provenance={"render_id": run, "stage": "fast_latent_2pass_master", "total_segments": total,
+                            "segment_files": [path.name for path in paths], "shotplan": plan},
+                source_workflow=source_workflow,
+            )
 
         queued = False
         if bool(queue_next_segment) and index + 1 < total:

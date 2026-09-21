@@ -5074,6 +5074,54 @@ function normalizeLiteRow(row, index) {
     };
 }
 
+function installShotboardPromptMagnifiers(root) {
+    if (root._iamccsPromptMagnifierInstalled) return;
+    root._iamccsPromptMagnifierInstalled = true;
+    const decorate = () => {
+        for (const area of root.querySelectorAll("textarea")) {
+            if (area.dataset.iamccsMagnifierReady) continue;
+            const hint = [area.getAttribute("aria-label"), area.title, area.placeholder,
+                area.dataset.iamccsPromptZoom, area.dataset.iamccsV3Key,
+                area.name, area.parentElement?.previousElementSibling?.textContent]
+                .filter(Boolean).join(" ").toLowerCase();
+            if (!/prompt/.test(hint) || /private note|not sent to promptrelay/.test(hint)) continue;
+            area.dataset.iamccsMagnifierReady = "1";
+            const wrap = document.createElement("div");
+            wrap.style.cssText = "position:relative;min-width:0;width:100%;";
+            area.parentNode.insertBefore(wrap, area);
+            wrap.append(area);
+            area.style.width = "100%";
+            const lens = document.createElement("button");
+            lens.type = "button"; lens.textContent = "⌕";
+            lens.title = "Ingrandisci questo prompt · editor 2×";
+            lens.setAttribute("aria-label", "Ingrandisci il prompt");
+            lens.style.cssText = "position:absolute;right:8px;top:7px;z-index:2;width:25px;height:24px;border:1px solid #b98e55;border-radius:5px;background:#261d15;color:#f8d69c;cursor:pointer;font-size:19px;line-height:16px;";
+            lens.onclick = (event) => {
+                event.preventDefault(); event.stopPropagation();
+                const overlay = document.createElement("div");
+                overlay.style.cssText = "position:fixed;inset:0;z-index:100000;background:rgba(3,5,9,.88);display:grid;place-items:center;";
+                const panel = document.createElement("div");
+                panel.style.cssText = "width:min(90vw,1200px);height:82vh;padding:16px;border:1px solid #d5a85e;border-radius:10px;background:#101821;display:flex;flex-direction:column;gap:10px;";
+                const done = document.createElement("button"); done.type = "button"; done.textContent = "DONE";
+                done.style.cssText = "align-self:flex-end;padding:7px 18px;background:#49351e;color:#ffe0a3;border:1px solid #d5a85e;border-radius:5px;cursor:pointer;";
+                const editor = document.createElement("textarea"); editor.value = area.value; editor.placeholder = area.placeholder;
+                editor.style.cssText = "flex:1;width:100%;min-height:0;padding:16px;background:#080e15;color:#f2e9d9;border:1px solid #526271;border-radius:7px;resize:none;line-height:1.45;font-size:24px;";
+                editor.oninput = () => { area.value = editor.value; area.dispatchEvent(new Event("input", {bubbles:true})); };
+                const close = () => { editor.oninput(); overlay.remove(); area.focus(); area.setSelectionRange(editor.selectionStart, editor.selectionEnd); };
+                done.onclick = close;
+                overlay.onclick = (e) => { if (e.target === overlay) close(); };
+                overlay.onkeydown = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
+                panel.append(done, editor); overlay.append(panel); document.body.append(overlay);
+                editor.focus(); editor.setSelectionRange(area.selectionStart, area.selectionEnd);
+            };
+            wrap.append(lens);
+        }
+    };
+    const observer = new MutationObserver(decorate);
+    observer.observe(root, {childList:true, subtree:true});
+    decorate();
+}
+
 function renderShotboardLite(node) {
     if (node._iamccsCineShotboardLiteReady) return;
     node._iamccsCineShotboardLiteReady = true;
@@ -5216,6 +5264,7 @@ function renderShotboardLite(node) {
     promptLabel.textContent = "Global FLF prompt";
     promptLabel.style.cssText = `font-size:11px;color:#D8BC80;margin-bottom:5px;font-weight:700;`;
     const promptArea = document.createElement("textarea");
+    promptArea.dataset.iamccsPromptZoom = "prompt-zoom";
     promptArea.value = String(globalPromptWidget?.value || "");
     promptArea.rows = 3;
     promptArea.style.cssText = inputBase() + "resize:vertical;min-height:62px;line-height:1.35;padding:9px 18px 9px 10px;scrollbar-gutter:stable;background:#0A0907;border-color:#70572E;color:#FFF2D8;";
@@ -5848,6 +5897,7 @@ function renderShotboardLite(node) {
     drawReferenceStrip();
     draw();
     const widget = node.addDOMWidget("Cine Shotboard Lite", "iamccs_cine_shotboard_lite", root, { serialize: false });
+    installShotboardPromptMagnifiers(root);
     widget.computeSize = (width) => {
         const rowCount = Math.max(1, rows.length);
         return [width, Math.min(700, Math.max(560, 300 + rowCount * 132))];
@@ -5956,6 +6006,7 @@ function renderShotboardPro(node) {
     promptLabel.textContent = "Global prompt";
     promptLabel.style.cssText = `font-size:11px;color:${CINE_FILM_LAB.muted};margin-bottom:5px;font-weight:600;`;
     const promptArea = document.createElement("textarea");
+    promptArea.dataset.iamccsPromptZoom = "prompt-zoom";
     promptArea.value = String(globalPromptWidget?.value || "");
     promptArea.rows = 3;
     promptArea.style.cssText = inputBase() + "resize:vertical;min-height:66px;line-height:1.38;padding:9px 18px 9px 10px;scrollbar-gutter:stable;";
@@ -7767,6 +7818,7 @@ function renderShotboardPro(node) {
     drawReferenceStrip();
     draw();
     const widget = node.addDOMWidget("Cine Shotboard Pro", "iamccs_cine_shotboard_pro", root, { serialize: false });
+    installShotboardPromptMagnifiers(root);
     node._iamccsCineShotboardWidget = widget;
     widget.computeSize = (width) => {
         if (root._iamccsFullscreenState) return [width, 24];
@@ -18909,6 +18961,7 @@ function renderShotboardV3(node) {
 
     const shotboardWidgetLabel = "MiniMax H3 Shotboard";
     const widget = node.addDOMWidget(shotboardWidgetLabel, "iamccs_cine_shotboard_v3", root, { serialize: false });
+    installShotboardPromptMagnifiers(root);
     node._iamccsCineShotboardV3Widget = widget;
     const v3RigidWidth = SHOTBOARD_V3_RIGID_WIDTH;
     widget.computeSize = (width) => {
@@ -22962,6 +23015,7 @@ function restoreH3SettingsWidgetState(node, serialized, nodeData) {
     const specs = {...nodeData?.input?.required, ...nodeData?.input?.optional};
     const names = Object.keys(specs);
     const named = serialized?.widgets_values_named || {};
+    const hasNamed = named && typeof named === "object" && Object.keys(named).length > 0;
     const schema = serialized?.properties?.iamccs_h3_settings_schema;
     const values = serialized?.widgets_values || [];
     // Schema-based positional restoration is safe only when the schema and
@@ -22976,6 +23030,11 @@ function restoreH3SettingsWidgetState(node, serialized, nodeData) {
         if (!widget) continue;
         if (Object.prototype.hasOwnProperty.call(named, name)) {
             widget.value = named[name];
+        } else if (hasNamed) {
+            // Older workflows have a named snapshot of their actual controls.
+            // A newly appended widget must use its schema default, never an
+            // unrelated trailing positional value from that old snapshot.
+            widget.value = specs[name]?.[1]?.default;
         } else if (positionalSchemaSafe && schema.includes(name)) {
             const index = schema.indexOf(name);
             if (index < values.length) widget.value = values[index];
@@ -23005,6 +23064,7 @@ function restoreH3SettingsWidgetState(node, serialized, nodeData) {
         const numericType = type === "INT" || type === "FLOAT";
         const numericValue = numericType ? Number(widget.value) : 0;
         const invalidNumber = numericType && (
+            widget.value === "" || widget.value === null || widget.value === undefined ||
             !Number.isFinite(numericValue)
             || (options.min !== undefined && numericValue < Number(options.min))
             || (options.max !== undefined && numericValue > Number(options.max))

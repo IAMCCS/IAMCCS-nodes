@@ -17,6 +17,23 @@ _KNOWN_EXTERNAL_MARKERS = (
 )
 
 
+def is_compatible_foreign_owner():
+    """Whether the live foreign wrapper implements the shared H3 merge ABI.
+
+    Motion Context and H3 AV Bank publish the same marker only when their
+    wrapper preserves keyframe video latents, reference video/audio latents
+    and the optional frame-count payload.  It is therefore safe for
+    LongerVid to compose its own marker-gated rewrite on top of that wrapper.
+    Unknown wrappers remain fail-closed.
+    """
+    try:
+        model_base = _import_model_base()
+        fn = getattr(getattr(model_base, "MiniMaxH3", None), "extra_conds", None)
+    except Exception:
+        return False
+    return bool(fn is not None and getattr(fn, "_h3_motion_context_payload_patch", False))
+
+
 def _import_model_base():
     import comfy.model_base as model_base
     return model_base
@@ -82,15 +99,20 @@ def install_payload_patch():
         return False
     if status.state == "ours":
         _APPLIED = True
-        _LOG.info("h3_continuous: compatible Herrgotts H3 payload patch is already active")
+        _LOG.info("IAMCCS H3 LongerVid: compatible payload patch is already active")
         return True
-    if status.state == "foreign":
+    if status.state == "foreign" and not is_compatible_foreign_owner():
         _LOG.error(
             "h3_continuous: H3 runtime-patch conflict: %s already owns "
             "MiniMaxH3.extra_conds (%s). Disable one H3 chaining pack and restart ComfyUI.",
             status.owner, status.module,
         )
         return False
+    if status.state == "foreign":
+        _LOG.info(
+            "IAMCCS H3 LongerVid: composing its marker-gated payload hook over "
+            "the compatible %s owner (%s)", status.owner, status.module,
+        )
 
     model_base = _import_model_base()
     cls = model_base.MiniMaxH3
@@ -118,11 +140,17 @@ def install_payload_patch():
         )
 
     setattr(patched_extra_conds, PAYLOAD_PATCH_MARKER, True)
+    # Preserve the shared ABI on the outer wrapper. Packs loaded later can
+    # recognise the composite as Motion-Context compatible and stand down.
+    if getattr(_ORIGINAL_EXTRA_CONDS, "_h3_motion_context_payload_patch", False):
+        setattr(patched_extra_conds, "_h3_motion_context_payload_patch", True)
+    if getattr(_ORIGINAL_EXTRA_CONDS, "_h3_avbank_merge", False):
+        setattr(patched_extra_conds, "_h3_avbank_merge", True)
     cls.extra_conds = patched_extra_conds
     _MODEL_BASE = model_base
     _APPLIED = True
     _LOG.info(
-        "h3_continuous v1.2.1: lazy, marker-gated H3 payload patch installed on first continuation use"
+        "IAMCCS H3 LongerVid: lazy, marker-gated payload hook installed on first continuation use"
     )
     return True
 
@@ -140,7 +168,7 @@ def uninstall_payload_patch_if_owned():
     _ORIGINAL_EXTRA_CONDS = None
     _MODEL_BASE = None
     _APPLIED = False
-    _LOG.info("h3_continuous: rolled back Herrgotts H3 payload patch")
+    _LOG.info("IAMCCS H3 LongerVid: rolled back payload hook")
     return True
 
 

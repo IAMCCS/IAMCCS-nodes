@@ -6,7 +6,9 @@ branch is allowed to reach the editor.  Consequently the established R42/R43
 generation branches stay untouched and Viggle remains an optional dependency.
 """
 
+from collections.abc import Mapping
 from copy import deepcopy
+import re
 from typing import Any
 
 import torch
@@ -38,8 +40,80 @@ def _shotplan_entry(cine_linx: Any):
     return None, None
 
 
+def _normalise_optional_audio(audio: Any) -> dict[str, Any] | None:
+    """Materialise optional AUDIO without rejecting a silent video container."""
+    if not isinstance(audio, Mapping):
+        return None
+    try:
+        waveform = audio.get("waveform")
+        sample_rate = max(1, int(audio.get("sample_rate", 32000) or 32000))
+    except Exception:
+        return None
+    if not torch.is_tensor(waveform) or waveform.ndim != 3 or int(waveform.shape[-1]) < 1:
+        return None
+    result = {"waveform": waveform, "sample_rate": sample_rate}
+    if audio.get("iamccs_silent_source_fallback", False):
+        result["iamccs_silent_source_fallback"] = True
+    return result
+
+
 def _audio_ok(audio: Any) -> bool:
-    return isinstance(audio, dict) and torch.is_tensor(audio.get("waveform"))
+    return _normalise_optional_audio(audio) is not None
+
+
+def _silent_audio_duration(error_text: str, start_time: float, duration: float) -> float:
+    if float(duration or 0) > 0:
+        return float(duration)
+    match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", error_text)
+    if not match:
+        return 1.0 / 24.0
+    total = int(match.group(1)) * 3600 + int(match.group(2)) * 60 + float(match.group(3))
+    return max(1.0 / 24.0, total - max(0.0, float(start_time or 0)))
+
+
+def _install_vhs_optional_audio_patch() -> None:
+    """Let video-only VHS inputs behave as optional audio in Viggle/R42/R43.
+
+    VHS deliberately exposes a lazy AUDIO output for every video.  Iterating
+    that output raises when the container has no audio stream, before a
+    downstream IAMCCS node can substitute silence.  Only that exact FFmpeg
+    no-stream condition is converted; corrupt files and real decode failures
+    still raise normally.
+    """
+    try:
+        from videohelpersuite import utils as vhs_utils
+    except Exception:
+        return
+    original = getattr(vhs_utils, "get_audio", None)
+    if not callable(original) or getattr(original, "_iamccs_optional_audio", False):
+        return
+
+    def get_audio_optional(file, start_time=0, duration=0):
+        try:
+            return original(file, start_time, duration)
+        except Exception as exc:
+            message = str(exc)
+            no_stream = (
+                "Output file does not contain any stream" in message
+                or "matches no streams" in message
+            )
+            if not no_stream:
+                raise
+            sample_rate = 32000
+            seconds = _silent_audio_duration(message, start_time, duration)
+            samples = max(1, int(round(seconds * sample_rate)))
+            return {
+                "waveform": torch.zeros((1, 2, samples), dtype=torch.float32),
+                "sample_rate": sample_rate,
+                "iamccs_silent_source_fallback": True,
+            }
+
+    get_audio_optional._iamccs_optional_audio = True
+    get_audio_optional._iamccs_original = original
+    vhs_utils.get_audio = get_audio_optional
+
+
+_install_vhs_optional_audio_patch()
 
 
 class IAMCCS_MiniMaxH3UniversalPathRouterEditorR42(
@@ -90,15 +164,21 @@ class IAMCCS_ViggleCineMedia:
             )
 
         fps = 24
-        if not _audio_ok(audio):
+        materialised_audio = _normalise_optional_audio(audio)
+        if materialised_audio is None:
             samples = max(1, int(round(int(driving.shape[0]) / fps * 32000)))
             audio = {
                 "waveform": torch.zeros((1, 2, samples), dtype=torch.float32),
                 "sample_rate": 32000,
+                "iamccs_silent_source_fallback": True,
             }
             audio_state = "silent fallback"
         else:
-            audio_state = "source video audio"
+            audio = materialised_audio
+            audio_state = (
+                "silent fallback" if audio.get("iamccs_silent_source_fallback")
+                else "source video audio"
+            )
 
         report = (
             f"Viggle Cine media | driving={int(driving.shape[0])} frames | "

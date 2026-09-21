@@ -798,7 +798,9 @@ class IAMCCS_MiniMaxH3MotionContextGenerationR37:
         if acceleration == "comfy_kitchen":
             from comfy_extras.nodes_model_advanced import ModelAttentionBackend
 
-            model = ModelAttentionBackend().patch(model, "comfy kitchen attention")[0]
+            model = ModelAttentionBackend.execute(
+                model=model, attention="comfy kitchen attention"
+            ).result[0]
             # The old backend remains immutable and therefore receives native;
             # CK has already been applied per-model above.
             plan["acceleration"] = "native"

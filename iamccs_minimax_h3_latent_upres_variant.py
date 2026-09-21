@@ -202,7 +202,9 @@ class IAMCCS_MiniMaxH3LatentUpresSamplingR38:
         if str(plan.get("acceleration", "native")).lower() == "comfy_kitchen":
             from comfy_extras.nodes_model_advanced import ModelAttentionBackend
 
-            active_model = ModelAttentionBackend().patch(shifted, "comfy kitchen attention")[0]
+            active_model = ModelAttentionBackend.execute(
+                model=shifted, attention="comfy kitchen attention"
+            ).result[0]
             acceleration_report = "ComfyKitchen per-model attention"
         else:
             active_model, acceleration_report = _accelerate(shifted, plan)

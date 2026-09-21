@@ -26,6 +26,16 @@ _KNOWN_EXTERNAL_MARKERS = (
 )
 
 
+def is_compatible_foreign_owner():
+    """Whether LongerVid may safely compose over the live layout wrapper."""
+    try:
+        mm = _import_mm()
+        fn = getattr(getattr(mm, "PackedLayout", None), "__init__", None)
+    except Exception:
+        return False
+    return bool(fn is not None and getattr(fn, "_h3_motion_context_layout_patch", False))
+
+
 def _import_mm():
     import comfy.ldm.minimax.model as mm
     return mm
@@ -88,7 +98,7 @@ def _cond_t(mm, text_len, latent_t, frame_count, p):
 
 
 def _fix_keyframes(mm, layout, text_len, latent_t, frame_count, keyframes, refs):
-    """Move only Herrgotts-marked keyframes onto the target timeline."""
+    """Move only LongerVid-marked keyframes onto the target timeline."""
     offset = _ref_cursor_advance(mm, refs)
     cond_spans = [(a, b) for a, b, kind in layout.segments if kind == "cond"]
     if len(cond_spans) != len(keyframes):
@@ -148,7 +158,7 @@ def _run_self_test(mm, original_init, patched_init):
     # stand-in keeps the same self-test valid across old and current cores.
     stub = _StubLatent((1, 1, 1, lh, lw))
 
-    # Herrgotts endpoint coordinates must reproduce stock H3 exactly.
+    # LongerVid endpoint coordinates must reproduce stock H3 exactly.
     stock_kf = [
         {"resolved_frame_index": 0, "latent": stub},
         {"resolved_frame_index": frame_count - 1, "latent": stub},
@@ -237,15 +247,20 @@ def install_layout_patch():
         return False
     if status.state == "ours":
         _APPLIED = True
-        _LOG.info("h3_continuous: compatible Herrgotts H3 layout patch is already active")
+        _LOG.info("IAMCCS H3 LongerVid: compatible layout patch is already active")
         return True
-    if status.state == "foreign":
+    if status.state == "foreign" and not is_compatible_foreign_owner():
         _LOG.error(
             "h3_continuous: H3 runtime-patch conflict: %s already owns "
             "PackedLayout.__init__ (%s). Disable one H3 chaining pack and restart ComfyUI.",
             status.owner, status.module,
         )
         return False
+    if status.state == "foreign":
+        _LOG.info(
+            "IAMCCS H3 LongerVid: composing its marker-gated layout hook over "
+            "the compatible %s owner (%s)", status.owner, status.module,
+        )
 
     mm = _import_mm()
     _MM = mm
@@ -263,9 +278,13 @@ def install_layout_patch():
             _fix_keyframes(mm, self, text_len, latent_t, compat_frame_count, keyframes, refs)
         if has_ours_audio:
             _fix_audio(mm, self, text_len, refs)
-        # No Herrgotts marker -> stock graph, returned exactly as built.
+        # No LongerVid marker -> the wrapped graph is returned unchanged.
 
     setattr(patched_init, LAYOUT_PATCH_MARKER, True)
+    # Keep the shared marker visible on the outer wrapper so a subsequently
+    # loaded Motion Context copy recognises the composite as compatible.
+    if getattr(_ORIGINAL_INIT, "_h3_motion_context_layout_patch", False):
+        setattr(patched_init, "_h3_motion_context_layout_patch", True)
 
     try:
         _run_self_test(mm, _ORIGINAL_INIT, patched_init)
@@ -282,7 +301,7 @@ def install_layout_patch():
     mm.PackedLayout.__init__ = patched_init
     _APPLIED = True
     _LOG.info(
-        "h3_continuous v1.2.1: lazy, marker-gated H3 layout patch installed on first continuation use"
+        "IAMCCS H3 LongerVid: lazy, marker-gated layout hook installed on first continuation use"
     )
     return True
 
@@ -300,7 +319,7 @@ def uninstall_layout_patch_if_owned():
     _ORIGINAL_ACCEPTS_FRAME_COUNT = None
     _MM = None
     _APPLIED = False
-    _LOG.info("h3_continuous: rolled back Herrgotts H3 layout patch")
+    _LOG.info("IAMCCS H3 LongerVid: rolled back layout hook")
     return True
 
 

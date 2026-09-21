@@ -54,7 +54,8 @@ CATEGORY = "IAMCCS/MiniMax H3/Universal Delivery"
 MASTER_ROUTES = {"ltx23"}
 LTX_PER_CHUNK_ROUTE = "ltx23_per_chunk"
 RTX_FINAL_ROUTE = "rtx_final"
-KNOWN_ROUTES = {"off", RTX_FINAL_ROUTE, "h3_pixel_refine", FAST_ROUTE, ULTIMATE_ROUTE, LTX_PER_CHUNK_ROUTE, *MASTER_ROUTES}
+PIXEL_TILED_ROUTE = "pixel_tiled_low_vram"
+KNOWN_ROUTES = {"off", RTX_FINAL_ROUTE, PIXEL_TILED_ROUTE, "h3_pixel_refine", FAST_ROUTE, ULTIMATE_ROUTE, LTX_PER_CHUNK_ROUTE, *MASTER_ROUTES}
 
 
 class IAMCCS_MiniMaxH3ExactLTXDeliverySizeR42:
@@ -204,6 +205,103 @@ def _stream_rtx_frames(frames, output, audio, width, height, fps, quality):
                 process.wait()
 
 
+def _stream_pixel_safe_frames(frames, output, audio, width, height, fps, settings):
+    """Encode one frame at a time; optional core Spandrel spatial tiling."""
+    import comfy.model_management as mm
+    import comfy.utils
+    from PIL import Image
+
+    ffmpeg = _find_ffmpeg()
+    if not ffmpeg:
+        raise RuntimeError("Pixel Safe delivery requires ffmpeg")
+    if output.exists():
+        raise FileExistsError(f"Pixel Safe delivery refuses to overwrite: {output}")
+    method = str(settings.get("method", "cpu_lanczos") or "cpu_lanczos")
+    if method not in {"cpu_lanczos", "model_tiled"}:
+        raise ValueError(f"Unknown Pixel Safe method: {method}")
+    model = None
+    if method == "model_tiled":
+        from comfy_extras.nodes_upscale_model import UpscaleModelLoader
+        model_name = str(settings.get("model_name", "") or "").strip()
+        if not model_name:
+            raise ValueError("Pixel Safe model_tiled needs a local model in ComfyUI/models/upscale_models")
+        model = UpscaleModelLoader.execute(model_name)[0]
+        mm.load_models_gpu([model.patcher], force_full_load=False)
+    frame_count = int(frames.shape[0])
+    source_height, source_width = int(frames.shape[1]), int(frames.shape[2])
+    with tempfile.TemporaryDirectory(prefix="iamccs_pixel_safe_") as temp, tempfile.TemporaryFile() as errors:
+        wav = Path(temp) / "native_audio.wav"
+        if not _write_wav(audio, wav):
+            raise ValueError("Pixel Safe delivery requires native AUDIO")
+        if method == "cpu_lanczos":
+            input_width, input_height = source_width, source_height
+            ratio = min(source_width / width, source_height / height)
+            crop_width = max(2, min(source_width, int(width * ratio) // 2 * 2))
+            crop_height = max(2, min(source_height, int(height * ratio) // 2 * 2))
+            vf = f"crop={crop_width}:{crop_height},scale={width}:{height}:flags=lanczos"
+        else:
+            input_width, input_height, vf = width, height, None
+        command = [
+            ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
+            "-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{input_width}x{input_height}",
+            "-r", str(fps), "-i", "pipe:0", "-i", str(wav),
+            "-map", "0:v:0", "-map", "1:a:0", "-frames:v", str(frame_count),
+        ]
+        if vf:
+            command.extend(["-vf", vf])
+        command.extend([
+            "-af", f"apad,atrim=duration={frame_count / fps:.9f},asetpts=PTS-STARTPTS",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(output),
+        ])
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=errors)
+        written = 0
+        try:
+            for frame in frames:
+                mm.throw_exception_if_processing_interrupted()
+                if model is None:
+                    encoded = frame[..., :3].clamp(0, 1).mul(255).round().to(device="cpu", dtype=torch.uint8).contiguous()
+                    payload = encoded.numpy().tobytes()
+                else:
+                    tile = max(128, min(2048, int(settings.get("tile_size", 512))))
+                    overlap = max(0, min(tile // 3, int(settings.get("overlap", 64))))
+                    source = frame[..., :3].permute(2, 0, 1).unsqueeze(0).to(model.patcher.load_device)
+                    while True:
+                        try:
+                            result = comfy.utils.tiled_scale(
+                                source, lambda patch: model(patch.float()), tile_x=tile, tile_y=tile,
+                                overlap=overlap, upscale_amount=model.scale, output_device="cpu",
+                            )
+                            break
+                        except Exception as exc:
+                            mm.raise_non_oom(exc)
+                            tile //= 2
+                            if tile < 128:
+                                raise
+                            overlap = min(overlap, tile // 3)
+                            mm.soft_empty_cache()
+                    image = result.squeeze(0).permute(1, 2, 0).clamp(0, 1).mul(255).round().to(torch.uint8).numpy()
+                    pil = Image.fromarray(image, "RGB")
+                    crop_ratio = min(pil.width / width, pil.height / height)
+                    crop_w, crop_h = int(width * crop_ratio), int(height * crop_ratio)
+                    left, top = (pil.width - crop_w) // 2, (pil.height - crop_h) // 2
+                    pil = pil.crop((left, top, left + crop_w, top + crop_h)).resize((width, height), Image.Resampling.LANCZOS)
+                    payload = pil.tobytes()
+                    del source, result, image, pil
+                process.stdin.write(payload)
+                written += 1
+            process.stdin.close()
+            code = process.wait()
+            if code or written != frame_count:
+                errors.seek(0)
+                detail = errors.read().decode("utf8", "replace")[-1800:]
+                raise RuntimeError(f"Pixel Safe delivery wrote {written}/{frame_count} frames: {detail}")
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait()
+
+
 def _route(cine_linx: Any) -> str:
     plan = _resolve_shotplan(cine_linx)
     if not bool(plan.get("upscale_enabled", False)):
@@ -235,7 +333,7 @@ class IAMCCS_MiniMaxH3UniversalRouteControlR42:
     def resolve(self, cine_linx):
         route = _route(cine_linx)
         master = route in MASTER_ROUTES
-        per_segment = route in {"off", RTX_FINAL_ROUTE, "h3_pixel_refine", FAST_ROUTE, ULTIMATE_ROUTE, LTX_PER_CHUNK_ROUTE}
+        per_segment = route in {"off", RTX_FINAL_ROUTE, PIXEL_TILED_ROUTE, "h3_pixel_refine", FAST_ROUTE, ULTIMATE_ROUTE, LTX_PER_CHUNK_ROUTE}
         report = (
             f"R42 universal route={route} | queue_owner="
             f"{'native master checkpoint' if master else 'selected per-segment delivery'} | lazy=yes"
@@ -337,35 +435,37 @@ class IAMCCS_MiniMaxH3UniversalRTXFinalR42:
         import comfy.model_management as mm
 
         route = _route(cine_linx)
-        if route != RTX_FINAL_ROUTE:
-            raise ValueError(f"RTX Final branch was requested for incompatible route: {route}")
+        if route not in {RTX_FINAL_ROUTE, PIXEL_TILED_ROUTE}:
+            raise ValueError(f"Streaming pixel branch was requested for incompatible route: {route}")
+        route_name = "RTX Final" if route == RTX_FINAL_ROUTE else "Pixel Safe"
         if not native_saved_report:
-            raise ValueError("RTX Final must run after the native safety checkpoint")
+            raise ValueError(f"{route_name} must run after the native safety checkpoint")
         if not torch.is_tensor(native_frames) or native_frames.ndim != 4 or int(native_frames.shape[0]) < 1:
-            raise ValueError("RTX Final expects the checkpointed native IMAGE frames")
+            raise ValueError(f"{route_name} expects the checkpointed native IMAGE frames")
         if not isinstance(native_audio, dict) or not torch.is_tensor(native_audio.get("waveform")):
-            raise ValueError("RTX Final expects the checkpointed native AUDIO")
+            raise ValueError(f"{route_name} expects the checkpointed native AUDIO")
 
         plan = _resolve_shotplan(cine_linx)
         index, total = int(current_segment), int(total_segments)
         fps = max(1, int(fps))
         if index < 0 or total < 1 or index >= total:
-            raise ValueError(f"RTX Final received invalid segment index {index + 1}/{total}")
+            raise ValueError(f"{route_name} received invalid segment index {index + 1}/{total}")
         width = int(plan.get("upscale_width", 1920) or 1920)
         height = int(plan.get("upscale_height", 1080) or 1080)
         if width < 2 or height < 2 or width % 2 or height % 2:
-            raise ValueError("RTX Final delivery width and height must be positive even numbers")
+            raise ValueError(f"{route_name} delivery width and height must be positive even numbers")
         settings = plan.get("h3_upres_settings", {}) if isinstance(plan.get("h3_upres_settings"), dict) else {}
         quality = str(settings.get("rtx_quality", "HIGH") or "HIGH").strip().upper()
-        if quality not in {"LOW", "MEDIUM", "HIGH", "ULTRA"}:
+        if route == RTX_FINAL_ROUTE and quality not in {"LOW", "MEDIUM", "HIGH", "ULTRA"}:
             raise ValueError(f"RTX Final quality is invalid: {quality}")
 
         run = _safe_name(str(resolved_render_id or "").strip(), "minimax_h3_render")
-        root = Path(folder_paths.get_output_directory()) / "IAMCCS" / "MiniMaxH3" / "RTX_FINAL" / run
+        route_label = "RTX_FINAL" if route == RTX_FINAL_ROUTE else "PIXEL_SAFE"
+        root = Path(folder_paths.get_output_directory()) / "IAMCCS" / "MiniMaxH3" / route_label / run
         root.mkdir(parents=True, exist_ok=True)
         output = root / f"segment_{index + 1:04d}.mp4"
         if output.exists():
-            raise FileExistsError(f"RTX Final refuses to overwrite existing segment: {output}")
+            raise FileExistsError(f"{route_name} refuses to overwrite existing segment: {output}")
 
         from .iamccs_minimax_h3_shotboard import _delivery_join_frames
         join = _delivery_join_frames(cine_linx, index, join_trim_frames)
@@ -374,42 +474,60 @@ class IAMCCS_MiniMaxH3UniversalRTXFinalR42:
         audio = _trim_audio_frames(native_audio, drop, fps) if drop else native_audio
         frames = int(visible_frames.shape[0])
         if frames < 1:
-            raise ValueError("RTX Final has no visible frame after the authored join trim")
+            raise ValueError(f"{route_name} has no visible frame after the authored join trim")
         native_h, native_w = int(visible_frames.shape[1]), int(visible_frames.shape[2])
 
         # Stream one native tensor at a time through RTX VSR directly into the
         # final ffmpeg pipe. No temporary compressed video and no upscaled
         # IMAGE batch are materialized.
-        LOG = __import__("logging").getLogger("IAMCCS.MiniMaxH3.RTXFinal")
+        LOG = __import__("logging").getLogger("IAMCCS.MiniMaxH3.StreamingPixel")
         LOG.info(
-            "NATIVE -> RTX FINAL start | segment=%d/%d | native=%dx%d | delivery=%dx%d | frames=%d | quality=%s | H3_resample=no | audio=locked",
-            index + 1, total, native_w, native_h, width, height, frames, quality,
+            "NATIVE -> %s start | segment=%d/%d | native=%dx%d | delivery=%dx%d | frames=%d | method=%s | H3_resample=no | audio=locked",
+            route_name, index + 1, total, native_w, native_h, width, height, frames,
+            quality if route == RTX_FINAL_ROUTE else plan.get("upscale_settings", {}).get("pixel_tiled", {}).get("method", "cpu_lanczos"),
         )
         try:
             mm.unload_all_models()
             mm.soft_empty_cache()
-            _stream_rtx_frames(visible_frames, output, audio, width, height, fps, quality)
+            if route == RTX_FINAL_ROUTE:
+                _stream_rtx_frames(visible_frames, output, audio, width, height, fps, quality)
+            else:
+                pixel_settings = plan.get("upscale_settings", {}).get("pixel_tiled", {})
+                _stream_pixel_safe_frames(visible_frames, output, audio, width, height, fps, pixel_settings)
         finally:
             mm.unload_all_models()
             gc.collect()
             mm.soft_empty_cache()
 
+        source_workflow = extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None
         _write_segment_metadata(
             output,
             frames,
             fps,
             "trim_silent_tail" if bool(native_audio.get("iamccs_flf_locked_audio_handles", False)) else "crossfade",
+            provenance={"render_id": run, "stage": route_label.lower(), "segment_index": index,
+                        "total_segments": total, "shotplan": plan},
+            source_workflow=source_workflow,
         )
         preview = output
         if index == total - 1:
             paths = [root / f"segment_{i + 1:04d}.mp4" for i in range(total)]
             preview = root / "final_film.mp4"
             if preview.exists():
-                raise FileExistsError(f"RTX Final refuses to overwrite existing master: {preview}")
+                raise FileExistsError(f"{route_name} refuses to overwrite existing master: {preview}")
             if join > 1:
                 _concat_videos_overlap(paths, preview, join, fps)
             else:
                 _concat_videos(paths, preview)
+            from .iamccs_minimax_h3_shotboard import _joined_frame_count
+            _write_segment_metadata(
+                preview, _joined_frame_count(paths, join if join > 1 else 0), fps,
+                "crossfade" if join > 1 else "direct",
+                provenance={"render_id": run, "stage": f"{route_label.lower()}_master",
+                            "total_segments": total, "segment_files": [path.name for path in paths],
+                            "shotplan": plan},
+                source_workflow=source_workflow,
+            )
 
         queued = False
         if bool(queue_next_segment) and index + 1 < total:
@@ -418,7 +536,7 @@ class IAMCCS_MiniMaxH3UniversalRTXFinalR42:
             _enqueue(next_prompt, extra_data=extra, outputs=outputs, sensitive=sensitive)
             queued = True
         report = (
-            f"NATIVE -> RTX FINAL saved {index + 1}/{total} | {native_w}x{native_h} -> {width}x{height} | "
+            f"NATIVE -> {route_label} saved {index + 1}/{total} | {native_w}x{native_h} -> {width}x{height} | "
             f"{frames}f | one H3 sample | native audio locked | next queued={queued} | {preview}"
         )
         LOG.info(report)
@@ -579,7 +697,12 @@ class IAMCCS_MiniMaxH3UniversalMasterSaveR42:
             if output.exists():
                 raise FileExistsError(f"LTX per-shot refuses to overwrite existing segment: {output}")
             _encode_images(selected, master_audio, max(1, int(fps)), output)
-            _write_segment_metadata(output, int(selected.shape[0]), max(1, int(fps)), "editorial_hard_cut")
+            _write_segment_metadata(
+                output, int(selected.shape[0]), max(1, int(fps)), "editorial_hard_cut",
+                provenance={"render_id": run, "stage": "ltx_per_shot", "segment_index": index,
+                            "total_segments": total, "shotplan": _resolve_shotplan(cine_linx)},
+                source_workflow=extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None,
+            )
             queued = False
             if index + 1 < total:
                 live, extra, outputs, sensitive = _current_prompt()
@@ -599,6 +722,11 @@ class IAMCCS_MiniMaxH3UniversalMasterSaveR42:
         if output.exists():
             raise FileExistsError(f"R42 refuses to overwrite existing delivery: {output}")
         _encode_images(selected, master_audio, max(1, int(fps)), output)
+        _write_segment_metadata(
+            output, int(selected.shape[0]), max(1, int(fps)), "master_audio_locked",
+            provenance={"render_id": run, "stage": route, "shotplan": _resolve_shotplan(cine_linx)},
+            source_workflow=extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None,
+        )
         report = f"R42 master delivery saved | route={route} | frames={int(selected.shape[0])} | {output}"
         return str(output), report
 
@@ -637,7 +765,7 @@ class IAMCCS_MiniMaxH3UniversalPathRouterR42:
         route = _route(cine_linx)
         if route in {"off", "h3_pixel_refine"}:
             return "native_or_windowed_path"
-        if route == RTX_FINAL_ROUTE:
+        if route in {RTX_FINAL_ROUTE, PIXEL_TILED_ROUTE}:
             return "rtx_final_path"
         if route in {FAST_ROUTE, ULTIMATE_ROUTE}:
             return "fast_path"

@@ -351,6 +351,18 @@ _H3_R40_SCOUT_SETTINGS_NODE_FIELDS = (
 _H3_FUSED_TURBO_SETTINGS_NODE_FIELDS = (
     "fused_turbo_model_name", "fused_turbo_sigma_preset",
 )
+_H3_PIXEL_TILED_SETTINGS_NODE_FIELDS = (
+    "h3_pixel_tiled_method", "h3_pixel_tiled_model_name",
+    "h3_pixel_tiled_tile_size", "h3_pixel_tiled_overlap",
+)
+_H3_CONTINUATION_SETTINGS_NODE_FIELDS = (
+    "h3_continuation_checkpoint", "h3_continuation_context_frames",
+    "h3_continuation_handover_mode", "h3_continuation_manual_tail_frames",
+)
+_H3_REFMOD_SETTINGS_NODE_FIELDS = (
+    "h3_refmod_enabled", "h3_refmod_name", "h3_refmod_strength",
+    "h3_refmod_retention", "h3_refmod_max_tokens",
+)
 _H3_SETTINGS_SEED_CONTROL_COMPAT_FIELD = "seed_control_after_generate_compat"
 _H3_SETTINGS_NODE_EXCLUDED_FIELDS = frozenset(("global_prompt", "timeline_data", "image_paths"))
 # These are editor/legacy compatibility widgets rather than MiniMax H3
@@ -1016,23 +1028,27 @@ def _encode_images(images: torch.Tensor, audio: dict[str, Any] | None, fps: floa
             if process.stdin is None:
                 raise RuntimeError("ffmpeg raw-video stdin non disponibile")
             for index, frame in enumerate(images):
-                rgb = (
-                    frame[..., :3]
-                    .detach()
-                    .to(device="cpu", dtype=torch.float32)
-                    .nan_to_num(nan=0.0, posinf=1.0, neginf=0.0)
-                    .clamp_(0.0, 1.0)
-                    .mul_(255.0)
-                    .round_()
-                    .to(dtype=torch.uint8)
-                    .contiguous()
-                    .numpy()
-                )
+                source = frame[..., :3].detach().to(device="cpu")
+                if source.dtype == torch.uint8:
+                    rgb = source.contiguous().numpy()
+                else:
+                    rgb = (
+                        source.to(dtype=torch.float32)
+                        .nan_to_num(nan=0.0, posinf=1.0, neginf=0.0)
+                        .clamp_(0.0, 1.0)
+                        .mul_(255.0)
+                        .round_()
+                        .to(dtype=torch.uint8)
+                        .contiguous()
+                        .numpy()
+                    )
                 process.stdin.write(rgb.tobytes())
                 if index == 0 or (index + 1) % 24 == 0 or index + 1 == total_frames:
                     LOG.info("MiniMax H3 streaming video encode | %d/%d frames", index + 1, total_frames)
             process.stdin.close()
             error_bytes = process.stderr.read() if process.stderr is not None else b""
+            if process.stderr is not None:
+                process.stderr.close()
             return_code = process.wait()
         except Exception:
             process.kill()
@@ -1043,7 +1059,7 @@ def _encode_images(images: torch.Tensor, audio: dict[str, Any] | None, fps: floa
             raise RuntimeError(f"ffmpeg segment encode failed: {error or f'exit {return_code}'}")
 
 
-def _concat_videos(paths: list[Path], output: Path) -> None:
+def _concat_videos(paths: list[Path], output: Path, *, audio_edge_fade_ms: float = 20.0) -> None:
     """Join independent H3 shots with exact video cuts and one audio master.
 
     Video is decoded through one PTS-reset concat filter and re-encoded at the
@@ -1110,7 +1126,7 @@ def _concat_videos(paths: list[Path], output: Path) -> None:
                 f"{''.join(f'[{label}]' for label in video_labels)}"
                 f"concat=n={len(video_labels)}:v=1:a=0[vjoined]"
             )
-            edge_seconds = 0.020
+            edge_seconds = max(0.0, min(0.100, float(audio_edge_fade_ms) / 1000.0))
             for index, frame_count in enumerate(frame_counts):
                 duration = max(1.0 / H3_FPS, float(frame_count) / H3_FPS)
                 fade = min(edge_seconds, duration / 4.0)
@@ -1119,9 +1135,9 @@ def _concat_videos(paths: list[Path], output: Path) -> None:
                     f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
                     f"atrim=duration={duration:.9f},asetpts=PTS-STARTPTS"
                 )
-                if index > 0:
+                if edge_seconds > 0 and index > 0:
                     chain += f",afade=t=in:st=0:d={fade:.9f}:curve=qsin"
-                if index + 1 < len(paths):
+                if edge_seconds > 0 and index + 1 < len(paths):
                     chain += (
                         f",afade=t=out:st={max(0.0, duration - fade):.9f}:"
                         f"d={fade:.9f}:curve=qsin"
@@ -1158,17 +1174,380 @@ def _concat_videos(paths: list[Path], output: Path) -> None:
         list_path.unlink(missing_ok=True)
 
 
+def _continuation_soft_context_path(
+    output_folder: Path, base_name: str, render_id: str, stage_label: str,
+) -> Path:
+    return (
+        output_folder / "_iamccs_continuation_soft_av_cache" /
+        f"{base_name}_{render_id}_{stage_label}_incoming_context.mp4"
+    )
+
+
+def _soften_outgoing_segment_with_context(
+    previous: Path,
+    context: Path,
+    output: Path,
+    *,
+    video_frames: int,
+    video_curve: str,
+    audio_ms: float,
+    fps: float,
+) -> dict[str, Any]:
+    """Build one duration-preserving outgoing segment for a Soft AV boundary.
+
+    ``context`` is the final time-corresponding portion of the incoming clip's
+    hidden AV head. Only the outgoing segment is rewritten: its last frames and
+    samples are replaced by context-aligned blends, while the incoming visible
+    clip stays byte-for-byte authored and the programme length remains exact.
+    """
+    ffmpeg = _find_ffmpeg()
+    if ffmpeg is None:
+        raise RuntimeError("ffmpeg non trovato: impossibile creare il join Continuation Soft AV")
+    if not previous.is_file() or not context.is_file():
+        raise FileNotFoundError(f"Soft AV input missing: previous={previous}, context={context}")
+    previous_frames = _read_segment_frame_count(previous)
+    context_frames = _read_segment_frame_count(context)
+    requested = max(0, min(16, int(video_frames)))
+    blend_frames = min(requested, previous_frames - 1, context_frames)
+    _require_identical_segment_canvas([previous, context])
+    fps = max(1.0, float(fps))
+    previous_duration = previous_frames / fps
+    context_duration = context_frames / fps
+    audio_seconds = min(
+        max(0.0, float(audio_ms) / 1000.0),
+        previous_duration / 4.0,
+        context_duration,
+    )
+    if blend_frames < 1 and audio_seconds <= 0:
+        shutil.copy2(previous, output)
+        _write_segment_metadata(output, previous_frames, fps, "soft_av_disabled")
+        return {"video_frames": 0, "audio_ms": 0.0, "curve": str(video_curve), "frame_count": previous_frames}
+
+    if blend_frames > 0:
+        previous_prefix_frames = previous_frames - blend_frames
+        context_start_frame = context_frames - blend_frames
+        x = f"((N+1)/{blend_frames + 1})"
+        if str(video_curve or "smoothstep").strip().lower() == "linear":
+            weight = x
+            resolved_curve = "linear"
+        else:
+            weight = f"({x}*{x}*(3-2*{x}))"
+            resolved_curve = "smoothstep"
+        blend_expr = f"A*(1-{weight})+B*{weight}"
+        filters = [
+            "[0:v]setpts=PTS-STARTPTS,format=yuv420p[vprev]",
+            "[1:v]setpts=PTS-STARTPTS,format=yuv420p[vctx]",
+            f"[vprev]split=2[vprefixsrc][vtailsrc]",
+            f"[vprefixsrc]trim=end_frame={previous_prefix_frames},setpts=PTS-STARTPTS[vprefix]",
+            f"[vtailsrc]trim=start_frame={previous_prefix_frames},setpts=PTS-STARTPTS[vtail]",
+            f"[vctx]trim=start_frame={context_start_frame}:end_frame={context_frames},setpts=PTS-STARTPTS[vhead]",
+            f"[vtail][vhead]blend=all_expr='{blend_expr}':shortest=1[vblend]",
+            "[vprefix][vblend]concat=n=2:v=1:a=0[vout]",
+        ]
+    else:
+        resolved_curve = "smoothstep"
+        filters = ["[0:v]setpts=PTS-STARTPTS,format=yuv420p[vout]"]
+    if audio_seconds > 0:
+        previous_audio_prefix = max(0.0, previous_duration - audio_seconds)
+        context_audio_start = max(0.0, context_duration - audio_seconds)
+        filters.extend([
+            "[0:a]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=PTS-STARTPTS[aprev]",
+            "[1:a]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=PTS-STARTPTS[actx]",
+            "[aprev]asplit=2[aprefixsrc][atailsrc]",
+            f"[aprefixsrc]atrim=end={previous_audio_prefix:.9f},asetpts=PTS-STARTPTS[aprefix]",
+            f"[atailsrc]atrim=start={previous_audio_prefix:.9f}:duration={audio_seconds:.9f},asetpts=PTS-STARTPTS[atail]",
+            f"[actx]atrim=start={context_audio_start:.9f}:duration={audio_seconds:.9f},asetpts=PTS-STARTPTS[ahead]",
+            f"[atail][ahead]acrossfade=d={audio_seconds:.9f}:c1=qsin:c2=qsin[ablend]",
+            "[aprefix][ablend]concat=n=2:v=0:a=1,apad," +
+            f"atrim=duration={previous_duration:.9f}[aout]",
+        ])
+    else:
+        filters.append(
+            "[0:a]aresample=48000:async=1:first_pts=0,aformat=sample_fmts=fltp:channel_layouts=stereo,"
+            f"atrim=duration={previous_duration:.9f},asetpts=PTS-STARTPTS[aout]"
+        )
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    command = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
+        "-i", str(previous), "-i", str(context),
+        "-filter_complex", ";".join(filters),
+        "-map", "[vout]", "-map", "[aout]",
+        "-frames:v", str(previous_frames), "-r", f"{fps:.6f}", "-fps_mode", "cfr",
+        "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-t", f"{previous_duration:.9f}",
+        "-movflags", "+faststart", str(output),
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, stdin=subprocess.DEVNULL)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg Continuation Soft AV failed: {result.stderr.strip() or result.stdout.strip()}")
+    _write_segment_metadata(
+        output, previous_frames, fps, "context_aligned_soft_av_outgoing",
+        provenance={
+            "source_segment": _portable_output_path(previous),
+            "incoming_hidden_context_asset": context.name,
+            "incoming_hidden_context_consumed": True,
+            "video_frames": blend_frames,
+            "video_curve": resolved_curve,
+            "audio_ms": round(audio_seconds * 1000.0, 3),
+            "duration_preserved": True,
+        },
+    )
+    return {
+        "video_frames": blend_frames,
+        "audio_ms": round(audio_seconds * 1000.0, 3),
+        "curve": resolved_curve,
+        "frame_count": previous_frames,
+    }
+
+
 def _segment_meta_path(path: Path) -> Path:
     return path.with_suffix(path.suffix + ".iamccs.json")
 
 
-def _write_segment_metadata(path: Path, frame_count: int, fps: float, audio_join_policy: str = "crossfade") -> None:
+def _continuation_chain_sidecar(checkpoint_path: Path) -> Path:
+    """Sidecar carrying media lineage for external run-and-gun continuation."""
+    return Path(checkpoint_path).with_suffix(".chain.json")
+
+
+def _portable_output_path(path: Path | str) -> str:
+    root = Path(folder_paths.get_output_directory()).resolve()
+    resolved = Path(path).resolve()
+    try:
+        return resolved.relative_to(root).as_posix()
+    except ValueError:
+        return str(resolved)
+
+
+def _resolve_output_media_path(value: Any) -> Path:
+    path = Path(str(value or "").strip())
+    if not path.is_absolute():
+        path = Path(folder_paths.get_output_directory()) / path
+    return path.resolve()
+
+
+def _infer_continuation_chain_from_output(checkpoint: Path) -> dict[str, Any] | None:
+    """Retrofit lineage for checkpoints created before .chain.json existed.
+
+    Native checkpoint media already carries IAMCCS provenance beside each MP4.
+    The external AV filename is ``<render_id>_<clip_index:05d>.safetensors``;
+    use that render id to find the original per-segment native assets.  This is
+    intentionally a fallback only, so modern explicit chain sidecars stay the
+    source of truth.
+    """
+    stem = checkpoint.stem
+    match = re.match(r"^(.*)_([0-9]{5})$", stem)
+    render_hint = match.group(1) if match else stem
+    output_root = Path(folder_paths.get_output_directory()).resolve()
+    candidates: list[tuple[int, int, Path]] = []
+    try:
+        metadata_files = output_root.rglob(f"*{render_hint}*.mp4.iamccs.json")
+        for meta_path in metadata_files:
+            try:
+                payload = json.loads(meta_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            provenance = None
+            if isinstance(payload, dict):
+                # v1 IAMCCS segment sidecars have always written this block as
+                # `generation`. Accept the short-lived `provenance` spelling as
+                # a compatibility fallback for developer builds.
+                provenance = payload.get("generation")
+                if not isinstance(provenance, dict):
+                    provenance = payload.get("provenance")
+            if not isinstance(provenance, dict):
+                continue
+            if str(provenance.get("render_id", "") or "") != render_hint:
+                continue
+            # Per-segment Native Checkpoint metadata carries segment_index.
+            # Master/delivery files are deliberately ignored to avoid duplicate
+            # programme material in a reconstructed lineage.
+            if "segment_index" not in provenance:
+                continue
+            media_text = str(meta_path)[:-len(".iamccs.json")]
+            media_path = Path(media_text)
+            if not media_path.is_file():
+                continue
+            stage = str(provenance.get("stage", "") or "").lower()
+            # Prefer the Native Checkpoint segment that produced the latent.
+            # R38B/LTX/other delivery copies may share the render id but should
+            # not silently replace the native lineage before B has finished its
+            # own delivery pass.
+            delivery_stage = (
+                "pixel_refine" in stage or "native_windowed" in stage
+                or "ltx" in stage or stage.endswith("_master")
+            )
+            candidates.append((
+                int(provenance.get("segment_index", 0) or 0),
+                1 if delivery_stage else 0,
+                media_path.resolve(),
+            ))
+    except Exception as exc:
+        LOG.warning("MiniMax H3 continuation lineage fallback scan failed | %s", exc)
+        return None
+
+    if not candidates:
+        return None
+    # Keep one media asset per segment index; a retry with the same render id
+    # should not duplicate a segment in the cumulative master.
+    by_index: dict[int, Path] = {}
+    for index, delivery_rank, path in sorted(candidates, key=lambda item: (item[0], item[1], str(item[2]))):
+        del delivery_rank
+        by_index.setdefault(index, path)
+    segments = [by_index[index] for index in sorted(by_index)]
+    payload = {
+        "schema": "iamccs.minimax_h3.continuation_chain.v1",
+        "chain_id": render_hint,
+        "checkpoint": _portable_output_path(checkpoint),
+        "segments": [_portable_output_path(path) for path in segments],
+        "master_path": "",
+        "parent_checkpoint": "",
+        "retrofitted": True,
+        "resolved_checkpoint": checkpoint,
+        "resolved_segments": segments,
+    }
+    try:
+        sidecar = _continuation_chain_sidecar(checkpoint)
+        serializable = {k: v for k, v in payload.items() if not k.startswith("resolved_")}
+        sidecar.write_text(json.dumps(serializable, indent=2, ensure_ascii=False), encoding="utf-8")
+        LOG.info(
+            "MiniMax H3 continuation chain retrofitted | checkpoint=%s | render=%s | segments=%d",
+            checkpoint, render_hint, len(segments),
+        )
+    except Exception as exc:
+        LOG.warning("MiniMax H3 continuation chain retrofit could not write sidecar | %s", exc)
+    return payload
+
+
+def _load_continuation_chain(checkpoint_value: Any, _seen: set[Path] | None = None) -> dict[str, Any] | None:
+    """Read original-segment lineage saved beside an IAMCCS AV checkpoint."""
+    raw = str(checkpoint_value or "").strip()
+    if not raw:
+        return None
+    checkpoint = _resolve_output_media_path(raw)
+    _seen = set() if _seen is None else _seen
+    if checkpoint in _seen:
+        LOG.warning("MiniMax H3 continuation chain cycle ignored | checkpoint=%s", checkpoint)
+        return None
+    _seen.add(checkpoint)
+    sidecar = _continuation_chain_sidecar(checkpoint)
+    if not sidecar.is_file():
+        return _infer_continuation_chain_from_output(checkpoint)
+    try:
+        payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    except Exception as exc:
+        LOG.warning("MiniMax H3 continuation chain sidecar unreadable | %s | %s", sidecar, exc)
+        return None
+    if not isinstance(payload, dict) or payload.get("schema") != "iamccs.minimax_h3.continuation_chain.v1":
+        return None
+    paths: list[Path] = []
+    for item in payload.get("segments", []):
+        try:
+            candidate = _resolve_output_media_path(item)
+        except Exception:
+            continue
+        if candidate.is_file():
+            paths.append(candidate)
+    # Repair/extend early v1 sidecars that stored only the current clip even
+    # though parent_checkpoint was present. Recursing through original MP4
+    # assets keeps A+B(+C) lossless and also makes already-created B checkpoints
+    # usable without deleting their preview or manifest.
+    parent_value = payload.get("parent_checkpoint")
+    if parent_value:
+        parent_chain = _load_continuation_chain(parent_value, _seen)
+        if isinstance(parent_chain, dict):
+            inherited = list(parent_chain.get("resolved_segments") or [])
+            deduped: list[Path] = []
+            seen_media: set[Path] = set()
+            for candidate in inherited + paths:
+                resolved = candidate.resolve()
+                if resolved not in seen_media:
+                    seen_media.add(resolved)
+                    deduped.append(resolved)
+            paths = deduped
+    if not paths:
+        return None
+    result = dict(payload)
+    result["resolved_checkpoint"] = checkpoint
+    result["resolved_segments"] = paths
+    soft_paths: list[Path] = []
+    for item in payload.get("soft_segments", []):
+        try:
+            candidate = _resolve_output_media_path(item)
+        except Exception:
+            continue
+        if candidate.is_file():
+            soft_paths.append(candidate)
+    # Soft lineage is optional and append-only. Old checkpoints deliberately
+    # fall back to their original segments, so the first new Soft AV boundary
+    # can upgrade a legacy A checkpoint without migration.
+    result["resolved_soft_segments"] = soft_paths if soft_paths else list(paths)
+    master = payload.get("master_path")
+    if master:
+        try:
+            result["resolved_master"] = _resolve_output_media_path(master)
+        except Exception:
+            pass
+    return result
+
+
+def _write_continuation_chain(
+    checkpoint_path: Path | str,
+    *,
+    chain_id: str,
+    segments: list[Path],
+    soft_segments: list[Path] | None = None,
+    master_path: Path | None = None,
+    parent_checkpoint: Any = None,
+) -> Path:
+    checkpoint = Path(checkpoint_path).resolve()
+    sidecar = _continuation_chain_sidecar(checkpoint)
+    payload = {
+        "schema": "iamccs.minimax_h3.continuation_chain.v1",
+        "chain_id": str(chain_id or ""),
+        "checkpoint": _portable_output_path(checkpoint),
+        "segments": [_portable_output_path(path) for path in segments],
+        "soft_segments": [_portable_output_path(path) for path in (soft_segments or [])],
+        "master_path": _portable_output_path(master_path) if master_path is not None else "",
+        "parent_checkpoint": _portable_output_path(_resolve_output_media_path(parent_checkpoint)) if str(parent_checkpoint or "").strip() else "",
+    }
+    sidecar.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    return sidecar
+
+
+def _sidecar_json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if torch.is_tensor(value):
+        return {"tensor_shape": list(value.shape), "dtype": str(value.dtype)}
+    if isinstance(value, dict):
+        return {str(key): _sidecar_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sidecar_json_safe(item) for item in value]
+    return str(value)[:512]
+
+
+def _write_segment_metadata(path: Path, frame_count: int, fps: float, audio_join_policy: str = "crossfade",
+                            *, provenance: dict[str, Any] | None = None, source_workflow: Any = None) -> None:
     metadata = {
         "schema": "iamccs.minimax_h3.segment",
         "frame_count": max(1, int(frame_count)),
         "fps": float(fps),
         "audio_join_policy": str(audio_join_policy or "crossfade"),
     }
+    if provenance:
+        metadata["generation"] = _sidecar_json_safe(provenance)
+    if isinstance(source_workflow, str):
+        try:
+            source_workflow = json.loads(source_workflow)
+        except json.JSONDecodeError:
+            source_workflow = None
+    if isinstance(source_workflow, dict) and source_workflow.get("nodes") is not None:
+        source_path = path.with_suffix(path.suffix + ".source_workflow.json")
+        source_path.write_text(json.dumps(_sidecar_json_safe(source_workflow), ensure_ascii=False, indent=2), encoding="utf-8")
+        metadata["source_workflow_file"] = source_path.name
     _segment_meta_path(path).write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
@@ -1181,6 +1560,18 @@ def _read_segment_frame_count(path: Path) -> int:
     if count < 1:
         raise ValueError(f"Frame count non valido nei metadati: {meta_path}")
     return count
+
+
+def _joined_frame_count(paths: list[Path], overlap_frames: int = 0) -> int:
+    """Match the per-boundary overlap caps used by the ffmpeg join."""
+    counts = [_read_segment_frame_count(path) for path in paths]
+    requested = max(0, int(overlap_frames))
+    if requested < 1 or len(counts) < 2:
+        return sum(counts)
+    return sum(counts) - sum(
+        min(requested, left - 1, right - 1)
+        for left, right in zip(counts, counts[1:])
+    )
 
 
 def _read_segment_dimensions(path: Path) -> tuple[int, int]:
@@ -1962,7 +2353,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "audio_mode": (list(H3_AUDIO_MODES), {"default": "h3_native_generated"}),
                 "prompt_mapping": (["global_plus_local", "local_only", "global_only"], {"default": "global_plus_local"}),
                 "upscale_mode": ([
-                    "off", "rtx_final", "h3_fast_latent_2pass", "h3_pixel_refine",
+                    "off", "rtx_final", "pixel_tiled_low_vram", "h3_fast_latent_2pass", "h3_pixel_refine",
                     "h3_ultimate_tiled", "h3_latent_upres", "ltx23", "ltx23_per_chunk", "wan22_5b",
                 ], {"default": "off"}),
                 # 0.5 MP / 16:9 is the practical Dynamic-VRAM default used by
@@ -2495,7 +2886,14 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "longvid_masked_loop_guided", "masked_loop_guided", "long_masked_loop_guided",
             "guided_av_loop_experimental", "longvid_guided_av_loop_experimental",
         }
-        longvid_requested = requested_task_key in {"longvid_guides", "longvid", "long_video_guides", "keyframe_joint_native"} or longvid_lipsync_requested or motion_context_requested or masked_loop_requested
+        # Keep the positioned-guides controls in their own mode family.  The
+        # Settings PRO node intentionally remembers every panel's values, so a
+        # value selected while LongVid was active can still be present after
+        # switching to I2V/FL2V/REF2V.  Remembered is not the same as active.
+        longvid_guides_requested = requested_task_key in {
+            "longvid_guides", "longvid", "long_video_guides",
+        }
+        longvid_requested = longvid_guides_requested or requested_task_key == "keyframe_joint_native" or longvid_lipsync_requested or motion_context_requested or masked_loop_requested
         lipsync_requested = requested_task_key in {"ref2vid_lipsync", "lipsync_ref2vid"} or longvid_lipsync_requested
         requested_legacy_audio_mode = audio_mode
         # LipSync uses one actual AudioBoard source in two compatible stock-H3
@@ -2544,9 +2942,12 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         legacy_adaptive_window_requested = (
             flf_continuity_mode == "longvid_latent_tail_experimental"
         )
-        adaptive_guide_windows_enabled = bool(
+        adaptive_guide_windows_selected = bool(
             longvid_guide_window_policy == "adaptive_latent_tail"
             or (longvid_guide_window_policy == "legacy_auto" and legacy_adaptive_window_requested)
+        )
+        adaptive_guide_windows_enabled = bool(
+            longvid_guides_requested and adaptive_guide_windows_selected
         )
         linked_stage_pairs = {
             "640x384 -> 1280x768": (640, 384, 1280, 768),
@@ -2563,7 +2964,12 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         if linked_factor_text not in linked_stage_pairs:
             linked_factor_text = "640x384 -> 1280x768"
         stage_low_width, stage_low_height, stage_high_width, stage_high_height = linked_stage_pairs[linked_factor_text]
-        linked_stage_active = bool(upscale_link_to_native) and bool(longvid_pianosequenza_2stage_enabled)
+        longvid_multistage_selected = bool(longvid_pianosequenza_2stage_enabled)
+        linked_stage_active = bool(
+            longvid_guides_requested
+            and upscale_link_to_native
+            and longvid_multistage_selected
+        )
         if linked_stage_active:
             # Queue truth: the visible/native H3 canvas becomes the HIGH stage.
             # The 2-stage sampler receives the linked LOW stage separately.
@@ -2757,17 +3163,26 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             ),
             motion_context_audio=bool(flf_continuity_audio),
             motion_context_window_frames=motion_context_window_frames,
-            longvid_terminal_endpoint_mode=longvid_terminal_endpoint_mode,
+            longvid_terminal_endpoint_mode=(
+                longvid_terminal_endpoint_mode if longvid_guides_requested else "hard_image"
+            ),
             keyframe_joint_latent_new=bool(saved_settings.get("keyframe_joint_latent_new", False)),
         )
+        longvid_guides_active = bool(
+            isinstance(plan, dict)
+            and str(plan.get("task_mode", "") or "").strip().lower() == "longvid_guides"
+        )
         if isinstance(plan, dict):
-            plan["pianosequenza_2stage_enabled"] = bool(longvid_pianosequenza_2stage_enabled)
-            plan["pianosequenza_hd_enabled"] = bool(str(longvid_terminal_endpoint_mode).lower() == "pianosequenza_hd")
-            if plan["pianosequenza_hd_enabled"] and str(plan.get("task_mode", "") or "").lower() != "longvid_guides":
-                raise ValueError(
-                    "PIANOSEQUENZA_HD is a LongVid Positioned Guides engine. "
-                    "Select LONGVID GUIDES before enabling the HD endpoint."
-                )
+            # Mode isolation is enforced in the planner, not merely by hiding
+            # controls in JavaScript.  This makes queued/API workflows safe as
+            # well and lets Settings PRO keep per-mode selections for later.
+            plan["pianosequenza_2stage_enabled"] = bool(
+                longvid_guides_active and longvid_multistage_selected
+            )
+            plan["pianosequenza_hd_enabled"] = bool(
+                longvid_guides_active
+                and str(longvid_terminal_endpoint_mode).lower() == "pianosequenza_hd"
+            )
             plan["pianosequenza_hd_settings"] = {
                 "lowres_scale": 0.5,
                 "high_step_fraction": 0.25,
@@ -2790,16 +3205,22 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "manual_stage2_steps": int(longvid_pianosequenza_manual_stage2_steps or 0),
                 "manual_stage3_steps": int(longvid_pianosequenza_manual_stage3_steps or 0),
             }
-            plan["upscale_link_to_native"] = bool(upscale_link_to_native)
+            plan["upscale_link_to_native"] = bool(linked_stage_active)
             plan["upscale_link_factor"] = linked_factor_text
             plan["longvid_guide_window_policy"] = {
-                "requested": str(longvid_guide_window_policy),
+                "requested": (
+                    str(longvid_guide_window_policy)
+                    if longvid_guides_active
+                    else "not_applicable"
+                ),
                 "adaptive_enabled": bool(adaptive_guide_windows_enabled),
-                "window_frames": int(motion_context_window_frames),
+                "window_frames": (
+                    int(motion_context_window_frames) if longvid_guides_active else 0
+                ),
                 "tail_frames": int(flf_continuity_tail_frames) if adaptive_guide_windows_enabled else 0,
                 "standard_contract": "positioned_guides_no_hidden_latent_prefix",
             }
-            if bool(longvid_pianosequenza_2stage_enabled):
+            if plan["pianosequenza_2stage_enabled"]:
                 LOG.info(
                     "MiniMax H3 MULTI-STAGE LINK | enabled=%s | pair=%s | low=%dx%d | high=%dx%d | profile=%s | task=%s",
                     bool(linked_stage_active), linked_factor_text, int(stage_low_width), int(stage_low_height),
@@ -2836,12 +3257,10 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         # Adaptive Guide Windows are now an explicit policy. STANDARD_POSITIONED
         # keeps ordinary positioned-guide technical windows (typically 362f)
         # without a hidden 22f latent prefix. LEGACY_AUTO preserves old saves.
-        latent_tail_requested = bool(adaptive_guide_windows_enabled)
+        latent_tail_requested = bool(
+            longvid_guides_active and adaptive_guide_windows_enabled
+        )
         if latent_tail_requested:
-            if str(task_mode or "").strip().lower() != "longvid_guides":
-                raise ValueError(
-                    "LONGVID LATENT TAIL A/B v1 is valid only with task_mode=longvid_guides."
-                )
             if str(audio_mode or "").strip().lower() != "h3_native_generated":
                 raise ValueError(
                     "LONGVID LATENT TAIL A/B v1 is VIDEO-only. "
@@ -2856,7 +3275,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         plan["longvid_latent_tail"] = {
             "schema": "iamccs.minimax_h3.longvid_latent_tail.v2",
             "enabled": latent_tail_enabled,
-            "tail_frames": int(flf_continuity_tail_frames),
+            "tail_frames": int(flf_continuity_tail_frames) if latent_tail_enabled else 0,
             "video_only": False,
             "native_av_tail": True,
             "taper": "linear_0_to_1",
@@ -2868,7 +3287,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "schema": "iamccs.minimax_h3.longvid_latent_tail_junction.v2",
             "enabled": latent_tail_enabled,
             "overlap_frames": 0,
-            "latent_context_frames": int(flf_continuity_tail_frames),
+            "latent_context_frames": int(flf_continuity_tail_frames) if latent_tail_enabled else 0,
             "strategy": "latent_context_exact_bridge_cut",
             "owner": "incoming_segment",
             "audio_overlap": False,
@@ -3222,7 +3641,42 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "source": "shotboard",
             },
             "h3_latent_upres": h3_upres_settings,
+            "pixel_tiled": {
+                "schema": "iamccs.minimax_h3.pixel_tiled.v1",
+                "method": str(saved_settings.get("h3_pixel_tiled_method", "cpu_lanczos") or "cpu_lanczos"),
+                "model_name": str(saved_settings.get("h3_pixel_tiled_model_name", "") or ""),
+                "tile_size": max(128, min(2048, int(_finite_float(saved_settings.get("h3_pixel_tiled_tile_size", 512), 512, 128, 2048)))),
+                "overlap": max(0, min(512, int(_finite_float(saved_settings.get("h3_pixel_tiled_overlap", 64), 64, 0, 512)))),
+                "frame_batch": 1,
+            },
             "source": "shotboard",
+        }
+        plan["continuation_settings"] = {
+            "schema": "iamccs.minimax_h3.continuation.v2",
+            "enabled": bool(saved_settings.get("h3_continuation_enabled", False)),
+            "save_enabled": bool(saved_settings.get("h3_continuation_save_enabled", False)),
+            "checkpoint": str(saved_settings.get("h3_continuation_checkpoint", "") or ""),
+            "context_frames": str(saved_settings.get("h3_continuation_context_frames", "22") or "22"),
+            "handover_mode": str(saved_settings.get("h3_continuation_handover_mode", "terminal") or "terminal"),
+            "manual_tail_frames": max(0, min(3400, int(_finite_float(saved_settings.get("h3_continuation_manual_tail_frames", 0), 0, 0, 3400)))),
+            # auto_safe is the corrected R42/R43 contract: a one-image I2V
+            # board must not turn its opening still into the endpoint of the
+            # continued clip.  A distinct FLF last image remains a legitimate
+            # future destination.
+            "visual_handover": str(saved_settings.get("h3_continuation_visual_handover", "auto_safe") or "auto_safe"),
+            "run_and_gun_enabled": bool(saved_settings.get("h3_continuation_run_and_gun_enabled", True)),
+            "run_and_gun_join": str(saved_settings.get("h3_continuation_run_and_gun_join", "soft_av") or "soft_av"),
+            "soft_video_frames": max(0, min(16, int(_finite_float(saved_settings.get("h3_continuation_soft_video_frames", 4), 4, 0, 16)))),
+            "soft_video_curve": str(saved_settings.get("h3_continuation_soft_video_curve", "smoothstep") or "smoothstep"),
+            "soft_audio_ms": max(0.0, min(100.0, _finite_float(saved_settings.get("h3_continuation_soft_audio_ms", 15.0), 15.0, 0.0, 100.0))),
+        }
+        plan["refmod_settings"] = {
+            "schema": "iamccs.minimax_h3.refmod.v1",
+            "enabled": bool(saved_settings.get("h3_refmod_enabled", False)),
+            "name": str(saved_settings.get("h3_refmod_name", "") or "").strip(),
+            "strength": max(0.0, min(1.0, _finite_float(saved_settings.get("h3_refmod_strength", 1.0), 1.0, 0.0, 1.0))),
+            "retention": max(0.0, min(1.0, _finite_float(saved_settings.get("h3_refmod_retention", 1.0), 1.0, 0.0, 1.0))),
+            "max_tokens": max(0, min(1048576, int(_finite_float(saved_settings.get("h3_refmod_max_tokens", 0), 0, 0, 1048576)))),
         }
         plan["face_detailer_settings"] = {
             "schema": "iamccs.minimax_h3.face_detailer",
@@ -3283,6 +3737,21 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             warnings.append("Low VRAM: trim this timeline box to 124 frames or less; use a following box for continuation")
         if low_vram_profile and int(width) * int(height) > 960 * 544:
             warnings.append("Low VRAM: generate at 960x544 or below, then upscale for a 1280-class delivery")
+        if (
+            low_vram_profile
+            and bool(plan.get("pianosequenza_2stage_enabled", False))
+            and str(longvid_pianosequenza_stage_profile) == "2_stage_full"
+            and int(width) * int(height) >= 1280 * 768
+        ):
+            warnings.append(
+                "12 GB OOM risk: learned latent lift does not reduce the HIGH H3 sampling peak. "
+                "Use 2_stage_safe_delivery to skip HIGH H3, or reduce canvas and window length."
+            )
+        if low_vram_profile and bool(upscale_enabled) and str(upscale_mode) == "h3_fast_latent_2pass":
+            warnings.append(
+                "FAST LATENT 2-PASS saves low-resolution render time but still runs H3 refine "
+                "at the Stage-2 canvas; test 124 frames before a longer film."
+            )
         if str(acceleration).lower() == "h3_exact" and clipproj_profile == "8b_v3.1":
             warnings.append("H3 Exact 8B ClipProj is selectable but heavy on 12 GB VRAM; 4B v3.1 is the recommended 8–12 GB route")
         if str(acceleration).lower() == "h3_exact" and int(motion_context_window_frames) >= 209:
@@ -3991,7 +4460,48 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
             if motion_context_pretrimmed
             else ("trim_silent_tail" if bool(audio.get("iamccs_flf_locked_audio_handles", False)) else "crossfade")
         )
-        _write_segment_metadata(segment_path, int(images_to_save.shape[0]), fps, audio_join_policy)
+        provenance_plan = _resolve_shotplan(cine_linx) if cine_linx is not None else {}
+        _write_segment_metadata(
+            segment_path, int(images_to_save.shape[0]), fps, audio_join_policy,
+            provenance={"render_id": active_render_id, "stage": safe_stage_label,
+                        "segment_index": current_segment, "total_segments": total_segments,
+                        "shotplan": provenance_plan},
+            source_workflow=extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None,
+        )
+
+        soft_context_path: Path | None = None
+        soft_context = (
+            sampled_latent.get("_iamccs_continuation_soft_av")
+            if isinstance(sampled_latent, dict) else None
+        )
+        if isinstance(soft_context, dict) and torch.is_tensor(soft_context.get("images_rgb8")):
+            context_images = soft_context["images_rgb8"]
+            if context_images.ndim == 4 and int(context_images.shape[0]) > 0:
+                soft_context_path = _continuation_soft_context_path(
+                    output_folder, base_name, active_render_id, safe_stage_label,
+                )
+                _require_new_output_path(soft_context_path)
+                _encode_images(
+                    context_images,
+                    soft_context.get("audio") if isinstance(soft_context.get("audio"), dict) else None,
+                    fps,
+                    soft_context_path,
+                )
+                _write_segment_metadata(
+                    soft_context_path, int(context_images.shape[0]), fps,
+                    "hidden_context_soft_av_source",
+                    provenance={
+                        "render_id": active_render_id,
+                        "stage": safe_stage_label,
+                        "source_segment_index": current_segment,
+                        "hidden_context": True,
+                        "visible_timeline_frames": 0,
+                    },
+                )
+                LOG.info(
+                    "MiniMax H3 Continuation Soft AV context saved | %s | frames=%d",
+                    soft_context_path, int(context_images.shape[0]),
+                )
 
         bridge_source = bridge_images if torch.is_tensor(bridge_images) else images
         if torch.is_tensor(bridge_source) and int(bridge_source.shape[0]) > 0:
@@ -4108,17 +4618,233 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
                 _concat_videos_overlap(segment_paths, final_path, decoded_overlap_frames, fps)
             else:
                 _concat_videos(segment_paths, final_path)
+            master_frames = _joined_frame_count(
+                segment_paths, decoded_overlap_frames if overlap_stitch else 0
+            )
+            _write_segment_metadata(
+                final_path, master_frames, fps, audio_join_policy,
+                provenance={"render_id": active_render_id, "stage": safe_stage_label,
+                            "total_segments": total_segments,
+                            "segment_files": [path.name for path in segment_paths],
+                            "shotplan": provenance_plan},
+                source_workflow=extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None,
+            )
             preview_path = final_path
             messages.append(f"{safe_stage_label.upper()} full video saved: {final_name}")
             if not bool(keep_segments):
                 for path in segment_paths:
                     path.unlink(missing_ok=True)
                     _segment_meta_path(path).unlink(missing_ok=True)
+                    path.with_suffix(path.suffix + ".source_workflow.json").unlink(missing_ok=True)
         elif str(editor_delivery_policy or "") == "per_slot_except_longvid":
             messages.append(
                 "Editor delivery: LongVid single master"
                 if editor_longvid
                 else f"Editor delivery: independent take T{current_segment + 1:02d} (automatic concat disabled)"
+            )
+
+        continuation = provenance_plan.get("continuation_settings")
+        is_final_segment = current_segment + 1 >= total_segments
+        current_chain_segments: list[Path] = []
+        inherited_chain: dict[str, Any] | None = None
+        inherited_segments: list[Path] = []
+        inherited_soft_segments: list[Path] = []
+        run_and_gun_master: Path | None = None
+        run_and_gun_soft_segments: list[Path] = []
+
+        if is_final_segment:
+            # Preserve the original per-shot assets as chain truth.  The
+            # cumulative master is rebuilt from these files, never recursively
+            # re-encoded from yesterday's cumulative master.
+            current_chain_segments = [
+                output_folder / f"{base_name}_{active_render_id}_{safe_stage_label}_seg_{index + 1:04d}.mp4"
+                for index in range(total_segments)
+            ]
+            missing_chain = [path for path in current_chain_segments if not path.is_file()]
+            if missing_chain:
+                # Legacy/master-only workflows may deliberately delete their
+                # per-chunk intermediates after building a full programme. In
+                # that case the completed current master is still a valid
+                # single lineage unit for future external continuation.
+                if Path(preview_path).is_file():
+                    current_chain_segments = [Path(preview_path)]
+                    LOG.info(
+                        "MiniMax H3 continuation chain using completed current master because %d source segment(s) were not retained",
+                        len(missing_chain),
+                    )
+                else:
+                    raise FileNotFoundError(
+                        "Continuation chain is missing current segment asset(s): "
+                        + ", ".join(str(path) for path in missing_chain)
+                    )
+
+            if (
+                isinstance(continuation, dict)
+                and bool(continuation.get("enabled", False))
+                and str(continuation.get("checkpoint", "") or "").strip()
+            ):
+                inherited_chain = _load_continuation_chain(continuation.get("checkpoint"))
+                if isinstance(inherited_chain, dict):
+                    inherited_segments = list(inherited_chain.get("resolved_segments") or [])
+                    inherited_soft_segments = list(
+                        inherited_chain.get("resolved_soft_segments") or inherited_segments
+                    )
+                    LOG.info(
+                        "MiniMax H3 continuation lineage resolved | checkpoint=%s | inherited_media=%s",
+                        continuation.get("checkpoint"), [str(path) for path in inherited_segments],
+                    )
+
+            if (
+                isinstance(continuation, dict)
+                and bool(continuation.get("run_and_gun_enabled", False))
+                and bool(continuation.get("enabled", False))
+            ):
+                if not inherited_segments:
+                    LOG.warning(
+                        "MiniMax H3 RUN & GUN cannot resolve parent media | checkpoint=%s",
+                        continuation.get("checkpoint"),
+                    )
+                    messages.append(
+                        "RUN & GUN skipped: selected source checkpoint has no IAMCCS chain sidecar. "
+                        "Regenerate/save the source clip once with this patch, then continue from that checkpoint."
+                    )
+                else:
+                    all_chain_segments = inherited_segments + current_chain_segments
+                    LOG.info(
+                        "MiniMax H3 RUN & GUN concat inputs | %s",
+                        [str(path) for path in all_chain_segments],
+                    )
+                    rag_name = f"{base_name}_{active_render_id}_{safe_stage_label}_run_and_gun_full.mp4"
+                    run_and_gun_master = output_folder / rag_name
+                    _require_new_output_path(run_and_gun_master)
+                    requested_join = str(
+                        continuation.get("run_and_gun_join", "soft_av") or "soft_av"
+                    ).strip().lower()
+                    applied_join = "direct"
+                    master_segments = list(all_chain_segments)
+                    soft_stats: dict[str, Any] = {}
+                    if requested_join == "soft_av":
+                        context_path = soft_context_path or _continuation_soft_context_path(
+                            output_folder, base_name, active_render_id, safe_stage_label,
+                        )
+                        soft_sources = list(inherited_soft_segments or inherited_segments)
+                        if soft_sources and context_path.is_file():
+                            softened_name = (
+                                f"{base_name}_{active_render_id}_{safe_stage_label}_"
+                                f"soft_av_outgoing_{len(inherited_segments):04d}.mp4"
+                            )
+                            softened_path = output_folder / "_iamccs_continuation_soft_av" / softened_name
+                            _require_new_output_path(softened_path)
+                            soft_stats = _soften_outgoing_segment_with_context(
+                                soft_sources[-1], context_path, softened_path,
+                                video_frames=int(continuation.get("soft_video_frames", 4) or 0),
+                                video_curve=str(continuation.get("soft_video_curve", "smoothstep") or "smoothstep"),
+                                audio_ms=float(continuation.get("soft_audio_ms", 15.0) or 0.0),
+                                fps=fps,
+                            )
+                            master_segments = soft_sources[:-1] + [softened_path] + current_chain_segments
+                            run_and_gun_soft_segments = list(master_segments)
+                            applied_join = "soft_av"
+                            # The compact hidden-context clip is needed only to
+                            # author this outgoing soft segment. The resulting
+                            # duration-preserving segment is the persistent
+                            # lineage asset used by future A+B(+C...) joins.
+                            context_path.unlink(missing_ok=True)
+                            _segment_meta_path(context_path).unlink(missing_ok=True)
+                            try:
+                                context_path.parent.rmdir()
+                            except OSError:
+                                pass
+                        else:
+                            LOG.warning(
+                                "MiniMax H3 RUN & GUN Soft AV unavailable; falling back to Direct | context=%s | inherited_soft=%d",
+                                context_path, len(soft_sources),
+                            )
+                            messages.append(
+                                "RUN & GUN Soft AV fallback: matching hidden AV context was unavailable; Direct join used."
+                            )
+                    _concat_videos(
+                        master_segments,
+                        run_and_gun_master,
+                        audio_edge_fade_ms=0.0 if applied_join == "soft_av" else 20.0,
+                    )
+                    LOG.info("MiniMax H3 RUN & GUN master written | %s", run_and_gun_master)
+                    rag_frames = _joined_frame_count(master_segments, 0)
+                    inherited_chain_id = str(inherited_chain.get("chain_id", "") or "") if inherited_chain else ""
+                    _write_segment_metadata(
+                        run_and_gun_master, rag_frames, fps,
+                        "context_aligned_soft_av" if applied_join == "soft_av" else "native_av_direct_join",
+                        provenance={
+                            "render_id": active_render_id,
+                            "stage": safe_stage_label,
+                            "run_and_gun": True,
+                            "chain_id": inherited_chain_id or active_render_id,
+                            "segment_files": [path.name for path in master_segments],
+                            "source_segment_files": [path.name for path in all_chain_segments],
+                            "run_and_gun_join_requested": requested_join,
+                            "run_and_gun_join_applied": applied_join,
+                            "soft_av": soft_stats,
+                            "duration_preserved": True,
+                            "shotplan": provenance_plan,
+                        },
+                        source_workflow=extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None,
+                    )
+                    preview_path = run_and_gun_master
+                    messages.append(
+                        f"RUN & GUN cumulative master saved: {rag_name} "
+                        f"({len(all_chain_segments)} source segment asset(s), join={applied_join})"
+                    )
+
+        if (
+            is_final_segment
+            and isinstance(continuation, dict)
+            and bool(continuation.get("save_enabled", False))
+        ):
+            if not isinstance(sampled_latent, dict) or sampled_latent.get("samples") is None:
+                raise ValueError(
+                    "SAVE TERMINAL AV is enabled, but the Native Checkpoint has no sampled_latent connection."
+                )
+            from .iamccs_minimax_h3_asset_library import (
+                IAMCCS_MiniMaxH3ContinuationAnalyze,
+                IAMCCS_MiniMaxH3ContinuationSave,
+            )
+
+            analysis = IAMCCS_MiniMaxH3ContinuationAnalyze().analyze(
+                images,
+                preset="Balanced",
+                context_frames=str(continuation.get("context_frames", "22") or "22"),
+            )
+            handover = analysis[0]
+            saved_path, saved_info = IAMCCS_MiniMaxH3ContinuationSave().save(
+                sampled_latent,
+                filename_prefix=f"IAMCCS/MiniMaxH3/CONTINUATION/{active_render_id}",
+                clip_index=total_segments,
+                handover=handover,
+                head_context_frames=max(
+                    0,
+                    int(motion_state.get("context_frames", 0) or 0)
+                    if isinstance(motion_state, dict) else 0,
+                ),
+                preview_image=bridge_source,
+                visible_frame_count=int(images.shape[0]) if torch.is_tensor(images) and images.ndim == 4 else 0,
+            )
+            chain_segments = inherited_segments + current_chain_segments
+            chain_id = (
+                str(inherited_chain.get("chain_id", "") or "")
+                if isinstance(inherited_chain, dict)
+                else ""
+            ) or active_render_id
+            chain_sidecar = _write_continuation_chain(
+                saved_path,
+                chain_id=chain_id,
+                segments=chain_segments or current_chain_segments,
+                soft_segments=run_and_gun_soft_segments,
+                master_path=run_and_gun_master or (preview_path if Path(preview_path).is_file() else None),
+                parent_checkpoint=(continuation.get("checkpoint") if bool(continuation.get("enabled", False)) else ""),
+            )
+            messages.append(
+                f"Continuation terminal AV saved: {saved_path} ({saved_info}) | "
+                f"chain={chain_sidecar.name}"
             )
 
         next_segment = current_segment + 1
@@ -4750,6 +5476,9 @@ class IAMCCS_ShotboardH3Settings:
                 and name not in _H3_PDD_SETTINGS_NODE_FIELDS
                 and name not in _H3_FUN_CONTROLNET_SETTINGS_NODE_FIELDS
                 and name not in _H3_FUSED_TURBO_SETTINGS_NODE_FIELDS
+                and name not in _H3_PIXEL_TILED_SETTINGS_NODE_FIELDS
+                and name not in _H3_CONTINUATION_SETTINGS_NODE_FIELDS
+                and name not in _H3_REFMOD_SETTINGS_NODE_FIELDS
             ):
                 grouped.append(("08 · ADVANCED COMPATIBILITY", name))
 
@@ -5178,6 +5907,66 @@ class IAMCCS_ShotboardH3Settings:
             },
         )
 
+        # Append only: serialized Settings/Settings PRO widget indices remain stable.
+        required["h3_pixel_tiled_method"] = (["cpu_lanczos", "model_tiled"], {
+            "default": "cpu_lanczos", "display_name": "PIXEL SAFE · METHOD",
+        })
+        required["h3_pixel_tiled_model_name"] = ([""] + folder_paths.get_filename_list("upscale_models"), {
+            "default": "", "display_name": "PIXEL SAFE · LOCAL UPSCALE MODEL",
+        })
+        required["h3_pixel_tiled_tile_size"] = ("INT", {
+            "default": 512, "min": 128, "max": 2048, "step": 64, "display_name": "PIXEL SAFE · TILE SIZE",
+        })
+        required["h3_pixel_tiled_overlap"] = ("INT", {
+            "default": 64, "min": 0, "max": 512, "step": 16, "display_name": "PIXEL SAFE · OVERLAP",
+        })
+        required["h3_continuation_checkpoint"] = ("STRING", {
+            "default": "", "display_name": "CONTINUATION · SAVED CHECKPOINT",
+        })
+        required["h3_continuation_context_frames"] = (["5", "22", "39"], {
+            "default": "22", "display_name": "CONTINUATION · AV CONTEXT FRAMES",
+        })
+        required["h3_continuation_handover_mode"] = (["terminal", "auto", "manual"], {
+            "default": "terminal", "display_name": "CONTINUATION · HANDOVER",
+            "tooltip": (
+                "TERMINAL = continue from the actual final AV latent boundary (recommended). "
+                "AUTO = use saved freeze/lock analysis. MANUAL = deliberately ignore N final source frames."
+            ),
+        })
+        required["h3_continuation_manual_tail_frames"] = ("INT", {
+            "default": 0, "min": 0, "max": 3400, "step": 1,
+            "display_name": "CONTINUATION · MANUAL TAIL",
+        })
+        required["h3_refmod_enabled"] = ("BOOLEAN", {
+            "default": False, "display_name": "REFMOD · AUTOMATIC INJECTION",
+            "tooltip": "Off preserves the exact former H3 conditioning. On injects one saved provider RefMod into every selected H3 chunk before sampling.",
+        })
+        required["h3_refmod_name"] = ("STRING", {
+            "default": "", "display_name": "REFMOD · SAVED NAME",
+            "tooltip": "Relative name under models/refmods, without .safetensors. Select from the PRO library or type the provider name.",
+        })
+        required["h3_refmod_strength"] = ("FLOAT", {
+            "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+            "display_name": "REFMOD · SOURCE STRENGTH",
+        })
+        required["h3_refmod_retention"] = ("FLOAT", {
+            "default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01,
+            "display_name": "REFMOD · MASTER RETENTION",
+        })
+        required["h3_refmod_max_tokens"] = ("INT", {
+            "default": 0, "min": 0, "max": 1048576, "step": 1,
+            "display_name": "REFMOD · MAX REFERENCE TOKENS (0 = OFF)",
+        })
+        # Append only after the original Continuation/RefMod schema. These
+        # switches must never shift values in workflows saved before R42/R43.
+        required["h3_continuation_enabled"] = ("BOOLEAN", {
+            "default": False, "display_name": "CONTINUATION · START FROM SAVED AV",
+            "tooltip": "Opt-in. Only the first queued Shotboard chunk starts from the selected external AV checkpoint; later chunks keep their own selected mode.",
+        })
+        required["h3_continuation_save_enabled"] = ("BOOLEAN", {
+            "default": False, "display_name": "CONTINUATION · SAVE TERMINAL AV",
+            "tooltip": "Opt-in export contract for a terminal sampled AV latent. It does not activate loading.",
+        })
         # User preference for new configurations. Existing workflow widget values
         # remain authoritative; no migration rewrites a saved sampling recipe.
         from .iamccs_h3_advisor import preferred_sla_defaults, recipes
@@ -5202,6 +5991,48 @@ class IAMCCS_ShotboardH3Settings:
                 "tooltip": "Per-mode local advisor state. Proposals apply only after acceptance."}),
             "seed_policy": (["fixed_per_generation", "random_per_generation", "fixed_per_chunk", "random_per_chunk"], {"default": "fixed_per_generation", "tooltip": "Fixed/random per generation: one seed for all chunks. Fixed per chunk: base + index × stride. Random per chunk: independent seeds derived from the randomized queue seed. Random policies choose a new base when you press Queue in Settings Pro; API clients must supply their base seed."}),
             "keyframe_joint_latent_new": ("BOOLEAN", {"default": False, "tooltip": "Keyframe Joint only: chain original generated AV latent tails through the LatentGoAhead branch. Destination images remain guides. OFF keeps one joint sample."}),
+            # R42 continuation fix fields are appended after every historical
+            # required+optional widget so pre-patch workflow arrays keep their
+            # exact positional meaning.
+            "h3_continuation_visual_handover": ([
+                "auto_safe", "latent_only", "shotboard_destination"
+            ], {
+                "default": "auto_safe",
+                "display_name": "CONTINUATION · VISUAL HANDOVER",
+                "tooltip": (
+                    "AUTO SAFE: if Shotboard first/last are the same still, use it only as a Qwen identity reference and let saved AV own the temporal opening; a distinct last image remains a future destination. "
+                    "LATENT ONLY: saved AV + prompt only. SHOTBOARD DESTINATION: legacy behavior, explicitly force the board endpoint."
+                ),
+            }),
+            "h3_continuation_run_and_gun_enabled": ("BOOLEAN", {
+                "default": True,
+                "display_name": "CONTINUATION · RUN & GUN MASTER",
+                "tooltip": (
+                    "When continuing from a checkpoint with IAMCCS chain metadata, also build one cumulative A+B(+C...) master from the original segment files. Individual segment files stay available for the Video Editor."
+                ),
+            }),
+            "h3_continuation_run_and_gun_join": (["soft_av", "direct"], {
+                "default": "soft_av",
+                "display_name": "CONTINUATION · RUN & GUN JOIN",
+                "tooltip": (
+                    "SOFT AV (recommended) uses the incoming generation's hidden, time-corresponding AV context to soften the outgoing boundary without changing latent continuation or programme duration. DIRECT preserves the exact hard join."
+                ),
+            }),
+            "h3_continuation_soft_video_frames": ("INT", {
+                "default": 4, "min": 0, "max": 16, "step": 1,
+                "display_name": "CONTINUATION · SOFT VIDEO FRAMES",
+                "tooltip": "Recommended: 4. Delivery-only context-aligned blend; 0 disables video blending.",
+            }),
+            "h3_continuation_soft_video_curve": (["smoothstep", "linear"], {
+                "default": "smoothstep",
+                "display_name": "CONTINUATION · SOFT VIDEO CURVE",
+                "tooltip": "SMOOTHSTEP is the recommended short dissolve. LINEAR is available for a strictly uniform ramp.",
+            }),
+            "h3_continuation_soft_audio_ms": ("FLOAT", {
+                "default": 15.0, "min": 0.0, "max": 100.0, "step": 1.0,
+                "display_name": "CONTINUATION · SOFT AUDIO MS",
+                "tooltip": "Recommended: 15 ms equal-power de-click against the matching hidden audio context. Keep it short for dialogue and lipsync.",
+            }),
         }}
 
     RETURN_TYPES = (SUPERNODE_LINX_TYPE,)
@@ -5433,9 +6264,13 @@ from .iamccs_minimax_h3_masked_loop_guided import (
     NODE_CLASS_MAPPINGS as _MASKED_LOOP_GUIDED_NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as _MASKED_LOOP_GUIDED_NODE_DISPLAY_NAME_MAPPINGS,
 )
-from .iamccs_minimax_h3_herrgotts import (
-    NODE_CLASS_MAPPINGS as _HERRGOTTS_DIRECT_AV_NODE_CLASS_MAPPINGS,
-    NODE_DISPLAY_NAME_MAPPINGS as _HERRGOTTS_DIRECT_AV_NODE_DISPLAY_NAME_MAPPINGS,
+from .iamccs_minimax_h3_longervid import (
+    NODE_CLASS_MAPPINGS as _LONGERVID_DIRECT_AV_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _LONGERVID_DIRECT_AV_NODE_DISPLAY_NAME_MAPPINGS,
+)
+from .iamccs_minimax_h3_asset_library import (
+    NODE_CLASS_MAPPINGS as _H3_ASSET_LIBRARY_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _H3_ASSET_LIBRARY_NODE_DISPLAY_NAME_MAPPINGS,
 )
 from .iamccs_minimax_h3_continuous_router import (
     NODE_CLASS_MAPPINGS as _CONTINUOUS_ROUTER_NODE_CLASS_MAPPINGS,
@@ -5485,8 +6320,10 @@ NODE_CLASS_MAPPINGS.update(_H3_PROGRESSIVE_SPATIAL_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_H3_PROGRESSIVE_SPATIAL_NODE_DISPLAY_NAME_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(_MASKED_LOOP_GUIDED_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_MASKED_LOOP_GUIDED_NODE_DISPLAY_NAME_MAPPINGS)
-NODE_CLASS_MAPPINGS.update(_HERRGOTTS_DIRECT_AV_NODE_CLASS_MAPPINGS)
-NODE_DISPLAY_NAME_MAPPINGS.update(_HERRGOTTS_DIRECT_AV_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_LONGERVID_DIRECT_AV_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_LONGERVID_DIRECT_AV_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_H3_ASSET_LIBRARY_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_H3_ASSET_LIBRARY_NODE_DISPLAY_NAME_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(_CONTINUOUS_ROUTER_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_CONTINUOUS_ROUTER_NODE_DISPLAY_NAME_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(_VIGGLE_BRIDGE_NODE_CLASS_MAPPINGS)

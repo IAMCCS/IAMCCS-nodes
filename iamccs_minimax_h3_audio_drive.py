@@ -359,6 +359,7 @@ def _lock_audio_stream(
     av_latent: dict[str, Any],
     chunk_audio: dict[str, Any],
     audio_vae: Any,
+    preserve_prefix_frames: int = 0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Replace the AV audio stream through ComfyUI's supported core nodes."""
     _validate_joint_av_latent(av_latent)
@@ -400,11 +401,18 @@ def _lock_audio_stream(
     # plain streams. The H3 target length remains authoritative.  Any tiny
     # codec-grid shortfall is zero-padded by the core fit and then locked as
     # silence; custom dialogue must never acquire a generative tail.
+    prefix_steps = max(0, min(
+        int(native_audio_samples.shape[-1]),
+        int(round(max(0, int(preserve_prefix_frames)) * 40.0 / 24.0)),
+    ))
+    fit_target = native_audio_samples[..., prefix_steps:] if prefix_steps else native_audio_samples
     fitted_samples, fitted_mask = LTXVConcatAVLatent.fit_audio(
-        native_audio_samples,
-        locked_audio["samples"],
-        locked_audio.get("noise_mask"),
+        fit_target, locked_audio["samples"], locked_audio.get("noise_mask"),
     )
+    if prefix_steps:
+        fitted_samples = torch.cat(
+            (native_audio_samples[..., :prefix_steps].clone(), fitted_samples), dim=-1
+        )
     if tuple(fitted_samples.shape) != tuple(native_audio_samples.shape):
         raise RuntimeError(
             "MiniMax H3 custom audio fit produced the wrong latent shape: "
@@ -456,6 +464,8 @@ def _lock_audio_stream(
         "locked_fraction": locked_fraction,
         "unlocked_latent_values": unlocked_tokens,
         "fit_rule": "trim overlong; lock silence-padded shortfall",
+        "preserved_native_prefix_frames": max(0, int(preserve_prefix_frames)),
+        "preserved_native_prefix_audio_steps": prefix_steps,
     }
     return locked_av, metadata
 
@@ -589,7 +599,16 @@ class IAMCCS_MiniMaxH3AtomicAudioDrive:
             return av_latent, chunk_audio, None, None, behavior, json.dumps(report, ensure_ascii=False, indent=2)
 
         if behavior == BEHAVIOR_LOCKED:
-            locked_latent, lock_report = _lock_audio_stream(av_latent, chunk_audio, audio_vae)
+            continuation = av_latent.get("iamccs_external_continuation") if isinstance(av_latent, dict) else None
+            preserve_prefix_frames = (
+                int(continuation.get("context_frames", 0) or 0)
+                if isinstance(continuation, dict) and continuation.get("preserve_native_audio_prefix")
+                else 0
+            )
+            locked_latent, lock_report = _lock_audio_stream(
+                av_latent, chunk_audio, audio_vae,
+                preserve_prefix_frames=preserve_prefix_frames,
+            )
             report["action"] = "audio stream VAE-encoded and locked before H3 sampling"
             report["latent_passthrough"] = False
             report["lock"] = lock_report

@@ -1,4 +1,4 @@
-"""Release-facing helpers for Herrgotts H3 Infinite Continuation Suite v1.2.
+"""Release-facing helpers for IAMCCS H3 LongerVid.
 
 These helpers are intentionally pure Python so duration conversion, preset
 selection, dropdown compatibility, and stitch planning can be regression-tested

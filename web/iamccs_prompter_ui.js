@@ -355,6 +355,10 @@ function safeProject(raw) {
         ai_direction: String(parsed.ai_direction || ""),
         ai_scope: String(parsed.ai_scope || "active_field"),
         ai_visual_roles: parsed.ai_visual_roles && typeof parsed.ai_visual_roles === "object" ? { ...parsed.ai_visual_roles } : {},
+        ai_visual_files: Array.isArray(parsed.ai_visual_files) ? parsed.ai_visual_files.slice(0, 4).map((item) => ({
+            name: String(item?.name || ""), path: String(item?.path || ""), mime_type: String(item?.mime_type || "image/png"),
+            size: Number(item?.size || 0), last_modified: Number(item?.last_modified || 0),
+        })).filter((item) => item.name && item.path) : [],
         visual_story_relationship: String(parsed.visual_story_relationship || ""),
         visual_story_plan: parsed.visual_story_plan && typeof parsed.visual_story_plan === "object" ? { ...parsed.visual_story_plan } : {},
         request: String(parsed.request || ""),
@@ -440,6 +444,14 @@ function button(label, className = "") {
     return result;
 }
 
+function fieldLabel(label, control, hint = "") {
+    const wrapper = el("label", "iamccs-pr-field-label");
+    wrapper.appendChild(el("span", "iamccs-pr-field-caption", label));
+    if (control) wrapper.appendChild(control);
+    if (hint) wrapper.appendChild(el("small", "iamccs-pr-field-hint", hint));
+    return wrapper;
+}
+
 function downloadProject(project) {
     const clean = String(project.project_name || "iamccs_h3_prompt").replace(/[^a-z0-9._-]+/gi, "_").replace(/^_+|_+$/g, "") || "iamccs_h3_prompt";
     const blob = new Blob([JSON.stringify(project, null, 2)], { type: "application/json" });
@@ -495,6 +507,25 @@ function shotboardsForPrompter(node) {
     return all.length === 1 ? all : [];
 }
 
+function partialExecutionId(node) {
+    const graph = node?.graph;
+    const root = graph?.rootGraph ?? app.graph;
+    if (!graph || !root || graph === root || graph.isRootGraph) return String(node.id);
+    function pathTo(target, current) {
+        for (const candidate of current?.nodes ?? current?._nodes ?? []) {
+            const subgraph = candidate?.subgraph;
+            if (!subgraph) continue;
+            if (subgraph === target) return String(candidate.id);
+            const child = pathTo(target, subgraph);
+            if (child !== undefined) return `${candidate.id}:${child}`;
+        }
+        return undefined;
+    }
+    const parent = pathTo(graph, root);
+    if (parent === undefined) throw new Error("Could not resolve IAMCCS Prompter inside its subgraph.");
+    return `${parent}:${node.id}`;
+}
+
 function mountPrompter(node) {
     if (node._iamccsPrompterMounted) return;
     node._iamccsPrompterMounted = true;
@@ -527,14 +558,16 @@ function mountPrompter(node) {
         .iamccs-pr-ai textarea{display:block;min-width:0;width:100%;min-height:72px;resize:vertical;border:1px solid #3b5065;border-radius:6px;background:#0b141d;color:#edf4fa;padding:8px;font:10px/1.45 Inter,Segoe UI,sans-serif;outline:none}
         .iamccs-pr-ai-status{min-width:0;min-height:31px;padding:7px 8px;border:1px solid #2c4052;border-radius:6px;background:#0d1720;color:#91a4b5;font-size:9px;line-height:1.4;overflow-wrap:anywhere}.iamccs-pr-ai-status.ok{border-color:#356c4e;color:#8fd1aa}.iamccs-pr-ai-status.error{border-color:#75443f;color:#ed9c92}
         .iamccs-pr-ai .iamccs-pr-btn{width:100%;height:auto;min-height:31px;border-color:#6094c0;background:#274866;color:#eef7ff;padding:6px 8px;line-height:1.25;white-space:normal}
+        .iamccs-pr-transcribe{min-height:44px!important;border:2px solid #f1ca78!important;background:linear-gradient(135deg,#d9a84d,#8f5e20)!important;color:#171109!important;font-size:11px!important;font-weight:950!important;letter-spacing:.045em!important;box-shadow:0 5px 14px #0008,inset 0 1px 0 #fff5!important;transition:transform .08s ease,filter .08s ease,box-shadow .08s ease}.iamccs-pr-transcribe:hover{filter:brightness(1.12)}.iamccs-pr-transcribe:active{transform:translateY(2px) scale(.985);box-shadow:0 1px 5px #0008,inset 0 2px 5px #0005!important}.iamccs-pr-transcribe:disabled{cursor:wait!important;filter:saturate(.65);opacity:.88}
         .iamccs-pr-ai-modelrow{display:grid;grid-template-columns:minmax(0,1fr) 32px;gap:6px;min-width:0}.iamccs-pr-ai-modelrow .iamccs-pr-btn{height:31px;min-height:31px;padding:0!important;font-size:14px}.iamccs-pr-ai-modelrow datalist{display:none}
-        .iamccs-pr-ai-images{display:grid;grid-template-columns:minmax(0,1fr);gap:5px;min-width:0}.iamccs-pr-ai-image{display:grid;grid-template-columns:44px minmax(0,1fr) 25px;gap:6px;padding:5px;border:1px solid #304255;border-radius:6px;background:#0c141c;min-width:0}.iamccs-pr-ai-thumb{width:44px;height:44px;object-fit:cover;border-radius:4px;background:#202832}.iamccs-pr-ai-image-meta{display:grid;gap:3px;min-width:0}.iamccs-pr-ai-image-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aebdca;font-size:8px}.iamccs-pr-ai-image select{height:24px!important;font-size:8px!important}.iamccs-pr-ai-remove{width:25px!important;min-height:25px!important;height:25px!important;padding:0!important;border-color:#75443f!important;background:#301b1b!important;color:#f1aaa2!important}.iamccs-pr-ai-file{display:none}
+        .iamccs-pr-ai-images{display:grid;grid-template-columns:minmax(0,1fr);gap:5px;min-width:0}.iamccs-pr-ai-image{display:grid;grid-template-columns:44px minmax(0,1fr) 25px;gap:6px;padding:5px;border:1px solid #304255;border-radius:6px;background:#0c141c;min-width:0}.iamccs-pr-ai-thumb{width:44px;height:44px;object-fit:cover;border-radius:4px;background:#202832}.iamccs-pr-ai-image-meta{display:grid;gap:3px;min-width:0}.iamccs-pr-ai-image-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aebdca;font-size:8px}.iamccs-pr-ai-image select{height:24px!important;font-size:8px!important}.iamccs-pr-ai-remove{width:25px!important;min-height:25px!important;height:25px!important;padding:0!important;border-color:#75443f!important;background:#301b1b!important;color:#f1aaa2!important}.iamccs-pr-ai-file{display:none}.iamccs-pr-ai-add{height:28px!important;min-height:28px!important;border:1px dashed #6b9fc9!important;background:#152738!important;color:#c7e7ff!important;font-size:16px!important;line-height:1!important}
         .iamccs-pr-example-select{height:30px;max-width:146px;border:1px solid #3b4350;border-radius:6px;background:#171b23;color:#e9edf2;padding:0 6px;font:600 10px Inter,Segoe UI,sans-serif}
         .iamccs-pr-inject{width:100%;height:38px!important;margin:0 0 7px;background:linear-gradient(135deg,#d3a447,#8d5c20)!important;border:1px solid #f0ca7d!important;color:#171109!important;font-size:12px!important;font-weight:900!important;letter-spacing:.06em;box-shadow:0 5px 14px #0007}
         .iamccs-pr-inject-status{min-height:30px;margin-bottom:12px;padding:7px;border:1px solid #303944;border-radius:6px;background:#151b22;color:#91a0ae;font-size:9px;line-height:1.35}.iamccs-pr-inject-status.ok{border-color:#3f7957;color:#9fe0b7}.iamccs-pr-inject-status.error{border-color:#824b45;color:#efaaa1}
         .iamccs-pr-field-ai{margin-left:4px!important;height:25px!important;min-width:54px;padding:0 8px!important;border:1px solid #9271d8!important;border-radius:4px!important;background:linear-gradient(145deg,#5b3f93,#302452)!important;color:#f4ebff!important;box-shadow:inset 0 1px 0 #ffffff25,0 2px 7px #2b174f55!important;font-size:9px!important;font-weight:900!important;letter-spacing:.045em!important}.iamccs-pr-field-ai:hover{border-color:#c8a9ff!important;background:linear-gradient(145deg,#7555b5,#3d2d68)!important;box-shadow:0 0 0 1px #b68cff33,0 3px 10px #28134688!important}.iamccs-pr-field-ai:disabled{cursor:wait;opacity:.72}
         .iamccs-pr-tagdeck{position:sticky;top:-12px;z-index:4;margin:-2px 0 12px;padding:9px 10px;border:1px solid #45505f;border-radius:8px;background:linear-gradient(145deg,#111720f5,#1c2430f5);box-shadow:0 5px 16px #0008;backdrop-filter:blur(6px)}
-        .iamccs-pr-taghead{display:flex;align-items:center;gap:8px;margin-bottom:7px}.iamccs-pr-tagtitle{color:#f1d492;font:800 10px Georgia,serif;letter-spacing:.09em}.iamccs-pr-taghint{margin-left:auto;color:#93a1b1;font-size:9px}.iamccs-pr-tagrows{display:grid;gap:5px}.iamccs-pr-tagrow{display:flex;align-items:center;gap:4px;flex-wrap:wrap}.iamccs-pr-taglabel{width:51px;color:#718297;font-size:8px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.iamccs-pr-tag{height:24px!important;padding:0 7px!important;border-color:#3d4a5b!important;background:#1c2632!important;color:#dce7f2!important;font:700 9px 'Courier New',monospace!important}.iamccs-pr-tag:hover{border-color:#d9ad58!important;color:#ffe5ab!important}.iamccs-pr-tag.syntax{background:#342a1c!important;border-color:#685536!important;color:#f5d38e!important}
+        .iamccs-pr-taghead{display:flex;align-items:center;gap:8px;margin-bottom:7px}.iamccs-pr-tagtitle{color:#f1d492;font:800 10px Georgia,serif;letter-spacing:.09em}.iamccs-pr-taghint{margin-left:auto;color:#93a1b1;font-size:9px}.iamccs-pr-tag-toggle{height:23px!important;padding:0 7px!important;font-size:9px!important}.iamccs-pr-tagdeck.is-collapsed{padding:6px 10px}.iamccs-pr-tagdeck.is-collapsed .iamccs-pr-taghead{margin-bottom:0}.iamccs-pr-tagdeck.is-collapsed .iamccs-pr-tagrows{display:none}.iamccs-pr-tagrows{display:grid;gap:5px}.iamccs-pr-tagrow{display:flex;align-items:center;gap:4px;flex-wrap:wrap}.iamccs-pr-taglabel{width:51px;color:#718297;font-size:8px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.iamccs-pr-tag{height:24px!important;padding:0 7px!important;border-color:#3d4a5b!important;background:#1c2632!important;color:#dce7f2!important;font:700 9px 'Courier New',monospace!important}.iamccs-pr-tag:hover{border-color:#d9ad58!important;color:#ffe5ab!important}.iamccs-pr-tag.syntax{background:#342a1c!important;border-color:#685536!important;color:#f5d38e!important}
+        .iamccs-pr-zoom-wrap{position:relative;min-width:0;width:100%}.iamccs-pr-zoom-wrap textarea{width:100%;padding-right:38px!important}.iamccs-pr-zoom-btn{position:absolute;top:5px;right:5px;z-index:2;width:25px;height:25px;border:1px solid #8b7650;border-radius:5px;background:#262a31;color:#ffe0a0;cursor:pointer;font-size:15px;line-height:1}.iamccs-pr-zoom-overlay{position:fixed;inset:0;z-index:100000;display:grid;place-items:center;background:#05070bdc;padding:24px}.iamccs-pr-zoom-panel{display:flex;flex-direction:column;gap:10px;width:min(1100px,94vw);height:min(820px,90vh);padding:16px;border:1px solid #9c7842;border-radius:12px;background:#171c25;box-shadow:0 20px 80px #000c}.iamccs-pr-zoom-head{display:flex;align-items:center;gap:10px;color:#f3d99f;font-weight:800}.iamccs-pr-zoom-head .iamccs-pr-btn{margin-left:auto}.iamccs-pr-zoom-editor{flex:1;min-height:0;width:100%;resize:none;border:1px solid #71869b;border-radius:8px;background:#f8f5ed;color:#181a1d;padding:18px;font:24px/1.5 'Courier New',monospace;outline:none}
     `;
     root.appendChild(aiStyle);
 
@@ -614,10 +647,17 @@ function mountPrompter(node) {
     audioDialogueLanguage.value = String(widget(node,"audio_dialogue_language")?.value || "English");
     audioSubject.value = String(widget(node,"audio_dialogue_subject")?.value || "1");
     const audioTranscriptDraft = el("textarea");
-    audioTranscriptDraft.placeholder = "Connect AUDIO and Queue once to transcribe, or paste/edit a transcript here.";
+    audioTranscriptDraft.placeholder = "Connect AUDIO, click REQUEST, GLOBAL or LOCAL, then press TRANSCRIBE + INSERT AT CURSOR.";
     audioTranscriptDraft.value = project.audio_transcript || "";
-    const audioStatus = el("div", "iamccs-pr-ai-status", project.audio_dialogue_tag ? "H3 dialogue tag ready for cursor insertion." : "Connect the Prompter AUDIO input, then Queue once. Whisper text returns here without auto-injecting Shotboard.");
-    const audioInsertGlobal = button("INSERT DIALOGUE AT GLOBAL CURSOR");
+    const audioStatus = el("div", "iamccs-pr-ai-status", project.audio_dialogue_tag ? "H3 dialogue tag ready for cursor insertion." : "1 · Connect AUDIO   2 · Click a GLOBAL or LOCAL prompt box   3 · Press the gold button.");
+    const audioTranscribe = button("TRANSCRIBE + INSERT AT CURSOR", "primary iamccs-pr-transcribe");
+    let pendingAudioInsertion = null;
+    let audioTranscriptionWatchdog = null;
+    const setAudioTranscriptionBusy = (busy) => {
+        audioTranscribe.disabled = Boolean(busy);
+        audioTranscribe.textContent = busy ? "● TRANSCRIBING… PLEASE WAIT" : "TRANSCRIBE + INSERT AT CURSOR";
+        audioTranscribe.setAttribute("aria-busy", busy ? "true" : "false");
+    };
     const refreshAudioDialogueTag = () => {
         const transcript = String(audioTranscriptDraft.value || "").replace(/\s+/g," ").trim();
         project.audio_transcript = transcript;
@@ -635,19 +675,56 @@ function mountPrompter(node) {
     audioModel.onchange = persistAudioControls; audioSourceLanguage.onchange = persistAudioControls;
     audioDialogueLanguage.onchange = persistAudioControls; audioSubject.onchange = persistAudioControls;
     audioTranscriptDraft.oninput = () => { refreshAudioDialogueTag(); commit(); };
-    audioInsertGlobal.onclick = () => {
-        refreshAudioDialogueTag();
-        if (!project.audio_dialogue_tag) { audioStatus.textContent = "Queue with a connected AUDIO input or paste a transcript first."; return; }
-        let area = activePromptArea;
-        if (!area || String(activePromptKey || "").startsWith("local_")) {
-            const preferred = ({audio_driven:"audio_dialogue_map",multi_shot_lipsync:"multishot_dialogue_map",ref2va:"detailed_description"})[project.task_mode] || "dialogue";
-            area = center.querySelector(`textarea[data-section-key="${preferred}"]`) || center.querySelector("textarea[data-section-key]");
+    audioTranscribe.addEventListener("pointerdown", (event) => event.preventDefault());
+    audioTranscribe.onclick = async () => {
+        const audioInput = (node.inputs || []).find((input) => String(input?.name || "").toLowerCase() === "audio");
+        if (!audioInput || audioInput.link == null) {
+            audioStatus.className = "iamccs-pr-ai-status error";
+            audioStatus.textContent = "No AUDIO link detected. Connect Load Audio to the Prompter AUDIO socket first.";
+            return;
         }
-        activePromptArea = area; activePromptKey = area?.dataset?.sectionKey || activePromptKey;
-        insertIntoActiveField(project.audio_dialogue_tag);
-        audioStatus.textContent = `Inserted at the GLOBAL cursor. Review wording, then inject Shotboard.`;
+        const targetArea = activePromptArea;
+        if (!targetArea) {
+            audioStatus.className = "iamccs-pr-ai-status error";
+            audioStatus.textContent = "Click inside REQUEST, GLOBAL or LOCAL where the dialogue must be inserted, then press TRANSCRIBE.";
+            return;
+        }
+        pendingAudioInsertion = {
+            area: targetArea,
+            key: activePromptKey,
+            start: Number.isFinite(targetArea.selectionStart) ? targetArea.selectionStart : targetArea.value.length,
+            end: Number.isFinite(targetArea.selectionEnd) ? targetArea.selectionEnd : targetArea.value.length,
+        };
+        persistAudioControls();
+        commit();
+        setAudioTranscriptionBusy(true);
+        audioStatus.className = "iamccs-pr-ai-status";
+        audioStatus.textContent = `Queueing this Prompter only with Whisper ${audioModel.value}…`;
+        try {
+            project._transcribe_once = true;
+            commit();
+            const queued = await app.queuePrompt(0, 1, [partialExecutionId(node)]);
+            if (queued === false) throw new Error("ComfyUI rejected the partial execution request.");
+            audioStatus.textContent = "Whisper is running. The H3 dialogue tag will be inserted automatically at the saved cursor.";
+            clearTimeout(audioTranscriptionWatchdog);
+            audioTranscriptionWatchdog = setTimeout(() => {
+                pendingAudioInsertion = null;
+                setAudioTranscriptionBusy(false);
+                audioStatus.className = "iamccs-pr-ai-status error";
+                audioStatus.textContent = "Transcription timed out. Check the ComfyUI queue/log, then try again.";
+            }, 120000);
+        } catch (error) {
+            pendingAudioInsertion = null;
+            clearTimeout(audioTranscriptionWatchdog);
+            setAudioTranscriptionBusy(false);
+            audioStatus.className = "iamccs-pr-ai-status error";
+            audioStatus.textContent = `Could not start transcription: ${error?.message || error}`;
+        } finally {
+            delete project._transcribe_once;
+            commit();
+        }
     };
-    audioPanel.append(audioHead, fieldLabel("Whisper model",audioModel), fieldLabel("Audio language",audioSourceLanguage), fieldLabel("H3 dialogue language",audioDialogueLanguage), fieldLabel("Speaker / subject",audioSubject), fieldLabel("Transcript",audioTranscriptDraft), audioInsertGlobal, audioStatus);
+    audioPanel.append(audioHead, fieldLabel("Whisper model",audioModel), fieldLabel("Audio language",audioSourceLanguage), fieldLabel("H3 dialogue language",audioDialogueLanguage), fieldLabel("Speaker / subject",audioSubject), fieldLabel("Transcript",audioTranscriptDraft), audioTranscribe, audioStatus);
     left.append(audioPanel);
     left.appendChild(el("div", "iamccs-pr-kicker", "Writing mode"));
     const writing = el("div", "iamccs-pr-writing");
@@ -756,17 +833,80 @@ function mountPrompter(node) {
     tagHead.append(el("div", "iamccs-pr-tagtitle", "MINIMAX H3 PROMPT TAGS"));
     const tagHint = el("div", "iamccs-pr-taghint", "Click a field, then insert a tag");
     tagHead.appendChild(tagHint);
+    const tagToggle = button("COLLAPSE ▲", "iamccs-pr-tag-toggle");
+    tagToggle.type = "button";
+    const setTagCollapsed = (collapsed) => {
+        tagDeck.classList.toggle("is-collapsed", collapsed);
+        tagToggle.textContent = collapsed ? "EXPAND ▼" : "COLLAPSE ▲";
+        tagToggle.setAttribute("aria-expanded", String(!collapsed));
+        node.properties.iamccs_prompter_tags_collapsed = collapsed;
+        node.setDirtyCanvas?.(true, true);
+    };
+    tagToggle.onclick = () => setTagCollapsed(!tagDeck.classList.contains("is-collapsed"));
+    tagHead.appendChild(tagToggle);
     const tagRows = el("div", "iamccs-pr-tagrows");
     tagDeck.append(tagHead, tagRows);
+    setTagCollapsed(Boolean(node.properties.iamccs_prompter_tags_collapsed));
 
-    const insertIntoActiveField = (text, selectionText = "") => {
-        const area = activePromptArea || center.querySelector("textarea.iamccs-pr-text");
+    const openZoomEditor = (area) => {
+        const overlay = el("div", "iamccs-pr-zoom-overlay");
+        overlay.setAttribute("role", "dialog");
+        overlay.setAttribute("aria-modal", "true");
+        overlay.setAttribute("aria-label", "Expanded prompt editor");
+        const panel = el("div", "iamccs-pr-zoom-panel");
+        const head = el("div", "iamccs-pr-zoom-head", "EXPANDED TEXT EDITOR · 2× TYPE");
+        const done = button("DONE", "iamccs-pr-btn primary");
+        const editor = el("textarea", "iamccs-pr-zoom-editor");
+        editor.value = area.value;
+        editor.placeholder = area.placeholder;
+        editor.style.fontSize = `${Math.max(18, 2 * parseFloat(getComputedStyle(area).fontSize || "12"))}px`;
+        head.appendChild(done);
+        panel.append(head, editor);
+        overlay.appendChild(panel);
+        const close = () => {
+            area.value = editor.value;
+            area.dispatchEvent(new Event("input", { bubbles: true }));
+            overlay.remove();
+            area.focus();
+            const cursor = Math.min(editor.selectionStart, area.value.length);
+            area.setSelectionRange(cursor, cursor);
+        };
+        done.onclick = close;
+        overlay.onclick = (event) => { if (event.target === overlay) close(); };
+        overlay.onkeydown = (event) => { if (event.key === "Escape") { event.preventDefault(); close(); } };
+        editor.oninput = () => { area.value = editor.value; area.dispatchEvent(new Event("input", { bubbles: true })); };
+        document.body.appendChild(overlay);
+        editor.focus();
+        editor.setSelectionRange(area.selectionStart, area.selectionEnd);
+    };
+    const decorateTextEditors = () => {
+        root.querySelectorAll("textarea:not(.iamccs-pr-zoom-editor)").forEach((area) => {
+            if (area.dataset.iamccsZoomReady) return;
+            area.dataset.iamccsZoomReady = "1";
+            const wrap = el("div", "iamccs-pr-zoom-wrap");
+            area.parentNode.insertBefore(wrap, area);
+            wrap.appendChild(area);
+            const zoom = button("⌕", "iamccs-pr-zoom-btn");
+            zoom.type = "button";
+            zoom.title = "Open this text box in the 2× expanded editor";
+            zoom.setAttribute("aria-label", "Expand text editor");
+            zoom.onclick = () => openZoomEditor(area);
+            wrap.appendChild(zoom);
+        });
+    };
+
+    const insertIntoActiveField = (text, selectionText = "", placement = null) => {
+        const area = placement?.area
+            ? (placement.area.isConnected ? placement.area : null)
+            : (activePromptArea || center.querySelector("textarea.iamccs-pr-text"));
         if (!area) {
             tagHint.textContent = "No prompt field is available in this mode";
-            return;
+            return false;
         }
-        const start = Number.isFinite(area.selectionStart) ? area.selectionStart : area.value.length;
-        const end = Number.isFinite(area.selectionEnd) ? area.selectionEnd : start;
+        const requestedStart = Number.isFinite(placement?.start) ? placement.start : area.selectionStart;
+        const requestedEnd = Number.isFinite(placement?.end) ? placement.end : area.selectionEnd;
+        const start = Math.max(0, Math.min(area.value.length, Number.isFinite(requestedStart) ? requestedStart : area.value.length));
+        const end = Math.max(start, Math.min(area.value.length, Number.isFinite(requestedEnd) ? requestedEnd : start));
         const before = area.value.slice(0, start);
         const after = area.value.slice(end);
         const prefix = before && !/[\s\n]$/.test(before) ? " " : "";
@@ -782,6 +922,7 @@ function mountPrompter(node) {
         area.focus();
         area.dispatchEvent(new Event("input", { bubbles: true }));
         tagHint.textContent = `${text} inserted in the active field`;
+        return true;
     };
     const addTagRow = (label, definitions) => {
         const row = el("div", "iamccs-pr-tagrow");
@@ -864,6 +1005,10 @@ function mountPrompter(node) {
         project.ai_direction = aiDirection.value;
         project.ai_scope = aiScope.value || "active_field";
         project.visual_story_relationship = visualRelationship.value;
+        project.ai_visual_files = aiVisualFiles.map((item) => ({
+            name: item.file.name, path: item.path, mime_type: item.file.type || "image/png",
+            size: item.file.size || 0, last_modified: item.file.lastModified || 0,
+        })).filter((item) => item.path).slice(0, 4);
         setWidget(node, "project_data", JSON.stringify(project));
         setWidget(node, "task_mode", project.task_mode);
         setWidget(node, "injection_target", project.injection_target);
@@ -919,7 +1064,14 @@ function mountPrompter(node) {
         aiProviderChip.classList.toggle("ok", isLocal);
         aiBaseUrl.placeholder = isOllama ? "http://127.0.0.1:11434" : "Provider API base URL";
     };
-    const aiVisualFiles = [];
+    let aiVisualFiles = [];
+    const restoreAIVisualFiles = () => {
+        aiVisualFiles = (project.ai_visual_files || []).map((item) => ({
+            file: { name: item.name, type: item.mime_type, size: item.size, lastModified: item.last_modified },
+            path: item.path, dataUrl: "",
+        }));
+    };
+    restoreAIVisualFiles();
     const visualRolesForTarget = () => {
         project.ai_visual_roles = project.ai_visual_roles && typeof project.ai_visual_roles === "object" ? project.ai_visual_roles : {};
         const key = project.injection_target || "global";
@@ -932,6 +1084,18 @@ function mountPrompter(node) {
         reader.onerror = () => reject(reader.error || new Error("Unable to read image"));
         reader.readAsDataURL(file);
     });
+    const imageViewURL = (path) => {
+        const parts = String(path || "").replaceAll("\\", "/").split("/");
+        const name = parts.pop() || "";
+        return `/view?filename=${encodeURIComponent(name)}&subfolder=${encodeURIComponent(parts.join("/"))}&type=input`;
+    };
+    const ensureImageData = async (item) => {
+        if (item.dataUrl) return item.dataUrl;
+        const response = await api.fetchApi(imageViewURL(item.path));
+        if (!response.ok) throw new Error(`Saved reference image unavailable: ${item.file.name} (${response.status})`);
+        item.dataUrl = await readFileDataUrl(await response.blob());
+        return item.dataUrl;
+    };
     const uploadVisualFile = async (file) => {
         const form = new FormData();
         const safeName = `${Date.now()}_${String(file.name || "visual.png").replace(/[^a-z0-9._-]+/gi, "_")}`;
@@ -950,7 +1114,7 @@ function mountPrompter(node) {
             const slot = String(index + 1);
             const card = el("div", "iamccs-pr-ai-image");
             const thumb = el("img", "iamccs-pr-ai-thumb");
-            thumb.src = item.dataUrl;
+            thumb.src = item.dataUrl || imageViewURL(item.path);
             const meta = el("div", "iamccs-pr-ai-image-meta");
             meta.appendChild(el("div", "iamccs-pr-ai-image-name", `Picture ${slot} · ${item.file.name}`));
             const role = el("select");
@@ -968,6 +1132,7 @@ function mountPrompter(node) {
             remove.onclick = () => {
                 const previousRoles = aiVisualFiles.map((_entry, oldIndex) => String(roles[String(oldIndex + 1)] || (oldIndex === 0 ? "opening" : oldIndex === 1 ? "closing" : "reference")));
                 aiVisualFiles.splice(index, 1);
+                project.visual_story_plan = {};
                 const nextRoles = {};
                 previousRoles.filter((_value, oldIndex) => oldIndex !== index).forEach((value, nextIndex) => { nextRoles[String(nextIndex + 1)] = value; });
                 project.ai_visual_roles[project.injection_target || "global"] = nextRoles;
@@ -977,17 +1142,27 @@ function mountPrompter(node) {
             card.append(thumb, meta, remove);
             aiImages.appendChild(card);
         });
+        if (aiVisualFiles.length < 4) {
+            const add = button("+", "iamccs-pr-ai-add");
+            add.type = "button";
+            add.title = "Add another reference image; existing images stay in their slots";
+            add.setAttribute("aria-label", "Add another reference image");
+            add.onclick = () => aiImageInput.click();
+            aiImages.appendChild(add);
+        }
+        addAIImagesBtn.textContent = `ADD AI REFERENCE IMAGES · ${aiVisualFiles.length}/4`;
+        addAIImagesBtn.disabled = aiVisualFiles.length >= 4;
     };
-    const buildAIImagePayload = () => {
+    const buildAIImagePayload = async () => {
         const roles = visualRolesForTarget();
-        return aiVisualFiles.map((item, index) => ({
+        return Promise.all(aiVisualFiles.map(async (item, index) => ({
             slot: index + 1,
             name: item.file.name,
             role: String(roles[String(index + 1)] || (index === 0 ? "opening" : index === 1 ? "closing" : "reference")),
             mime_type: item.file.type || "image/png",
-            data: item.dataUrl,
+            data: await ensureImageData(item),
             path: item.path || "",
-        })).filter((item) => item.role !== "ignore");
+        }))).then((items) => items.filter((item) => item.role !== "ignore"));
     };
     const loadOllamaModels = async ({ quiet = false } = {}) => {
         if (!["ollama", "lm_studio"].includes(aiProvider.value)) return [];
@@ -1048,10 +1223,13 @@ function mountPrompter(node) {
         aiStatus.textContent = files.length ? "Uploading visual references to ComfyUI input…" : "No new image added (maximum 4 or duplicate selection).";
         try {
             for (const file of files) aiVisualFiles.push({ file, dataUrl: await readFileDataUrl(file), path: await uploadVisualFile(file) });
+            if (files.length) project.visual_story_plan = {};
             renderAIImages();
+            commit();
             aiStatus.className = "iamccs-pr-ai-status ok";
             aiStatus.textContent = `${aiVisualFiles.length} image reference(s) saved in ComfyUI input, readable by AI and ready for Shotboard injection.`;
         } catch (error) {
+            renderAIImages(); commit();
             aiStatus.className = "iamccs-pr-ai-status error";
             aiStatus.textContent = error?.message || "Image upload failed";
         } finally {
@@ -1071,7 +1249,7 @@ function mountPrompter(node) {
                 method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ provider: aiProvider.value, base_url: aiBaseUrl.value.trim(), model: aiModel.value.trim(),
                     api_key: aiApiKey.value, relationship: visualRelationship.value.trim(), task_mode: project.task_mode,
-                    images: buildAIImagePayload(), temperature: Number(aiTemperature.value || 0.3), timeout: 150 }),
+                    images: await buildAIImagePayload(), temperature: Number(aiTemperature.value || 0.3), timeout: 150 }),
             });
             const payload = await response.json();
             if (!response.ok || !payload?.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
@@ -1190,6 +1368,7 @@ function mountPrompter(node) {
         const requestBox = el("textarea", "iamccs-pr-text"); requestBox.value = project.request;
         requestBox.placeholder = "Describe the global scene, then: Prompt 1: I want… Prompt 2: then… Prompt 3: finally… Choose GLOBAL + LOCALS to develop all numbered prompts and inject them together.";
         requestBox.oninput = () => { project.request = requestBox.value; commit(); };
+        requestBox.onfocus = () => { activePromptArea = requestBox; activePromptKey = "request"; };
         requestAI.onclick = () => runAIRewrite({directTargetKeys:MODE_META[project.task_mode].sections.map(([key]) => key), triggerButton:requestAI, narrativeRequest:requestBox.value});
         requestCard.append(requestHead, requestBox, el("div","iamccs-pr-tip","GLOBAL fills the structured global boxes. GLOBAL + LOCALS replaces the global and local draft with an ordered development of your numbered directions. Review the local slot numbers before INJECT; no generation is queued."));
         center.append(requestCard);
@@ -1238,7 +1417,7 @@ function mountPrompter(node) {
             fieldAudioButton.addEventListener("pointerdown", (event) => event.preventDefault());
             fieldAudioButton.onclick = (event) => {
                 event.preventDefault(); event.stopPropagation(); refreshAudioDialogueTag();
-                if (!project.audio_dialogue_tag) { audioStatus.textContent = "No transcript available. Connect AUDIO and Queue once, or paste a transcript."; return; }
+                if (!project.audio_dialogue_tag) { audioStatus.textContent = "No transcript yet. Use the large gold TRANSCRIBE + INSERT AT CURSOR button first."; return; }
                 activePromptArea = area; activePromptKey = key; insertIntoActiveField(project.audio_dialogue_tag);
                 audioStatus.textContent = `Inserted into GLOBAL · ${label}.`;
             };
@@ -1254,6 +1433,7 @@ function mountPrompter(node) {
         modeButtons.forEach((item, key) => item.classList.toggle("active", key === project.task_mode));
         modeNote.textContent = meta.subtitle;
         modeNote.title = meta.subtitle;
+        decorateTextEditors();
         renderPreview();
     };
 
@@ -1290,6 +1470,7 @@ function mountPrompter(node) {
         writingButtons.forEach((item, key) => item.classList.toggle("active", key === project.writing_mode));
         populateAIScope();
         aiDirection.value = String(project.ai_direction || "");
+        visualRelationship.value = String(project.visual_story_relationship || "");
         root.classList.toggle("mode-manual", project.writing_mode === "manual");
         // Provider/model selection and per-field AI buttons are editing tools,
         // not generation modes. Keep them available in Manual and Guided too.
@@ -1403,7 +1584,7 @@ function mountPrompter(node) {
         aiStatus.className = "iamccs-pr-ai-status";
         aiStatus.textContent = `Sending ${targetKeys.join(", ")} to ${aiProvider.options[aiProvider.selectedIndex]?.text || aiProvider.value}.`;
         try {
-            const imagePayload = buildAIImagePayload();
+            const imagePayload = await buildAIImagePayload();
             const response = await api.fetchApi("/iamccs/prompter/rewrite", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -1485,7 +1666,7 @@ function mountPrompter(node) {
             remove.onclick=()=>{locals.splice(index,1);commit();renderSections();};
             audioLine.onclick=()=>{
                 refreshAudioDialogueTag();
-                if(!project.audio_dialogue_tag){audioStatus.textContent="No transcript available. Connect AUDIO and Queue once, or paste a transcript.";return;}
+                if(!project.audio_dialogue_tag){audioStatus.textContent="No transcript yet. Use the large gold TRANSCRIBE + INSERT AT CURSOR button first.";return;}
                 activePromptArea=area;activePromptKey=`local_${row.slot || index+1}`;insertIntoActiveField(project.audio_dialogue_tag);
                 audioStatus.textContent=`Inserted into LOCAL SLOT ${row.slot || index+1}.`;
             };
@@ -1514,7 +1695,7 @@ function mountPrompter(node) {
                 node._iamccsPromptAiBusy=true; const done=beginAiBusy(ai);
                 try {
                     persistAI();
-                    const response=await api.fetchApi("/iamccs/prompter/rewrite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:aiProvider.value,base_url:aiBaseUrl.value.trim(),model:aiModel.value.trim(),api_key:aiApiKey.value,task_mode:requestMode,sections:{[key]:rough},target_keys:[key],user_direction:`Rewrite only LOCAL slot ${row.slot}. Keep its active speaker and supplied dialogue unchanged; do not write a new global story. Global context: ${composePrompt(project).slice(0,3500)}`,images:buildAIImagePayload(),temperature:Number(aiTemperature.value||0.35),timeout:180})});
+                    const response=await api.fetchApi("/iamccs/prompter/rewrite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:aiProvider.value,base_url:aiBaseUrl.value.trim(),model:aiModel.value.trim(),api_key:aiApiKey.value,task_mode:requestMode,sections:{[key]:rough},target_keys:[key],user_direction:`Rewrite only LOCAL slot ${row.slot}. Keep its active speaker and supplied dialogue unchanged; do not write a new global story. Global context: ${composePrompt(project).slice(0,3500)}`,images:await buildAIImagePayload(),temperature:Number(aiTemperature.value||0.35),timeout:180})});
                     const result=await response.json(); if(!response.ok||!result.ok) throw new Error(result.error||`HTTP ${response.status}`);
                     if(project.task_mode!==requestMode || row.prompt!==rough) throw new Error("Your box changed while AI was working; your edit was kept.");
                     if(!result.sections?.[key]) throw new Error("No local prompt returned.");
@@ -1640,6 +1821,7 @@ function mountPrompter(node) {
         if (!previous) { injectStatus.className = "iamccs-pr-inject-status error"; injectStatus.textContent = "No previous Prompter state is available yet."; return; }
         const current = JSON.stringify(project);
         project = safeProject(previous);
+        restoreAIVisualFiles();
         node.properties.iamccs_prompter_previous = current;
         renderControls(); renderSections(); commit();
         injectStatus.className = "iamccs-pr-inject-status ok";
@@ -1653,6 +1835,7 @@ function mountPrompter(node) {
         try {
             snapshotProject("load project");
             project = safeProject(await file.text());
+            restoreAIVisualFiles();
             renderControls();
             renderSections();
             commit();
@@ -1707,16 +1890,31 @@ function mountPrompter(node) {
         try { originalExecuted?.apply(this, arguments); } catch {}
         const transcript = Array.isArray(message?.iamccs_audio_transcript) ? message.iamccs_audio_transcript[0] : message?.iamccs_audio_transcript;
         const dialogueTag = Array.isArray(message?.iamccs_h3_dialogue_tag) ? message.iamccs_h3_dialogue_tag[0] : message?.iamccs_h3_dialogue_tag;
-        if (transcript != null) {
+        const transcriptionError = Array.isArray(message?.iamccs_audio_transcription_error) ? message.iamccs_audio_transcription_error[0] : message?.iamccs_audio_transcription_error;
+        if (pendingAudioInsertion && transcript != null) {
+            clearTimeout(audioTranscriptionWatchdog);
+            setAudioTranscriptionBusy(false);
             project.audio_transcript = String(transcript || "");
             project.audio_dialogue_tag = String(dialogueTag || "");
             audioTranscriptDraft.value = project.audio_transcript;
             refreshAudioDialogueTag();
             commit();
+            const insertion = pendingAudioInsertion;
+            pendingAudioInsertion = null;
+            let insertedAtSavedCursor = false;
+            if (project.audio_dialogue_tag && insertion) {
+                activePromptArea = insertion.area;
+                activePromptKey = insertion.key;
+                insertedAtSavedCursor = insertIntoActiveField(project.audio_dialogue_tag, "", insertion);
+            }
             audioStatus.className = `iamccs-pr-ai-status${project.audio_dialogue_tag ? " ok" : " error"}`;
             audioStatus.textContent = project.audio_dialogue_tag
-                ? "Whisper transcript ready. Use AUDIO LINE in the desired GLOBAL or LOCAL prompt; Shotboard is not changed until INJECT."
-                : "No usable transcript returned. Check comfy-mtb Whisper nodes/model and the connected audio.";
+                ? (insertedAtSavedCursor
+                    ? `Whisper transcript inserted automatically at the saved ${String(insertion.key || "prompt").toUpperCase()} cursor. Shotboard is unchanged until INJECT.`
+                    : "Whisper transcript ready, but the original text field is no longer open. Click inside REQUEST, GLOBAL or LOCAL and insert the saved AUDIO LINE.")
+                : (transcriptionError
+                    ? `Whisper failed: ${transcriptionError}`
+                    : "No usable transcript returned. Check that the connected audio contains audible speech.");
         }
     };
 

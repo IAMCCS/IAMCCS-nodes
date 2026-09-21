@@ -34,6 +34,8 @@ const COMPATIBILITY_ONLY = new Set([
 ]);
 const GROUPS = [
   { id: "ahead", label: "AHEAD CONTROL ROOM", title: "LatentGoAhead seam controls", fields: [] },
+  { id: "continuation", label: "CONTINUATION", title: "AV latent checkpoints", fields: ["h3_continuation_enabled", "h3_continuation_save_enabled", "h3_continuation_checkpoint", "h3_continuation_context_frames", "h3_continuation_handover_mode", "h3_continuation_manual_tail_frames", "h3_continuation_visual_handover", "h3_continuation_run_and_gun_enabled", "h3_continuation_run_and_gun_join", "h3_continuation_soft_video_frames", "h3_continuation_soft_video_curve", "h3_continuation_soft_audio_ms"] },
+  { id: "refmod", label: "REFMOD", title: "Reference latent library", fields: ["h3_refmod_enabled", "h3_refmod_name", "h3_refmod_strength", "h3_refmod_retention", "h3_refmod_max_tokens"] },
   { id: "assistant", label: "MODE ASSISTANT", title: "Guided setup", assistant: true, fields: [] },
   { id: "overview", label: "1 · NATIVE", title: "Native H3 canvas", fields: ["width", "height", "upscale_link_to_native", "upscale_link_factor", "reference_resize_policy", "reference_resize_megapixels", "reference_resize_filter", "prompt_mapping"] },
   { id: "audio", label: "2 · AUDIO", title: "Audio authority", fields: ["audio_mode", "reference_audio_role", "voice_reference_picture_index"] },
@@ -42,10 +44,10 @@ const GROUPS = [
   { id: "speed", label: "5 · SPEED", title: "Acceleration recipe", fields: ["acceleration", "turbo_mode", "turbo_lora_name", "turbo_strength", "turbo_sampler_mode", "fused_turbo_model_name", "fused_turbo_sigma_preset", "pdd_lora_name", "pdd_strength", "secondary_lora_enabled", "secondary_lora_name", "secondary_lora_strength", "ref_image_size", "sol_conditioning", "spectrum_profile", "h3_sla_sparsity", "h3_sla_dense_last_steps"] },
   { id: "direction", label: "6 · DIRECT", title: "Mode-specific contract", fields: ["reference_role_1", "reference_role_2", "reference_role_3", "reference_role_4", "reference_video_role", "v2v_guide_mode", "v2v_source_range_policy", "v2v_source_offset_seconds", "v2v_source_fit", "v2v_source_end_policy", "v2v_audio_pairing", "flf_join_mode", "flf_overlap_frames", "flf_continuity_mode", "flf_continuity_tail_frames", "flf_continuity_audio", "longvid_guide_window_policy", "keyframe_joint_latent_new", "longvid_terminal_endpoint_mode", "longvid_pianosequenza_2stage_enabled"] }, // IAMCCS_LONGVID_ENDPOINT_STRATEGIES_V1
   { id: "control", label: "CONTROLNET", title: "H3 Fun ControlNet", contextual: "control", fields: ["h3_controlnet_enabled", "h3_controlnet_name", "h3_controlnet_kind", "h3_controlnet_strength", "h3_controlnet_start_percent", "h3_controlnet_end_percent", "h3_controlnet_frame_scope", "h3_controlnet_end_policy"] },
-  { id: "face", label: "FACE SWAP", title: "Face Swap", contextual: "face", fields: ["h3_faceswap_sam_model", "h3_faceswap_birefnet_model", "h3_faceswap_mask_prompt", "h3_faceswap_threshold", "h3_faceswap_objects", "h3_faceswap_cleanup_threshold", "h3_faceswap_cleanup_shrink", "h3_faceswap_cleanup_min_frames", "h3_faceswap_cleanup_edge_grow", "h3_faceswap_crop_scale", "h3_faceswap_crop_megapixels", "h3_faceswap_grow_spatial", "h3_faceswap_grow_temporal", "h3_faceswap_feather"] },
+  { id: "face", label: "SAM3 SWAP", title: "SAM3 Subject Swap", contextual: "face", fields: ["h3_faceswap_sam_model", "h3_faceswap_birefnet_model", "h3_faceswap_mask_prompt", "h3_faceswap_threshold", "h3_faceswap_objects", "h3_faceswap_cleanup_threshold", "h3_faceswap_cleanup_shrink", "h3_faceswap_cleanup_min_frames", "h3_faceswap_cleanup_edge_grow", "h3_faceswap_crop_scale", "h3_faceswap_crop_megapixels", "h3_faceswap_grow_spatial", "h3_faceswap_grow_temporal", "h3_faceswap_feather"] },
   { id: "face_refine", label: "FACE REFINE", title: "Face Refinement", fields: ["face_detailer_enabled", "face_detailer_profile", "face_detailer_use_sam_mask"] },
   { id: "scout", label: "7 · SCOUT", title: "Candidate seed scout", fields: ["h3_r40_seed_scout_enabled", "h3_r40_candidate_count", "h3_r40_seed_stride", "h3_r40_preview_max_frames", "h3_r40_sparse_enabled", "h3_r40_sparse_video_budget", "h3_r40_sparse_denser_edges"] },
-  { id: "finish", label: "8 · OUTPUT", title: "Delivery", fields: ["upscale_mode", "upscale_enabled", "upscale_width", "upscale_height", "upscale_prompt", "upscale_sage", "upscale_seed_offset", "wan_upscale_denoise", "ltx_seam_safe", "ltx_detailer_enabled", "ltx_detailer_lora_name", "ltx_detailer_strength", "ltx_4k_enabled", "ltx_4k_quality", "ltx_looper_temporal_tile_size", "ltx_looper_temporal_overlap", "ltx_looper_guiding_strength", "ltx_looper_overlap_strength", "ltx_looper_cond_image_strength", "ltx_looper_horizontal_tiles", "ltx_looper_vertical_tiles", "ltx_looper_spatial_overlap", "h3_upres_model_name", "h3_upres_precision", "h3_upres_device", "h3_upres_keep_models_resident", "h3_upres_steps", "h3_upres_denoise", "h3_upres_sampler", "h3_upres_scheduler", "h3_upres_temporal_chunk", "h3_upres_temporal_overlap", "h3_upres_anchor_strength", "h3_upres_tile_width", "h3_upres_tile_height", "h3_upres_overlap_width", "h3_upres_overlap_height", "h3_upres_fade_width", "h3_upres_fade_height", "h3_upres_min_tile_size", "h3_upres_overlap_mode", "h3_upres_overlap_blend", "h3_upres_rtx_enabled", "h3_upres_rtx_quality", "h3_upres_pixel_groups", "h3_upres_window_frames", "h3_upres_window_overlap", "h3_upres_pixel_method"] },
+  { id: "finish", label: "8 · OUTPUT", title: "Delivery", fields: ["upscale_mode", "upscale_enabled", "upscale_width", "upscale_height", "h3_pixel_tiled_method", "h3_pixel_tiled_model_name", "h3_pixel_tiled_tile_size", "h3_pixel_tiled_overlap", "upscale_prompt", "upscale_sage", "upscale_seed_offset", "wan_upscale_denoise", "ltx_seam_safe", "ltx_detailer_enabled", "ltx_detailer_lora_name", "ltx_detailer_strength", "ltx_4k_enabled", "ltx_4k_quality", "ltx_looper_temporal_tile_size", "ltx_looper_temporal_overlap", "ltx_looper_guiding_strength", "ltx_looper_overlap_strength", "ltx_looper_cond_image_strength", "ltx_looper_horizontal_tiles", "ltx_looper_vertical_tiles", "ltx_looper_spatial_overlap", "h3_upres_model_name", "h3_upres_precision", "h3_upres_device", "h3_upres_keep_models_resident", "h3_upres_steps", "h3_upres_denoise", "h3_upres_sampler", "h3_upres_scheduler", "h3_upres_temporal_chunk", "h3_upres_temporal_overlap", "h3_upres_anchor_strength", "h3_upres_tile_width", "h3_upres_tile_height", "h3_upres_overlap_width", "h3_upres_overlap_height", "h3_upres_fade_width", "h3_upres_fade_height", "h3_upres_min_tile_size", "h3_upres_overlap_mode", "h3_upres_overlap_blend", "h3_upres_rtx_enabled", "h3_upres_rtx_quality", "h3_upres_pixel_groups", "h3_upres_window_frames", "h3_upres_window_overlap", "h3_upres_pixel_method"] },
   { id: "advanced", label: "TECHNICAL", title: "Technical controls", dynamic: true, fields: [] },
 ];
 const ASSIGNED = new Set(GROUPS.flatMap((group) => group.fields));
@@ -76,6 +78,7 @@ const FUNCTIONAL_LAYOUT = {
   ],
   finish: [
     ["OUTPUT", ["rife_mode", "upscale_enabled", "upscale_mode", "upscale_width", "upscale_height", "upscale_prompt", "upscale_sage", "upscale_seed_offset", "wan_upscale_denoise"]],
+    ["PIXEL SAFE · LOW VRAM", ["h3_pixel_tiled_method", "h3_pixel_tiled_model_name", "h3_pixel_tiled_tile_size", "h3_pixel_tiled_overlap"]],
     ["LTX DELIVERY", ["ltx_seam_safe", "ltx_detailer_enabled", "ltx_detailer_lora_name", "ltx_detailer_strength", "ltx_4k_enabled", "ltx_4k_quality", "ltx_looper_temporal_tile_size", "ltx_looper_temporal_overlap", "ltx_looper_guiding_strength", "ltx_looper_overlap_strength", "ltx_looper_cond_image_strength", "ltx_looper_horizontal_tiles", "ltx_looper_vertical_tiles", "ltx_looper_spatial_overlap"]],
     ["H3 2-PASS MODEL", ["h3_upres_model_name", "h3_upres_precision", "h3_upres_device", "h3_upres_keep_models_resident"]],
     ["H3 2-PASS SAMPLING", ["h3_upres_steps", "h3_upres_denoise", "h3_upres_sampler", "h3_upres_scheduler", "h3_upres_anchor_strength"]],
@@ -103,7 +106,7 @@ const MODE_CHOICES = [
   ["LONGVID · MULTISHOT AUDIO DRIVE", "longvid_guided_lipsync", "Per-shot guides and rebased locked AudioBoard clips."],
   ["CONTROL VIDEO", "v2va_controlnet", "Drive pose, depth or edges from video."],
   ["OBJECT SWAP", "v2va_object_swap", "Replace a tracked object in source video."],
-  ["FACE SWAP", "v2va_face_swap", "Replace a tracked identity in source video."],
+  ["SAM3 SUBJECT SWAP", "v2va_face_swap", "Track a source-video subject and regenerate the identity from Picture 1."],
 ];
 const FRIENDLY_VALUES = { // IAMCCS_LONGVID_PIANOSEQUENZA_V2_UPSTREAM_PARITY
   hard_image: "HARD IMAGE · exact terminal keyframe (legacy)",
@@ -173,6 +176,17 @@ const H3_NATIVE_RESOLUTION_PRESETS = Object.freeze([
   ["V · 2:3 · 640 × 960", "640x960"],
   ["H/V · 1:1 · 768 × 768", "768x768"],
 ]);
+// FAST LATENT 2-PASS uses one full Stage-2 canvas, not spatial tiles. Both
+// dimensions must stay on the H3/upscaler 32-pixel grid; 1088 is the legal
+// FHD-class height before an optional final 1080 crop elsewhere.
+const H3_FAST_2PASS_PAIRS = Object.freeze([
+  ["640 × 384 → 1280 × 768 · 2×", 640, 384, 1280, 768],
+  ["736 × 416 → 1504 × 832 · R41 tested source", 736, 416, 1504, 832],
+  ["864 × 480 → 1728 × 960 · 2×", 864, 480, 1728, 960],
+  ["960 × 544 → 1920 × 1088 · 2× FHD-class", 960, 544, 1920, 1088],
+  ["1280 × 736 → 1920 × 1088 · FHD-class", 1280, 736, 1920, 1088],
+  ["1024 × 576 → 2048 × 1152 · 2×", 1024, 576, 2048, 1152],
+]);
 
 const widget = (node, name) => (node.widgets || []).find((item) => item?.name === name);
 const nodeClass = (node) => String(node?.comfyClass || node?.type || "");
@@ -197,21 +211,31 @@ function choices(item) {
 }
 function human(name) { return String(name).replace(/^h3_/, "").replaceAll("_", " ").replace(/\b\w/g, (c) => c.toUpperCase()); }
 function friendly(value) { return FRIENDLY_VALUES[String(value)] || String(value || "AUTO / NONE").replaceAll("_", " "); }
-function restoreNamedValues(node, info) {
+function restoreNamedValues(node, info, nodeData) {
   const named = info?.widgets_values_named;
   if (!named || typeof named !== "object" || Array.isArray(named)) return;
-  for (const [name, value] of Object.entries(named)) {
+  const specs = {...nodeData?.input?.required, ...nodeData?.input?.optional};
+  for (const [name, spec] of Object.entries(specs)) {
     const item = widget(node, name);
-    if (item) item.value = value;
+    if (!item) continue;
+    const kind = spec?.[0], options = spec?.[1] || {};
+    let value = Object.prototype.hasOwnProperty.call(named, name) ? named[name] : options.default;
+    if (Array.isArray(kind) && !kind.includes(value)) value = options.default ?? kind[0];
+    if ((kind === "INT" || kind === "FLOAT") && (value === "" || value == null || !Number.isFinite(Number(value)) ||
+      (options.min !== undefined && Number(value) < Number(options.min)) ||
+      (options.max !== undefined && Number(value) > Number(options.max)))) value = options.default ?? 0;
+    item.value = value;
   }
+  const names = Object.keys(specs);
+  const values = names.map((name) => widget(node, name)?.value);
+  node.widgets_values = values.slice();
+  info.widgets_values = values.slice();
 }
-function serializeNamedValues(node, info) {
+function serializeNamedValues(node, info, nodeData) {
   if (!info || typeof info !== "object") return;
-  info.widgets_values_named = Object.fromEntries(
-    (node.widgets || [])
-      .filter((item) => item?.name && !String(item.name).startsWith("H3 Settings PRO"))
-      .map((item) => [item.name, item.value]),
-  );
+  const names = Object.keys({...nodeData?.input?.required, ...nodeData?.input?.optional});
+  info.widgets_values_named = Object.fromEntries(names.map((name) => [name, widget(node, name)?.value]));
+  info.widgets_values = names.map((name) => widget(node, name)?.value);
 }
 
 function normalizePianosequenzaStageControls(node) {
@@ -267,7 +291,7 @@ const IAMCCS_2STAGE_RESOLUTION_PAIRS = Object.freeze([
   "1024x576 -> 2048x1152",
   "1280x736 -> 2560x1472",
 ]);
-function normalize2StageResolutionLink(node) {
+function normalize2StageResolutionLink(node, activeMode = shotboardMode(node)) {
   const toggle = widget(node, "upscale_link_to_native");
   const pair = widget(node, "upscale_link_factor");
   if (toggle && typeof toggle.value !== "boolean") toggle.value = false;
@@ -275,6 +299,9 @@ function normalize2StageResolutionLink(node) {
     const value = String(pair.value ?? "");
     if (!IAMCCS_2STAGE_RESOLUTION_PAIRS.includes(value)) pair.value = IAMCCS_2STAGE_RESOLUTION_PAIRS[0];
   }
+  // Settings PRO retains LongVid choices while another mode is active, but
+  // those dormant choices must never rewrite the active mode's native canvas.
+  if (String(activeMode || "").toLowerCase() !== "longvid_guides") return;
   if (toggle?.value && pair) {
     const match = String(pair.value).match(/^(\d+)x(\d+) -> (\d+)x(\d+)$/);
     if (match) {
@@ -335,7 +362,7 @@ function branchGate(node, name) {
   };
   if (name.startsWith("h3_faceswap_")) return {
     available: has(/H3FaceSwapInput/i),
-    reason: "Connect the H3 Face Swap input branch to enable this control.",
+    reason: "Connect the H3 SAM3 Subject Swap input branch to enable this control.",
   };
   if (name.startsWith("face_detailer_")) return {
     available: has(/MiniMaxH3Face(Delivery|Detailer|Track|Stitch|Mask)/i),
@@ -381,7 +408,7 @@ function modeAvailability(node, mode) {
   };
   if (value === "v2va_face_swap") return {
     available: has(/H3FaceSwapInput|MiniMaxH3FaceDelivery|MiniMaxH3FaceDetailer/i),
-    reason: "Connect the H3 Face branch to enable Face Swap.",
+    reason: "Connect the H3 SAM3 branch to enable Subject Swap.",
   };
   // Core modes and experimental modes implemented inside the universal backend
   // remain selectable. Do not infer missing support from a filename alone.
@@ -755,6 +782,7 @@ function selectedDelivery(node) {
   return ({
     h3_fast_latent_2pass: "upres",
     h3_pixel_refine: "h3-pixel",
+    pixel_tiled_low_vram: "pixel-safe",
     ltx23: "ltx-master",
     ltx23_per_chunk: "ltx-per-shot",
     rtx_final: "rtx-final",
@@ -821,8 +849,17 @@ function applyRecipe(node, recipe) {
     set("upscale_enabled", false); set("upscale_mode", "off"); set("rife_mode", "off");
   } else if (recipe === "upres") {
     set("upscale_enabled", true); set("upscale_mode", "h3_fast_latent_2pass");
+    // Studio-style visual refinement: AV split -> learned 3D lift -> short
+    // target-resolution H3 pass. Stage-1 model/LoRA stays mode-matched to Shotboard.
+    set("h3_upres_precision", "fp16"); set("h3_upres_keep_models_resident", false);
+    // Match the working R41 Fast Latent baseline; this is a starting recipe,
+    // not a guarantee of visual lip sync at every resolution.
+    set("h3_upres_steps", 8); set("h3_upres_denoise", 0.3);
+    set("h3_upres_sampler", "euler"); set("h3_upres_scheduler", "simple");
   } else if (recipe === "h3-pixel") {
     set("upscale_enabled", true); set("upscale_mode", "h3_pixel_refine");
+  } else if (recipe === "pixel-safe") {
+    set("upscale_enabled", true); set("upscale_mode", "pixel_tiled_low_vram"); set("h3_pixel_tiled_method", "cpu_lanczos");
   } else if (recipe === "ltx-master") {
     set("upscale_enabled", true); set("upscale_mode", "ltx23");
   } else if (recipe === "ltx-per-shot") {
@@ -944,10 +981,72 @@ function mount(node) {
   .iamccs-h3pro .h3p-rail{background:linear-gradient(180deg,#17232f,#0b111a);gap:7px;overflow-y:auto}.iamccs-h3pro .h3p-tab{min-height:40px;flex-shrink:0;border:1px solid #334454;background:linear-gradient(135deg,#223140,#141d28);box-shadow:inset 0 1px #ffffff0b,0 2px 5px #0003;transition:border-color .15s,background .15s;padding:9px 12px;white-space:normal;line-height:1.25}.iamccs-h3pro .h3p-tab.active{border-color:#dec087;border-left:3px solid #f5cf8d;background:linear-gradient(100deg,#493922,#233444);box-shadow:0 0 12px #d8b26c18,inset 0 1px #fff1}.iamccs-h3pro .h3p-tab:hover{border-color:#88b6c6;color:#fff}.iamccs-h3pro .h3p-choice.active{border-left:3px solid #eac383;box-shadow:0 3px 12px #0004}.iamccs-h3pro .h3p-choice{min-height:68px;padding:12px}
   .iamccs-h3pro{height:100%;padding:12px;box-sizing:border-box;background:radial-gradient(circle at 85% 0,#273346 0,transparent 34%),linear-gradient(145deg,#090d13,#111923 62%,#0a0e14);border:1px solid #8b7046;border-radius:14px;color:#eaf0f5;font:11px Inter,Segoe UI,sans-serif;overflow:hidden}.iamccs-h3pro *{box-sizing:border-box}.h3p-head{height:48px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #344253}.h3p-mark{padding:6px 10px;border:1px solid #d2a65c;border-radius:999px;background:#32281a;color:#f8d89c;font-size:9px;font-weight:900;letter-spacing:.08em}.h3p-title{font:700 17px Georgia,serif}.h3p-sub{color:#8291a0;font-size:9px}.h3p-mode{margin-left:auto;text-align:right}.h3p-mode b{display:block;color:#7ee2ad;font-size:10px}.h3p-layout{display:grid;grid-template-columns:155px minmax(500px,1fr) 260px;gap:10px;height:calc(100% - 58px);padding-top:10px}.h3p-rail,.h3p-main,.h3p-truth{min-height:0;border:1px solid #2e3a47;border-radius:10px;background:rgba(12,18,25,.88)}.h3p-rail{padding:7px;display:flex;flex-direction:column;gap:5px}.h3p-tab{height:38px;padding:0 10px;border:1px solid transparent;border-radius:7px;background:transparent;color:#94a2b0;text-align:left;font-size:9px;font-weight:850;letter-spacing:.05em;cursor:pointer}.h3p-tab:hover{background:#182330;color:#fff}.h3p-tab.active{border-color:#a98650;background:linear-gradient(90deg,#3c3020,#1c2530);color:#f3d69c}.h3p-owner{margin-top:auto;padding:10px;border-radius:8px;background:#111b24;color:#8493a2;font-size:8px;line-height:1.45}.h3p-owner strong{display:block;color:#f0c97d;margin-bottom:4px}.h3p-main{padding:12px;overflow:auto}.h3p-section-title{font:700 16px Georgia,serif;color:#f0d39e}.h3p-section-note{margin:4px 0 12px;color:#8493a2;font-size:9px}.h3p-recipes{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}.h3p-recipe,.h3p-choice{padding:8px 10px;border:1px solid #4c5c6d;border-radius:7px;background:#1a2530;color:#d9e2e9;font-size:8px;font-weight:850;cursor:pointer}.h3p-recipe:hover,.h3p-recipe.active,.h3p-choice:hover,.h3p-choice.active{border-color:#d0a45c;color:#f6d99d;background:#2b261d;box-shadow:0 0 0 1px rgba(240,190,99,.2),0 0 12px rgba(240,190,99,.16)}.h3p-recipe[disabled]{opacity:.35;cursor:not-allowed}.h3p-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.h3p-functional{grid-column:1/-1;padding:9px;border:1px solid #344353;border-radius:10px;background:linear-gradient(145deg,#111b25,#0c141c)}.h3p-functional-title{margin:0 0 8px;color:#e3bd78;font-size:8px;font-weight:900;letter-spacing:.09em}.h3p-functional-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.h3p-resolution{height:31px;min-width:220px;border:1px solid #9b7944;border-radius:7px;background:#171f27;color:#f1d49b;padding:0 8px;font-size:8px;font-weight:850}.h3p-field{min-height:58px;padding:7px;border:1px solid #2d3945;border-radius:8px;background:#101821}.h3p-field.muted{opacity:.48;border-style:dashed;background:#0b1218}.h3p-field.muted label::after{content:" · BRANCH OFF";color:#d0a45c;font-size:7px}.h3p-field.muted input,.h3p-field.muted select{cursor:not-allowed}.h3p-field label{display:block;margin-bottom:5px;color:#9ba8b5;font-size:8px;font-weight:800}.h3p-field input,.h3p-field select{width:100%;height:29px;border:1px solid #43515e;border-radius:6px;background:#0a1118;color:#edf2f6;padding:0 7px;font-size:9px}.h3p-field input[type=checkbox]{width:18px;height:18px;accent-color:#d3a758}.h3p-field small{display:block;margin-top:4px;color:#667786;font-size:7px}.h3p-truth{padding:12px;overflow:auto}.h3p-truth h3{margin:0 0 10px;color:#f0d39e;font:700 14px Georgia,serif}.h3p-truth-row{padding:8px 0;border-bottom:1px solid #26323d}.h3p-truth-row span{display:block;color:#718190;font-size:7px;font-weight:900}.h3p-truth-row b{display:block;margin-top:3px;color:#dce5eb;font:600 9px Consolas,monospace;overflow-wrap:anywhere}.h3p-health{margin-top:10px;padding:9px;border-left:3px solid #68d69a;border-radius:6px;background:#11231c;color:#a9e6c5;font-size:8px;line-height:1.45}.h3p-health.warn{border-color:#e7a14e;background:#2a2014;color:#ffd59a}.h3p-health.error{border-color:#e86767;background:#2d1619;color:#ffb0b0}.h3p-context{margin-bottom:10px;padding:9px;border:1px solid #405064;border-radius:8px;background:#14202c;color:#a9b7c5;font-size:9px}.h3p-context b{color:#f2cf8b}.h3p-question{margin:12px 0 6px;color:#f0cf91;font-size:9px;font-weight:900;letter-spacing:.05em}.h3p-choice-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.h3p-choice{text-align:left}.h3p-choice span{display:block;margin-top:3px;color:#8493a2;font-weight:500;line-height:1.3}.h3p-choice[disabled]{opacity:.34;filter:saturate(.45);cursor:not-allowed;border-style:dashed}.h3p-choice[disabled] span::after{content:" · BRANCH MISSING";color:#e7a14e}.h3p-recipe.active{outline:1px solid #f2c97e;outline-offset:1px}.h3p-flow{padding:10px;border:1px solid #354455;border-radius:9px;background:#0d151e}
   .h3p-recipe.active{border-color:#d0a45c;color:#f6d99d;background:#2b261d;box-shadow:inset 0 0 0 1px #6b5330}.h3p-recipe[disabled]::after{content:" · UNAVAILABLE";color:#e7a14e}.h3p-main[data-section="memory"] .h3p-recipes,.h3p-memory-recipes{padding:9px;border:1px solid #4d79a0;border-radius:9px;background:linear-gradient(135deg,#122838,#101c2a)}.h3p-main[data-section="memory"] .h3p-recipe,.h3p-memory-recipes .h3p-recipe{border-color:#4d83ad;color:#bfe4ff}.h3p-main[data-section="speed"] .h3p-recipes,.h3p-speed-recipes{padding:9px;border:1px solid #9a7140;border-radius:9px;background:linear-gradient(135deg,#302313,#201a14)}.h3p-main[data-section="speed"] .h3p-recipe,.h3p-speed-recipes .h3p-recipe{border-color:#b0844b;color:#ffe0a9}.h3p-delivery-recipes{padding:9px;border:1px solid #5b8a69;border-radius:9px;background:#12251a}
+  .h3p-assets{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.h3p-library-title{grid-column:1/-1;margin-top:8px;padding:9px;border:1px solid #3d5062;border-radius:8px;background:#101a24;color:#e3bd78;font-size:8px;font-weight:900;letter-spacing:.09em}.h3p-library-title small{display:block;margin-top:4px;color:#8499a8;font-weight:500;letter-spacing:0}.h3p-asset{border:1px solid #43576a;border-radius:10px;background:#111d29;padding:8px;min-width:0}.h3p-asset img,.h3p-asset-placeholder{display:block;width:100%;height:145px;object-fit:contain;background:#080e15;border-radius:6px;color:#7e90a0;text-align:center;align-content:center}.h3p-cache-card .h3p-asset-placeholder{height:62px;color:#d7b879;font-weight:900;letter-spacing:.08em}.h3p-asset strong,.h3p-asset small{display:block;overflow-wrap:anywhere;margin:7px 0}.h3p-asset small{color:#8499a8}.h3p-asset-actions{display:flex;flex-wrap:wrap;gap:6px}.h3p-asset-actions button{padding:6px 9px;border:1px solid #a98754;border-radius:6px;background:#222b34;color:#f0d5a5;cursor:pointer}.h3p-asset-actions button.h3p-danger{border-color:#a85656;background:#34191d;color:#ffb5b5}.h3p-asset-actions button:disabled{opacity:.45;cursor:wait}.h3p-asset-status{grid-column:1/-1;color:#a5bac9}
+  .h3p-open-editor{height:30px;padding:0 12px;border:1px solid #d0a45c;border-radius:7px;background:linear-gradient(135deg,#4a371d,#263543);color:#ffe2aa;font-size:8px;font-weight:900;letter-spacing:.06em;cursor:pointer;white-space:nowrap}.h3p-open-editor:hover{border-color:#f2ce88;background:linear-gradient(135deg,#6a4b21,#30485a);color:#fff3d5}.iamccs-h3pro:fullscreen,.iamccs-h3pro.h3p-monitor-open{width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;padding:16px!important;border:0!important;border-radius:0!important}.iamccs-h3pro:fullscreen .h3p-layout,.iamccs-h3pro.h3p-monitor-open .h3p-layout{height:calc(100vh - 66px)!important;grid-template-columns:190px minmax(0,1fr) 330px}.iamccs-h3pro:fullscreen .h3p-head,.iamccs-h3pro.h3p-monitor-open .h3p-head{height:50px}.iamccs-h3pro:fullscreen .h3p-main,.iamccs-h3pro.h3p-monitor-open .h3p-main{padding:16px}.iamccs-h3pro:fullscreen .h3p-grid,.iamccs-h3pro.h3p-monitor-open .h3p-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.iamccs-h3pro:fullscreen .h3p-functional-grid,.iamccs-h3pro.h3p-monitor-open .h3p-functional-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.h3p-monitor-host{position:fixed;inset:0;z-index:2147483640;background:#05080c;display:block;overflow:hidden}.h3p-monitor-host>.iamccs-h3pro{position:absolute;inset:0}.h3p-monitor-host .h3p-open-editor{border-color:#efbf6d;background:#6b4518}@media(max-width:1050px){.iamccs-h3pro:fullscreen .h3p-layout,.iamccs-h3pro.h3p-monitor-open .h3p-layout{grid-template-columns:145px minmax(0,1fr) 260px}.iamccs-h3pro:fullscreen .h3p-grid,.iamccs-h3pro.h3p-monitor-open .h3p-grid,.iamccs-h3pro:fullscreen .h3p-functional-grid,.iamccs-h3pro.h3p-monitor-open .h3p-functional-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
   </style>
-  <div class="h3p-head"><span class="h3p-mark">IAMCCS PRO</span><div><div class="h3p-title">H3 Settings PRO</div><div class="h3p-sub">Render compiler · one queue truth · no editorial duplication</div></div><div class="h3p-mode"><span class="h3p-sub">SHOTBOARD MODE</span><b data-mode>NOT CONNECTED</b></div></div>
+  <div class="h3p-head"><span class="h3p-mark">IAMCCS PRO</span><div><div class="h3p-title">H3 Settings PRO</div><div class="h3p-sub">Render compiler · one queue truth · no editorial duplication</div></div><div class="h3p-mode"><span class="h3p-sub">SHOTBOARD MODE</span><b data-mode>NOT CONNECTED</b></div><button type="button" class="h3p-open-editor" data-open-editor>OPEN EDITOR</button></div>
   <div class="h3p-layout"><nav class="h3p-rail"></nav><main class="h3p-main"><div class="h3p-section-title"></div><div class="h3p-section-note"></div><div class="h3p-context"></div><div class="h3p-recipes"></div><div class="h3p-grid" data-grid></div></main><aside class="h3p-truth"><h3>Queue Truth</h3><div class="h3p-truth-list"></div><div class="h3p-health"></div></aside></div>`;
   const q = (selector) => root.querySelector(selector); let active = String(node.properties?.iamccs_h3_settings_pro_active_section || "assistant"), lastMode = "";
+  const openEditor = q("[data-open-editor]");
+  let monitorHost = null, monitorPlaceholder = null;
+  let editorRequestedOpen = false;
+  const monitorOpen = () => document.fullscreenElement === root || root.classList.contains("h3p-monitor-open");
+  const syncOpenEditor = () => {
+    const open = editorRequestedOpen || monitorOpen();
+    openEditor.textContent = open ? "CLOSE EDITOR" : "OPEN EDITOR";
+    openEditor.title = open ? "Return IAMCCS Settings PRO to the node" : "Open IAMCCS Settings PRO across the complete monitor";
+    openEditor.setAttribute("aria-pressed", String(open));
+  };
+  const closeMonitorFallback = () => {
+    if (!root.classList.contains("h3p-monitor-open")) return;
+    root.classList.remove("h3p-monitor-open");
+    if (monitorPlaceholder?.parentNode) monitorPlaceholder.parentNode.insertBefore(root, monitorPlaceholder);
+    monitorPlaceholder?.remove(); monitorHost?.remove();
+    monitorPlaceholder = null; monitorHost = null;
+    syncOpenEditor();
+  };
+  const openMonitorFallback = () => {
+    if (root.classList.contains("h3p-monitor-open")) return;
+    monitorPlaceholder = document.createComment("IAMCCS Settings PRO monitor placeholder");
+    root.parentNode?.insertBefore(monitorPlaceholder, root);
+    monitorHost = document.createElement("div"); monitorHost.className = "h3p-monitor-host";
+    document.body.appendChild(monitorHost); monitorHost.appendChild(root);
+    root.classList.add("h3p-monitor-open"); syncOpenEditor();
+  };
+  const ensureEditorOpen = () => {
+    if (!editorRequestedOpen || monitorOpen()) { syncOpenEditor(); return; }
+    // Browser confirmation dialogs may dismiss native fullscreen. Preserve the
+    // user's editor intent with the full-monitor overlay until CLOSE EDITOR.
+    openMonitorFallback();
+  };
+  const preserveEditorAfterRefresh = () => {
+    if (!editorRequestedOpen) { syncOpenEditor(); return; }
+    window.setTimeout(ensureEditorOpen, 0);
+  };
+  const closeSettingsEditor = async () => {
+    editorRequestedOpen = false;
+    if (document.fullscreenElement === root) {
+      try { await document.exitFullscreen(); } catch {}
+    }
+    closeMonitorFallback(); syncOpenEditor();
+  };
+  const toggleSettingsEditor = async () => {
+    if (editorRequestedOpen || monitorOpen()) { await closeSettingsEditor(); return; }
+    editorRequestedOpen = true;
+    try {
+      await root.requestFullscreen({ navigationUI: "hide" });
+    } catch {
+      openMonitorFallback();
+    }
+    ensureEditorOpen();
+  };
+  const onSettingsFullscreenChange = () => {
+    if (editorRequestedOpen && !monitorOpen()) window.setTimeout(ensureEditorOpen, 0);
+    else syncOpenEditor();
+  };
+  openEditor.onclick = (event) => { event.preventDefault(); event.stopPropagation(); void toggleSettingsEditor(); };
+  document.addEventListener("fullscreenchange", onSettingsFullscreenChange);
+  syncOpenEditor();
   // Canvas wheel handlers must not consume the panel's native scrolling.
   root.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
   const scrollStyle = document.createElement("style");
@@ -1031,6 +1130,10 @@ function mount(node) {
     const value = String(mode).toLowerCase();
     const endpoint = String(widget(node, "longvid_terminal_endpoint_mode")?.value || "hard_image").toLowerCase();
     const hd = endpoint === "pianosequenza_hd";
+    if (name.startsWith("h3_pixel_tiled_")) {
+      if (String(widget(node, "upscale_mode")?.value || "off") !== "pixel_tiled_low_vram") return false;
+      if (name !== "h3_pixel_tiled_method" && String(widget(node, "h3_pixel_tiled_method")?.value || "cpu_lanczos") !== "model_tiled") return false;
+    }
     if (["longvid_terminal_endpoint_mode", "longvid_pianosequenza_2stage_enabled", "longvid_pianosequenza_stage_profile"].includes(name) && value !== "longvid_guides") return false;
     if (name === "longvid_pianosequenza_stage_profile" && (hd || !Boolean(widget(node, "longvid_pianosequenza_2stage_enabled")?.value))) return false;
     if (name === "longvid_guide_window_policy" && value !== "longvid_guides") return false;
@@ -1044,7 +1147,7 @@ function mount(node) {
   function visibleGroups(mode) {
     // Keep the entry discoverable even when automatic timeline mode resolution
     // is pending. The panel itself checks for a connected continuation branch.
-    return GROUPS.filter((group) => group.id === 'ahead' || group.assistant || group.dynamic || group.fields.some((name) => widget(node, name)));
+    return GROUPS.filter((group) => ["ahead", "continuation", "refmod"].includes(group.id) || group.assistant || group.dynamic || group.fields.some((name) => widget(node, name)));
   }
   function fieldNames(group, mode) {
     if (!group.dynamic) return group.fields.filter((name) => widget(node, name) && fieldRelevant(name, mode));
@@ -1104,15 +1207,28 @@ function mount(node) {
     if (Boolean(widget(node, "h3_controlnet_enabled")?.value) && !branchGate(node, "h3_controlnet_enabled").available) issues.push(["error", "H3 Fun ControlNet is enabled, but its input branch is not connected."]);
     if (Boolean(widget(node, "face_detailer_enabled")?.value) && !branchGate(node, "face_detailer_enabled").available) issues.push(["error", "Face Detailer is enabled, but its optional branch is not connected."]);
     const upscaleMode = String(widget(node, "upscale_mode")?.value || "off").toLowerCase();
+    const externalContinuation = Boolean(widget(node,"h3_continuation_enabled")?.value);
+    if (externalContinuation && !String(widget(node,"h3_continuation_checkpoint")?.value || "").trim()) issues.push(["error", "START FROM SAVED AV is enabled, but no continuation checkpoint is selected."]);
+    if (externalContinuation && /ref2v|lipsync_ref2vid/.test(String(mode || "").toLowerCase())) issues.push(["error", "External saved-AV continuation is FL2VA-family only; REF2VA/Ref2Vid LipSync cannot share that denoiser branch."]);
+    if (externalContinuation && upscaleMode === "h3_fast_latent_2pass" && Boolean(widget(node,"upscale_enabled")?.value)) issues.push(["error", "External saved-AV continuation cannot use Fast Latent 2-Pass yet because the saved checkpoint has the native latent grid. Use Native or Pixel Safe delivery."]);
     if (Boolean(widget(node, "upscale_enabled")?.value)) {
       const field = upscaleMode.includes("ltx") ? "ltx_seam_safe" : upscaleMode.includes("wan") ? "wan_upscale_denoise" : upscaleMode.startsWith("h3_") ? "h3_upres_model_name" : "";
       if (field && !branchGate(node, field).available) issues.push(["error", `${friendly(upscaleMode)} is enabled, but its delivery branch is not connected.`]);
+      if (upscaleMode === "h3_fast_latent_2pass") issues.push(["warn", "Learned 3D lift saves Stage-1 render time, not Stage-2 VRAM. The target-resolution H3 refine still runs; on 12 GB start with a short 124F clip and a modest target canvas. H3 2-stage SAFE DELIVERY skips the HIGH H3 forward."]);
     }
-    if (modeContext(mode) === "face" && !String(widget(node, "h3_faceswap_birefnet_model")?.value || "")) issues.push(["error", "Face Swap requires BiRefNet in background_removal."]);
+    if (modeContext(mode) === "face" && !String(widget(node, "h3_faceswap_sam_model")?.value || "")) issues.push(["error", "SAM3 Subject Swap requires an installed SAM3 checkpoint, unless a complete source mask is connected to the swap input."]);
     issues.push(...selectedH3AssetCompatibility(node, mode));
+    const longvidGuidesMode = String(mode || "").toLowerCase() === "longvid_guides";
     const endpoint = String(widget(node, "longvid_terminal_endpoint_mode")?.value || "hard_image").toLowerCase();
-    if (endpoint === "pianosequenza_hd" && Boolean(widget(node, "longvid_pianosequenza_2stage_enabled")?.value)) {
+    if (longvidGuidesMode && endpoint === "pianosequenza_hd" && Boolean(widget(node, "longvid_pianosequenza_2stage_enabled")?.value)) {
       issues.push(["warn", "PIANOSEQUENZA HD owns its fixed two-stage contract; the separate Multi-Stage Spatial toggle is preserved but ignored while HD is selected."]);
+    }
+    if (longvidGuidesMode
+        && Boolean(widget(node, "longvid_pianosequenza_2stage_enabled")?.value)
+        && String(widget(node, "longvid_pianosequenza_stage_profile")?.value || "2_stage_full") === "2_stage_full"
+        && ["vram8", "vram12"].includes(selectedMemory(node))
+        && Number(widget(node, "width")?.value || 0) * Number(widget(node, "height")?.value || 0) >= 1280 * 768) {
+      issues.push(["warn", "12 GB OOM risk: the learned LOW→HIGH lift is not the expensive part; the HIGH H3 forward at 1280×768+ is. Reduce the HIGH canvas/window or choose 2 STAGE SAFE DELIVERY (lift only, no HIGH H3 refinement)."]);
     }
     if (String(mode) === "longvid_guides") {
       const pixels = Number(widget(node,"width")?.value || 0) * Number(widget(node,"height")?.value || 0);
@@ -1222,7 +1338,7 @@ function mount(node) {
       const recipes=document.createElement('div');recipes.className='h3p-recipes';
       addRecipe(recipes,'NATIVE DELIVERY · no upscale / no interpolation','native-delivery');
       if(mode!=='latent_go_ahead'){addRecipe(recipes,'12–16 GB · 209-frame window','vram12');addRecipe(recipes,'16–24 GB · 294-frame window','vram16');addRecipe(recipes,'24 GB+ · 362-frame window','vram24');}
-      const caution=document.createElement('p');caution.textContent='Memory presets are starting points, not VRAM guarantees. They change window and memory controls, not resolution. LatentGoAhead supports compatible accelerators; Fused is T2VA only and progressive sampling cannot preserve its audio mask. Face Swap requires two identity views; ControlNet requires a compatible control model and real preprocessed frames.';grid.append(recipes,caution);
+      const caution=document.createElement('p');caution.textContent='Memory presets are starting points, not VRAM guarantees. They change window and memory controls, not resolution. LatentGoAhead supports compatible accelerators; Fused is T2VA only and progressive sampling cannot preserve its audio mask. SAM3 Subject Swap uses one Picture 1 by default; a second identity view enables the optional BiRefNet legacy card. ControlNet requires a compatible control model and real preprocessed frames.';grid.append(recipes,caution);
     }
     ask("2 · WHAT MEDIA DO YOU HAVE?"); const media = document.createElement("div"); media.className = "h3p-recipes";
     const mediaText = String(mode).startsWith("t2") ? "PROMPT ONLY" : String(mode).includes("controlnet") ? "PREPROCESSED CONTROL VIDEO" : String(mode).includes("face_swap") ? "SOURCE VIDEO + IDENTITY REFERENCES" : String(mode).includes("ref2") ? "ONE OR MORE REFERENCE IMAGES" : String(mode).includes("fl2") ? "FIRST + LAST IMAGE" : String(mode).includes("i2") ? "OPENING IMAGE" : "SHOTBOARD MEDIA";
@@ -1244,14 +1360,208 @@ function mount(node) {
     addRecipe(delivery, "FACE REFINE · TOGGLE", "face-refine", true, selectedFace);
     addRecipe(delivery, "NATIVE DELIVERY", "native-delivery", true, selectedFinish === "native-delivery");
     addRecipe(delivery, "H3 2-PASS UPRES", "upres", branchGate(node, "h3_upres_model_name").available && deliveryModeAvailable(node, "h3_fast_latent_2pass"), selectedFinish === "upres");
+    addRecipe(delivery, "PIXEL SAFE · LOW VRAM", "pixel-safe", deliveryModeAvailable(node, "pixel_tiled_low_vram"), selectedFinish === "pixel-safe");
     addRecipe(delivery, "H3 PIXEL REFINE", "h3-pixel", deliveryModeAvailable(node, "h3_pixel_refine"), selectedFinish === "h3-pixel");
     addRecipe(delivery, "LTX 2.3 MASTER", "ltx-master", deliveryModeAvailable(node, "ltx23"), selectedFinish === "ltx-master");
     addRecipe(delivery, "LTX 2.3 PER-SHOT", "ltx-per-shot", deliveryModeAvailable(node, "ltx23_per_chunk"), selectedFinish === "ltx-per-shot");
     addRecipe(delivery, "RTX FINAL", "rtx-final", deliveryModeAvailable(node, "rtx_final"), selectedFinish === "rtx-final");
     grid.append(delivery);
   }
+  async function renderAssetLibrary(kind, grid) {
+    grid.replaceChildren();
+    const status = document.createElement("div"); status.className = "h3p-asset-status"; status.textContent = "Reading saved latent metadata…"; grid.append(status);
+    try {
+      const response = await fetch(`/api/iamccs/h3/assets?kind=${kind}`, {cache:"no-store"});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      if (active !== kind) return;
+      grid.replaceChildren();
+      if (!data.items?.length) { status.textContent = kind === "continuation" ? "No saved AV checkpoint. Connect IAMCCS Continuation Save after the accepted native sampler latent." : "No saved RefMod. Save a RefMod in models/refmods, then use IAMCCS RefMod Preview Cache with its matching H3 VAE."; grid.append(status); return; }
+      for (const item of data.items) {
+        const card = document.createElement("article"); card.className = "h3p-asset";
+        if (item.preview) {
+          const image = document.createElement("img");
+          image.src = `/api/iamccs/h3/assets/preview?${new URLSearchParams({kind,root:String(item.root),path:item.path})}`;
+          image.alt = `${item.name} latent preview`; card.append(image);
+        } else { const placeholder = document.createElement("div"); placeholder.className = "h3p-asset-placeholder"; placeholder.textContent = "PREVIEW NOT CACHED"; card.append(placeholder); }
+        const name = document.createElement("strong"); name.textContent = item.name;
+        const detail = document.createElement("small"); detail.textContent = `${item.detail} · ${item.size_mb} MB · ${item.path}`;
+        const facts = document.createElement("small"); facts.textContent = Array.isArray(item.facts) ? item.facts.filter(Boolean).join(" · ") : "";
+        facts.style.color = "#d7b879";
+        const prompt = document.createElement("small"); prompt.textContent = item.prompt ? `PROMPT · ${item.prompt}` : "";
+        prompt.style.cssText = "white-space:pre-wrap;max-height:72px;overflow:auto";
+        const actions = document.createElement("div"); actions.className = "h3p-asset-actions";
+        if (kind === "continuation") {
+          const select = document.createElement("button"); select.textContent = String(widget(node,"h3_continuation_checkpoint")?.value || "").endsWith(item.path) ? "SELECTED" : "USE IN PRO";
+          select.onclick = () => { setValue(node,"h3_continuation_checkpoint",`IAMCCS/MiniMaxH3/CONTINUATION/${item.path}`); setValue(node,"h3_continuation_enabled",true); node._iamccsSettingsProRefresh?.(); };
+          actions.append(select);
+        } else {
+          const modName = item.path.replace(/\.safetensors$/i, "");
+          const select = document.createElement("button");
+          select.textContent = String(widget(node,"h3_refmod_name")?.value || "") === modName ? "SELECTED" : "USE IN PRO";
+          select.onclick = () => {
+            setValue(node,"h3_refmod_name",modName);
+            setValue(node,"h3_refmod_enabled",true);
+            node._iamccsSettingsProRefresh?.();
+          };
+          actions.append(select);
+        }
+        const copy = document.createElement("button"); copy.textContent = "COPY PATH"; copy.onclick = async () => {
+          const path = kind === "continuation" ? `IAMCCS/MiniMaxH3/CONTINUATION/${item.path}` : item.path.replace(/\.safetensors$/i, "");
+          try { await navigator.clipboard.writeText(path); copy.textContent = "COPIED"; } catch { window.prompt("Copy asset path", path); }
+        };
+        const rename = document.createElement("button"); rename.textContent = "RENAME"; rename.onclick = async () => {
+          const next = window.prompt(kind === "refmod" ? "New RefMod filename (update any saved workflow that refers to the old name):" : "New checkpoint filename:", item.name);
+          if (!next || next === item.name) return;
+          try {
+            const result = await fetch("/api/iamccs/h3/assets/rename", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({kind,root:item.root,path:item.path,name:next})});
+            const payload = await result.json(); if (!result.ok) throw new Error(payload.error || `HTTP ${result.status}`);
+            node._iamccsSettingsProRefresh?.();
+          } catch (error) { window.alert(`Rename failed: ${error.message}`); }
+        };
+        const purgeAsset = document.createElement("button"); purgeAsset.textContent = "PURGE LATENT"; purgeAsset.className = "h3p-danger"; purgeAsset.onclick = async () => {
+          if (!window.confirm(`Permanently delete only the latent ${item.name}? Its preview and IAMCCS lineage manifest are preserved.`)) return;
+          purgeAsset.disabled = true; purgeAsset.textContent = "PURGING…";
+          try {
+            const result = await fetch("/api/iamccs/h3/assets/purge", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({kind,root:item.root,path:item.path,scope:"asset"})});
+            const payload = await result.json(); if (!result.ok) throw new Error(payload.error || `HTTP ${result.status}`);
+            if (kind === "continuation" && String(widget(node,"h3_continuation_checkpoint")?.value || "").endsWith(item.path)) {
+              setValue(node,"h3_continuation_checkpoint",""); setValue(node,"h3_continuation_enabled",false);
+            }
+            const modName = item.path.replace(/\.safetensors$/i, "");
+            if (kind === "refmod" && String(widget(node,"h3_refmod_name")?.value || "") === modName) {
+              setValue(node,"h3_refmod_name",""); setValue(node,"h3_refmod_enabled",false);
+            }
+            node._iamccsSettingsProRefresh?.();
+          } catch (error) { purgeAsset.disabled = false; purgeAsset.textContent = "PURGE ASSET"; window.alert(`Asset purge failed: ${error.message}`); }
+        };
+        actions.append(copy, rename, purgeAsset); card.append(name,detail,facts,prompt,actions); grid.append(card);
+      }
+    } catch (error) { status.textContent = `Library unavailable: ${error.message}`; }
+    finally { preserveEditorAfterRefresh(); }
+  }
+  async function renderCacheLibrary(grid) {
+    grid.replaceChildren();
+    const status = document.createElement("div"); status.className = "h3p-asset-status"; status.textContent = "Reading IAMCCS disk caches…"; grid.append(status);
+    try {
+      const response = await fetch("/api/iamccs/h3/caches", {cache:"no-store"});
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      if (active !== "continuation" && active !== "refmod") return;
+      grid.replaceChildren();
+      const items = Array.isArray(data.items) ? data.items : [];
+      if (!items.length) { status.textContent = "No purgeable IAMCCS LongVid / latent-upres / disk-bridge cache files found."; grid.append(status); return; }
+
+      const totalMb = items.reduce((sum,item)=>sum + Number(item.size_mb || 0), 0);
+      const toolbar = document.createElement("div"); toolbar.className = "h3p-asset-actions"; toolbar.style.cssText = "display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:6px 0 10px";
+      const selectAllLabel = document.createElement("label"); selectAllLabel.style.cssText = "display:flex;align-items:center;gap:6px;font-size:11px";
+      const selectAll = document.createElement("input"); selectAll.type = "checkbox";
+      selectAllLabel.append(selectAll, document.createTextNode(`SELECT ALL · ${items.length} files · ${totalMb.toFixed(1)} MB`));
+      const purgeSelected = document.createElement("button"); purgeSelected.className = "h3p-danger"; purgeSelected.textContent = "PURGE SELECTED"; purgeSelected.disabled = true;
+      toolbar.append(selectAllLabel, purgeSelected); grid.append(toolbar);
+
+      const selected = new Map();
+      const refreshSelection = () => {
+        const checks = [...selected.values()];
+        const count = checks.filter(c=>c.checked).length;
+        purgeSelected.disabled = count === 0;
+        purgeSelected.textContent = count ? `PURGE SELECTED (${count})` : "PURGE SELECTED";
+        selectAll.checked = checks.length > 0 && count === checks.length;
+        selectAll.indeterminate = count > 0 && count < checks.length;
+      };
+      const purgeOne = async (item) => {
+        const result = await fetch("/api/iamccs/h3/caches/purge", {method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({root:item.root,path:item.path})});
+        const payload = await result.json(); if (!result.ok) throw new Error(payload.error || `HTTP ${result.status}`);
+      };
+
+      const groups = new Map();
+      for (const item of items) {
+        const key = String(item.category || "OTHER CACHE");
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(item);
+      }
+      for (const [category, groupItems] of groups) {
+        const details = document.createElement("details"); details.className = "h3p-cache-group"; details.style.cssText = "border:1px solid #36424b;border-radius:8px;margin:5px 0;background:#11191f";
+        const summary = document.createElement("summary"); summary.style.cssText = "cursor:pointer;padding:9px 11px;font-weight:600;display:flex;align-items:center;gap:8px";
+        const groupMb = groupItems.reduce((sum,item)=>sum + Number(item.size_mb || 0), 0);
+        const groupToggle = document.createElement("input"); groupToggle.type = "checkbox"; groupToggle.title = `Select all ${category} cache files`;
+        groupToggle.onclick = (event) => event.stopPropagation();
+        const groupText = document.createElement("span"); groupText.textContent = `${category} · ${groupItems.length} file(s) · ${groupMb.toFixed(1)} MB`;
+        summary.append(groupToggle,groupText);
+        details.append(summary);
+        const rows = document.createElement("div"); rows.style.cssText = "display:flex;flex-direction:column;gap:4px;padding:6px 10px 10px";
+        for (const item of groupItems) {
+          const row = document.createElement("label"); row.style.cssText = "display:grid;grid-template-columns:18px minmax(120px,1fr) auto;gap:8px;align-items:center;padding:5px 6px;border-top:1px solid #26323a;font-size:10px";
+          const check = document.createElement("input"); check.type = "checkbox"; selected.set(`${item.root}:${item.path}`, check); check.onchange = refreshSelection;
+          const text = document.createElement("span"); const stamp = item.modified_at ? new Date(item.modified_at * 1000).toLocaleString() : "date unavailable"; text.textContent = `${item.name} · ${item.size_mb} MB · ${stamp}`; text.title = item.path;
+          const purge = document.createElement("button"); purge.type = "button"; purge.className = "h3p-danger"; purge.textContent = "PURGE"; purge.onclick = async (event) => { event.preventDefault(); event.stopPropagation(); if (!window.confirm(`Delete this IAMCCS cache file?\n\n${item.path}`)) return; purge.disabled = true; try { await purgeOne(item); renderCacheLibrary(grid); } catch (error) { purge.disabled = false; window.alert(`Cache purge failed: ${error.message}`); } };
+          row.append(check,text,purge); rows.append(row);
+        }
+        groupToggle.onchange = () => {
+          for (const item of groupItems) {
+            const check = selected.get(`${item.root}:${item.path}`);
+            if (check) check.checked = groupToggle.checked;
+          }
+          refreshSelection();
+        };
+        details.append(rows); grid.append(details);
+      }
+      selectAll.onchange = () => { for (const check of selected.values()) check.checked = selectAll.checked; refreshSelection(); };
+      purgeSelected.onclick = async () => {
+        const chosen = items.filter(item => selected.get(`${item.root}:${item.path}`)?.checked);
+        if (!chosen.length) return;
+        if (!window.confirm(`Permanently delete ${chosen.length} selected IAMCCS cache file(s)? Finished videos, continuation latents and RefMods are not part of this cache list.`)) return;
+        purgeSelected.disabled = true; purgeSelected.textContent = "PURGING…";
+        try { for (const item of chosen) await purgeOne(item); renderCacheLibrary(grid); }
+        catch (error) { purgeSelected.disabled = false; window.alert(`Cache purge failed: ${error.message}`); }
+      };
+      refreshSelection();
+    } catch (error) { grid.replaceChildren(status); status.textContent = `Cache library unavailable: ${error.message}`; }
+    finally { preserveEditorAfterRefresh(); }
+  }
   function renderMain(mode) {
     q(".h3p-main").dataset.section = active;
+    if (active === "continuation" || active === "refmod") {
+      const kind = active;
+      q(".h3p-section-title").textContent = kind === "continuation" ? "CONTINUATION · AV CHECKPOINTS" : "REFMOD · REFERENCE LATENTS";
+      q(".h3p-section-note").textContent = kind === "continuation" ? "External AV continuation is Shotboard-mode agnostic: TERMINAL reuses the real final AV latent boundary of the selected checkpoint, then the current Shotboard mode authors only the new visible shot. RUN & GUN builds A+B(+C...); SOFT AV is the duration-preserving default and DIRECT remains selectable." : "Select a saved RefMod and enable automatic injection into native H3 conditioning. The installed provider loads and applies it once per generated chunk; leave OFF to preserve the old route.";
+      q(".h3p-context").textContent = kind === "continuation" ? "Use HANDOVER = TERMINAL for a literal end-to-next continuation. I2V, FL2VA and LongVid may stay authored as they are; the external continuation layer owns only the hidden AV head. AUTO remains available for freeze-aware landing diagnostics." : "RefMod is appearance/voice reference context, not temporal continuation. Do not also connect an external Apply H3 RefMod to the same branch.";
+      const grid = q("[data-grid]"); grid.className = "h3p-grid"; grid.replaceChildren();
+      if (kind === "continuation") {
+        const controls = document.createElement("section"); controls.className = "h3p-functional";
+        const heading = document.createElement("div"); heading.className = "h3p-functional-title"; heading.textContent = "QUEUE VALUES · CONNECT SHOTBOARD CINE LINX TO IAMCCS LOAD + CONTINUE";
+        const fields = document.createElement("div"); fields.className = "h3p-functional-grid";
+        for (const name of ["h3_continuation_enabled", "h3_continuation_save_enabled", "h3_continuation_checkpoint", "h3_continuation_context_frames", "h3_continuation_handover_mode", "h3_continuation_manual_tail_frames", "h3_continuation_visual_handover", "h3_continuation_run_and_gun_enabled", "h3_continuation_run_and_gun_join", "h3_continuation_soft_video_frames", "h3_continuation_soft_video_curve", "h3_continuation_soft_audio_ms"]) {
+          if (name === "h3_continuation_manual_tail_frames" && String(widget(node,"h3_continuation_handover_mode")?.value || "auto") !== "manual") continue;
+          if (name === "h3_continuation_run_and_gun_join" && !Boolean(widget(node,"h3_continuation_run_and_gun_enabled")?.value)) continue;
+          if (["h3_continuation_soft_video_frames", "h3_continuation_soft_video_curve", "h3_continuation_soft_audio_ms"].includes(name) && (!Boolean(widget(node,"h3_continuation_run_and_gun_enabled")?.value) || String(widget(node,"h3_continuation_run_and_gun_join")?.value || "soft_av") !== "soft_av")) continue;
+          const control = makeControl(name); if (control) fields.append(control);
+        }
+        controls.append(heading,fields); grid.append(controls);
+      } else {
+        const controls = document.createElement("section"); controls.className = "h3p-functional";
+        const heading = document.createElement("div"); heading.className = "h3p-functional-title"; heading.textContent = "AUTOMATIC REFMOD · QUEUE VALUES";
+        const fields = document.createElement("div"); fields.className = "h3p-functional-grid";
+        for (const name of ["h3_refmod_enabled", "h3_refmod_name", "h3_refmod_strength", "h3_refmod_retention", "h3_refmod_max_tokens"]) {
+          const control = makeControl(name); if (control) fields.append(control);
+        }
+        controls.append(heading,fields); grid.append(controls);
+      }
+      const libraryTitle = document.createElement("div"); libraryTitle.className = "h3p-library-title"; libraryTitle.textContent = kind === "continuation" ? "SAVED CONTINUATION LATENTS" : "SAVED REFMOD LATENTS";
+      const libraryNote = document.createElement("small"); libraryNote.textContent = "PURGE LATENT removes only the selected safetensors asset. Preview PNG and IAMCCS lineage/metadata manifests remain protected."; libraryTitle.append(libraryNote);
+      const library = document.createElement("div"); library.className = "h3p-assets";
+      const cacheDetails = document.createElement("details"); cacheDetails.className = "h3p-cache-maintenance"; cacheDetails.style.cssText = "grid-column:1/-1;margin-top:10px";
+      const cacheSummary = document.createElement("summary"); cacheSummary.className = "h3p-library-title"; cacheSummary.style.cursor = "pointer"; cacheSummary.textContent = "CACHE MAINTENANCE · OPEN / PURGE";
+      const cacheNote = document.createElement("small"); cacheNote.style.cssText = "display:block;padding:4px 0 8px"; cacheNote.textContent = "Collapsed by default. Cache files are grouped in dropdowns with selection toggles. Continuation latent cards and RefMod previews remain visible above.";
+      const cacheLibrary = document.createElement("div"); cacheLibrary.className = "h3p-assets";
+      cacheDetails.append(cacheSummary,cacheNote,cacheLibrary);
+      grid.append(libraryTitle,library,cacheDetails);
+      const recipes = q(".h3p-recipes"); recipes.replaceChildren();
+      const reload = document.createElement("button"); reload.className = "h3p-recipe"; reload.textContent = "REFRESH LIBRARY"; reload.onclick = () => renderAssetLibrary(kind,library); recipes.append(reload);
+      const reloadCaches = document.createElement("button"); reloadCaches.className = "h3p-recipe"; reloadCaches.textContent = "OPEN / REFRESH CACHES"; reloadCaches.onclick = () => { cacheDetails.open = true; renderCacheLibrary(cacheLibrary); }; recipes.append(reloadCaches);
+      cacheDetails.addEventListener("toggle", () => { if (cacheDetails.open && !cacheLibrary.dataset.loaded) { cacheLibrary.dataset.loaded = "1"; renderCacheLibrary(cacheLibrary); } });
+      renderAssetLibrary(kind,library); return;
+    }
     if(active === 'ahead') {
       q('.h3p-section-title').textContent='AHEAD CONTROL ROOM';
       q('.h3p-section-note').textContent='Controls for the connected LatentGoAhead branch and completed checkpoints.';
@@ -1265,7 +1575,7 @@ function mount(node) {
       : group.contextual === "face" ? (() => {
           const swap = branchGate(node, "h3_faceswap_sam_model");
           const detailer = branchGate(node, "face_detailer_enabled");
-          return { available: swap.available || detailer.available, reason: "Connect the optional Face Swap or Face Detailer branch to activate these controls." };
+          return { available: swap.available || detailer.available, reason: "Connect the optional SAM3 Subject Swap or Face Detailer branch to activate these controls." };
         })() : null;
     q(".h3p-section-note").textContent = group.assistant ? "Answer in order; every accepted tag updates Queue Truth immediately."
       : contextualGate && !contextualGate.available ? `Optional branch is not connected. Values are preserved but muted. ${contextualGate.reason}`
@@ -1278,12 +1588,13 @@ function mount(node) {
       help.textContent = "Choose ONE speed recipe. Native: quality baseline; PDD: 8-step distillation; FastH3: 6 steps; SLA: 4-step sparse-attention recipe; Fused ConvRot: baked 4-step model, no extra Turbo/PDD LoRA. Memory presets only change memory, not speed. Manual overrides are optional below.";
       recipes.append(help);
     }
-    const recipeSet = active === "memory" ? [["≤ 8–12 GB · 124F / 2048 ROWS", "vram8"], ["12–16 GB · 209F / 4096 ROWS", "vram12"], ["16–24 GB · 294F / 8192 ROWS", "vram16"], ["24 GB+ · 362F / 16384 ROWS", "vram24"]] : active === "speed" ? [["NATIVE QUALITY · 20 STEP", "native"], ["PDD · 8 STEP", "pdd"], ["FASTH3 · 6 STEP", "fasth3"], ["SLA · 4 STEP", "sla"], ["FUSED FAST · T2VA ONLY", "fused"]] : active === "control" ? [["ENABLE + SELECT INSTALLED MODEL", "control"]] : active === "face" ? [["SAFE FACE SWAP", "face"]] : active === "face_refine" ? [["FACE REFINE · TOGGLE", "face-refine"]] : active === "finish" ? [["NATIVE DELIVERY", "native-delivery"], ["H3 2-PASS UPRES", "upres"], ["H3 PIXEL REFINE", "h3-pixel"], ["LTX 2.3 MASTER", "ltx-master"], ["LTX 2.3 PER-SHOT", "ltx-per-shot"], ["RTX FINAL", "rtx-final"]] : [];
+    const recipeSet = active === "memory" ? [["≤ 8–12 GB · 124F / 2048 ROWS", "vram8"], ["12–16 GB · 209F / 4096 ROWS", "vram12"], ["16–24 GB · 294F / 8192 ROWS", "vram16"], ["24 GB+ · 362F / 16384 ROWS", "vram24"]] : active === "speed" ? [["NATIVE QUALITY · 20 STEP", "native"], ["PDD · 8 STEP", "pdd"], ["FASTH3 · 6 STEP", "fasth3"], ["SLA · 4 STEP", "sla"], ["FUSED FAST · T2VA ONLY", "fused"]] : active === "control" ? [["ENABLE + SELECT INSTALLED MODEL", "control"]] : active === "face" ? [["SAM3 SUBJECT SWAP · SAFE DEFAULTS", "face"]] : active === "face_refine" ? [["FACE REFINE · TOGGLE", "face-refine"]] : active === "finish" ? [["NATIVE DELIVERY", "native-delivery"], ["PIXEL SAFE · LOW VRAM", "pixel-safe"], ["H3 2-PASS UPRES", "upres"], ["H3 PIXEL REFINE", "h3-pixel"], ["LTX 2.3 MASTER", "ltx-master"], ["LTX 2.3 PER-SHOT", "ltx-per-shot"], ["RTX FINAL", "rtx-final"]] : [];
     recipeSet.forEach(([label, id]) => {
-      const deliveryRecipe = ["native-delivery", "upres", "h3-pixel", "ltx-master", "ltx-per-shot", "rtx-final", "face-refine"].includes(id);
+      const deliveryRecipe = ["native-delivery", "pixel-safe", "upres", "h3-pixel", "ltx-master", "ltx-per-shot", "rtx-final", "face-refine"].includes(id);
       const deliveryAvailable = id === "upres"
         ? branchGate(node, "h3_upres_model_name").available && deliveryModeAvailable(node, "h3_fast_latent_2pass")
         : id === "h3-pixel" ? deliveryModeAvailable(node, "h3_pixel_refine")
+        : id === "pixel-safe" ? deliveryModeAvailable(node, "pixel_tiled_low_vram")
         : id === "ltx-master" ? deliveryModeAvailable(node, "ltx23")
         : id === "ltx-per-shot" ? deliveryModeAvailable(node, "ltx23_per_chunk")
         : id === "rtx-final" ? deliveryModeAvailable(node, "rtx_final")
@@ -1291,11 +1602,8 @@ function mount(node) {
       addRecipe(recipes, label, id, deliveryRecipe ? deliveryAvailable : accelerationAvailable(node,id,mode));
     });
     if (active === "overview") {
-      normalize2StageResolutionLink(node);
+      normalize2StageResolutionLink(node, mode);
   normalizePianosequenzaStageControls(node);
-      const linkedNote = document.createElement("p");
-      linkedNote.textContent = "Pianosequenza Multi-Stage: enable the LOW/HIGH link below to use a legal pair such as 640×384 → 1280×768. The HIGH size becomes the native canvas; LOW is used only by stage 1.";
-      recipes.append(linkedNote);
       const format = document.createElement("select"); format.className = "h3p-resolution";
       const current = `${Number(widget(node,"width")?.value || 0)}x${Number(widget(node,"height")?.value || 0)}`;
       format.add(new Option("CUSTOM · keep current", "custom"));
@@ -1303,9 +1611,59 @@ function mount(node) {
       format.value = [...format.options].some((option) => option.value === current) ? current : "custom";
       format.onchange = () => { if (format.value === "custom") return; const [width,height] = format.value.split("x").map(Number); setValue(node,"width",width,false); setValue(node,"height",height,false); setValue(node,"image_width",width,false); setValue(node,"image_height",height,false); document.dispatchEvent(new CustomEvent("iamccs:h3-settings-changed", {detail:{source_node_id:node.id,recipe:"resolution"}})); refresh(); };
       recipes.prepend(format);
+      node.properties ||= {};
+      const fastOn = Boolean(widget(node,"upscale_enabled")?.value) && String(widget(node,"upscale_mode")?.value) === "h3_fast_latent_2pass";
+      format.disabled = fastOn;
+      format.title = fastOn ? "Choose the linked LOW→HIGH pair below, or switch off H3 2-PASS for a custom native canvas." : "Native H3 canvas";
+      const stage = document.createElement("div"); stage.className = "h3p-functional";
+      stage.style.cssText = "display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin:0 0 10px;width:100%";
+      const stageLabel = document.createElement("label"); stageLabel.style.cssText = "color:#f0d39e;font-size:10px;font-weight:800;display:flex;align-items:center;gap:6px";
+      const stageToggle = document.createElement("input"); stageToggle.type = "checkbox"; stageToggle.checked = fastOn;
+      stageLabel.append(stageToggle, "H3 2-PASS UPSCALE · LOW → HIGH");
+      const stagePair = document.createElement("select"); stagePair.className = "h3p-resolution";
+      H3_FAST_2PASS_PAIRS.forEach(([label, lowW, lowH, highW, highH]) => stagePair.add(new Option(label, `${lowW}x${lowH}->${highW}x${highH}`)));
+      const actualPair = `${Number(widget(node,"width")?.value || 0)}x${Number(widget(node,"height")?.value || 0)}->${Number(widget(node,"h3_upres_tile_width")?.value || 0)}x${Number(widget(node,"h3_upres_tile_height")?.value || 0)}`;
+      const selectedPair = String(node.properties.iamccs_fast_2pass_pair || actualPair);
+      if (fastOn && !H3_FAST_2PASS_PAIRS.some(([,lw,lh,hw,hh]) => `${lw}x${lh}->${hw}x${hh}` === actualPair)) stagePair.add(new Option(`CUSTOM · ${actualPair}`, "custom"));
+      stagePair.value = fastOn && actualPair !== selectedPair ? actualPair : selectedPair;
+      if (![...stagePair.options].some((option) => option.value === stagePair.value)) stagePair.value = fastOn ? "custom" : "736x416->1504x832";
+      stagePair.disabled = !fastOn;
+      stagePair.title = fastOn ? "Stage 1 native canvas → Stage 2 full H3 canvas. The target is also the delivery canvas." : "Enable H3 2-PASS first";
+      const applyFastPair = () => {
+        const match = stagePair.value.match(/^(\d+)x(\d+)->(\d+)x(\d+)$/);
+        if (!match) return;
+        const [,lowW,lowH,highW,highH] = match.map(Number);
+        node.properties.iamccs_fast_2pass_pair = stagePair.value;
+        for (const [name,value] of Object.entries({width:lowW,height:lowH,image_width:lowW,image_height:lowH,
+          h3_upres_tile_width:highW,h3_upres_tile_height:highH,upscale_width:highW,upscale_height:highH})) setValue(node,name,value,false);
+        document.dispatchEvent(new CustomEvent("iamccs:h3-settings-changed", {detail:{source_node_id:node.id,recipe:"fast_2pass_resolution_pair"}}));
+      };
+      stageToggle.onchange = () => {
+        if (stageToggle.checked) {
+          const upresModel = String(widget(node,"h3_upres_model_name")?.value || "").trim();
+          if (!deliveryModeAvailable(node,"h3_fast_latent_2pass") || !branchGate(node,"h3_upres_model_name").available || !upresModel || /^none$/i.test(upresModel)) {
+            stageToggle.checked = false; alert("Connect the Fast Latent 2-Pass branch and select an installed H3 3D latent upscaler first."); return;
+          }
+          node.properties.iamccs_fast_2pass_native = true;
+          applyFastPair(); applyRecipe(node,"upres");
+        } else {
+          node.properties.iamccs_fast_2pass_native = false;
+          if (String(widget(node,"upscale_mode")?.value) === "h3_fast_latent_2pass") applyRecipe(node,"native-delivery");
+          else refresh();
+        }
+      };
+      stagePair.onchange = () => { if (stageToggle.checked) { applyFastPair(); refresh(); } };
+      const stageNote = document.createElement("small");
+      stageNote.style.cssText = "flex-basis:100%;color:#91a0ad;font-size:8px";
+      stageNote.textContent = "32px-grid legal, not VRAM-certified. 1920×1088 is FHD-class; exact 1920×1080 needs an optional final crop. HIGH H3 sampling can still OOM or change lip motion.";
+      stage.append(stageLabel,stagePair,stageNote);
+      format.after(stage);
     }
     const grid = q("[data-grid]"); grid.className = "h3p-grid"; grid.replaceChildren();
     let names = fieldNames(group, mode);
+    if (active === "overview" && (mode !== "longvid_guides" || String(widget(node,"upscale_mode")?.value) === "h3_fast_latent_2pass")) {
+      names = names.filter((name) => !["upscale_link_to_native", "upscale_link_factor"].includes(name));
+    }
     if (active === "direction") {
       const hd = String(widget(node, "longvid_terminal_endpoint_mode")?.value || "").toLowerCase() === "pianosequenza_hd";
       const multiStageOn = Boolean(widget(node, "longvid_pianosequenza_2stage_enabled")?.value);
@@ -1368,7 +1726,14 @@ function mount(node) {
     const branchSignature = connectedNodes(node).map(nodeClass).sort().join("|");
     if (mode !== lastMode || branchSignature !== node._iamccsSettingsProBranchSignature) refresh();
   }, 800);
-  const removed = node.onRemoved; node.onRemoved = function () { window.clearInterval(this._iamccsSettingsProTimer); return removed?.apply(this, arguments); };
+  const removed = node.onRemoved; node.onRemoved = function () {
+    window.clearInterval(this._iamccsSettingsProTimer);
+    document.removeEventListener("fullscreenchange", onSettingsFullscreenChange);
+    editorRequestedOpen = false;
+    if (document.fullscreenElement === root) document.exitFullscreen?.().catch?.(() => {});
+    closeMonitorFallback();
+    return removed?.apply(this, arguments);
+  };
 }
 
 app.registerExtension({
@@ -1378,7 +1743,7 @@ app.registerExtension({
     const created = nodeType.prototype.onNodeCreated; nodeType.prototype.onNodeCreated = function () { const result = created?.apply(this, arguments); window.setTimeout(() => mount(this), 0); return result; };
     const configured = nodeType.prototype.onConfigure; nodeType.prototype.onConfigure = function (info) {
       const result = configured?.apply(this, arguments);
-      restoreNamedValues(this, info);
+      restoreNamedValues(this, info, nodeData);
       normalizeSeedPolicy(this);
       normalizeInstalledSpeedAsset(this);
       normalizeSpeedPresetContract(this);
@@ -1396,7 +1761,7 @@ app.registerExtension({
       normalize2StageResolutionLink(this);
       normalizePianosequenzaStageControls(this);
       installPianosequenzaStageQueueGuards(this);
-      serializeNamedValues(this, info);
+      serializeNamedValues(this, info, nodeData);
       return result;
     };
   },

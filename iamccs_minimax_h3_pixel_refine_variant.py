@@ -364,7 +364,7 @@ class IAMCCS_MiniMaxH3PixelRefineR38B:
         import comfy.model_management as mm
         from .iamccs_minimax_h3_shotboard import (
             _concat_videos, _concat_videos_overlap, _current_prompt, _encode_images, _enqueue,
-            _trim_audio_frames, _write_segment_metadata,
+            _joined_frame_count, _trim_audio_frames, _write_segment_metadata,
         )
 
         plan = _resolve_shotplan(cine_linx)
@@ -529,8 +529,14 @@ class IAMCCS_MiniMaxH3PixelRefineR38B:
                 mm.soft_empty_cache()
         else:
             _encode_images(native_frames[1:] if join == 1 else native_frames, audio, 24, output)
-        _write_segment_metadata(output, frames, 24,
-                                "trim_silent_tail" if native_audio.get("iamccs_flf_locked_audio_handles", False) else "crossfade")
+        source_workflow = extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None
+        _write_segment_metadata(
+            output, frames, 24,
+            "trim_silent_tail" if native_audio.get("iamccs_flf_locked_audio_handles", False) else "crossfade",
+            provenance={"render_id": run, "stage": "h3_pixel_refine" if enabled else "native_windowed",
+                        "segment_index": index, "total_segments": total, "shotplan": plan},
+            source_workflow=source_workflow,
+        )
         preview = output
         if index == total - 1:
             paths = [root / f"segment_{i + 1:04d}.mp4" for i in range(total)]
@@ -553,6 +559,19 @@ class IAMCCS_MiniMaxH3PixelRefineR38B:
                 _concat_videos_overlap(paths, preview, join, 24)
             else:
                 _concat_videos(paths, preview)
+            overlap = (
+                int(final_tail_cfg.get("tail_frames", 0) or 0)
+                if isinstance(final_tail_cfg, dict) and bool(final_tail_cfg.get("enabled", False))
+                else (join if join > 1 else 0)
+            )
+            _write_segment_metadata(
+                preview, _joined_frame_count(paths, overlap), 24,
+                "incoming_overlap" if overlap else "direct",
+                provenance={"render_id": run, "stage": "h3_pixel_refine_master" if enabled else "native_windowed_master",
+                            "total_segments": total, "segment_files": [path.name for path in paths],
+                            "shotplan": plan},
+                source_workflow=source_workflow,
+            )
         queued = False
         if bool(queue_next_segment) and index + 1 < total:
             live, extra, outputs, sensitive = _current_prompt()

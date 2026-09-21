@@ -712,6 +712,21 @@ def rewrite_sections_with_ai(
     filtered = {key: value for key, value in rewritten.items() if key in requested and value}
     if not filtered:
         raise RuntimeError("The AI did not return any valid filled MiniMax section")
+    # An AI rewrite may paraphrase a Whisper transcript even when told not to.
+    # Restore the exact H3 dialogue line supplied by the user after parsing.
+    authored = "\n".join([str(user_direction or ""), *(str(value or "") for value in sections.values())])
+    dialogue_lines = list(dict.fromkeys(re.findall(
+        r"<Subject\s+\d+>\s*\(S\d+\):\s*<d>\[[^\]]+\][\s\S]*?</d>",
+        authored,
+        flags=re.IGNORECASE,
+    )))
+    if dialogue_lines:
+        target = "audio_dialogue_map" if "audio_dialogue_map" in requested else next(
+            (key for key in target_keys if key in requested), next(iter(requested))
+        ) if isinstance(target_keys, list) else next(iter(requested))
+        for line in dialogue_lines:
+            if line not in "\n".join(filtered.values()):
+                filtered[target] = "\n".join(part for part in (filtered.get(target, ""), line) if part)
     return filtered, {
         "provider": provider,
         "model": model,
@@ -858,6 +873,14 @@ def build_visual_story_plan_with_ai(provider: str, base_url: str, model: str, ap
             "Integrated chronological action:\n" + shot_plan,
             f"Continuity locks:\n{continuity_locks}" if continuity_locks else "",
         ) if part)
+    # REQUEST → GLOBAL + LOCALS has a separate AI endpoint. Keep verbatim
+    # Whisper dialogue here too, even when the model paraphrases its output.
+    for line in dict.fromkeys(re.findall(
+        r"<Subject\s+\d+>\s*\(S\d+\):\s*<d>\[[^\]]+\][\s\S]*?</d>",
+        relation, flags=re.IGNORECASE,
+    )):
+        if line not in global_prompt and not any(line in shot["local_prompt"] for shot in shots):
+            global_prompt = "\n\n".join(part for part in (global_prompt, line) if part)
     return {"global_prompt": global_prompt,
             "global_direction": global_direction,
             "recommended_mode": mode,
@@ -1486,8 +1509,9 @@ class IAMCCS_Prompter:
                 "audio": (
                     "AUDIO",
                     {
+                        "lazy": True,
                         "tooltip": (
-                            "Optional speech audio. On Queue, IAMCCS reuses the comfy-mtb Whisper path and returns an H3-ready dialogue tag for cursor insertion."
+                            "Loaded only for the explicit TRANSCRIBE button. Ordinary global Queue leaves this connected AUDIO branch inert."
                         ),
                     },
                 ),
@@ -1498,10 +1522,17 @@ class IAMCCS_Prompter:
     RETURN_NAMES = ("cine_linx", "final_prompt", "project_json", "report", "audio_transcript", "h3_dialogue_tag")
     FUNCTION = "compose"
     CATEGORY = CATEGORY
+    # The UI's TRANSCRIBE button queues this node as a partial execution target.
+    # ComfyUI accepts partial targets only when the target class is an output node.
+    OUTPUT_NODE = True
 
     @classmethod
     def IS_CHANGED(cls, **kwargs):
         return json.dumps(kwargs, ensure_ascii=False, sort_keys=True, default=str)
+
+    def check_lazy_status(self, project_data, audio=None, **kwargs):
+        # A connected Load Audio must not run for every normal H3 generation.
+        return ["audio"] if _safe_project(project_data).get("_transcribe_once") and audio is None else []
 
     def compose(
         self,
@@ -1520,13 +1551,14 @@ class IAMCCS_Prompter:
         audio=None,
     ):
         project = _safe_project(project_data)
+        transcribe_once = bool(project.pop("_transcribe_once", False))
         mode = _normalise_task_mode(task_mode or project.get("task_mode") or "t2va")
         project["task_mode"] = mode
         project["injection_target"] = str(injection_target)
         project["writing_mode"] = str(writing_mode)
         project["merge_policy"] = str(merge_policy)
         final_prompt, details = _compose_prompt(project, mode, str(writing_mode), str(assistant_draft or ""))
-        if not final_prompt:
+        if not final_prompt and not transcribe_once:
             raise ValueError("IAMCCS_Prompter: compila almeno un box prima di accodare il workflow")
 
         primary_target = str(injection_target or "global").strip().lower()
@@ -1576,10 +1608,12 @@ class IAMCCS_Prompter:
                 "project_name": injection["project_name"],
                 "source": "iamccs_cine_h3_vision_info",
             })
-        transcript = ""
-        dialogue_tag = ""
+        transcript = str(project.get("audio_transcript") or "")
+        dialogue_tag = str(project.get("audio_dialogue_tag") or "")
         transcription_error = ""
-        if audio is not None:
+        if transcribe_once and audio is not None:
+            transcript = ""
+            dialogue_tag = ""
             try:
                 try:
                     from .iamccs_cine_audio_dialogue import IAMCCS_CineAudioTranscriptPromptCompiler
@@ -1619,7 +1653,7 @@ class IAMCCS_Prompter:
             "audio_handoff_authoring_rule": AUDIO_HANDOFF_AUTHORING_RULE,
             "audio_driven_dialogue_template": "<Subject 1> (S1): <d>[Language] ...</d>",
             "audio_transcription": {
-                "requested": audio is not None,
+                "requested": transcribe_once,
                 "engine": "comfy-mtb Whisper",
                 "model": str(audio_transcription_model),
                 "source_language": str(audio_transcription_language),
@@ -1651,13 +1685,14 @@ class IAMCCS_Prompter:
         out_linx["outputs"]["h3_dialogue_tag"] = dialogue_tag
         ui_status = (
             f"Whisper transcript ready ({len(transcript)} characters). Insert the H3 dialogue tag at the desired cursor."
-            if dialogue_tag else
+            if transcribe_once and dialogue_tag else
             (f"Whisper transcription failed: {transcription_error}" if transcription_error else "No AUDIO input connected; transcript stage skipped.")
         )
         return {
             "ui": {
                 "iamccs_audio_transcript": [transcript],
                 "iamccs_h3_dialogue_tag": [dialogue_tag],
+                "iamccs_audio_transcription_error": [transcription_error],
                 "text": [ui_status],
             },
             "result": (out_linx, final_prompt, project_json, report, transcript, dialogue_tag),

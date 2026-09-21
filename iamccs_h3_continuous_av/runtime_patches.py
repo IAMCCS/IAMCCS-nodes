@@ -9,10 +9,10 @@ _LOG = logging.getLogger("h3_continuous")
 _LOCK = threading.RLock()
 
 
-def _conflict_message(kind, status, err):
+def _conflict_message(kind, status, err, compatible_foreign=False):
     if status is None:
         return f"{kind}: {err}"
-    if status.state == "foreign":
+    if status.state == "foreign" and not compatible_foreign:
         return f"{kind}: {status.owner} already owns {status.module}"
     return None
 
@@ -25,16 +25,23 @@ def ensure_h3_runtime_patches():
 
         layout_status, layout_err = patch_layout.get_layout_patch_status()
         payload_status, payload_err = patch_payload.get_payload_patch_status()
+        layout_compatible = patch_layout.is_compatible_foreign_owner()
+        payload_compatible = patch_payload.is_compatible_foreign_owner()
         problems = [
             p for p in (
-                _conflict_message("PackedLayout", layout_status, layout_err),
-                _conflict_message("MiniMaxH3.extra_conds", payload_status, payload_err),
+                _conflict_message(
+                    "PackedLayout", layout_status, layout_err, layout_compatible
+                ),
+                _conflict_message(
+                    "MiniMaxH3.extra_conds", payload_status, payload_err,
+                    payload_compatible,
+                ),
             ) if p
         ]
         if problems:
             detail = "; ".join(problems)
             raise RuntimeError(
-                "Herrgotts H3 Infinite Continuation Suite cannot install its H3 runtime hooks: "
+                "IAMCCS H3 LongerVid cannot install its H3 runtime hooks: "
                 f"{detail}. Disable/remove the other H3 chaining pack (or update ComfyUI if an "
                 "expected H3 API is missing), restart ComfyUI, then run the continuation again."
             )
@@ -44,14 +51,14 @@ def ensure_h3_runtime_patches():
 
         if not patch_payload.install_payload_patch():
             raise RuntimeError(
-                "Herrgotts H3 Infinite Continuation Suite could not install the MiniMax H3 "
+                "IAMCCS H3 LongerVid could not install the MiniMax H3 "
                 "payload hook. See the ComfyUI console for the compatibility-check error."
             )
         if not patch_layout.install_layout_patch():
             if not payload_was_ours:
                 patch_payload.uninstall_payload_patch_if_owned()
             raise RuntimeError(
-                "Herrgotts H3 Infinite Continuation Suite could not install the MiniMax H3 "
+                "IAMCCS H3 LongerVid could not install the MiniMax H3 "
                 "layout hook. The temporary payload hook was rolled back. See the ComfyUI "
                 "console for the live self-test error."
             )
@@ -64,6 +71,6 @@ def ensure_h3_runtime_patches():
             raise RuntimeError("h3_continuous: runtime hooks did not reach a consistent active state")
 
         _LOG.info(
-            "h3_continuous v1.2.1: H3 runtime hooks ready; unrelated H3 graphs remain on stock behavior"
+            "IAMCCS H3 LongerVid: runtime hooks ready; unrelated H3 graphs remain on stock behavior"
         )
         return True

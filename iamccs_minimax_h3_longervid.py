@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Carmine Cristallo Scalzi (IAMCCS)
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""IAMCCS-native FL2VA Continuous AV and experimental Guided AV Loop.
+"""IAMCCS-native LongerVid FL2VA Continuous AV and Guided AV Loop.
 
 The internal continuation engine is a GPLv3 source port of Herrgotts H3
 Infinite Continuation Suite v1.2.1. See iamccs_h3_continuous_av/ATTRIBUTION.md.

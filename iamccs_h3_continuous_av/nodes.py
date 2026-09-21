@@ -222,7 +222,10 @@ class H3ContinuousContinue:
                         raise ValueError(
                             f"metadata frame_count {meta_frames} != latent frame_count {previous_frame_count}"
                         )
-                    if handover.get("detector_mode") not in ("final_frame_lock", "final_frame_lock_robust", "stable_tail_consensus"):
+                    if handover.get("detector_mode") not in (
+                        "final_frame_lock", "final_frame_lock_robust",
+                        "stable_tail_consensus", "iamccs_visible_terminal",
+                    ):
                         _LOG.warning(
                             "h3_continuous: loaded handover metadata predates final-frame-lock detection; "
                             "the stored cutoff will still work, but re-analyze/re-save the source clip to get the new later lock point"
@@ -434,6 +437,10 @@ class H3ContinuousSaveLatent:
                     "forceInput": True,
                     "tooltip": "Clip 1: leave unconnected (0). Clip 2+: connect actual_head_context_frames from Continue from Latent so the saved file is self-describing for later seamless stitching.",
                 }),
+                "visible_frame_count": ("INT", {
+                    "forceInput": True,
+                    "tooltip": "Optional delivered-frame count. It separates inherited head context and native H3 padding from the visible clip when a continued latent is saved again.",
+                }),
             },
         }
     RETURN_TYPES = ("STRING", "STRING")
@@ -443,7 +450,8 @@ class H3ContinuousSaveLatent:
     CATEGORY = "H3 Continuous"
     DESCRIPTION = "Save the COMPLETE H3 AV latent plus non-destructive handover/head-context metadata for later continuation or seamless saved-chain stitching."
 
-    def save(self, latent, filename_prefix, clip_index=1, handover=None, head_context_frames=0):
+    def save(self, latent, filename_prefix, clip_index=1, handover=None, head_context_frames=0,
+             visible_frame_count=0):
         video, audio = _streams_from_latent(latent)
         video_cpu = video.detach().cpu().contiguous()
         audio_cpu = audio.detach().cpu().contiguous()
@@ -459,6 +467,21 @@ class H3ContinuousSaveLatent:
             path = os.path.join(folder, f"{filename}_{int(counter):05d}_.safetensors")
 
         head_context_frames = max(0, int(head_context_frames or 0))
+        visible_frame_count = max(0, int(visible_frame_count or 0))
+        if head_context_frames > frame_count:
+            raise ValueError(
+                f"h3_continuous: saved head context {head_context_frames} exceeds technical latent length {frame_count}"
+            )
+        if visible_frame_count <= 0:
+            visible_frame_count = max(0, frame_count - head_context_frames)
+        if head_context_frames + visible_frame_count > frame_count:
+            raise ValueError(
+                "h3_continuous: head context + visible clip exceeds the saved technical latent "
+                f"({head_context_frames} + {visible_frame_count} > {frame_count})"
+            )
+        visible_start_frame = head_context_frames
+        visible_end_frame = head_context_frames + visible_frame_count
+        technical_padding_frames = frame_count - visible_end_frame
         metadata = {
             "format": "h3_continuous_av_v8",
             "release_version": "1.2.1",
@@ -466,21 +489,54 @@ class H3ContinuousSaveLatent:
             "frame_count": str(frame_count),
             "clip_index": str(int(clip_index)),
             "head_context_frames": str(head_context_frames),
+            "visible_frame_count": str(visible_frame_count),
+            "visible_start_frame": str(visible_start_frame),
+            "visible_end_frame": str(visible_end_frame),
+            "technical_padding_frames": str(technical_padding_frames),
             "video_shape": json.dumps(list(video_cpu.shape)),
             "audio_shape": json.dumps(list(audio_cpu.shape)),
         }
         handover_summary = "no handover metadata"
         if isinstance(handover, dict) and handover.get("available"):
-            analyzed_frames = int(handover.get("frame_count", frame_count))
-            if analyzed_frames != frame_count:
+            analyzed_frames = int(handover.get("frame_count", visible_frame_count))
+            if analyzed_frames not in {visible_frame_count, frame_count}:
                 _LOG.warning(
                     "h3_continuous: analyzer frame_count %s != saved latent frame_count %s; "
-                    "handover metadata will not be saved", analyzed_frames, frame_count
+                    "handover metadata will not be saved (expected visible=%s or technical=%s)",
+                    analyzed_frames, frame_count, visible_frame_count, frame_count
                 )
                 handover_summary = "handover metadata rejected (frame-count mismatch)"
             else:
                 clean = dict(handover)
+                # The analyzer sees the delivered clip, while the sampler latent
+                # for clip B+ also contains inherited A context at its head. Move
+                # absolute frame coordinates into the saved technical timeline;
+                # durations/counts intentionally remain unchanged.
+                if analyzed_frames == visible_frame_count and head_context_frames:
+                    coordinate_keys = {
+                        "freeze_start_frame", "lock_start_frame", "handover_end_frame",
+                        "ideal_handover_end_frame", "legacy_handover_end_frame",
+                        "phase_aligned_source_end_frame", "phase_aligned_source_start_frame",
+                        "phase_aligned_target_end_frame", "phase_aware_handover_end_frame",
+                        "phase_aware_target_end_frame", "no_lock_fallback_target_end_frame",
+                        "analysis_start_frame",
+                    }
+                    for key in coordinate_keys:
+                        if key in clean:
+                            try:
+                                value = int(clean[key])
+                            except (TypeError, ValueError):
+                                continue
+                            if value >= 0:
+                                clean[key] = value + head_context_frames
                 clean["frame_count"] = frame_count
+                clean["visible_frame_count"] = visible_frame_count
+                clean["visible_start_frame"] = visible_start_frame
+                clean["visible_end_frame"] = visible_end_frame
+                clean["technical_padding_frames"] = technical_padding_frames
+                # Inclusive cutoff used by IAMCCS TERMINAL continuation. This
+                # excludes native grid padding without cropping/resaving latent.
+                clean["terminal_target_end_frame"] = max(0, visible_end_frame - 1)
                 metadata["handover_json"] = json.dumps(clean, separators=(",", ":"), sort_keys=True)
                 handover_summary = (
                     f"phase-aligned tail {clean.get('landing_tail_frames', '?')} | "
@@ -497,7 +553,8 @@ class H3ContinuousSaveLatent:
         st_save({"video": video_cpu, "audio": audio_cpu}, path, metadata=metadata)
         info = (
             f"{frame_count} frames | video {tuple(video_cpu.shape)} | audio {tuple(audio_cpu.shape)} | "
-            f"head context {head_context_frames} | {handover_summary}"
+            f"head context {head_context_frames} | visible {visible_frame_count} | "
+            f"technical padding {technical_padding_frames} | {handover_summary}"
         )
         _LOG.info("h3_continuous: saved %s (%s)", path, info)
         return (path, info)
@@ -592,7 +649,11 @@ class H3ContinuousLoadLatent:
         else:
             hinfo = "no auto handover metadata"
         saved_head = metadata.get("head_context_frames")
+        visible = metadata.get("visible_frame_count")
+        padding = metadata.get("technical_padding_frames")
         head_info = f"saved head context {saved_head} | " if saved_head is not None else ""
+        if visible is not None:
+            head_info += f"visible {visible} | technical padding {padding or '0'} | "
         info = f"{frame_count} frames | video {tuple(video.shape)} | audio {tuple(audio.shape)} | {head_info}{hinfo}"
         _LOG.info("h3_continuous: loaded %s (%s)", path, info)
         return (latent, path, info, handover)
@@ -1054,12 +1115,12 @@ class H3ContinuousStitchOutputV1:
 # ---------------------------------------------------------------------------
 
 class H3ContinuousStartV11(H3ContinuousStartV1):
-    CATEGORY = "Herrgotts H3 Infinite Continuation Suite"
+    CATEGORY = "IAMCCS/MiniMax H3/LongerVid"
     DESCRIPTION = "v1.2 Clip 1: native FL2VA first/last anchors with Duration (Seconds). Optional <Picture 1> remains Qwen-only."
 
 
 class H3ContinuousContinueV11(H3ContinuousContinueV1):
-    CATEGORY = "Herrgotts H3 Infinite Continuation Suite"
+    CATEGORY = "IAMCCS/MiniMax H3/LongerVid"
     DESCRIPTION = "v1.2 Clip 2+: phase-aligned direct video+audio latent continuation. Auto handover consumes lock or no-lock-fallback metadata from the v1.2 analyzer."
 
 
@@ -1158,7 +1219,7 @@ class H3ContinuousAnalyzeHandoverV11(H3ContinuousAnalyzeHandoverV1):
                 ordered[name] = (kind, opts)
         return {"required": ordered}
 
-    CATEGORY = "Herrgotts H3 Infinite Continuation Suite"
+    CATEGORY = "IAMCCS/MiniMax H3/LongerVid"
     DESCRIPTION = "v1.2 Auto Handover. Balanced/Motion Safe use freeze_hold=8. If no lock is found, freeze_hold-1 ending frames are excluded before phase-aligned latent cutoff selection."
 
     def analyze(self, images, preset="Balanced", analysis_window=72, freeze_hold=8, safety_margin=3,
@@ -1260,7 +1321,7 @@ class H3ContinuousStitchOutputV11(H3ContinuousStitchOutputV1):
             },
         }
 
-    CATEGORY = "Herrgotts H3 Infinite Continuation Suite"
+    CATEGORY = "IAMCCS/MiniMax H3/LongerVid"
     DESCRIPTION = "v1.2 rendered AV output helper. Full keeps everything; Stitch Ready removes continuation overlap plus the effective freeze-safe tail; Final Clip removes only the reused head so the last segment can reach its complete Last Frame landing."
 
 
@@ -1306,7 +1367,7 @@ class H3ContinuousSeamlessJoinV11:
     RETURN_TYPES = ("IMAGE", "AUDIO", "STRING")
     RETURN_NAMES = ("images", "audio", "join_info")
     FUNCTION = "join"
-    CATEGORY = "Herrgotts H3 Infinite Continuation Suite"
+    CATEGORY = "IAMCCS/MiniMax H3/LongerVid"
     DESCRIPTION = "v1.2 context-aligned rendered AV join. Safe Tail Bridge replaces the first few potentially unstable continuation frames with detector-approved pixels from the previous clip; video gets a short corresponding-context blend and audio keeps the tested 15 ms de-click crossfade."
 
     def join(self, previous_images, next_images, next_output_mode="Stitch Ready",
@@ -1510,7 +1571,7 @@ class H3ContinuousStitchSavedChainV11:
                 "first_clip": ("INT", {"default": 1, "min": 1, "max": 99999}),
                 "last_clip": ("INT", {"default": 0, "min": 0, "max": 99999,
                     "tooltip": "0 = automatically use the highest numbered clip for this prefix."}),
-                "filename_prefix": ("STRING", {"default": "video/Herrgotts_H3_Infinite_Stitched"}),
+                "filename_prefix": ("STRING", {"default": "video/IAMCCS_H3_LongerVid_Stitched"}),
                 "video_crossfade_frames": ("INT", {"default": 4, "min": 0, "max": 16, "step": 1,
                     "tooltip": "Context-aligned video crossfade. Recommended: 4 frames."}),
                 "audio_crossfade_ms": ("FLOAT", {"default": 15.0, "min": 0.0, "max": 100.0, "step": 1.0,
@@ -1532,11 +1593,11 @@ class H3ContinuousStitchSavedChainV11:
     RETURN_NAMES = ("video_path", "stitch_info")
     FUNCTION = "stitch"
     OUTPUT_NODE = True
-    CATEGORY = "Herrgotts H3 Infinite Continuation Suite"
+    CATEGORY = "IAMCCS/MiniMax H3/LongerVid"
     DESCRIPTION = "v1.2 memory-bounded saved-chain stitcher. Uses Safe Tail Bridge plus short context-aligned video/audio seam smoothing and encodes directly to MP4 so peak memory does not grow with chain length."
 
     def stitch(self, video_vae, audio_vae, latent_prefix="h3_continuous/clip",
-               first_clip=1, last_clip=0, filename_prefix="video/Herrgotts_H3_Infinite_Stitched",
+               first_clip=1, last_clip=0, filename_prefix="video/IAMCCS_H3_LongerVid_Stitched",
                video_crossfade_frames=4, audio_crossfade_ms=15.0, luminance_match=False,
                luminance_fade_frames=16, max_luminance_correction_percent=10.0, crf=18,
                max_safe_tail_bridge_frames=2):
@@ -1659,6 +1720,9 @@ class H3ContinuousStitchSavedChainV11:
                         raise ValueError(f"Saved Chain Stitch currently supports mono/stereo audio, got {channels} channels")
                     layout = "mono" if channels == 1 else "stereo"
                     output = av.open(out_path, mode="w", options={"movflags": "use_metadata_tags+faststart"})
+                    output.metadata["iamccs_h3_longervid_version"] = "1.2.1"
+                    # Retained for old catalogues that indexed the upstream
+                    # engine's historical metadata key.
                     output.metadata["herrgotts_h3_infinite_version"] = "1.2.1"
                     output.metadata["clip_range"] = f"{first}-{last}"
                     output.metadata["video_crossfade_frames"] = str(requested_vfade)
@@ -1871,9 +1935,9 @@ class H3ContinuousStitchSavedChainV11:
         return (out_path, info)
 
 # Shared release nodes live with the v1.2 suite in the Add Node menu.
-H3ContinuousSaveLatent.CATEGORY = "Herrgotts H3 Infinite Continuation Suite"
-H3ContinuousLoadLatent.CATEGORY = "Herrgotts H3 Infinite Continuation Suite"
-H3ContinuousLatentInfo.CATEGORY = "Herrgotts H3 Infinite Continuation Suite"
+H3ContinuousSaveLatent.CATEGORY = "IAMCCS/MiniMax H3/LongerVid"
+H3ContinuousLoadLatent.CATEGORY = "IAMCCS/MiniMax H3/LongerVid"
+H3ContinuousLatentInfo.CATEGORY = "IAMCCS/MiniMax H3/LongerVid"
 
 NODE_CLASS_MAPPINGS = {
     # v1.2 release-facing nodes

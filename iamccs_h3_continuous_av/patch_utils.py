@@ -23,7 +23,7 @@ def classify_callable(owner_cls, fn, our_marker, known_external_markers=()):
 
     module = str(getattr(fn, "__module__", "?") or "?")
     if getattr(fn, our_marker, False):
-        return PatchStatus("ours", "Herrgotts-H3-Infinite-Continuation-Suite", module)
+        return PatchStatus("ours", "IAMCCS-H3-LongerVid", module)
 
     for marker, label in known_external_markers:
         if getattr(fn, marker, False):

@@ -442,12 +442,59 @@ def _apply_h3_fun_controlnet(
     return patched_model, report
 
 
+def _apply_h3_refmod(positive, shotplan: dict[str, Any]):
+    """Opt-in provider injection; the unselected path does not touch conditioning."""
+    config = shotplan.get("refmod_settings") if isinstance(shotplan.get("refmod_settings"), dict) else {}
+    if not config.get("enabled"):
+        return positive, "off"
+    name = str(config.get("name", "") or "").strip().replace("\\", "/")
+    if name.lower().endswith(".safetensors"):
+        name = name[:-12]
+    if not name or name.startswith("/") or ".." in name.split("/"):
+        raise ValueError("H3 RefMod automatic injection requires a valid saved name under models/refmods")
+    strength = float(config.get("strength", 1.0))
+    retention = float(config.get("retention", 1.0))
+    max_tokens = int(config.get("max_tokens", 0))
+    if not 0.0 <= strength <= 1.0 or not 0.0 <= retention <= 1.0 or max_tokens < 0:
+        raise ValueError("H3 RefMod strength/retention/token budget is outside provider limits")
+    import nodes as comfy_nodes
+    loader_class = comfy_nodes.NODE_CLASS_MAPPINGS.get("MiniMaxH3RefModsLoader")
+    apply_class = comfy_nodes.NODE_CLASS_MAPPINGS.get("MiniMaxH3RefModApply")
+    if loader_class is None or apply_class is None:
+        raise ValueError("H3 RefMod is enabled but ComfyUI-MiniMaxH3Mod Load/Apply nodes are unavailable")
+    mods, _hint = loader_class().load(
+        show_info=False, max_total_tokens=max_tokens, mod_1=name, strength_1=strength, copies_1=1,
+    )
+    if not mods:
+        raise ValueError(f"H3 RefMod '{name}' loaded no reference blocks; disable injection or select a valid saved mod")
+    applied = apply_class.execute(
+        conditioning=positive, mods=mods, retention=retention,
+        curve_direction="constant", curve_shape="linear", curve_value=1.0,
+        max_total_tokens=max_tokens,
+    )
+    conditioned = applied.result[0] if hasattr(applied, "result") else applied[0]
+    report = f"{name} | source={strength:.2f} | retention={retention:.2f} | blocks={len(mods)}"
+    LOG.info("MiniMax H3 RefMod automatically injected | %s", report)
+    return conditioned, report
+
+
 def _effective_task(cine_linx: Any, chunk: dict[str, Any]) -> str:
     config, _ = _cine_info_h3(cine_linx)
     override = str(config.get("task_override", "from_shotboard") or "from_shotboard").lower()
     if override in {"t2va", "i2va", "fl2va", "ref2va"}:
         return override
     return str(chunk.get("task_mode", "t2va") or "t2va").lower()
+
+
+def _external_continuation_active(shotplan: dict[str, Any], segment_index: int) -> bool:
+    """External saved-AV continuation is an explicit first-chunk-only route."""
+    settings = shotplan.get("continuation_settings")
+    return bool(
+        int(segment_index) == 0
+        and isinstance(settings, dict)
+        and settings.get("enabled", False)
+        and str(settings.get("checkpoint", "") or "").strip()
+    )
 
 
 def _effective_shotplan(cine_linx: Any, shotplan: dict[str, Any]) -> dict[str, Any]:
@@ -1668,6 +1715,8 @@ class IAMCCS_MiniMaxH3AtomicModelRouter:
     @staticmethod
     def _input_name(cine_linx, segment_index):
         shotplan = _resolve_shotplan(cine_linx)
+        if _external_continuation_active(shotplan, int(segment_index)):
+            return "fl2va_model"
         if _is_fused_turbo_preview(shotplan):
             return "fused_turbo_model"
         chunk = _chunk(cine_linx, segment_index)
@@ -1686,7 +1735,8 @@ class IAMCCS_MiniMaxH3AtomicModelRouter:
 
     def select(self, cine_linx, segment_index, fl2va_model=None, ref2va_model=None):
         shotplan = _resolve_shotplan(cine_linx)
-        if _is_fused_turbo_preview(shotplan):
+        external_continuation = _external_continuation_active(shotplan, int(segment_index))
+        if _is_fused_turbo_preview(shotplan) and not external_continuation:
             chunk = _chunk(shotplan, segment_index)
             task = _effective_task(shotplan, chunk)
             fused_task = str(task).lower()
@@ -1700,8 +1750,13 @@ class IAMCCS_MiniMaxH3AtomicModelRouter:
             return model, f"fused_turbo_{fused_task}", f"{report} | task={fused_task}"
         chunk = _chunk(cine_linx, segment_index)
         task = _effective_task(cine_linx, chunk)
+        if external_continuation and _task_family(task) == "ref2va":
+            raise ValueError(
+                "External saved-AV continuation uses the FL2VA model family and cannot be combined with "
+                "REF2VA/Ref2Vid LipSync. Use FL2VA, I2VA, T2VA or a LongVid FL2VA-family mode."
+            )
         selected = self._input_name(cine_linx, segment_index)
-        family = "ref2va" if selected == "ref2va_model" else _task_family(task)
+        family = "fl2va" if external_continuation else ("ref2va" if selected == "ref2va_model" else _task_family(task))
         model = ref2va_model if family == "ref2va" else fl2va_model
         if model is None:
             raise ValueError(
@@ -1790,7 +1845,14 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             from .iamccs_h3_face_swap import prepare_face_swap
             return prepare_face_swap(model, clip, video_vae, audio_vae, cine_linx, segment_index, prompt_override)
         chunk = _chunk(shotplan, segment_index)
-        task = _effective_task(cine_linx, chunk)
+        external_continuation = _external_continuation_active(shotplan, int(segment_index))
+        authored_task = _effective_task(cine_linx, chunk)
+        if external_continuation and _task_family(authored_task) == "ref2va":
+            raise ValueError(
+                "External saved-AV continuation is incompatible with the REF2VA model family. "
+                "Disable START FROM SAVED AV or choose an FL2VA-family Shotboard mode."
+            )
+        task = "fl2va" if external_continuation else authored_task
         width = int(shotplan.get("width", 960))
         height = int(shotplan.get("height", 544))
         adaptive_guide_window = bool(chunk.get("latent_tail_adaptive_window", False))
@@ -1884,6 +1946,11 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             raise RuntimeError(str(exc)) from exc
         if isinstance(native_av_context, dict):
             frames = int(native_av_context["sample_frames"])
+        if external_continuation and isinstance(native_av_context, dict):
+            raise ValueError(
+                "External saved-AV continuation and Shotboard native Motion Context cannot both own chunk 1. "
+                "Disable one continuation system."
+            )
         motion_state = {
             "active": False,
             "trim_frames": 0,
@@ -2038,7 +2105,145 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
         external_images = resized_external_images
 
         manifest: list[dict[str, str]] = []
-        if task == "t2va":
+        if external_continuation:
+            from .iamccs_minimax_h3_asset_library import (
+                IAMCCS_MiniMaxH3ContinuationContinue,
+                IAMCCS_MiniMaxH3ContinuationLoad,
+            )
+
+            visible_continuation_frames = int(frames)
+            continuation_settings = (
+                shotplan.get("continuation_settings")
+                if isinstance(shotplan.get("continuation_settings"), dict)
+                else {}
+            )
+            visual_handover = str(
+                continuation_settings.get("visual_handover", "auto_safe") or "auto_safe"
+            ).strip().lower()
+            if visual_handover not in {"auto_safe", "latent_only", "shotboard_destination"}:
+                visual_handover = "auto_safe"
+
+            first_path = str(chunk.get("first_image", "") or "").strip()
+            last_path = str(chunk.get("last_image", "") or "").strip()
+            same_authored_still = bool(
+                first_path and last_path
+                and os.path.normcase(os.path.normpath(first_path))
+                == os.path.normcase(os.path.normpath(last_path))
+            )
+            continuation_target = None
+            continuation_reference = next(
+                (image for image in external_images if torch.is_tensor(image)), None
+            )
+            visual_report = visual_handover
+
+            if visual_handover == "shotboard_destination":
+                continuation_target = last if torch.is_tensor(last) else first
+                visual_report = "shotboard_destination(explicit)"
+            elif visual_handover == "auto_safe":
+                if torch.is_tensor(last) and not same_authored_still:
+                    # A distinct FLF/end image is genuinely in the future of the
+                    # new continuation window and is safe to keep as endpoint.
+                    continuation_target = last
+                    visual_report = "auto_safe:distinct_future_destination"
+                elif same_authored_still and continuation_reference is None and torch.is_tensor(planned_first):
+                    # Critical R42 fix: one-image I2V boards describe the source
+                    # shot, not the future end state.  Keep that still Qwen-only
+                    # for identity/style and never inject it as a DiT endpoint.
+                    continuation_reference = planned_first[:1]
+                    visual_report = "auto_safe:same_still_qwen_identity_only"
+                else:
+                    visual_report = "auto_safe:latent_owned"
+            else:
+                visual_report = "latent_only"
+
+            def build_external(active_clip):
+                previous_latent, resolved_path, latent_info, handover = (
+                    IAMCCS_MiniMaxH3ContinuationLoad().load("", 0, cine_linx)
+                )
+                builder = IAMCCS_MiniMaxH3ContinuationContinue()
+                probe = builder.build(
+                    active_clip, video_vae, previous_latent, prompt, width, height,
+                    visible_continuation_frames / H3_FPS,
+                    last_frame=continuation_target,
+                    reference_image=continuation_reference,
+                    handover=handover,
+                    cine_linx=cine_linx,
+                )
+                context = max(1, int(probe[2]))
+                requested_total = visible_continuation_frames + context
+                sample_frames = max(5, ((requested_total - 5 + 16) // 17) * 17 + 5)
+                if sample_frames > 362:
+                    raise ValueError(
+                        "External AV continuation exceeds H3's 362-frame sample limit: "
+                        f"{visible_continuation_frames} visible + {context} context -> {sample_frames} sample frames. "
+                        "Shorten the first new Shotboard slot."
+                    )
+                built = builder.build(
+                    active_clip, video_vae, previous_latent, prompt, width, height,
+                    sample_frames / H3_FPS,
+                    last_frame=continuation_target,
+                    reference_image=continuation_reference,
+                    handover=handover,
+                    cine_linx=cine_linx,
+                )
+                actual_context = max(1, int(built[2]))
+                if actual_context != context:
+                    sample_frames = max(
+                        5,
+                        ((visible_continuation_frames + actual_context - 5 + 16) // 17) * 17 + 5,
+                    )
+                    if sample_frames > 362:
+                        raise ValueError("External AV continuation phase extension leaves no legal H3 window")
+                    built = builder.build(
+                        active_clip, video_vae, previous_latent, prompt, width, height,
+                        sample_frames / H3_FPS,
+                        last_frame=continuation_target,
+                        reference_image=continuation_reference,
+                        handover=handover,
+                        cine_linx=cine_linx,
+                    )
+                    actual_context = max(1, int(built[2]))
+                return built, sample_frames, actual_context, resolved_path, latent_info
+
+            continuation_bundle, text_encoder_report = _run_h3_conditioning_with_cpu_fallback(
+                clip, shotplan, build_external,
+            )
+            built, frames, continuation_context, continuation_path, continuation_info = continuation_bundle
+            result = (built[0], built[1])
+            motion_state.update({
+                "active": True,
+                "method": "external_saved_av_continuation",
+                "trim_frames": int(continuation_context),
+                "context_frames": int(continuation_context),
+                "export_frames": int(visible_continuation_frames),
+                "sample_frames": int(frames),
+                "checkpoint": str(continuation_path),
+                # Delivery-only seam controls. They never alter conditioning,
+                # the sampled AV latent, or the visible continuation frames.
+                "run_and_gun_join": str(
+                    continuation_settings.get("run_and_gun_join", "soft_av") or "soft_av"
+                ).strip().lower(),
+                "soft_video_frames": max(
+                    0, min(16, int(continuation_settings.get("soft_video_frames", 4) or 0))
+                ),
+                "soft_video_curve": str(
+                    continuation_settings.get("soft_video_curve", "smoothstep") or "smoothstep"
+                ).strip().lower(),
+                "soft_audio_ms": max(
+                    0.0, min(100.0, float(continuation_settings.get("soft_audio_ms", 15.0) or 0.0))
+                ),
+            })
+            manifest.append({"label": "<Saved AV Context>", "role": "hidden_external_continuation"})
+            if torch.is_tensor(continuation_target):
+                manifest.append({"label": "<Continuation Destination>", "role": "new_timeline_destination"})
+            elif torch.is_tensor(continuation_reference):
+                manifest.append({"label": "<Picture 1>", "role": "qwen_identity_reference_only"})
+            LOG.info(
+                "MiniMax H3 external AV continuation | checkpoint=%s | visible=%df | context=%df | sample=%df | handover=%s | visual=%s | %s",
+                continuation_path, visible_continuation_frames, continuation_context, frames,
+                str(continuation_settings.get("handover_mode", "terminal") or "terminal"), visual_report, continuation_info,
+            )
+        elif task == "t2va":
             result, text_encoder_report = _run_h3_conditioning_with_cpu_fallback(
                 clip,
                 shotplan,
@@ -2264,6 +2469,14 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             raise ValueError(f"Unsupported atomic H3 task: {task}")
 
         positive, latent = result[0], result[1]
+        if external_continuation:
+            latent = dict(latent)
+            latent["iamccs_external_continuation"] = {
+                "context_frames": int(motion_state.get("context_frames", 0) or 0),
+                "visible_frames": int(motion_state.get("export_frames", visible_frames) or visible_frames),
+                "sample_frames": int(motion_state.get("sample_frames", frames) or frames),
+                "preserve_native_audio_prefix": True,
+            }
         if latent_tail_active:
             if not str(render_id or "").strip():
                 raise RuntimeError(
@@ -2345,9 +2558,13 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 int(native_av_context.get("context_frames", 0))
                 if isinstance(native_av_context, dict)
                 else (
-                    int(latent_tail_context_frames)
-                    if latent_tail_active
-                    else int(hd_context_prefix_frames)
+                    int(motion_state.get("context_frames", 0) or 0)
+                    if external_continuation
+                    else (
+                        int(latent_tail_context_frames)
+                        if latent_tail_active
+                        else int(hd_context_prefix_frames)
+                    )
                 )
             )
             positioned_bridge_head = (
@@ -2477,7 +2694,14 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                     len(shotplan.get("chunks", [])),
                     ", ".join(applied_guides),
                 )
-        control_prefix_frames = int(native_av_context.get("context_frames", 0)) if isinstance(native_av_context, dict) else 0
+        control_prefix_frames = (
+            int(native_av_context.get("context_frames", 0))
+            if isinstance(native_av_context, dict)
+            else (
+                int(motion_state.get("context_frames", 0) or 0)
+                if external_continuation else 0
+            )
+        )
         model, controlnet_report = _apply_h3_fun_controlnet(
             model,
             cine_linx=cine_linx,
@@ -2487,6 +2711,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             target_frames=frames,
             prefix_frames=control_prefix_frames,
         )
+        positive, refmod_report = _apply_h3_refmod(positive, shotplan)
         if legacy_actual_output_bridge:
             motion_report += "; legacy_actual_output_bridge_ignored"
         if motion_state["active"] and motion_state.get("strategy") == "reference_motion_carry":
@@ -2518,7 +2743,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             f"ref_size={shotplan.get('ref_image_size', 'match')} | "
             f"ref_source={shotplan.get('reference_source', 'backend_sockets_or_legacy_timeline')} | "
             f"pre_resize={';'.join(resize_reports) if resize_reports else 'none'} | "
-            f"text_encoder={text_encoder_report} | motion_context={motion_report} | controlnet={controlnet_report}"
+            f"text_encoder={text_encoder_report} | motion_context={motion_report} | controlnet={controlnet_report} | refmod={refmod_report}"
         )
         return (
             model,
@@ -2970,6 +3195,50 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
         native_frames = comfy_nodes.VAEDecode().decode(vae=video_vae, samples=sampled)[0]
         native_audio = VAEDecodeAudio.execute(vae=audio_vae, samples=sampled)[0]
         if (
+            isinstance(sampled, dict)
+            and isinstance(motion_state, dict)
+            and bool(motion_state.get("active"))
+            and str(motion_state.get("method")) == "external_saved_av_continuation"
+            and str(motion_state.get("run_and_gun_join", "soft_av")) == "soft_av"
+        ):
+            # Preserve only the small, time-corresponding end of B's hidden AV
+            # head. NativeCheckpoint uses it to soften A's outgoing tail while
+            # keeping every visible A/B frame and the sampled latent untouched.
+            head = max(1, int(motion_state.get("context_frames", 0) or 0))
+            requested_video = max(0, min(16, int(motion_state.get("soft_video_frames", 4) or 0)))
+            requested_audio_ms = max(0.0, min(100.0, float(motion_state.get("soft_audio_ms", 15.0) or 0.0)))
+            requested_audio_frames = int(math.ceil(requested_audio_ms / 1000.0 * H3_FPS))
+            requested = max(requested_video, requested_audio_frames)
+            kept = min(requested, head, int(native_frames.shape[0]))
+            if kept > 0:
+                context_images = (
+                    native_frames[head - kept:head, ..., :3]
+                    .detach()
+                    .to(device="cpu", dtype=torch.float32)
+                    .nan_to_num(nan=0.0, posinf=1.0, neginf=0.0)
+                    .clamp_(0.0, 1.0)
+                    .mul_(255.0)
+                    .round_()
+                    .to(dtype=torch.uint8)
+                    .contiguous()
+                )
+                context_audio = None
+                if isinstance(native_audio, dict) and torch.is_tensor(native_audio.get("waveform")):
+                    sample_rate = max(1, int(native_audio.get("sample_rate", 32000) or 32000))
+                    context_end = max(1, int(round(head * sample_rate / H3_FPS)))
+                    context_start = max(0, int(round((head - kept) * sample_rate / H3_FPS)))
+                    waveform = native_audio["waveform"][..., context_start:context_end]
+                    context_audio = {
+                        "waveform": waveform.detach().to(device="cpu", dtype=torch.float32).contiguous(),
+                        "sample_rate": sample_rate,
+                    }
+                sampled["_iamccs_continuation_soft_av"] = {
+                    "images_rgb8": context_images,
+                    "audio": context_audio,
+                    "fps": float(H3_FPS),
+                    "frames": int(kept),
+                }
+        if (
             isinstance(motion_state, dict)
             and bool(motion_state.get("active"))
             and str(motion_state.get("method")) == "longvid_latent_tail_experimental"
@@ -3053,6 +3322,31 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
                 int(chunk.get("frame_count", 0) or 0),
                 head,
                 export_frames,
+            )
+        elif (
+            isinstance(motion_state, dict)
+            and bool(motion_state.get("active"))
+            and str(motion_state.get("method")) == "external_saved_av_continuation"
+        ):
+            head = max(1, int(motion_state.get("context_frames", 0) or 0))
+            export_frames = max(1, int(motion_state.get("export_frames", 0) or 0))
+            stop = head + export_frames
+            if not torch.is_tensor(native_frames) or native_frames.ndim != 4 or int(native_frames.shape[0]) < stop:
+                raise RuntimeError(
+                    "External AV continuation decoded too few frames for its hidden-context contract: "
+                    f"decoded={int(native_frames.shape[0]) if torch.is_tensor(native_frames) else 0}, "
+                    f"need={stop} ({head} context + {export_frames} visible)."
+                )
+            native_frames = native_frames[head:stop, ...]
+            if isinstance(native_audio, dict) and torch.is_tensor(native_audio.get("waveform")):
+                native_audio = dict(native_audio)
+                sample_rate = max(1, int(native_audio.get("sample_rate", 32000) or 32000))
+                start_sample = max(0, int(round(head * sample_rate / H3_FPS)))
+                visible_samples = max(1, int(round(export_frames * sample_rate / H3_FPS)))
+                native_audio["waveform"] = native_audio["waveform"][..., start_sample:start_sample + visible_samples]
+            LOG.info(
+                "MiniMax H3 external AV continuation delivery | hidden_context=%df | visible=%df | sample=%df",
+                head, export_frames, int(motion_state.get("sample_frames", 0) or 0),
             )
         elif (
             isinstance(motion_state, dict)

@@ -1862,6 +1862,7 @@ def build_shotplan(
     if active_upscale_mode not in {
         "off",
         "rtx_final",
+        "pixel_tiled_low_vram",
         "ltx23",
         "ltx23_per_chunk",
         "wan22_5b",

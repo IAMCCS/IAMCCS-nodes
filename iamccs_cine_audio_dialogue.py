@@ -1574,6 +1574,28 @@ class IAMCCS_CineAudioTranscriptPromptCompiler:
             return None
         return None
 
+    @staticmethod
+    def _ensure_whisper_compatibility(pipeline: Any):
+        """Bridge comfy-mtb's Transformers 4.x expectation on Transformers 5.x."""
+        model = pipeline.get("model") if isinstance(pipeline, dict) else None
+        config = getattr(model, "config", None)
+        if config is not None and not hasattr(config, "max_length"):
+            generation_config = getattr(model, "generation_config", None)
+            max_length = getattr(generation_config, "max_length", None) or 448
+            setattr(config, "max_length", int(max_length))
+        if model is not None and not getattr(model, "_iamccs_mtb_generate_compat", False):
+            original_generate = model.generate
+            generation_config = getattr(model, "generation_config", None)
+
+            def generate_with_explicit_config(*args, **kwargs):
+                if generation_config is not None:
+                    kwargs.setdefault("generation_config", generation_config)
+                return original_generate(*args, **kwargs)
+
+            model.generate = generate_with_explicit_config
+            model._iamccs_mtb_generate_compat = True
+        return pipeline
+
     @classmethod
     def _pipeline(cls, model_size: str, download_missing: bool):
         key = f"{model_size}|{bool(download_missing)}"
@@ -1588,7 +1610,7 @@ class IAMCCS_CineAudioTranscriptPromptCompiler:
                     except Exception:
                         raise ImportError("Cannot find comfy-mtb Load Whisper node. Install/enable comfy-mtb or keep the node package available.") from None
             cls._PIPELINE_CACHE[key] = MTB_LoadWhisper().load(str(model_size), bool(download_missing))[0]
-        return cls._PIPELINE_CACHE[key]
+        return cls._ensure_whisper_compatibility(cls._PIPELINE_CACHE[key])
 
     @classmethod
     def _transcribe(cls, audio: Any, model_size: str, language: str, download_missing: bool, return_timestamps: bool) -> str:

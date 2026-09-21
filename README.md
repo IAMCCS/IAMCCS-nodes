@@ -1,452 +1,216 @@
-# 🌀 IAMCCS-nodes
+<p align="center">
+  <img src="icon.png" alt="IAMCCS" width="160" />
+</p>
 
-![[Node piece](assets/cover_sq.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/cover_sq.png)
+# IAMCCS Nodes
 
-## Author: IAMCCS (Carmine Cristallo Scalzi)
+**A production-oriented collection of ComfyUI nodes for image generation, AI video, audio, continuity and editorial workflows.**
 
-<img src="icon.png" width="150" height="150">
+IAMCCS Nodes turns complex model pipelines into readable production systems. Use it to plan a sequence in a Shotboard, define its technical behaviour in one settings surface, generate with the model branch you need, and carry media, prompts and timing through delivery without losing the context that makes a shot coherent.
 
-### Category: ComfyUI Custom Nodes
-### Main Feature: Fix for LoRA loading in native WANAnimate workflows + general nodes 4 ComfyUI
+[Patreon](https://www.patreon.com/IAMCCS) · [Website](https://carminecristalloscalzi.com/) · [Buy Me a Coffee](https://www.buymeacoffee.com/iamccs) · [goyAIcanvas perpetual licence](https://iamccs.gumroad.com/l/goyAIcanvas-advanced?layout=profile)
 
-## Version: 1.5.5 (Added MiniMax H3 Engine from the IAMCCS architecture)
+> **Start with the system that matches the model you are using.** The package contains many composable utility nodes, but the featured systems below are the clearest entry points for a new workflow.
 
+## Production systems
 
-## Version: 1.5.3 (Fixed Bugs, added several Minimax H3 nodes and Cine utilities for a IAMCCS Cinematic Pipeline Framework)
+### 1. MiniMax H3 Shotboard
 
-## Version: 1.5.2 (MiniMax H3 utilities and workflow polish)
+The H3 Shotboard is the planning surface for MiniMax H3 workflows. It keeps the authored sequence together: global direction, local shot prompts, media slots, timing, audio handoff and continuity information. The Shotboard is the source of truth for the sequence; connected renderer branches consume that plan instead of maintaining a separate, hidden version of it.
 
-This update adds useful MiniMax H3 utilities and other workflow improvements:
+Use it for:
 
-- Better audio-drive, audio-timeline and multi-chunk lane support for MiniMax H3 Shotboard workflows.
-- More resilient MiniMax backend device handling, compiler fallbacks and long-video lip-sync paths.
-- Polished Shotboard, dialogue-tag editor, prompter, exporter and RTX/VFX user interfaces.
-- Backup archives are excluded from the node package and kept outside the repository.
+- first/last-frame and reference-led video shots;
+- multi-shot and long-form H3 sequences;
+- local prompt direction per interval, with a global creative direction above it;
+- native AV delivery, continuity-aware paths and editorial handoff;
+- repeatable seed policies for a whole generation or for individual chunks.
 
-## Version: 1.5.1 (Multigen Roll, Master Audio EDL Export and AudioBoard UX)
+**Key nodes:** `IAMCCS_ShotboardH3Settings`, `IAMCCS_ShotboardH3SettingsPro`, MiniMax H3 planner, audio timeline and delivery nodes.
 
-This release extends the Shotboard multigen editorial workflow:
+### 2. IAMCCS H3 Settings PRO
 
-- Non-destructive pre-roll and post-roll windows for multigen takes, with nominal timeline duration preserved in the editor.
-- Master Audio mode carried from AudioBoard to the Video Editor and rendered through the IAMCCS Shotboarder Aud+Vid Exporter PRO.
-- Exporter roll de-duplication: overlapped pre/post-roll material is emitted once, preserving nominal final duration and matching master-audio sync after editorial trim changes.
-- Dedicated professional audio/video exporter with direct master-file handling, encoded preview output and optional RTX processing.
-- Clearer, grouped AudioBoard controls for import, edit, split, MA mode, roll and publish actions.
+`IAMCCS_ShotboardH3SettingsPro` is the technical control room for an H3 Shotboard. It centralises the choices that should travel with the project: task and delivery mode, dimensions, frame rate, duration, seed policy, supported acceleration profile, continuity options and editor-facing controls.
 
-## Version: 1.5.0 (Shotboard multigen pipeline, Shotboard Editor and AudioBoard)
+The purpose is practical: a preset is a visible starting configuration, while its values remain inspectable and editable. Settings PRO publishes its resolved configuration through CineLinX so connected H3 branches stay aligned with the active Shotboard.
 
-This release adds the integrated IAMCCS production path for multi-timeline video work:
+### 3. LTX Shotboard and long-video toolkit
 
-- Shotboard multigen pipeline for selecting and routing timeline/take audio pairs.
-- Shotboard Video Editor with video, audio and master-audio lanes, real media previews, editing tools and project manifests.
-- AudioBoard Arranger with clip editing, real waveform previews, master-audio support, package export and second-grid snapping.
-- Metadata and media contracts that keep timeline identity, audio-lane identity and generated take assets aligned.
+The LTX family brings the same production approach to LTX workflows. The LTX 2.5 Shotboard accepts a timed image plan, per-segment direction and an optional animated bounding-box project, then compiles the plan for the downstream animator and LTX video path.
 
-## Version: 1.4.9 (Frame Designer V2 added)
+The surrounding LTX nodes cover the operational work needed by real projects: frame-rate and frame-count validation, first/last-frame control, latent continuation, overlap conditioning, disk-backed extension and LoRA stacks.
 
-## Version: 1.4.8 (Audioboard and other audio utilities)
+**Key nodes:** `IAMCCS_CineShotboardPlannerV3B`, `IAMCCS_LTX2_Validator`, `IAMCCS_LTX2_FrameRateSync`, `IAMCCS_LTX2_ExtensionModule`, `IAMCCS_LTX2_JointRefreshLatent`.
 
-## Version: 1.4.7 (New functions, utilities and bug fixed)
+> The LTX 2.5 BBox Shotboard expects compatible LTX Video and BBox Animator nodes to be installed in ComfyUI.
 
-## Version: 1.4.6 (Shotboard planner v2 and v3 added)
+### 4. WAN Animate LoRA system
 
-Version: 1.4.5 (Cine nodes added)
+The original IAMCCS node family solves a frequent native WAN Animate problem: a LoRA may appear connected while most of its weights are not actually applied. The WAN LoRA system remaps and stacks compatible LoRAs, injects them directly into the model, and can vary them safely across a long generation loop.
 
-Version: 1.4.4 (Supernodes and wan 2.2 + LTX 2.2 utilities added)
+Use the basic stack and apply pair for a compact graph, or add the Model In→Out, scheduled and runtime-bridge variants for phased animation work.
 
-## IAMCCS SuperNodes requirements
+**Key nodes:** `IAMCCS_WanLoRAStack`, `IAMCCS_ModelWithLoRA`, `IAMCCS_WanLoRAStackModelIO`, `IAMCCS_WanLoRASchedule`, `IAMCCS_WanLoRAHookSchedule`, `IAMCCS_WanLoRARuntimeBridge`.
 
-The IAMCCS SuperNodes are wrappers around ComfyUI/LTXV, IAMCCS helper nodes,
-audio preprocessing, VAE decode, and video combine nodes. Before sharing or
-testing a SuperNode workflow, check the dedicated requirements document:
+### 5. Motion, audio and finishing
 
-- [IAMCCS SuperNodes Requirements](SUPERNODES_REQUIREMENTS.md)
-- [MiniMax H3 Shotboard Workflow Requirements](docs/MINIMAX_H3_WORKFLOW_REQUIREMENTS.md)
-- [AudioBoard + BusOut Guide](AUDIOBOARD_BUSOUT_GUIDE.md)
+IAMCCS Nodes also includes the practical building blocks around a generation:
 
-## 🆕 Added new LTX-2.3 nodes for v2v, au+img2vid (instructions: patreon.com/IAMCCS)
+- **WAN motion:** `IAMCCS_WanImageMotion` and `WanImageMotionPro` provide controllable motion, optional FLF end-lock and conservative safety presets.
+- **Audio and editorial:** AudioBoard, dialogue tools, timeline mixing, master-audio export and Shotboard Video Editor nodes keep audio and picture on the same timeline.
+- **Low-VRAM delivery:** frame-by-frame VAE decode to disk, tiled decode, progressive and post-upscale routes, and VRAM cleanup nodes reduce peak memory pressure.
+- **Workflow clarity:** AutoLink turns dense direct wiring into organised Set/Get routes, while CineLinX carries structured project information between IAMCCS systems.
+- **Model utilities:** GGUF acceleration, hardware recommendations, sampler controls and LoRA management make larger graphs easier to operate and diagnose.
 
-Version: 1.4.0
+## A clear way through the package
 
-## 🆕 Dataset Creation Workflow Companions
+```mermaid
+flowchart LR
+    A[Shotboard<br/>prompts · media · timing] --> B[Settings PRO<br/>mode · technical controls]
+    B --> C{Model branch}
+    C --> D[MiniMax H3]
+    C --> E[LTX]
+    C --> F[WAN Animate]
+    D --> G[Audio · editorial · delivery]
+    E --> G
+    F --> G
+```
 
-The newer dataset creation workflows around `IAMCCS QE Prompt Enhancer` also now benefit from dedicated IAMCCS-nodes helpers on the generation side.
+The planning layer carries the authored intent. The connected model branch performs the generation, while the shared editorial and delivery tools keep the result usable as a production asset.
 
-Relevant nodes to include in workflow documentation:
+| Your goal | Start here | Add when needed |
+| --- | --- | --- |
+| Plan and generate a MiniMax H3 sequence | H3 Shotboard + H3 Settings PRO | Audio timeline, continuity, delivery and editor tools |
+| Create a timed LTX shot with image control | LTX 2.5 Shotboard | BBox direction, validators, extension and latent continuity |
+| Animate a WAN workflow with reliable LoRAs | WAN LoRA Stack + Apply LoRA to MODEL | Schedules, hook schedules and runtime bridge |
+| Increase controlled motion in a WAN shot | WanImageMotion / WanImageMotionPro | FLF end-lock, reference latents and safety preset |
+| Finish a long video on limited memory | VAE Decode to Disk + Video Combine From Dir | Tiled decode, VRAM flush and upscaling |
+| Keep a large graph readable | AutoLink | Bus groups and named Set/Get routes |
 
-- `IAMCCS Qwen Multi-Gen` (`IAMCCS_QwenMultiGen`)
-  - Runs newline-separated prompt variants in a single Qwen image-edit execution loop.
-  - Keeps the same workflow-facing node type name used by earlier dataset creation graphs, so existing workflows can keep loading without JSON edits.
+## Node previews
 
-- `Flux Klein Multi-Gen` (`IAMCCS_FluxKleinMultiGen`)
-  - Runs newline-separated prompt variants in a single Flux.2 Klein execution loop.
-  - Useful when one QE dataset slot needs to become a structured multi-view Flux batch without manually duplicating the whole sampling chain.
+The screenshots below are real nodes from this package. They are included here so the README acts as a visual map rather than a long unstructured inventory.
 
-- `Multiline Prompt Splitter (8 outputs)` (`IAMCCS_MultilinePromptSplitter8`)
-  - Splits one multiline STRING into `prompt_1` through `prompt_8` plus `count`.
-  - Supports optional fill modes such as `empty`, `repeat_last`, and `wrap`.
-  - Useful when a workflow needs explicit per-line routing into multiple text encoders or generation branches.
+<table>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="assets/lora%20stack.png"><img src="assets/lora%20stack.png" alt="LoRA Stack for WAN" /></a><br />
+      <strong>LoRA Stack (WAN-style remap)</strong><br />
+      Combines WAN, Flow and compatible LoRAs before native model injection.
+    </td>
+    <td width="50%" valign="top">
+      <a href="assets/lora_stack_model_I_O.png"><img src="assets/lora_stack_model_I_O.png" alt="Model In to Out WAN LoRA Stack" /></a><br />
+      <strong>LoRA Stack (Model In to Out) WAN</strong><br />
+      A direct model-to-model variant for concise WAN Animate graphs.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="assets/extension.png"><img src="assets/extension.png" alt="LTX 2 Extension Module" /></a><br />
+      <strong>LTX-2 Extension Module</strong><br />
+      Builds a controlled extension plan with overlap, source handling and seam-related options.
+    </td>
+    <td width="50%" valign="top">
+      <a href="assets/validator.png"><img src="assets/validator.png" alt="LTX 2 Validator" /></a><br />
+      <strong>LTX-2 Validator</strong><br />
+      Keeps resolution, duration and frame-count requirements visible before sampling.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="assets/wanimagemotionpro.png"><img src="assets/wanimagemotionpro.png" alt="WanImageMotionPro" /></a><br />
+      <strong>WanImageMotionPro</strong><br />
+      Motion control with optional FLF end-lock, reference latents and safety controls.
+    </td>
+    <td width="50%" valign="top">
+      <a href="assets/gguf.png"><img src="assets/gguf.png" alt="GGUF Accelerator" /></a><br />
+      <strong>GGUF Accelerator</strong><br />
+      Helps manage patch placement and VRAM reserve in GGUF-based pipelines.
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <a href="assets/autolink.png"><img src="assets/autolink.png" alt="AutoLink" /></a><br />
+      <strong>AutoLink</strong><br />
+      Converts direct links into organised Set/Get routes and can restore them when needed.
+    </td>
+    <td width="50%" valign="top">
+      <a href="assets/stage.png"><img src="assets/stage.png" alt="LTX LoRA staging" /></a><br />
+      <strong>LTX-2 staged LoRA workflow</strong><br />
+      Supports multi-stage LoRA application for more deliberate LTX setups.
+    </td>
+  </tr>
+</table>
 
-These nodes are especially relevant if you want to present the full dataset creation ecosystem and not only the QE node itself.
+## goyAIcanvas
 
-## 🆕 LTX-2.3 audio extension modules + VAE RAM safers
+**goyAIcanvas** is the companion local-first image workspace for IAMCCS users. It is built around ComfyUI and focuses on direct image creation and editing: text-to-image, image-to-image, drawing, inpainting, outpainting, references, layers, LoRAs, gallery history and image correction.
 
-Version: 1.3.6
+- [goyAIcanvas EASY on GitHub](https://github.com/IAMCCS/IAMCCS_goyAIcanvas-easy) is the public standalone entry point.
+- [goyAIcanvas Advanced on Gumroad](https://iamccs.gumroad.com/l/goyAIcanvas-advanced?layout=profile) is the perpetual-licence image generator and editor studio.
+- [goyAIcanvas updates and editions on Patreon](https://www.patreon.com/iamccs/posts/goyaicanvas-next-168753166) describe the current production tiers and ongoing development.
 
-## 🆕 Motion Nodes Update (2026-02-28) + 
+The IAMCCS Nodes package also exposes the Goya canvas integration node used by compatible local workflows.
 
-WanImageMotionPro Bux fixed 
-Added WanMotionProTrimmer
-added reference workflow
+## Installation
 
-Version: 1.3.5
+### ComfyUI Manager
 
-## 🆕 Motion Nodes Update (2026-02-24)
+Install **IAMCCS Nodes** from ComfyUI Manager, then restart ComfyUI and refresh the browser once. The package should exist only once in `custom_nodes`; duplicate copies can cause old node definitions or frontend routes to load.
 
-This update extends the WAN SVI Pro motion toolset:
+### Manual installation
 
-- New node: `WanImageMotionPro (Motion + FLF End Lock)`
-  - Adds optional `end_samples` end-lock (FLF-style) on top of motion continuity.
-- New artifact-mitigation widget on both motion nodes: `safety_preset`
-  - `safe` (default): activates stabilizations only when `motion > 1.15`
-  - `safer`: stronger stabilization for higher motion values
-  - `legacy`: keeps the older behavior
+```powershell
+cd <your-ComfyUI-folder>\custom_nodes
+git clone https://github.com/IAMCCS/IAMCCS-nodes.git
+```
 
-![[Node piece](assets/wanimagemotionpro.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/wanimagemotionpro.png)
+Restart ComfyUI after installing or updating. If the node UI looks stale, perform a hard browser refresh after the restart.
 
+### Before loading a workflow
 
-# UPDATE VERSION 1-3-4
+1. Install the model-specific dependencies required by that workflow.
+2. Put model, VAE, text-encoder, LoRA and audio files in the normal ComfyUI model paths.
+3. Start with the workflow's intended resolution, frame count and model family.
+4. Test a short single segment before enabling long-video, upscale or continuation routes.
 
-## 🆕 Version 1.3.4 — Video Performance + Low-RAM Tools
+IAMCCS Nodes does not ship model weights. Every model, LoRA, VAE, audio model and external node remains subject to its own licence and requirements.
 
-Date: 2026-02-01
+## Documentation and workflow guidance
 
-Highlights (EN):
-- New sampler wrapper: `Sampler Advanced v1` (`IAMCCS_SamplerAdvancedVersion1`)
-  - Delegates sampling to ComfyUI `SamplerCustomAdvanced` (same sampling core), but adds workflow-friendly knobs:
-    - `disable_progress`: reduces UI/progress update overhead on long video runs (often feels smoother)
-    - `cleanup`: optional VRAM cleanup after sampling
-  - Compatibility: supports newer ComfyUI returns (`NodeOutput`) and older tuple returns.
+- [SuperNodes requirements](SUPERNODES_REQUIREMENTS.md)
+- [H3 continuation quickstart — Italian](docs/H3_CONTINUATION_QUICKSTART_IT.md)
+- [H3 continuation guide for filmmakers — Italian](docs/H3_CONTINUATION_FILMMAKER_POST_IT.md)
+- [H3 Pixel Safe continuation reference](docs/H3_PIXEL_SAFE_CONTINUATION_REFMOD.md)
+- [Complete change history](CHANGELOG.md)
 
-- True low-RAM decoding: `VAE Decode → Disk (frames, low RAM)` (`IAMCCS_VAEDecodeToDisk`)
-  - Decodes one frame at a time and saves frames to disk to avoid large `IMAGE` batches in system RAM.
+For workflow releases, detailed setup notes and tutorials, follow [IAMCCS on Patreon](https://www.patreon.com/IAMCCS) or visit [carminecristalloscalzi.com](https://carminecristalloscalzi.com/).
 
-- HW recommendations as a node: `HW Probe Recommendations (JSON)` (`IAMCCS_HWProbeRecommendations`)
-  - Outputs a JSON report + extracted recommended values for long video workflows.
+## Support and releases
 
-- GGUF Accelerator improvements: `GGUF Accelerator (patch_on_device)` (`IAMCCS_GGUF_accelerator`)
-  - Added safer patch move strategies (`move_policy`) and a VRAM reserve budget (`leave_free_vram_mb`).
-  - Backward-compatible input ordering preserved for older workflows.
+IAMCCS Nodes is actively developed. Patreon is the main place for release posts, workflows, technical notes and the wider IAMCCS AI-cinema ecosystem. If the project helps your work, you can also support it through [Buy Me a Coffee](https://www.buymeacoffee.com/iamccs).
 
-- Frontend quality-of-life:
-  - Bus Group with MACRO settings.
-  - HW probe apply is user-controlled (overwrite vs fill-missing) and preset sync can be disabled to keep manual tuning.
+<details>
+<summary><strong>Recent release history</strong></summary>
 
-- MultiSwitch (frontend + workflow UX): `MultiSwitch (dynamic inputs)` (`IAMCCS_MultiSwitch`)
-  - Active-link indicator: visually shows which input is currently connected/used.
-  - Input rename: you can rename inputs to keep complex graphs readable (especially when routing MANY signals).
+<br />
+
+| Release | Date | Highlights |
+| --- | --- | --- |
+| **1.5.5** | 2026-09-19 | MiniMax H3 engine integration and project licensing documentation. |
+| **1.5.2** | 2026-08-24 | H3 audio-drive, audio-timeline and Shotboard workflow polish. |
+| **1.5.1** | 2026-07-21 | Multigen roll, master-audio EDL export and AudioBoard UX. |
+| **1.5.0** | 2026-07-12 | Shotboard multigen pipeline, Video Editor and AudioBoard. |
+| **1.4.x** | 2026 | LTX audio extensions, low-RAM utilities, SuperNodes and cinematic helpers. |
+| **1.3.x** | 2026 | WAN motion controls, AutoLink, LTX extension modules and LoRA workflow tools. |
+
+See [CHANGELOG.md](CHANGELOG.md) for the complete chronological record.
+</details>
+
+## Licence
+
+This repository is released under the [GNU GPL v3.0](LICENSE). Preserve the included licence and attribution notices when redistributing or modifying the package.
 
 ---
 
-# UPDATE VERSION 1-3-3
-
-## 🆕 Version 1.3.3 — AutoLink + LTX-2 Extension Module
-
-Date: 2026-01-26
-
-Highlights (EN):
-- AutoLink (frontend): convert direct links into compact Set/Get nodes + restore when needed.
-
-![[Node piece](assets/autolink.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/autolink.png)
-
-- LTX-2: Extension Module + helpers for iterative long video extension workflows.
-
-![[Node piece](assets/extension.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/extension.png)
-
-
-GGUF / OOM tips:
-- If you use `IAMCCS_GGUF_accelerator` and you are close to the VRAM limit, consider PyTorch allocator tuning to reduce fragmentation (must be set **before** launching ComfyUI).
-  - Example: `PYTORCH_ALLOC_CONF=backend:cudaMallocAsync`
-  - Example (native allocator): `PYTORCH_ALLOC_CONF=max_split_size_mb:128,garbage_collection_threshold:0.8`
-  - Example (experimental, native allocator): `PYTORCH_ALLOC_CONF=expandable_segments:True`
-
-### IAMCCS_GGUF_accelerator (how to use)
-
-![[Node piece](assets/gguf.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/gguf.png)
-
-This node modifies a GGUF `MODEL` so ComfyUI-GGUF can avoid expensive per-step CPU↔GPU patch movement.
-
-Recommended usage:
-- Place it **after** your GGUF model loader and **before** LoRA application / sampling.
-- Default: `mode = auto_oom_safe`.
-  - If free VRAM is low, it automatically disables `patch_on_device` and avoids pre-moving patches.
-  - If a CUDA OOM happens while moving patches, it falls back to CPU/offload (when `oom_fallback = true`).
-
-Suggested starting values on 12GB GPUs:
-- `mode = auto_oom_safe`
-- `min_free_vram_mb = 1500` (raise to 2000–3000 if you still get OOMs)
-- Keep `move_patches_now = true` only if you have headroom; set to `false` if you want the safest VRAM behavior.
-
-PyTorch allocator tuning (set before start):
-- You can use `PYTORCH_ALLOC_CONF` (or the legacy alias `PYTORCH_CUDA_ALLOC_CONF`) to reduce fragmentation.
-- Windows example (PowerShell, current session):
-  - `$env:PYTORCH_ALLOC_CONF = "backend:cudaMallocAsync"`
-- Windows example (CMD / .bat):
-  - `set PYTORCH_ALLOC_CONF=backend:cudaMallocAsync`
-
----
-
-# UPDATE VERSION 1-3-2
-
-## 🆕 Version 1.3.2 — LTX-2 Nodes Pack
-
-Highlights:
-- Added/updated **LTX-2 LoRA nodes** (category `IAMCCS/LoRA`):
-  - `LoRA Stack (LTX-2, 3 slots)` (`IAMCCS_LTX2_LoRAStack`)
-  - `LoRA Stack (LTX-2, staged: stage1+stage2) (BETA)` (`IAMCCS_LTX2_LoRAStackStaged`)
-
-![[Node piece](assets/stage.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/stage.png)
-
-  - `Apply LoRA to MODEL (LTX-2, quiet logs)` (`IAMCCS_ModelWithLoRA_LTX2`)
-  - `Apply LoRA to MODEL (LTX-2, staged) (BETA)` (`IAMCCS_ModelWithLoRA_LTX2_Staged`)
-  - `LoRA Stack (Model In→Out) LTX-2` (`IAMCCS_LTX2_LoRAStackModelIO`)
-
-![[Node piece](assets/validator.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/validator.png)
-
-- Added/updated **LTX-2 workflow utilities** (category `IAMCCS/LTX-2`):
-  - `LTX-2 FrameRate Sync (int+float)` (`IAMCCS_LTX2_FrameRateSync`) — keeps FPS INT/FLOAT consistent.
-  - `LTX-2 Validator (16px, 8n +1)` (`IAMCCS_LTX2_Validator`) — EmptyImage-like IMAGE + validated `length` output; enforces `8n+1` and a permissive spatial multiple (16px).
-    - `fps` is handled by `LTX-2 FrameRate Sync` (no fps input on the Validator).
-    - `seconds` + `length` are both visible; the UI auto-syncs them.
-  - `LTX-2 TimeFrameCount` (`IAMCCS_LTX2_TimeFrameCount`) — duration-only helper for I2V workflows: `seconds` ↔ `length` kept in sync in the UI (uses nearest FrameRateSync, fallback 24fps).
-  - `LTX-2 Control Preprocess (aux)` (`IAMCCS_LTX2_ControlPreprocess`) — lightweight grayscale/threshold/edges helper for control-style workflows.
-
-![[Node piece](assets/frame.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/frame.png)
-
----
-
-# UPDATE VERSION 1-3-1
-
-## 🆕 Version 1.3.1 — WAN SVI Pro Motion Control
-
-
-![[Node piece](assets/wanmotion.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/wanmotion.png)
-
-Highlights:
-- Added `IAMCCS WanImageMotion` node: drop-in replacement for common WAN SVI Pro image-to-video nodes, with motion amplitude control to fix slow-motion issues in WAN SVI Pro workflows.
-- Motion modes: apply boost to `prev_samples` only or all non-first latents.
-- VRAM profiles: normal / chunked / per-frame loop / CPU offload for memory-constrained systems.
-- `include_padding_in_motion` toggle: enables motion boost on padded frames when anchor has single frame (T=1).
-- `safety_preset` (safe defaults for higher motion): helps reduce color artifacts and seam degradation when pushing `motion`.
-- Comprehensive logging with warnings when motion_range is empty.
-- Full documentation: `docs/WanImageMotion.md` and `docs/wanimagemotion_instructions.md`
-- Removed the previously included external-model LoRA loader node and related documentation.
-
-### New Node: IAMCCS WanImageMotion
-
-Use this node in WAN SVI Pro workflows to control motion intensity and prevent slow-motion artifacts.
-
-Inputs:
-- `positive` / `negative`: conditioning
-- `length`: video length
-- `anchor_samples`: base latent samples
-- `motion`: motion amplitude (1.0-2.0, default 1.15)
-- `motion_mode`: choose where to apply boost
-- `motion_latent_count`: frames from prev_samples to use as motion reference
-- `include_padding_in_motion`: enable to apply motion on padded frames
-- `vram_profile`: memory optimization strategy
-- `latent_precision`: dtype control (auto/fp16/fp32)
-- `safety_preset`: `safe` / `safer` / `legacy` (artifact mitigation when `motion > 1.15`)
-- `add_reference_latents`: optional conditioning stabilization
-- Optional `prev_samples`: previous latents for motion continuity
-
-Outputs:
-- Updated `positive` / `negative` conditioning with motion-boosted latents
-- `latent`: empty latent for sampling
-
----
-
-# UPDATE VERSION 1-3-0
-
-## 🆕 Version 1.3.0 — New MODEL IO LoRA Stack
-
-Highlights:
-- Added `LoRA Stack (Model In→Out) WAN` node: directly applies up to 4 WAN / Flow / Standard LoRAs to an incoming MODEL and outputs a patched MODEL (ideal for WAN 2.2 workflows where a single node step is preferred).
-- Added `LoRA Schedule (WAN, ranged)` node: activates extra LoRA stacks by generation index, with optional open-ended ranges for long loop workflows.
-- Extended internal WAN key remapping for seamless WAN 2.2 (Flow) + WAN 2.1 cross-compatibility.
-- Version bump across project files.
-
-### New Node: LoRA Stack (Model In→Out) WAN
-
-![Node piece no_7](assets/lora_stack_model_I_O.png)lora_stack_model_I_O.png
-
-Use this node when you already have a base MODEL loaded (WAN 2.2, Flow, SDXL, etc.) and want a single pass application of multiple LoRAs without an intermediate stack/output hand-off. It mirrors the behavior of the classic stack + apply pair but merges them for simpler graphs (especially animation or chained sampler pipelines).
-
-Inputs:
-- `model`: base diffusion MODEL.
-- `lora1..lora4` + `strength1..strength4` (skips if "no" or strength == 0.0)
-- `model_type`: choose `flow`, `wan2x`, or `standard` to control remapping logic.
-- Optional `lora` (LORA) input: allows concatenating a previously built stack from `IAMCCS_WanLoRAStack` for more than 4 total LoRAs.
-
-Output:
-- Patched `MODEL` ready for samplers / video pipelines.
-
-Recommended Use (WAN 2.2 workflows):
-1. Load base WAN 2.2 / LightX2V model.
-2. Add `LoRA Stack (Model In→Out) WAN` and select up to 4 LoRAs.
-3. (Optional) Chain a classic `IAMCCS_WanLoRAStack` into the optional `lora` input if you need >4.
-4. Connect output to KSampler / Animate nodes.
-
-Why this node: Eliminates one extra node hop, reduces graph complexity and clarifies model lineage in large animation workflows.
-
-### Additional Node: LoRA Schedule (WAN, ranged)
-
-Use this node when a WAN loop needs always-on LoRAs plus extra LoRAs that only apply on specific generations or generation ranges.
-
-Typical setup:
-1. Keep your main always-on LoRAs in `IAMCCS_WanLoRAStack` or `IAMCCS_WanLoRAStackModelIO`.
-2. Build extra LoRA stacks for alternate phases.
-3. Feed the loop `index` into `generation_index`.
-4. Set `slot_01_start/end`, `slot_02_start/end`, etc. to define which extra stack is active on which generations.
-5. Send the scheduler `lora` output into the optional `lora` input of your main WAN LoRA stack node.
-
-Notes:
-- `default_lora` stays active on every generation.
-- `end = -1` means "from this generation onward".
-- Multiple active slots stack together, so you can layer phase LoRAs if ranges overlap.
-
-Preset behavior:
-- `manual_range`: uses `start/end`; if `end = -1`, the slot stays active from `start` onward.
-- `all_generations`: always active.
-- `only_first`: active only on generation `0`.
-- `all_nonfirst`: active from generation `1` onward.
-- `even_generations`: active on `0, 2, 4, ...`.
-- `odd_generations`: active on `1, 3, 5, ...`.
-- `every_2_from_start`: active on `start, start+2, start+4, ...`.
-- `every_3_from_start`: active on `start, start+3, start+6, ...`.
-
-Logging:
-- Each execution logs the current `generation_index`.
-- Logs show the always-on `default_lora` entries.
-- Logs show each active slot, the preset that matched, and the actual LoRA names/strengths injected on that generation.
-
-## Previous Versions
-
-### Version 1.2.3 — New input lora - add another StackLoraModel (concatenate) + Extended Wan 2.1 Compatibility
-
-### Version 1.2.1
-
-# UPDATE VERSION 1-2-1
-
-## 🆕 Version 1.2.1 — Extended Wan 2.1 Compatibility
-
-The **WAN-style remap** node now supports **LightX2V 2.1 LoRA models**.  
-This version extends overall compatibility to all LoRA types — even those without dedicated weight tensors (these will simply display a non-critical “missing optional weights” message).  
-
-This ensures smoother cross-compatibility between LightX2V 2.1 / 2.2 and any WAN-based or character LoRA setup.
-
-See full changelog → [CHANGELOG.md](./CHANGELOG.md)
-
-# Overview
-
-The IAMCCS-nodes package introduces a fix for a key limitation in native WANAnimate workflows:
-when users run animation pipelines without the WanVideoWrapper, LoRA models fail to load correctly — most weights are ignored, and the visual consistency breaks.
-
-This package contains two complementary nodes that work together to fix this problem and restore full LoRA functionality while keeping the workflow lightweight and modular.
-
-The IAMCCS Native LoRA System introduces an optimized way to handle multiple LoRAs inside native ComfyUI workflows.
-It is composed of two interconnected nodes designed to work seamlessly together.
-
-## 1. LoRA Stack (WAN-style remap)
-
-This node lets you combine several LoRA models—especially those made for WAN2.x / Animate / Flow architectures—into one unified output.
-
-![[Node piece](assets/lora stack.png)](https://github.com/IAMCCS/IAMCCS-nodes/blob/main/assets/lora%20stack.png)
-
-Each LoRA slot includes:
-
-an independent strength control,
-
-automatic WAN-style key remapping for full compatibility,
-
-and support for .safetensors files across any model type (flow, wan, sdxl, etc).
-
-It produces a stacked LoRA bundle that merges all the active LoRAs and prepares them for efficient native injection.
-
-## 2. Apply LoRA to MODEL (Native)
-
-This node applies the generated LoRA stack directly to a loaded diffusion model at the Torch level, without relying on older ComfyUI Apply LoRA wrappers.
-
-![Node piece no_2](assets/lora%20to%20model.png)
-
-Works natively with FP16 accumulation (recommended when paired with Model Patch Torch Settings)
-
-Maintains precision and speed
-
-Fully compatible with WAN2.x and other Flow-type diffusion models
-
-Output: a ready-to-run patched model for image or video generation.
-
-This structure replaces multiple chained LoRA nodes with a single modular system, improving both stability and performance.
-Ideal for WANAnimate, WANVideo, or any Flow-based cinematic model.
-
-![Node piece no_3](assets/ensemble.png)
-
-# LoRA Concatenation (1.2.3)
-
-![Node piece no_4](assets/lora_concatenatel.png)lora_concatenatel.png
-
-### LoRA Stack (WAN-style remap)
-Supports the following LoRAs:  
-- New Moe distill WAN 2.2 LightX2V High Model  
-- New Moe distill WAN 2.2 LightX2V Low Model 
-- WAN 2.2 LightX2V High Model  
-- WAN 2.2 LightX2V Low Model 
-- WAN Boost Realism  
-- WAN 2.2 LightX2V 4-Step High  
-- WAN 2.2 LightX2V 4-Step Low
-- Character LoRAs   
-- WAN 2.1 LightX2V Model  
-
-# Installation
-
-The node has now been officially accepted on ComfyUI Manager, You can install it directly from there (just search for IAMCCS).
-
-or
-
-You can grab it manually:
-
-digit in your terminal:
-
- cd ComfyUI/custom_nodes
- git clone https://github.com/IAMCCS/IAMCCS-nodes.git
-
-Compatibility
-
-ComfyUI ≥ 0.3.0
-
-Python ≥ 3.12
-
-Torch ≥ 2.8 (CUDA 12.6 or 12.8)
-
-Compatible with:
-WAN2.1, WAN2.2, WANAnimate, WANAnimate_relight, Pulid, Flux, and multi-LoRA setups.
-
-
-# Technical Insight
-
-LoRA weights fail to load in native WANAnimate pipelines because the model initialization bypasses the internal LoRA merge functions used in the wrapper.
-By separating the process into two modular nodes, IAMCCS-nodes restores full LoRA compatibility without depending on WanVideoWrapper, keeping performance high and structure clean.
-
-Node 1 replaces the missing LoRA-loading phase.
-
-Node 2 reintroduces dynamic LoRA reapplication and blending inside the animation graph.
-
-This modular architecture makes LoRA management in WANAnimate flexible, transparent, and fully native.
-
-### If my work helped you, and you’d like to say thanks — grab me a coffee ☕
-
-<a href="https://www.buymeacoffee.com/iamccs" target="_blank">
-  <img src="https://cdn.buymeacoffee.com/buttons/v2/default-yellow.png" alt="Buy Me A Coffee" width="200" />
-</a>
-
+Created by **IAMCCS / Carmine Cristallo Scalzi** · [Patreon](https://www.patreon.com/IAMCCS) · [Website](https://carminecristalloscalzi.com/) · [Gumroad](https://iamccs.gumroad.com/)
