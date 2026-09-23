@@ -47,7 +47,7 @@ SOURCE_FIT_POLICIES = ("native_adapt", "canvas_pad", "canvas_crop", "stretch")
 SOURCE_FIT_OVERRIDES = ("from_shotboard",) + SOURCE_FIT_POLICIES
 AUDIO_PAIRING_POLICIES = ("pair_with_source_video", "standalone_reference", "off")
 AUDIO_PAIRING_OVERRIDES = ("from_shotboard",) + AUDIO_PAIRING_POLICIES
-SOURCE_END_POLICIES = ("hold_last_for_grid", "error")
+SOURCE_END_POLICIES = ("hold_last_for_grid", "hold_last_visible", "error")
 SOURCE_END_OVERRIDES = ("from_shotboard",) + SOURCE_END_POLICIES
 REF_IMAGE_SIZE_POLICIES = ("match", "max")
 REF_IMAGE_SIZE_OVERRIDES = ("from_shotboard",) + REF_IMAGE_SIZE_POLICIES
@@ -321,13 +321,18 @@ def _frame_indices(
     positions = start_seconds * source_fps + torch.arange(aligned_frames, dtype=torch.float64) * (source_fps / H3_FPS)
     indices = torch.floor(positions + 0.5).to(dtype=torch.long)
     requested_max = int(indices[requested_frames - 1].item())
-    if requested_max >= source_frames:
+    visible_overflow = indices[:requested_frames] >= source_frames
+    visible_overflow_count = int(visible_overflow.sum().item())
+    if requested_max >= source_frames and end_policy != "hold_last_visible":
         available_seconds = source_frames / source_fps
         needed_seconds = start_seconds + requested_frames / H3_FPS
         raise ValueError(
             "MiniMax H3 V2V source is shorter than the requested visible range: "
             f"available={available_seconds:.3f}s, requested_end={needed_seconds:.3f}s, "
-            f"source_fps={source_fps:.3f}. Shorten the Shotboard segment or supply a longer source."
+            f"source_start={start_seconds:.3f}s, requested_frames={requested_frames}, "
+            f"aligned_frames={aligned_frames}, source_frames={source_frames}, source_fps={source_fps:.3f}. "
+            "Shorten the Shotboard/Settings PRO master duration, supply a longer source, or explicitly select "
+            "hold_last_visible (the padded range cannot preserve source lip-sync)."
         )
     overflow = indices >= source_frames
     overflow_count = int(overflow.sum().item())
@@ -342,7 +347,7 @@ def _frame_indices(
     # action frames of chunk N+1. The strict `error` policy intentionally keeps
     # real tail addressing when the caller explicitly asks for it.
     grid_tail_hold_frames = 0
-    if end_policy == "hold_last_for_grid" and aligned_frames > requested_frames:
+    if end_policy in {"hold_last_for_grid", "hold_last_visible"} and aligned_frames > requested_frames:
         grid_tail_hold_frames = aligned_frames - requested_frames
         indices[requested_frames:] = indices[requested_frames - 1]
     indices.clamp_(0, source_frames - 1)
@@ -350,6 +355,7 @@ def _frame_indices(
         "first_source_index": int(indices[0].item()),
         "last_source_index": int(indices[-1].item()),
         "grid_tail_hold_frames": grid_tail_hold_frames,
+        "visible_last_frame_hold_frames": visible_overflow_count,
         "source_tail_overflow_frames": overflow_count,
         "source_fps": source_fps,
         "target_fps": H3_FPS,
@@ -398,6 +404,7 @@ def _slice_audio(
     start_seconds: float,
     requested_frames: int,
     aligned_frames: int,
+    end_policy: str = "hold_last_for_grid",
 ) -> dict[str, Any] | None:
     if not isinstance(audio, Mapping) or not torch.is_tensor(audio.get("waveform")):
         return None
@@ -408,16 +415,22 @@ def _slice_audio(
     start = max(0, int(round(float(start_seconds) * sample_rate)))
     visible_samples = max(1, int(round(requested_frames / H3_FPS * sample_rate)))
     aligned_samples = max(visible_samples, int(round(aligned_frames / H3_FPS * sample_rate)))
-    if start + visible_samples > int(waveform.shape[-1]):
+    source_samples = int(waveform.shape[-1])
+    available_visible_samples = max(0, min(visible_samples, source_samples - start))
+    missing_visible_samples = visible_samples - available_visible_samples
+    if missing_visible_samples and end_policy != "hold_last_visible":
         raise ValueError(
             "MiniMax H3 V2V source audio is shorter than the requested visible segment: "
-            f"need samples {start}:{start + visible_samples}, have {int(waveform.shape[-1])}."
+            f"need samples {start}:{start + visible_samples}, have {source_samples}. "
+            "Shorten the Shotboard/Settings PRO duration or select hold_last_visible to pad missing audio with silence."
         )
     # Only the requested programme range may read real source samples.  The
     # 17k+5-only tail is conditioning padding and must be silence; otherwise
     # the beginning of the next chunk (and possibly its speech) leaks backward
     # into the current REF2VA/custom-audio conditioning window.
-    sliced = waveform[..., start : start + visible_samples]
+    sliced = waveform[..., start : min(start + visible_samples, source_samples)]
+    if int(sliced.shape[-1]) < visible_samples:
+        sliced = F.pad(sliced, (0, visible_samples - int(sliced.shape[-1])))
     if aligned_samples > visible_samples:
         sliced = F.pad(sliced, (0, aligned_samples - visible_samples))
     return {
@@ -428,6 +441,7 @@ def _slice_audio(
         "iamccs_requested_frames": int(requested_frames),
         "iamccs_aligned_frames": int(aligned_frames),
         "iamccs_fps": H3_FPS,
+        "iamccs_source_visible_pad_samples": int(missing_visible_samples),
     }
 
 
@@ -762,6 +776,7 @@ class IAMCCS_MiniMaxH3V2VConditioningR22:
                 start_seconds=source_start,
                 requested_frames=requested,
                 aligned_frames=aligned,
+                end_policy=config["source_end_policy"],
             )
         references = [resources.get(f"{RESOURCE_PREFIX}reference_image_{index}") for index in range(1, 5)]
         roles = list(attached.get("reference_roles") or [])[:4]

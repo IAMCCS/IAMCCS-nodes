@@ -169,6 +169,13 @@ def _is_frame_timeline(timeline: dict[str, Any]) -> bool:
 
 
 def _duration_seconds(slot: dict[str, Any], timeline: dict[str, Any], fallback: float) -> float:
+    # Filmmaker timelines are frame-authored. ``length`` is the live value
+    # changed by trimming/stretching a box, while duration_seconds and older
+    # length_frames mirrors can remain serialized with the previous value.
+    # Prefer the frame truth so a 6-second edit cannot silently compile the
+    # former 124-frame/~5-second range.
+    if _is_frame_timeline(timeline) and slot.get("length") is not None:
+        return max(1.0 / H3_FPS, _float(slot.get("length"), fallback * H3_FPS) / H3_FPS)
     explicit = _first_value(slot, ("duration_seconds", "length_seconds", "duration"))
     if explicit is not None:
         return max(0.01, _float(explicit, fallback))
@@ -180,6 +187,8 @@ def _duration_seconds(slot: dict[str, Any], timeline: dict[str, Any], fallback: 
 
 
 def _start_seconds(slot: dict[str, Any], timeline: dict[str, Any], fallback: float) -> float:
+    if _is_frame_timeline(timeline) and slot.get("start") is not None:
+        return max(0.0, _float(slot.get("start"), fallback * H3_FPS) / H3_FPS)
     explicit = _first_value(slot, ("start_seconds", "second", "time_seconds"))
     if explicit is not None:
         return max(0.0, _float(explicit, fallback))
@@ -189,30 +198,28 @@ def _start_seconds(slot: dict[str, Any], timeline: dict[str, Any], fallback: flo
     return max(0.0, fallback)
 
 
-def _normalise_slots(timeline: dict[str, Any], duration_seconds: float, fallback_duration: float) -> list[dict[str, Any]]:
+def _normalise_slots(
+    timeline: dict[str, Any],
+    duration_seconds: float,
+    fallback_duration: float,
+    preserve_image_anchors: bool = False,
+) -> list[dict[str, Any]]:
     raw_rows = _timeline_rows(timeline)
     image_paths = _timeline_image_paths(timeline)
     slots: list[dict[str, Any]] = []
     cursor = 0.0
+    # ``duration_seconds`` is the programme boundary: it comes from the
+    # Shotboard alone, or from connected Settings/PRO after compilation. Rows
+    # are editorial content inside that boundary. This prevents a stale row
+    # length from silently restoring an older 6/30-second generation request.
+    duration_limit_frames = max(
+        H3_MIN_FRAMES,
+        int(round(max(0.01, _float(duration_seconds, fallback_duration)) * H3_FPS)),
+    )
     for index, row in enumerate(raw_rows):
         row_type = _text(row.get("type", "image")).lower()
         if row_type in {"audio", "motion", "video"} or _bool(row.get("placeholder"), False):
             continue
-        duration = _duration_seconds(row, timeline, fallback_duration)
-        start = _start_seconds(row, timeline, cursor)
-        requested_frames = max(H3_MIN_FRAMES, int(round(duration * H3_FPS)))
-        if requested_frames > H3_MAX_TRAINED_FRAMES:
-            raise ValueError(
-                f"Il box '{_text(_first_value(row, ('label', 'name'))) or index + 1}' richiede "
-                f"{requested_frames} frame: riduci il trimming sulla timeline a massimo "
-                f"{H3_MAX_TRAINED_FRAMES} frame. Il planner non divide automaticamente i box."
-            )
-        frame_count = align_h3_frames(requested_frames)
-        if frame_count > H3_MAX_TRAINED_FRAMES:
-            raise ValueError(
-                f"Il box {index + 1} diventa {frame_count} frame dopo l'allineamento H3 17k+5: "
-                f"riduci il trimming a massimo {H3_MAX_TRAINED_FRAMES} frame."
-            )
         image = _slot_image(row)
         if not image and "imageFile" not in row:
             try:
@@ -225,6 +232,32 @@ def _normalise_slots(timeline: dict[str, Any], duration_seconds: float, fallback
             row.get("use_keyframe", row.get("use_guide", True)),
             True,
         )
+        protected_anchor = bool(preserve_image_anchors and image and use_keyframe)
+        duration = _duration_seconds(row, timeline, fallback_duration)
+        start = _start_seconds(row, timeline, cursor)
+        requested_frames = max(H3_MIN_FRAMES, int(round(duration * H3_FPS)))
+        if not protected_anchor:
+            start_frame = max(0, int(round(start * H3_FPS)))
+            remaining_frames = duration_limit_frames - start_frame
+            if remaining_frames <= 0:
+                continue
+            requested_frames = min(requested_frames, remaining_frames)
+            # H3 cannot compile a sub-five-frame fragment at the programme edge.
+            # Ignore the sliver rather than extending beyond the declared truth.
+            if requested_frames < H3_MIN_FRAMES:
+                continue
+        if requested_frames > H3_MAX_TRAINED_FRAMES:
+            raise ValueError(
+                f"Il box '{_text(_first_value(row, ('label', 'name'))) or index + 1}' richiede "
+                f"{requested_frames} frame: riduci il trimming sulla timeline a massimo "
+                f"{H3_MAX_TRAINED_FRAMES} frame. Il planner non divide automaticamente i box."
+            )
+        frame_count = align_h3_frames(requested_frames)
+        if frame_count > H3_MAX_TRAINED_FRAMES:
+            raise ValueError(
+                f"Il box {index + 1} diventa {frame_count} frame dopo l'allineamento H3 17k+5: "
+                f"riduci il trimming a massimo {H3_MAX_TRAINED_FRAMES} frame."
+            )
         slot = {
             "id": _text(row.get("id")) or f"shot_{index + 1}",
             "label": _text(_first_value(row, ("label", "name"))) or f"Shot {index + 1:02d}",
@@ -241,7 +274,7 @@ def _normalise_slots(timeline: dict[str, Any], duration_seconds: float, fallback
             "use_keyframe": bool(image and use_keyframe),
         }
         slots.append(slot)
-        cursor = max(cursor, start + frame_count / H3_FPS)
+        cursor = max(cursor, start + requested_frames / H3_FPS)
 
     slots.sort(key=lambda item: (float(item["start_seconds"]), str(item["id"])))
     for index, slot in enumerate(slots):
@@ -2027,7 +2060,22 @@ def build_shotplan(
         return plan
 
     fallback_duration = min(H3_MAX_TRAINED_FRAMES / H3_FPS, max(H3_MIN_FRAMES / H3_FPS, 10.0))
-    slots = _normalise_slots(timeline, duration_seconds, fallback_duration)
+    raw_visual_rows = [
+        row for row in _timeline_rows(timeline)
+        if _text(row.get("type", "image")).lower() not in {"audio", "motion", "video", "text"}
+        and not _bool(row.get("placeholder"), False)
+        and _slot_image(row)
+        and _bool(row.get("use_keyframe", row.get("use_guide", True)), True)
+    ]
+    preserve_flf_anchors = requested_task_mode in {
+        "flf", "fflf", "fl2va", "longvid_continuous_guided", "long_continuous_guided",
+    } or (requested_task_mode in {"auto", "auto_from_timeline"} and len(raw_visual_rows) >= 2)
+    slots = _normalise_slots(
+        timeline,
+        duration_seconds,
+        fallback_duration,
+        preserve_image_anchors=preserve_flf_anchors,
+    )
     lipsync_requested = requested_task_mode in {"ref2vid_lipsync", "lipsync_ref2vid"}
     lipsync_audio_rows = _timeline_audio_rows(timeline) if lipsync_requested else []
     # A LipSync performance can use one CineInfoH3 image connected outside the
@@ -2075,8 +2123,9 @@ def build_shotplan(
         or (auto_task_mode and len(image_slots) >= 2)
     )
     if flf_anchor_mode:
-        timeline_duration = _float(timeline.get("duration_seconds"), duration_seconds)
-        slots = _normalise_flf_bridge_slots(timeline, slots, timeline_duration)
+        # The compiled duration argument is already resolved from Shotboard or
+        # connected Settings PRO. Never let a stale timeline mirror override it.
+        slots = _normalise_flf_bridge_slots(timeline, slots, duration_seconds)
     i2v_hard_cut_mode = bool(explicit_i2v_mode and len(image_slots) > 1)
     # Ref2VA does not accept the previous chunk's final frame as temporal
     # conditioning. Multiple timeline slots are independent reference-guided

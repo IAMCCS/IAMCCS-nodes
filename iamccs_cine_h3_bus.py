@@ -619,13 +619,17 @@ class IAMCCS_CineH3AudioBus:
         return (out_linx, *lanes, json.dumps(manifest, ensure_ascii=False, indent=2))
 
 
+from .iamccs_h3_previs import IAMCCS_H3PrevisControl
+
 NODE_CLASS_MAPPINGS = {
+    "IAMCCS_H3PrevisControl": IAMCCS_H3PrevisControl,
     "IAMCCS_CineH3Input": IAMCCS_CineH3Input,
     "IAMCCS_CineH3FunControlInput": IAMCCS_CineH3FunControlInput,
     "IAMCCS_CineH3AudioBus": IAMCCS_CineH3AudioBus,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "IAMCCS_H3PrevisControl": "IAMCCS H3 PREVIS · Camera + Subject Blocking",
     "IAMCCS_CineH3Input": "IAMCCS CineH3Input · Modular Bridge",
     "IAMCCS_CineH3FunControlInput": "IAMCCS Cine H3 Fun Control Input · Pose / Depth / Edge",
     "IAMCCS_CineH3AudioBus": "Cine H3 Audio Bus (Shotboard Lanes)",

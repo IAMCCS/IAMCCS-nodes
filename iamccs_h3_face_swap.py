@@ -1,6 +1,7 @@
 """SAM3 tracked subject swap: lazy crop/inpaint/uncrop branch for universal H3."""
 from __future__ import annotations
 
+import hashlib
 import json
 
 import folder_paths
@@ -9,6 +10,45 @@ import torch
 FACE_SWAP_MODE = "v2va_face_swap"
 FACE_SWAP_RESOURCE = "iamccs_h3_face_swap_source"
 FACE_SWAP_LATENT = "iamccs_h3_face_swap_crop"
+
+
+def _image_signature(image):
+    """Short diagnostic identity for the exact reference tensor used by H3."""
+    if not torch.is_tensor(image) or image.ndim != 4 or not len(image):
+        return "none"
+    sample = image[:1].detach().to(device="cpu", dtype=torch.float32).contiguous()
+    digest = hashlib.sha256(sample.numpy().tobytes()).hexdigest()[:12]
+    return f"sha256:{digest}:{sample.shape[2]}x{sample.shape[1]}"
+
+
+def _fill_empty_mask_frames(masks):
+    """Fill SAM3 tracking dropouts from the nearest detected frame.
+
+    SAM3 may acquire a subject only after several frames.  In an inpaint
+    branch an empty leading mask means "preserve the source", which looked
+    like a deliberately delayed swap.  Copying only completely empty masks
+    keeps every valid tracked mask intact while making the edit active from
+    frame zero and bridging isolated tracking losses.
+    """
+    if not torch.is_tensor(masks) or masks.ndim < 3 or not len(masks):
+        return masks, {"active_before": 0, "first_active_before": None, "filled_frames": 0}
+    flat = masks.reshape(len(masks), -1)
+    active = torch.any(flat > 1e-6, dim=1)
+    active_indices = torch.nonzero(active, as_tuple=False).flatten().tolist()
+    if not active_indices:
+        return masks, {"active_before": 0, "first_active_before": None, "filled_frames": 0}
+    repaired = masks.clone()
+    empty_indices = torch.nonzero(~active, as_tuple=False).flatten().tolist()
+    for frame_index in empty_indices:
+        nearest = min(active_indices, key=lambda candidate: (abs(candidate - frame_index), candidate))
+        repaired[frame_index] = masks[nearest]
+    return repaired, {
+        "active_before": len(active_indices),
+        "first_active_before": int(active_indices[0]),
+        "filled_frames": len(empty_indices),
+        "active_after": int(len(repaired)),
+        "first_active_after": 0,
+    }
 
 
 def settings_schema():
@@ -38,7 +78,15 @@ def settings_schema():
 
 
 def face_swap_settings(named):
-    return {name.removeprefix("h3_faceswap_"): named.get(name, spec[1]["default"]) for name, spec in settings_schema().items()}
+    settings = {
+        name.removeprefix("h3_faceswap_"): named.get(name, spec[1]["default"])
+        for name, spec in settings_schema().items()
+    }
+    # This field is intentionally declared append-only by the parent Settings
+    # schema, rather than inserted into settings_schema(), so old positional
+    # Settings/PRO widget arrays cannot shift.
+    settings["generate_new_audio"] = bool(named.get("h3_faceswap_generate_new_audio", False))
+    return settings
 
 
 def validate_plan(plan):
@@ -100,11 +148,15 @@ class IAMCCS_H3FaceSwapInput:
             raise ValueError("Select an installed SAM3 checkpoint in Face Swap settings, or connect source_mask.")
         if reference_mode == "two_view_birefnet_legacy" and not folder_paths.get_full_path("background_removal", config.get("birefnet_model", "")):
             raise ValueError("Two-view BiRefNet legacy mode requires its model in models/background_removal.")
+        reference_signature = _image_signature(reference_face)
         data = {"video": source_video, "fps": float(source_fps), "reference": reference_face,
                 "reference_2": reference_face_2, "audio": source_audio, "mask": source_mask}
+        data["reference_signature"] = reference_signature
         return (build_stage_linx_payload(cine_linx, stage_name="H3 Face Swap input", stage_kind="minimax_h3_face_swap",
-                payload={"source_frames": len(source_video), "source_fps": source_fps},
-                report="SAM3 Subject Swap source · lazy single-reference tracked branch", resources={FACE_SWAP_RESOURCE: data}),)
+                payload={"source_frames": len(source_video), "source_fps": source_fps,
+                         "reference_signature": reference_signature},
+                report=f"SAM3 Subject Swap source · lazy single-reference tracked branch · {reference_signature}",
+                resources={FACE_SWAP_RESOURCE: data}),)
 
 
 def _build_white_multiview_reference(reference_a, reference_b, model_name):
@@ -174,6 +226,15 @@ def prepare_face_swap(model, clip, video_vae, audio_vae, cine_linx, segment_inde
     if not source:
         raise ValueError("FACE SWAP mode requires IAMCCS H3 Face Swap Input between Shotboard and the atomic backend.")
     chunk = _shotplan_chunk(plan, segment_index)
+    generate_new_audio = bool(config.get("generate_new_audio", False))
+    source_audio_available = isinstance(source.get("audio"), dict) and torch.is_tensor(source["audio"].get("waveform"))
+    if not generate_new_audio and not source_audio_available:
+        raise ValueError(
+            "SAM3 Subject Swap defaults to SOURCE VIDEO AUDIO, but source_audio is not connected. "
+            "Connect the Load Video audio output to IAMCCS H3 Face Swap Input, or enable "
+            "FACE SWAP · GENERATE NEW AUDIO in IAMCCS Settings PRO."
+        )
+    use_source_audio = source_audio_available and not generate_new_audio
     requested = _requested_frames(chunk)
     aligned = align_h3_frames(requested)
     v2v = plan.get("v2v", {})
@@ -201,6 +262,7 @@ def prepare_face_swap(model, clip, video_vae, audio_vae, cine_linx, segment_inde
             edge_grow=int(config.get("cleanup_edge_grow", 16)))[0]
     if not torch.any(masks > 0):
         raise ValueError("Face Swap mask is empty. Adjust the SAM3 prompt, object indices or threshold; no render was started.")
+    masks, mask_temporal_report = _fill_empty_mask_frames(masks)
     crops, crop_masks, boxes, *_ = _mvex("MVEx_SubjectCrop").execute(original_images=raw, masks=masks,
             mode={"mode": "tracked", "crop_scale": float(config.get("crop_scale", 1.75)), "padding": "firm", "prefer": "stillness", "aspect_ratio": 0.0, "seamless_loop": False},
             divisible_by=32, upscale_megapixels=float(config.get("crop_megapixels", 0.5)))
@@ -224,7 +286,7 @@ def prepare_face_swap(model, clip, video_vae, audio_vae, cine_linx, segment_inde
         prompt += " " + directed_prompt
     ref_audios = None
     sliced_source_audio = None
-    if plan.get("audio_mode") == "h3_custom_audio_drive" and isinstance(source.get("audio"), dict):
+    if use_source_audio:
         # Ref2VA must hear the exact same timeline slice that is later locked
         # into this chunk. Passing the full programme here makes chunk 2+ hear
         # the opening phonemes again even though the output audio is sliced.
@@ -233,6 +295,7 @@ def prepare_face_swap(model, clip, video_vae, audio_vae, cine_linx, segment_inde
             start_seconds=start,
             requested_frames=requested,
             aligned_frames=aligned,
+            end_policy=v2v.get("source_end_policy", "hold_last_for_grid"),
         )
         sliced_source_audio = {
             **sliced_source_audio,
@@ -256,7 +319,7 @@ def prepare_face_swap(model, clip, video_vae, audio_vae, cine_linx, segment_inde
     audio_stream = {"samples": empty_av["samples"].unbind()[1]}
     latent = LTXVConcatAVLatent.execute(video_latent=video, audio_latent=audio_stream)[0]
     original_audio = None
-    if plan.get("audio_mode") == "h3_custom_audio_drive":
+    if use_source_audio:
         if sliced_source_audio is not None:
             original_audio = sliced_source_audio
         elif source.get("audio") is not None:
@@ -265,6 +328,7 @@ def prepare_face_swap(model, clip, video_vae, audio_vae, cine_linx, segment_inde
                 start_seconds=start,
                 requested_frames=requested,
                 aligned_frames=aligned,
+                end_policy=v2v.get("source_end_policy", "hold_last_for_grid"),
             )
             original_audio = {
                 **original_audio,
@@ -282,8 +346,12 @@ def prepare_face_swap(model, clip, video_vae, audio_vae, cine_linx, segment_inde
     latent[FACE_SWAP_LATENT] = {"original": raw, "masks": crop_masks.cpu(), "boxes": boxes,
             "requested": requested, "audio": original_audio, "feather": int(config.get("feather", 16))}
     identity_report = "BiRefNet 2-view legacy card" if reference_mode == "two_view_birefnet_legacy" else "single Picture 1 reference"
-    report = f"SAM3 SUBJECT SWAP · tracked crop/inpaint/uncrop | SAM3 {config.get('mask_prompt', 'head')}@{float(config.get('threshold', 0.5)):.2f} max=1 interval=1 | {identity_report} | source={plan['width']}x{plan['height']} | crop={width}x{height} | frames={requested}/{aligned} | encoder={encoder_report}"
-    return (model, positive, latent, raw[:1], raw[-1:], json.dumps({"task": FACE_SWAP_MODE, "source": index_report}),
+    reference_signature = str(source.get("reference_signature") or _image_signature(source.get("reference")))
+    audio_route = "source video audio · lip timing + preserved output" if use_source_audio else "new H3 generated audio · explicit opt-in"
+    report = f"SAM3 SUBJECT SWAP · tracked crop/inpaint/uncrop | SAM3 {config.get('mask_prompt', 'head')}@{float(config.get('threshold', 0.5)):.2f} max=1 interval=1 | {identity_report} {reference_signature} | audio={audio_route} | mask-first={mask_temporal_report.get('first_active_before')} fill={mask_temporal_report.get('filled_frames')} | source={plan['width']}x{plan['height']} | crop={width}x{height} | frames={requested}/{aligned} | encoder={encoder_report}"
+    return (model, positive, latent, raw[:1], raw[-1:], json.dumps({"task": FACE_SWAP_MODE, "source": index_report,
+            "reference_signature": reference_signature, "mask_temporal_repair": mask_temporal_report,
+            "audio_route": "source_video" if use_source_audio else "generated_new"}),
             prompt, int(segment_index), len(plan["chunks"]), 0, report, {"active": False})
 
 

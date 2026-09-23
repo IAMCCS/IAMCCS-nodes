@@ -5087,17 +5087,49 @@ function installShotboardPromptMagnifiers(root) {
             if (!/prompt/.test(hint) || /private note|not sent to promptrelay/.test(hint)) continue;
             area.dataset.iamccsMagnifierReady = "1";
             const wrap = document.createElement("div");
-            wrap.style.cssText = "position:relative;min-width:0;width:100%;";
+            // Timeline prompt textareas are absolutely positioned inside a
+            // segment. Transfer their geometry to the wrapper so the lens and
+            // the editor share the same bounded rectangle. A full-width
+            // wrapper here overflows the segment's right edge.
+            const isAbsolute = area.style.position === "absolute";
+            wrap.style.cssText = "position:relative;min-width:0;width:100%;box-sizing:border-box;";
+            if (isAbsolute) {
+                wrap.style.position = "absolute";
+                for (const key of ["left", "right", "top", "bottom", "height"]) {
+                    if (area.style[key]) wrap.style[key] = area.style[key];
+                }
+                // A very short timeline slot can be narrower than its usual
+                // left rail. Keep the editor inside that slot as it shrinks.
+                if (area.style.left && area.style.right) {
+                    wrap.style.left = `min(${area.style.left}, 20%)`;
+                }
+                wrap.style.width = "auto";
+                area.style.position = "relative";
+                area.style.left = "auto";
+                area.style.right = "auto";
+                area.style.top = "auto";
+                area.style.bottom = "auto";
+                area.style.height = "100%";
+            } else if (area.style.height === "100%") {
+                wrap.style.height = "100%";
+            }
             area.parentNode.insertBefore(wrap, area);
             wrap.append(area);
             area.style.width = "100%";
+            area.style.boxSizing = "border-box";
+            // Reserve a narrow gutter so prompt text never sits beneath the toggle.
+            area.style.paddingRight = "22px";
             const lens = document.createElement("button");
             lens.type = "button"; lens.textContent = "⌕";
             lens.title = "Ingrandisci questo prompt · editor 2×";
             lens.setAttribute("aria-label", "Ingrandisci il prompt");
-            lens.style.cssText = "position:absolute;right:8px;top:7px;z-index:2;width:25px;height:24px;border:1px solid #b98e55;border-radius:5px;background:#261d15;color:#f8d69c;cursor:pointer;font-size:19px;line-height:16px;";
+            lens.setAttribute("aria-pressed", "false");
+            lens.style.cssText = "position:absolute;right:3px;bottom:3px;z-index:2;width:16px;max-width:calc(100% - 6px);height:16px;padding:0;border:1px solid #b98e55;border-radius:3px;background:#261d15;color:#f8d69c;cursor:pointer;font-size:12px;line-height:13px;text-align:center;";
+            lens.onpointerdown = (event) => event.stopPropagation();
             lens.onclick = (event) => {
                 event.preventDefault(); event.stopPropagation();
+                lens.setAttribute("aria-pressed", "true");
+                lens.style.background = "#674522";
                 const overlay = document.createElement("div");
                 overlay.style.cssText = "position:fixed;inset:0;z-index:100000;background:rgba(3,5,9,.88);display:grid;place-items:center;";
                 const panel = document.createElement("div");
@@ -5107,7 +5139,7 @@ function installShotboardPromptMagnifiers(root) {
                 const editor = document.createElement("textarea"); editor.value = area.value; editor.placeholder = area.placeholder;
                 editor.style.cssText = "flex:1;width:100%;min-height:0;padding:16px;background:#080e15;color:#f2e9d9;border:1px solid #526271;border-radius:7px;resize:none;line-height:1.45;font-size:24px;";
                 editor.oninput = () => { area.value = editor.value; area.dispatchEvent(new Event("input", {bubbles:true})); };
-                const close = () => { editor.oninput(); overlay.remove(); area.focus(); area.setSelectionRange(editor.selectionStart, editor.selectionEnd); };
+                const close = () => { editor.oninput(); overlay.remove(); lens.setAttribute("aria-pressed", "false"); lens.style.background = "#261d15"; area.focus(); area.setSelectionRange(editor.selectionStart, editor.selectionEnd); };
                 done.onclick = close;
                 overlay.onclick = (e) => { if (e.target === overlay) close(); };
                 overlay.onkeydown = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
@@ -11076,7 +11108,7 @@ function renderShotboardV3(node) {
     promptLabel.textContent = "Global prompt";
     promptLabel.style.cssText = "min-width:0;flex:1;";
     const durationQuickSlot = document.createElement("div");
-    durationQuickSlot.title = "Total MiniMax Shotboard duration. Timeline trims remain the authority for each H3 chunk.";
+    durationQuickSlot.title = "Total programme duration. This is generation truth without Settings PRO; when Settings PRO is master, its duration is synchronized here. Timeline rows are clipped to this boundary.";
     durationQuickSlot.style.cssText = `flex:0 0 auto;display:flex;align-items:center;min-width:260px;min-height:32px;padding:3px 7px;border:1px solid #F0B458;border-radius:7px;background:linear-gradient(145deg,rgba(151,92,26,.86),rgba(61,44,31,.94));box-shadow:inset 0 1px 0 rgba(255,255,255,.20),0 0 0 1px rgba(240,180,88,.16),0 3px 10px rgba(0,0,0,.32);`;
     const durationVisibleBar = document.createElement("div");
     durationVisibleBar.setAttribute("role", "group");
@@ -11851,9 +11883,10 @@ function renderShotboardV3(node) {
         { value: "stretch", label: "Stretch" },
         { value: "native_adapt", label: "Native / H3 adapt" },
     ]);
-    addWidgetChoiceSetting("Grid tail", "v2v_source_end_policy", [
-        { value: "hold_last_for_grid", label: "Hold only 17k+5 tail" },
-        { value: "error", label: "Strict source end" },
+    addWidgetChoiceSetting("Source end", "v2v_source_end_policy", [
+        { value: "hold_last_for_grid", label: "Recommended · visible strict + hold 17k+5 tail" },
+        { value: "hold_last_visible", label: "Tolerant · hold short visible source + silence" },
+        { value: "error", label: "Fully strict · require technical tail too" },
     ]);
     addWidgetChoiceSetting("Effective source audio", "v2v_audio_pairing", [
         { value: "pair_with_source_video", label: "Pair with <Video 1>" },
@@ -20647,7 +20680,7 @@ function h3SettingsUiLabel(name) {
         flf_continuity_mode: "Continuity mode", flf_continuity_tail_frames: "AV tail · frames / seconds",
         flf_continuity_audio: "Continue audio", voice_reference_picture_index: "Voice character",
         v2v_guide_mode: "Guide stack", v2v_source_range_policy: "Source ranges", v2v_source_offset_seconds: "Source offset (s)",
-        v2v_source_fit: "Source fit", v2v_source_end_policy: "Grid tail", v2v_audio_pairing: "Source audio",
+        v2v_source_fit: "Source fit", v2v_source_end_policy: "Source end", v2v_audio_pairing: "Source audio",
         ltx_looper_temporal_tile_size: "Looper temporal tile", ltx_looper_temporal_overlap: "Looper temporal overlap",
         ltx_looper_guiding_strength: "Looper guide strength", ltx_looper_overlap_strength: "Looper continuity",
         ltx_looper_cond_image_strength: "Looper condition image", ltx_looper_horizontal_tiles: "Looper horizontal tiles",

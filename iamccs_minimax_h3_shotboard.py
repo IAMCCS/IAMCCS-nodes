@@ -376,15 +376,13 @@ _H3_SETTINGS_CINELINX_OMITTED_FIELDS = frozenset((
     _H3_SETTINGS_SEED_CONTROL_COMPAT_FIELD,
 ))
 _H3_SETTINGS_SHOTBOARD_AUTHORITY_FIELDS = frozenset((
-    # Timeline extent and audio routing are authored Shotboard facts.  A stale
-    # Settings/AudioBoard payload must never turn native H3 audio back into a
-    # previously published custom soundtrack.
-    "duration_seconds", "audio_mode",
+    # Audio routing remains an authored Shotboard fact. Duration is different:
+    # Shotboard owns it without external Settings; connected Settings/PRO owns
+    # it and the PRO UI mirrors it back into the visible board.
+    "audio_mode",
 ))
 _H3_SETTINGS_PRO_SHOTBOARD_OWNED_FIELDS = frozenset((
-    # Only authored duration remains Shotboard-authoritative.  The remaining
-    # generation controls exposed by the proven Settings node are mapped into
-    # Settings PRO below without changing their backend meaning.
+    # Duration is deliberately absent: connected Settings PRO is its master.
     *_H3_SETTINGS_SHOTBOARD_AUTHORITY_FIELDS,
 ))
 _H3_SETTINGS_LINX_SCHEMA = "iamccs.minimax_h3.settings_cine_linx"
@@ -2476,7 +2474,14 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "v2v_source_range_policy": (["", "timeline_segment", "sequential_requested", "repeat_from_offset"], {"default": "timeline_segment"}),
                 "v2v_source_offset_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 86400.0, "step": 0.01}),
                 "v2v_source_fit": (["", "native_adapt", "canvas_pad", "canvas_crop", "stretch"], {"default": "canvas_pad"}),
-                "v2v_source_end_policy": (["", "hold_last_for_grid", "error"], {"default": "hold_last_for_grid"}),
+                "v2v_source_end_policy": (["", "hold_last_for_grid", "hold_last_visible", "error"], {
+                    "default": "hold_last_for_grid",
+                    "tooltip": (
+                        "HOLD LAST FOR GRID requires the complete visible source and freezes only H3's hidden 17k+5 tail (recommended). "
+                        "HOLD LAST VISIBLE also extends a genuinely short source with its final frame and silence; continuity survives but lip-sync cannot continue beyond the real source. "
+                        "ERROR requires real source frames even for the technical tail."
+                    ),
+                }),
                 "v2v_audio_pairing": (["", "pair_with_source_video", "standalone_reference", "off"], {"default": "pair_with_source_video"}),
                 # FL2VA only.  Stable planned keyframes remain the default;
                 # the native AV option is an explicit experimental handoff
@@ -2706,9 +2711,9 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         # from the Shotboard snapshot: that would resurrect stale local Turbo,
         # model-family or delivery values and recreate a dual-truth regression.
         external_settings = _h3_settings_from_cine_linx(cine_linx)
-        # Mode and duration always come from the Shotboard widgets/timeline.
-        # Ignore stale values produced by older Settings nodes so a saved T2VA
-        # selection cannot turn LongVid Motion Context into a T2V plan.
+        # Mode stays protected from stale Settings payloads. Duration is
+        # accepted intentionally: without external Settings the Shotboard is
+        # truth; with Settings/PRO connected its named duration is the master.
         external_settings = {
             name: value for name, value in external_settings.items()
             if name not in _H3_SETTINGS_SHOTBOARD_AUTHORITY_FIELDS
@@ -2719,6 +2724,11 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 name: value for name, value in saved_settings.items()
                 if name not in _H3_SETTINGS_SHOTBOARD_AUTHORITY_FIELDS
             }
+            # A timeline-embedded legacy settings snapshot is not a connected
+            # master. Its old duration must never override the live Shotboard
+            # control. Only an actual external Settings CineLinX may own it.
+            if not external_settings:
+                saved_settings.pop("duration_seconds", None)
         if saved_settings:
             duration_seconds = saved_settings.get("duration_seconds", duration_seconds)
             frame_rate = saved_settings.get("frame_rate", frame_rate)
@@ -2922,7 +2932,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         if v2v_source_fit not in {"native_adapt", "canvas_pad", "canvas_crop", "stretch"}:
             v2v_source_fit = "canvas_pad"
         v2v_source_end_policy = str(v2v_source_end_policy or "hold_last_for_grid")
-        if v2v_source_end_policy not in {"hold_last_for_grid", "error"}:
+        if v2v_source_end_policy not in {"hold_last_for_grid", "hold_last_visible", "error"}:
             v2v_source_end_policy = "hold_last_for_grid"
         v2v_audio_pairing = str(v2v_audio_pairing or "pair_with_source_video")
         if v2v_audio_pairing not in {"pair_with_source_video", "standalone_reference", "off"}:
@@ -3168,6 +3178,11 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             ),
             keyframe_joint_latent_new=bool(saved_settings.get("keyframe_joint_latent_new", False)),
         )
+        if isinstance(plan, dict):
+            plan["duration_authority"] = (
+                "settings_pro" if "duration_seconds" in external_settings else "shotboard"
+            )
+            plan["duration_master_seconds"] = float(duration_seconds)
         longvid_guides_active = bool(
             isinstance(plan, dict)
             and str(plan.get("task_mode", "") or "").strip().lower() == "longvid_guides"
@@ -6032,6 +6047,16 @@ class IAMCCS_ShotboardH3Settings:
                 "default": 15.0, "min": 0.0, "max": 100.0, "step": 1.0,
                 "display_name": "CONTINUATION · SOFT AUDIO MS",
                 "tooltip": "Recommended: 15 ms equal-power de-click against the matching hidden audio context. Keep it short for dialogue and lipsync.",
+            }),
+            # Append only: source-video audio is the safe/default identity-swap
+            # contract. Native H3 audio must be an explicit user choice.
+            "h3_faceswap_generate_new_audio": ("BOOLEAN", {
+                "default": False,
+                "display_name": "FACE SWAP · GENERATE NEW AUDIO",
+                "tooltip": (
+                    "OFF (recommended): use source_video audio as Ref2VA lip timing and preserve that exact audio in the output. "
+                    "ON: ignore source audio for conditioning/output and generate a new native H3 audio stream."
+                ),
             }),
         }}
 

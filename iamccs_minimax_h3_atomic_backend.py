@@ -1653,27 +1653,51 @@ def _clean_vram_before_decode() -> str:
         return f"cleanup warning: {exc}"
 
 
-def _release_conditioning_models(shotplan: dict[str, Any]) -> str:
+def _release_conditioning_models(shotplan: dict[str, Any], effective_task: str = "") -> str:
     """Strict barrier after conditioning and immediately before H3 sampling.
 
     Positive conditioning and the AV latent are already materialized when the
-    generation node runs.  Qwen3-VL (and any conditioning-time VAE residency)
+    generation node runs. Qwen3-VL (and any conditioning-time VAE residency)
     can therefore be unloaded before the H3 model is requested.
+
+    Local REF2VA + Fun ControlNet exception:
+    ComfyUI's MiniMax H3 Fun ControlNet wrapper builds its control latent lazily
+    on first diffusion forward and restores the model patchers that were active
+    around that VAE encode. Unloading them here can leave a dead/None patcher
+    in the restore list. Preserve model residency only for that exact branch.
     """
+    fun_controlnet = (
+        shotplan.get("fun_controlnet")
+        if isinstance(shotplan.get("fun_controlnet"), dict)
+        else {}
+    )
+    ref2va_fun_controlnet = (
+        bool(fun_controlnet.get("enabled", False))
+        and str(effective_task or "").strip().lower().startswith("ref2va")
+    )
+
     try:
         import comfy.model_management as mm
 
-        mm.unload_all_models()
-        try:
-            mm.cleanup_models()
-        except Exception:
-            pass
-        mm.soft_empty_cache()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if ref2va_fun_controlnet:
+            # Surgical local fix: do NOT invalidate model patchers needed later
+            # by MiniMaxH3FunControlNetApply.prepare_control_latent().
+            mm.soft_empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        else:
+            mm.unload_all_models()
+            try:
+                mm.cleanup_models()
+            except Exception:
+                pass
+            mm.soft_empty_cache()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
     except Exception as exc:
         LOG.warning("MiniMax H3 pre-sampler conditioning cleanup warning: %s", exc)
         return f"conditioning cleanup warning: {exc}"
+
     gc.collect()
     if os.name == "nt":
         try:
@@ -1681,12 +1705,20 @@ def _release_conditioning_models(shotplan: dict[str, Any]) -> str:
 
             handle = ctypes.windll.kernel32.GetCurrentProcess()
             ctypes.windll.psapi.EmptyWorkingSet(handle)
-            report = "conditioning models unloaded; CUDA cache cleared; Windows working set trimmed"
+            report = (
+                "REF2VA+FunControlNet model patchers preserved; CUDA cache cleared; Windows working set trimmed"
+                if ref2va_fun_controlnet
+                else "conditioning models unloaded; CUDA cache cleared; Windows working set trimmed"
+            )
             LOG.info("MiniMax H3 pre-sampler barrier: %s", report)
             return report
         except Exception as exc:
             LOG.warning("MiniMax H3 working-set trim warning: %s", exc)
-    report = "conditioning models unloaded; CUDA cache cleared"
+    report = (
+        "REF2VA+FunControlNet model patchers preserved; CUDA cache cleared"
+        if ref2va_fun_controlnet
+        else "conditioning models unloaded; CUDA cache cleared"
+    )
     LOG.info("MiniMax H3 pre-sampler barrier: %s", report)
     return report
 
@@ -2868,7 +2900,7 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
                 raise ValueError("Fused Fast H3 requires the visible profile shifts: video 12.0 and audio 3.0")
         actual_seed = chunk_seed(sampling, chunk_index, seed, seed_stride)
         seed_contract = sampling.get("seed_policy", "fixed_per_generation")
-        conditioning_cleanup = _release_conditioning_models(shotplan)
+        conditioning_cleanup = _release_conditioning_models(shotplan, _effective_task(cine_linx, chunk))
 
         turbo = _turbo_settings(shotplan)
         turbo_requested = str(turbo.get("mode", "off") or "off").lower() != "off" and bool(turbo.get("enabled", True))
