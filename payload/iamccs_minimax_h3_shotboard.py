@@ -426,14 +426,7 @@ _H3_UI_NATIVE_FIELDS = frozenset((
     "upscale_link_to_native", "upscale_link_factor", "reference_resize_policy",
     "reference_resize_megapixels", "reference_resize_filter", "prompt_mapping",
 ))
-_H3_UI_AUDIO_FIELDS = frozenset((
-    "audio_mode", "reference_audio_role", "voice_reference_picture_index",
-    # Phase B: audio-only controls for EXTEND native AV seams. These never
-    # alter video masks, pinned-frame geometry, or the visual assembler.
-    "extended_av_soft_audio_handover_ms",
-    "extended_av_boundary_polish_ms",
-    "extended_av_boundary_polish_strength",
-))
+_H3_UI_AUDIO_FIELDS = frozenset(("audio_mode", "reference_audio_role", "voice_reference_picture_index"))
 _H3_UI_MEMORY_FIELDS = frozenset((
     "performance_profile", "text_encoder_device", "vram_clean_before_decode",
     "h3_exact_profile", "h3_exact_chunk_rows", "h3_exact_precision_mode",
@@ -603,44 +596,6 @@ def _timeline_dict(timeline_data: Any) -> dict[str, Any]:
     except (TypeError, ValueError, json.JSONDecodeError):
         return {}
     return parsed if isinstance(parsed, dict) else {}
-
-
-AUTO_EXTEND_SLOT_THRESHOLD_SECONDS = 15.0
-
-
-def _authored_slot_count_for_auto_extend(timeline_data: Any) -> int:
-    """Count authored visual/prompt slots without treating audio lanes as shots.
-
-    Phase B auto-EXTEND is deliberately a *same-slot* rule.  A programme may
-    be longer than 15 s because it contains several editorial shots; that must
-    never silently become one masked continuation chain.  Zero rows is treated
-    by the caller as an implicit single externally-connected Picture/Prompt.
-    """
-    timeline = _timeline_dict(timeline_data)
-    candidates = []
-    nested = timeline.get("timeline")
-    if isinstance(nested, dict):
-        candidates.append(nested)
-    candidates.append(timeline)
-    rows = []
-    for source in candidates:
-        value = source.get("rows")
-        if isinstance(value, list):
-            rows = value
-            break
-        value = source.get("segments")
-        if isinstance(value, list):
-            rows = value
-            break
-    count = 0
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        row_type = str(row.get("type", row.get("slotType", "image")) or "image").strip().lower()
-        if row_type in {"audio", "motion", "video"} or bool(row.get("placeholder", False)):
-            continue
-        count += 1
-    return count
 
 
 def _visible_shotboard_global_prompt(timeline_data: Any, widget_prompt: Any) -> str:
@@ -1162,43 +1117,7 @@ def _trim_audio_frames(audio: dict[str, Any] | None, frames: int, fps: float) ->
     return {"waveform": waveform[:, :, samples:], "sample_rate": sample_rate}
 
 
-def _write_extend_audio_raw_float(
-    audio: dict[str, Any] | None,
-    frames: int,
-    fps: float,
-    output: Path,
-) -> tuple[bool, int, int]:
-    """OBVPM-equivalent EXTEND take audio input: native-rate interleaved f32le.
-
-    No WAV/int16 quantisation, resample, async clock correction, pad or loudness
-    filter is allowed here. The H3 decoded waveform is truncated on the video
-    frame clock and handed directly to the single AAC encoder for this take.
-    """
-    if not isinstance(audio, dict) or not torch.is_tensor(audio.get("waveform")):
-        return False, 0, 0
-    waveform = audio["waveform"]
-    sample_rate = max(1, int(audio.get("sample_rate", 0) or 0))
-    if sample_rate <= 0:
-        return False, 0, 0
-    wf = waveform[0] if waveform.ndim == 3 else waveform
-    if wf.ndim != 2 or int(wf.shape[0]) < 1:
-        return False, 0, 0
-    # Match OBVPM nodes_save._write_audio_raw: ceil, not async resampling.
-    want = max(1, int(math.ceil(sample_rate / max(0.001, float(fps)) * int(frames))))
-    wf = wf[..., :want].detach().to(device="cpu", dtype=torch.float32).contiguous()
-    interleaved = wf.transpose(0, 1).contiguous().numpy().astype(np.float32, copy=False)
-    output.write_bytes(interleaved.tobytes(order="C"))
-    return True, sample_rate, int(wf.shape[0])
-
-
-def _encode_images(
-    images: torch.Tensor,
-    audio: dict[str, Any] | None,
-    fps: float,
-    output: Path,
-    *,
-    audio_policy: str = "legacy",
-) -> None:
+def _encode_images(images: torch.Tensor, audio: dict[str, Any] | None, fps: float, output: Path) -> None:
     ffmpeg = _find_ffmpeg()
     if ffmpeg is None:
         raise RuntimeError("ffmpeg non trovato: impossibile salvare i segmenti MiniMax H3")
@@ -1209,51 +1128,30 @@ def _encode_images(
     output.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="minimax_h3_segment_") as temp:
         temp_path = Path(temp)
-        exact_audio = str(audio_policy or "legacy").strip().lower() == "extend_exact_float"
         wav_path = temp_path / "audio.wav"
-        raw_audio_path = temp_path / "audio.f32le"
+        has_audio = _write_wav(audio, wav_path)
         height = int(images.shape[1])
         width = int(images.shape[2])
         total_frames = int(images.shape[0])
         exact_duration = total_frames / max(0.001, float(fps))
-        if exact_audio:
-            has_audio, audio_rate, audio_channels = _write_extend_audio_raw_float(
-                audio, total_frames, fps, raw_audio_path
-            )
-        else:
-            has_audio = _write_wav(audio, wav_path)
-            audio_rate = int(audio.get("sample_rate", 32000)) if isinstance(audio, dict) else 32000
-            audio_channels = (
-                int(audio["waveform"].shape[-2])
-                if isinstance(audio, dict) and torch.is_tensor(audio.get("waveform"))
-                else 2
-            )
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-video_size", f"{width}x{height}",
             "-framerate", f"{float(fps):.6f}", "-i", "pipe:0",
         ]
         if has_audio:
-            if exact_audio:
-                command += [
-                    "-f", "f32le", "-ar", str(audio_rate), "-ac", str(audio_channels),
-                    "-i", str(raw_audio_path),
-                ]
-            else:
-                command += ["-i", str(wav_path)]
+            command += ["-i", str(wav_path)]
         command += ["-c:v", "libx264", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p"]
         if has_audio:
-            if exact_audio:
-                # Match OBVPM's take saver: native sample rate, one AAC encode,
-                # no aresample=async/apad/atrim and no intermediate int16 WAV.
-                command += ["-c:a", "aac"]
-            else:
-                # Legacy behaviour remains untouched for every non-EXTEND mode.
-                command += [
-                    "-af",
-                    f"aresample=48000:async=1:first_pts=0,apad,atrim=duration={exact_duration:.9f}",
-                    "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
-                ]
+            # The IMAGE frame count owns programme duration.  ``-shortest``
+            # can silently drop final video frames when the generated audio
+            # is a few AAC samples shorter, so pad/trim audio to that exact
+            # duration instead.
+            command += [
+                "-af",
+                f"aresample=48000:async=1:first_pts=0,apad,atrim=duration={exact_duration:.9f}",
+                "-c:a", "aac", "-b:a", "192k", "-ar", "48000",
+            ]
         command += ["-movflags", "+faststart", str(output)]
         process = subprocess.Popen(
             command,
@@ -1296,361 +1194,17 @@ def _encode_images(
             raise RuntimeError(f"ffmpeg segment encode failed: {error or f'exit {return_code}'}")
 
 
-EXTEND_SOFT_AUDIO_DEFAULT_MS = 15.0
-EXTEND_BOUNDARY_POLISH_DEFAULT_MS = 3.0
-EXTEND_BOUNDARY_POLISH_DEFAULT_STRENGTH = 1.0
+def _concat_videos(paths: list[Path], output: Path, *, audio_edge_fade_ms: float = 20.0) -> None:
+    """Join independent H3 shots with exact video cuts and one audio master.
 
-
-def _extend_soft_audio_context_path(segment_path: Path) -> Path:
-    return segment_path.with_suffix(segment_path.suffix + ".extend_soft_audio.npz")
-
-
-def _save_extend_soft_audio_context(segment_path: Path, context: dict[str, Any] | None) -> Path | None:
-    if not isinstance(context, dict) or not torch.is_tensor(context.get("waveform")):
-        return None
-    wave = context["waveform"]
-    wave = wave[0] if wave.ndim == 3 else wave
-    if wave.ndim != 2 or int(wave.shape[-1]) < 2:
-        return None
-    rate = max(1, int(context.get("sample_rate", 0) or 0))
-    if rate <= 0:
-        return None
-    path = _extend_soft_audio_context_path(segment_path)
-    np.savez_compressed(
-        path,
-        waveform=wave.detach().to(device="cpu", dtype=torch.float32).contiguous().numpy(),
-        sample_rate=np.asarray([rate], dtype=np.int32),
-        duration_ms=np.asarray([float(context.get("duration_ms", wave.shape[-1] / rate * 1000.0))], dtype=np.float32),
-    )
-    return path
-
-
-def _load_extend_soft_audio_context(segment_path: Path) -> tuple[np.ndarray, int] | None:
-    path = _extend_soft_audio_context_path(segment_path)
-    if not path.is_file():
-        return None
-    try:
-        with np.load(path, allow_pickle=False) as data:
-            wave = np.asarray(data["waveform"], dtype=np.float32)
-            rate = int(np.asarray(data["sample_rate"]).reshape(-1)[0])
-    except Exception:
-        LOG.warning("EXTEND Soft-AV audio context unreadable | %s", path, exc_info=True)
-        return None
-    if wave.ndim != 2 or wave.shape[-1] < 2 or rate <= 0:
-        return None
-    return np.ascontiguousarray(wave), rate
-
-
-def _resample_extend_soft_audio_context(
-    wave: np.ndarray,
-    source_rate: int,
-    target_rate: int,
-) -> np.ndarray:
-    """Resample hidden EXTEND Soft-AV PCM to the master take rate.
-
-    New Phase 9.3 renders should normally never need this because R38B now
-    preserves EXTEND audio at its native H3 rate.  It remains as a strict
-    compatibility path for older 48 kHz R38B segments and alternate delivery
-    routes.  PyAV is used so the conversion follows the same float-planar
-    resampling family as the EXTEND master decoder.
-    """
-    source_rate = int(source_rate)
-    target_rate = int(target_rate)
-    if source_rate <= 0 or target_rate <= 0:
-        raise ValueError("EXTEND Soft-AV resample requires positive sample rates")
-    wave = np.ascontiguousarray(wave, dtype=np.float32)
-    if source_rate == target_rate:
-        return wave
-    if wave.ndim != 2 or int(wave.shape[0]) not in {1, 2, 6}:
-        raise ValueError(f"EXTEND Soft-AV unsupported PCM shape for resample: {wave.shape}")
-    import av
-
-    layout = {1: "mono", 2: "stereo", 6: "5.1"}[int(wave.shape[0])]
-    frame = av.AudioFrame.from_ndarray(wave, format="fltp", layout=layout)
-    frame.sample_rate = source_rate
-    resampler = av.audio.resampler.AudioResampler(
-        format="fltp", layout=layout, rate=target_rate
-    )
-    chunks: list[np.ndarray] = []
-    converted = resampler.resample(frame)
-    if converted is not None:
-        if not isinstance(converted, list):
-            converted = [converted]
-        chunks.extend(np.asarray(one.to_ndarray(), dtype=np.float32) for one in converted)
-    flushed = resampler.resample(None)
-    if flushed is not None:
-        if not isinstance(flushed, list):
-            flushed = [flushed]
-        chunks.extend(np.asarray(one.to_ndarray(), dtype=np.float32) for one in flushed)
-    if not chunks:
-        raise RuntimeError("EXTEND Soft-AV PyAV resampler returned no samples")
-    return np.ascontiguousarray(np.concatenate(chunks, axis=1), dtype=np.float32)
-
-
-def _decode_extend_audio_part_obvpm(path: Path) -> tuple[np.ndarray, int, str]:
-    """Decode one take exactly like OBVPM preview_route._decode_audio.
-
-    The AAC stream is decoded with PyAV, resampled only to its OWN declared
-    sample rate/layout, flushed, and returned as planar float32 [C,T].  No
-    forced 48 kHz conversion and no ffmpeg async clock correction occurs.
-    """
-    import av
-
-    with av.open(str(path)) as container:
-        if not container.streams.audio:
-            raise RuntimeError(f"EXTEND take has no audio stream: {path.name}")
-        stream = container.streams.audio[0]
-        sample_rate = int(stream.codec_context.sample_rate or 0)
-        if sample_rate <= 0:
-            raise RuntimeError(f"EXTEND take has no valid audio sample rate: {path.name}")
-        channels = int(stream.codec_context.channels or 2)
-        layout = {1: "mono", 2: "stereo", 6: "5.1"}.get(channels, "stereo")
-        resampler = av.audio.resampler.AudioResampler(
-            format="fltp", layout=layout, rate=sample_rate
-        )
-        chunks: list[np.ndarray] = []
-        for frame in container.decode(stream):
-            for rf in resampler.resample(frame):
-                chunks.append(np.asarray(rf.to_ndarray(), dtype=np.float32))
-        for rf in resampler.resample(None):
-            chunks.append(np.asarray(rf.to_ndarray(), dtype=np.float32))
-    if not chunks:
-        raise RuntimeError(f"EXTEND take decoded no audio samples: {path.name}")
-    return np.concatenate(chunks, axis=1), sample_rate, layout
-
-
-def _build_extend_audio_wave_master(
-    paths: list[Path],
-    frame_counts: list[int],
-    *,
-    declick_ms: float = 5.0,
-    soft_av_ms: float = EXTEND_SOFT_AUDIO_DEFAULT_MS,
-    boundary_polish_ms: float = EXTEND_BOUNDARY_POLISH_DEFAULT_MS,
-    boundary_polish_strength: float = EXTEND_BOUNDARY_POLISH_DEFAULT_STRENGTH,
-) -> tuple[np.ndarray, int, str]:
-    """Build the EXTEND master audio with hidden-context Soft AV seams.
-
-    Phase 9.2 keeps the Phase 9.1 OBVPM-style native PCM decode/one-AAC
-    contract, but changes the INTERNAL seam treatment.  When child B has a
-    saved hidden-head context, the last ``soft_av_ms`` of A is handed over to
-    that time-corresponding child context using equal-power/qsin amplitudes.
-    The visible child then receives a duration-preserving micro-polish: its
-    first sample is matched to the just-completed handover and that correction
-    decays to zero over ``boundary_polish_ms``.  This removes the remaining
-    sample/slope step without overlap, silence, or any video operation.
-
-    If a context sidecar is missing, fall back only for that seam to the
-    conservative Phase 9.1 5 ms cos^2 taper on both visible parts.
-    """
-    if len(paths) != len(frame_counts):
-        raise ValueError("EXTEND audio master needs one frame count per segment")
-    parts: list[np.ndarray] = []
-    sample_rate: int | None = None
-    layout: str | None = None
-    channels: int | None = None
-    for path, frame_count in zip(paths, frame_counts):
-        wave, rate, this_layout = _decode_extend_audio_part_obvpm(path)
-        if sample_rate is None:
-            sample_rate = int(rate)
-            layout = this_layout
-            channels = int(wave.shape[0])
-        elif int(rate) != sample_rate or int(wave.shape[0]) != channels:
-            raise RuntimeError(
-                "EXTEND audio takes disagree on native format: "
-                f"{path.name}={rate}Hz/{wave.shape[0]}ch, expected "
-                f"{sample_rate}Hz/{channels}ch"
-            )
-        want = max(1, int(round(float(frame_count) / H3_FPS * sample_rate)))
-        if int(wave.shape[1]) < want:
-            raise RuntimeError(
-                f"EXTEND audio take {path.name} is short: decoded={wave.shape[1]} "
-                f"samples, need={want} from {frame_count}f"
-            )
-        parts.append(np.asarray(wave[..., :want].copy(), dtype=np.float32))
-
-    if sample_rate is None or layout is None or not parts:
-        raise RuntimeError("EXTEND audio master has no decoded PCM")
-
-    soft_count = 0
-    fallback_count = 0
-    for child_index in range(1, len(parts)):
-        previous = parts[child_index - 1]
-        child = parts[child_index]
-        context_bundle = _load_extend_soft_audio_context(paths[child_index])
-        applied = False
-        if context_bundle is not None:
-            context, context_rate = context_bundle
-            if int(context.shape[0]) == int(previous.shape[0]):
-                if int(context_rate) != int(sample_rate):
-                    try:
-                        original_rate = int(context_rate)
-                        context = _resample_extend_soft_audio_context(
-                            context, original_rate, int(sample_rate)
-                        )
-                        context_rate = int(sample_rate)
-                        LOG.info(
-                            "EXTEND Soft-AV context rate conformed | child=%s | %dHz->%dHz | channels=%d",
-                            paths[child_index].name, original_rate, int(sample_rate), int(context.shape[0]),
-                        )
-                    except Exception:
-                        LOG.warning(
-                            "EXTEND Soft-AV context resample failed | child=%s | context=%dHz | master=%dHz",
-                            paths[child_index].name, int(context_rate), int(sample_rate), exc_info=True,
-                        )
-                if int(context_rate) == int(sample_rate):
-                    max_soft = max(0, int(round(float(soft_av_ms) / 1000.0 * sample_rate)))
-                    n = min(max_soft, int(context.shape[-1]), int(previous.shape[-1]))
-                    if n > 1:
-                        # Run & Gun Soft AV semantics: outgoing A converges into the
-                        # FINAL, same-time hidden audio head of B. FFmpeg qsin/qsin
-                        # is an equal-power cos/sin pair. The B visible head is NOT
-                        # faded; it continues from its own hidden context.
-                        theta = np.linspace(0.0, np.pi / 2.0, n, dtype=np.float64)
-                        out_gain = np.cos(theta).astype(np.float32)
-                        in_gain = np.sin(theta).astype(np.float32)
-                        previous[..., -n:] = (
-                            previous[..., -n:] * out_gain
-                            + context[..., -n:] * in_gain
-                        )
-                        soft_count += 1
-                        applied = True
-
-                        # Phase B audio-only boundary polish.  The Soft-AV
-                        # handover ends on B's hidden same-time context, while
-                        # the next sample comes from B's visible decode.  They
-                        # are generated by the same child but can still differ
-                        # by a tiny DC/phase step.  Match ONLY the first visible
-                        # sample to the preceding master endpoint and decay the
-                        # correction to zero over a few milliseconds.  Duration
-                        # and video are untouched; no samples are inserted or
-                        # removed and no fade to silence is introduced.
-                        polish_ms = max(0.0, min(20.0, float(boundary_polish_ms)))
-                        polish_strength = max(0.0, min(1.0, float(boundary_polish_strength)))
-                        polish_n = min(
-                            max(0, int(round(polish_ms / 1000.0 * sample_rate))),
-                            int(child.shape[-1]),
-                        )
-                        jump_before = float(np.max(np.abs(child[..., :1] - previous[..., -1:])))
-                        jump_after = jump_before
-                        if polish_n > 1 and polish_strength > 0.0:
-                            delta = previous[..., -1:] - child[..., :1]
-                            decay = (
-                                np.cos(np.linspace(0.0, np.pi / 2.0, polish_n, dtype=np.float64)) ** 2
-                            ).astype(np.float32)
-                            child[..., :polish_n] = (
-                                child[..., :polish_n]
-                                + delta * (decay[np.newaxis, :] * polish_strength)
-                            )
-                            jump_after = float(np.max(np.abs(child[..., :1] - previous[..., -1:])))
-                        LOG.info(
-                            "EXTEND Soft-AV audio seam | seam=%d/%d | policy=hidden_child_context_qsin | samples=%d | rate=%d | ms=%.3f",
-                            child_index, len(parts) - 1, n, sample_rate, n / sample_rate * 1000.0,
-                        )
-                        LOG.info(
-                            "EXTEND audio boundary polish | seam=%d/%d | ms=%.3f | strength=%.3f | samples=%d | jump_before=%.8f | jump_after=%.8f",
-                            child_index, len(parts) - 1, polish_ms, polish_strength, polish_n, jump_before, jump_after,
-                        )
-            if not applied and int(context.shape[0]) != int(previous.shape[0]):
-                LOG.warning(
-                    "EXTEND Soft-AV context channel mismatch | child=%s | context=%dch | master=%dch",
-                    paths[child_index].name, int(context.shape[0]), int(previous.shape[0]),
-                )
-        if not applied:
-            # Missing/malformed context: preserve the known-safe Phase 9.1
-            # behaviour for this seam only rather than silently hard-cutting.
-            n = min(
-                max(0, int(round(float(declick_ms) / 1000.0 * sample_rate))),
-                int(previous.shape[-1]) // 2, int(child.shape[-1]) // 2,
-            )
-            if n > 1:
-                ramp = np.cos(np.linspace(0.0, np.pi / 2.0, n)) ** 2
-                previous[..., -n:] *= ramp.astype(np.float32)
-                child[..., :n] *= ramp[::-1].astype(np.float32)
-            fallback_count += 1
-            LOG.warning(
-                "EXTEND Soft-AV audio seam fallback | seam=%d/%d | policy=cos2_declick | child=%s",
-                child_index, len(parts) - 1, paths[child_index].name,
-            )
-
-    LOG.info(
-        "EXTEND audio master seam summary | soft_av=%d | fallback_declick=%d | seams=%d",
-        soft_count, fallback_count, max(0, len(parts) - 1),
-    )
-    return np.concatenate(parts, axis=1), sample_rate, layout
-
-
-def _mux_extend_video_audio_obvpm(
-    video_path: Path,
-    output: Path,
-    wave: np.ndarray,
-    sample_rate: int,
-    layout: str,
-) -> None:
-    """Mux video + one continuous AAC track using OBVPM's PyAV pattern."""
-    import av
-
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with av.open(str(video_path)) as source, av.open(
-        str(output), mode="w", options={"movflags": "+faststart"}
-    ) as target:
-        if not source.streams.video:
-            raise RuntimeError("EXTEND temporary master has no video stream")
-        vin = source.streams.video[0]
-        vout = target.add_stream_from_template(template=vin)
-        aout = target.add_stream("aac", rate=int(sample_rate), layout=layout)
-        for packet in source.demux(vin):
-            if packet.dts is None:
-                continue
-            packet.stream = vout
-            target.mux(packet)
-        frame = av.AudioFrame.from_ndarray(
-            np.ascontiguousarray(wave, dtype=np.float32),
-            format="fltp",
-            layout=layout,
-        )
-        frame.sample_rate = int(sample_rate)
-        frame.pts = 0
-        target.mux(aout.encode(frame))
-        target.mux(aout.encode())
-
-def _build_locked_audio_wave_master(paths: list[Path], frame_counts: list[int]) -> tuple[np.ndarray, int, str]:
-    parts = []
-    rate = 0
-    channels = 0
-    for path, frames in zip(paths, frame_counts):
-        with np.load(path.with_suffix(path.suffix + ".locked_audio.npz"), allow_pickle=False) as saved:
-            wave = np.array(saved["waveform"], dtype=np.float32, copy=True)
-            current_rate = int(saved["sample_rate"])
-        if wave.ndim != 2 or wave.shape[0] not in {1, 2} or current_rate <= 0:
-            raise ValueError(f"Invalid locked PCM sidecar: {path.name}")
-        if parts and (current_rate != rate or wave.shape[0] != channels):
-            raise ValueError("Locked audio segments must share one sample rate and channel layout")
-        rate, channels = current_rate, wave.shape[0]
-        wanted = int(round(frames * rate / H3_FPS))
-        if wave.shape[-1] != wanted:
-            raise ValueError(f"Locked PCM duration differs from video: {path.name}")
-        parts.append(wave)
-    return np.concatenate(parts, axis=1), rate, "mono" if channels == 1 else "stereo"
-
-
-def _concat_videos(
-    paths: list[Path],
-    output: Path,
-    *,
-    audio_edge_fade_ms: float = 20.0,
-    audio_join_policy: str = "legacy_filter",
-    extend_soft_av_ms: float = EXTEND_SOFT_AUDIO_DEFAULT_MS,
-    extend_boundary_polish_ms: float = EXTEND_BOUNDARY_POLISH_DEFAULT_MS,
-    extend_boundary_polish_strength: float = EXTEND_BOUNDARY_POLISH_DEFAULT_STRENGTH,
-) -> None:
-    """Join H3 delivery segments with exact video cuts and one audio master.
-
-    ``legacy_filter`` preserves the existing independent-shot behaviour.
-    ``extend_soft_av`` is the Phase 9.2 EXTEND audio policy: decode each
-    delivered segment to exact native PCM, use the child hidden-head audio as
-    a qsin/equal-power handover source at each seam, concatenate sample-
-    accurately, and AAC encode once. ``sample_exact_declick`` remains accepted
-    as the Phase 9.1 compatibility fallback. Video is identical in all policies.
+    Video is decoded through one PTS-reset concat filter and re-encoded at the
+    exact sidecar frame count, so encoder delay cannot become a freeze at a
+    hard cut and every segment shares one canvas. Audio is decoded per shot,
+    conformed to stereo/48 kHz, given a 20 ms
+    equal-power edge fade at internal cuts, concatenated without overlap and
+    finally normalised once as a complete programme.  The edge treatment
+    removes AAC boundary clicks without shortening the edit or mixing two
+    different lines of dialogue together.
     """
     ffmpeg = _find_ffmpeg()
     if ffmpeg is None:
@@ -1693,23 +1247,6 @@ def _concat_videos(
             for path in paths:
                 command += ["-i", str(path)]
 
-            _audio_policy = str(audio_join_policy or "legacy_filter").strip().lower()
-            sample_exact_audio = _audio_policy in {"sample_exact_declick", "extend_soft_av", "locked_master"}
-            master_wave: np.ndarray | None = None
-            master_audio_rate = 0
-            master_audio_layout = "stereo"
-            video_only_path: Path | None = None
-            if _audio_policy == "locked_master":
-                master_wave, master_audio_rate, master_audio_layout = _build_locked_audio_wave_master(paths, frame_counts)
-            elif sample_exact_audio:
-                master_wave, master_audio_rate, master_audio_layout = _build_extend_audio_wave_master(
-                    paths, frame_counts,
-                    declick_ms=float(audio_edge_fade_ms),
-                    soft_av_ms=float(extend_soft_av_ms),
-                    boundary_polish_ms=float(extend_boundary_polish_ms),
-                    boundary_polish_strength=float(extend_boundary_polish_strength),
-                )
-
             filters: list[str] = []
             labels: list[str] = []
             video_labels: list[str] = []
@@ -1724,61 +1261,41 @@ def _concat_videos(
                 f"{''.join(f'[{label}]' for label in video_labels)}"
                 f"concat=n={len(video_labels)}:v=1:a=0[vjoined]"
             )
-            exact_duration = sum(frame_counts) / H3_FPS
-            if sample_exact_audio:
-                command += [
-                    "-filter_complex", ";".join(filters),
-                    "-map", "[vjoined]", "-an",
-                ]
-            else:
-                edge_seconds = max(0.0, min(0.100, float(audio_edge_fade_ms) / 1000.0))
-                for index, frame_count in enumerate(frame_counts):
-                    duration = max(1.0 / H3_FPS, float(frame_count) / H3_FPS)
-                    fade = min(edge_seconds, duration / 4.0)
-                    chain = (
-                        f"[{index}:a]aresample=48000:async=1:first_pts=0,"
-                        f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                        f"atrim=duration={duration:.9f},asetpts=PTS-STARTPTS"
-                    )
-                    if edge_seconds > 0 and index > 0:
-                        chain += f",afade=t=in:st=0:d={fade:.9f}:curve=qsin"
-                    if edge_seconds > 0 and index + 1 < len(paths):
-                        chain += (
-                            f",afade=t=out:st={max(0.0, duration - fade):.9f}:"
-                            f"d={fade:.9f}:curve=qsin"
-                        )
-                    label = f"acut{index}"
-                    filters.append(f"{chain}[{label}]")
-                    labels.append(label)
-                audio_inputs = "".join(f"[{label}]" for label in labels)
-                filters.append(
-                    f"{audio_inputs}concat=n={len(labels)}:v=0:a=1,"
-                    "loudnorm=I=-16:LRA=11:TP=-1.5,"
-                    f"apad,atrim=duration={exact_duration:.9f}[amaster]"
+            edge_seconds = max(0.0, min(0.100, float(audio_edge_fade_ms) / 1000.0))
+            for index, frame_count in enumerate(frame_counts):
+                duration = max(1.0 / H3_FPS, float(frame_count) / H3_FPS)
+                fade = min(edge_seconds, duration / 4.0)
+                chain = (
+                    f"[{index}:a]aresample=48000:async=1:first_pts=0,"
+                    f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                    f"atrim=duration={duration:.9f},asetpts=PTS-STARTPTS"
                 )
-                command += [
-                    "-filter_complex", ";".join(filters),
-                    "-map", "[vjoined]", "-map", "[amaster]",
-                ]
-            if sample_exact_audio:
-                tmp_video = tempfile.NamedTemporaryFile(suffix=".mp4", delete=False)
-                video_only_path = Path(tmp_video.name)
-                tmp_video.close()
-                video_only_path.unlink(missing_ok=True)
-                command += [
-                    "-frames:v", str(sum(frame_counts)), "-r", f"{H3_FPS:.6f}",
-                    "-fps_mode", "cfr", "-c:v", "libx264", "-preset", "medium",
-                    "-crf", "16", "-pix_fmt", "yuv420p", "-t", f"{exact_duration:.9f}",
-                    "-movflags", "+faststart", str(video_only_path),
-                ]
-            else:
-                command += [
-                    "-frames:v", str(sum(frame_counts)), "-r", f"{H3_FPS:.6f}",
-                    "-fps_mode", "cfr", "-c:v", "libx264", "-preset", "medium",
-                    "-crf", "16", "-pix_fmt", "yuv420p", "-c:a", "aac",
-                    "-b:a", "192k", "-ar", "48000", "-t", f"{exact_duration:.9f}",
-                    "-movflags", "+faststart", str(output),
-                ]
+                if edge_seconds > 0 and index > 0:
+                    chain += f",afade=t=in:st=0:d={fade:.9f}:curve=qsin"
+                if edge_seconds > 0 and index + 1 < len(paths):
+                    chain += (
+                        f",afade=t=out:st={max(0.0, duration - fade):.9f}:"
+                        f"d={fade:.9f}:curve=qsin"
+                    )
+                label = f"acut{index}"
+                filters.append(f"{chain}[{label}]")
+                labels.append(label)
+            audio_inputs = "".join(f"[{label}]" for label in labels)
+            exact_duration = sum(frame_counts) / H3_FPS
+            filters.append(
+                f"{audio_inputs}concat=n={len(labels)}:v=0:a=1,"
+                "loudnorm=I=-16:LRA=11:TP=-1.5,"
+                f"apad,atrim=duration={exact_duration:.9f}[amaster]"
+            )
+            command += [
+                "-filter_complex", ";".join(filters),
+                "-map", "[vjoined]", "-map", "[amaster]",
+                "-frames:v", str(sum(frame_counts)), "-r", f"{H3_FPS:.6f}",
+                "-fps_mode", "cfr", "-c:v", "libx264", "-preset", "medium",
+                "-crf", "16", "-pix_fmt", "yuv420p", "-c:a", "aac",
+                "-b:a", "192k", "-ar", "48000", "-t", f"{exact_duration:.9f}",
+                "-movflags", "+faststart", str(output),
+            ]
         else:
             command += ["-f", "concat", "-safe", "0", "-i", str(list_path)]
             command += [
@@ -1788,21 +1305,8 @@ def _concat_videos(
         result = subprocess.run(command, capture_output=True, text=True, stdin=subprocess.DEVNULL)
         if result.returncode != 0:
             raise RuntimeError(f"ffmpeg concat failed: {result.stderr.strip() or result.stdout.strip()}")
-        if (
-            'sample_exact_audio' in locals() and sample_exact_audio
-            and video_only_path is not None and master_wave is not None
-        ):
-            _mux_extend_video_audio_obvpm(
-                video_only_path, output, master_wave,
-                master_audio_rate, master_audio_layout,
-            )
     finally:
         list_path.unlink(missing_ok=True)
-        try:
-            if 'video_only_path' in locals() and video_only_path is not None:
-                video_only_path.unlink(missing_ok=True)
-        except Exception:
-            pass
 
 
 def _continuation_soft_context_path(
@@ -3078,7 +2582,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         return {
             "required": {
                 "global_prompt": ("STRING", {"default": "one continuous cinematic shot with coherent motion, stable identity, controlled camera and native stereo audio", "multiline": True}),
-                "timeline_data": ("STRING", {"default": "", "multiline": True, "iamccs_contracts": ["iamccs.h3.evolving.v1"]}),
+                "timeline_data": ("STRING", {"default": "", "multiline": True}),
                 "duration_seconds": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 36000.0, "step": 0.01}),
                 "task_mode": ([
                     "auto_from_timeline", "t2va", "i2va", "fl2va", "ref2va",
@@ -3088,7 +2592,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                     # Isolated R44 research path. Existing modes retain their
                     # historical join/continuity behavior unless this task is
                     # selected explicitly.
-                    "fl2va_extended_av", "t2va_continuous",
+                    "fl2va_extended_av",
                 ], {"default": "auto_from_timeline"}),
                 "audio_mode": (list(H3_AUDIO_MODES), {"default": "h3_native_generated"}),
                 "prompt_mapping": (["global_plus_local", "local_only", "global_only"], {"default": "global_plus_local"}),
@@ -3439,11 +2943,6 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         # workflows by inferring Adaptive Guide Windows from the historical
         # longvid_latent_tail_experimental continuity selector.
         longvid_guide_window_policy = "legacy_auto"
-        # Phase B append-only Settings PRO controls.  They live in 2 · AUDIO
-        # and affect only EXTEND delivery audio, never the video junction.
-        extended_av_soft_audio_handover_ms = EXTEND_SOFT_AUDIO_DEFAULT_MS
-        extended_av_boundary_polish_ms = EXTEND_BOUNDARY_POLISH_DEFAULT_MS
-        extended_av_boundary_polish_strength = EXTEND_BOUNDARY_POLISH_DEFAULT_STRENGTH
         # Append-only Settings/PRO controls. They are intentionally NOT planner widgets,
         # so historical Shotboard widget positions remain byte-for-byte compatible.
         upscale_link_to_native = False
@@ -3630,15 +3129,6 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             extended_av_joint_refine_mode = saved_settings.get("extended_av_joint_refine_mode", extended_av_joint_refine_mode)
             extended_av_joint_window_frames = saved_settings.get("extended_av_joint_window_frames", extended_av_joint_window_frames)
             extended_av_joint_window_overlap = saved_settings.get("extended_av_joint_window_overlap", extended_av_joint_window_overlap)
-            extended_av_soft_audio_handover_ms = saved_settings.get(
-                "extended_av_soft_audio_handover_ms", extended_av_soft_audio_handover_ms
-            )
-            extended_av_boundary_polish_ms = saved_settings.get(
-                "extended_av_boundary_polish_ms", extended_av_boundary_polish_ms
-            )
-            extended_av_boundary_polish_strength = saved_settings.get(
-                "extended_av_boundary_polish_strength", extended_av_boundary_polish_strength
-            )
             motion_context_window_frames = saved_settings.get(
                 "motion_context_window_frames", motion_context_window_frames
             )
@@ -3829,55 +3319,24 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             auto_extend_mode = "off"
         auto_extend_continue_audio = bool(saved_settings.get("h3_auto_extend_continue_audio", True))
         native_window_seconds = float(H3_MAX_TRAINED_FRAMES) / float(H3_FPS)
-
-        # Phase B: duration is editorial truth; >15 s on ONE authored image or
-        # prompt slot automatically selects the production EXTEND-style engine.
-        # This is intentionally independent of the old manual AUTO EXTEND
-        # switch, which remains serialized only for workflow compatibility.
-        authored_slot_count = _authored_slot_count_for_auto_extend(timeline_data)
-        same_authored_slot = authored_slot_count <= 1
-        phase_b_extend_supported_tasks = {
+        auto_extend_supported_tasks = {
             "auto", "auto_from_timeline", "auto_from_shotboard",
-            "t2va", "t2va_continuous", "i2va", "fl2va", "fl2va_stable", "fl2va_continuous",
-            "ref2va", "ref2va_audio", "ref2va_reference",
+            "t2va", "i2va", "fl2va", "fl2va_stable", "fl2va_continuous",
         }
-        phase_b_auto_extend_requested = bool(
-            not longvid_requested
-            and requested_task_key in phase_b_extend_supported_tasks
-            and same_authored_slot
-            and float(duration_seconds) > AUTO_EXTEND_SLOT_THRESHOLD_SECONDS + 1e-6
-        )
-        legacy_auto_extend_requested = bool(
-            not phase_b_auto_extend_requested
-            and auto_extend_mode != "off"
+        auto_extend_requested = bool(
+            auto_extend_mode != "off"
             and not longvid_requested
-            and requested_task_key in {
-                "auto", "auto_from_timeline", "auto_from_shotboard",
-                "t2va", "i2va", "fl2va", "fl2va_stable", "fl2va_continuous",
-            }
+            and requested_task_key in auto_extend_supported_tasks
             and float(duration_seconds) > native_window_seconds + 1e-6
         )
-        auto_extend_requested = bool(phase_b_auto_extend_requested or legacy_auto_extend_requested)
-        if phase_b_auto_extend_requested:
-            compiled_task_mode = "t2va_continuous" if requested_task_key == "t2va_continuous" else "fl2va_extended_av"
-        elif legacy_auto_extend_requested:
-            compiled_task_mode = "motion_context_auto_chain"
-        else:
-            compiled_task_mode = task_mode
-        extended_av_root_task = "ref2va" if requested_task_key.startswith("ref2va") else "t2va"
+        compiled_task_mode = "motion_context_auto_chain" if auto_extend_requested else task_mode
         compiled_motion_context_tail_frames = int(flf_continuity_tail_frames)
-        if legacy_auto_extend_requested and compiled_motion_context_tail_frames not in {22, 39, 56}:
+        if auto_extend_requested and compiled_motion_context_tail_frames not in {22, 39, 56}:
             compiled_motion_context_tail_frames = 22
-        compiled_motion_context_audio = bool(auto_extend_continue_audio) if legacy_auto_extend_requested else bool(flf_continuity_audio)
-        if phase_b_auto_extend_requested:
+        compiled_motion_context_audio = bool(auto_extend_continue_audio) if auto_extend_requested else bool(flf_continuity_audio)
+        if auto_extend_requested:
             LOG.info(
-                "MiniMax H3 AUTO EXTEND-style | requested_task=%s | compiled_task=fl2va_extended_av | root_task=%s | duration=%.3fs | authored_slots=%d | threshold=%.3fs | junction=masked_exact",
-                requested_task_key or str(task_mode), extended_av_root_task, float(duration_seconds),
-                int(authored_slot_count), AUTO_EXTEND_SLOT_THRESHOLD_SECONDS,
-            )
-        elif legacy_auto_extend_requested:
-            LOG.info(
-                "MiniMax H3 legacy auto-extend | requested_task=%s | compiled_task=%s | duration=%.3fs | threshold=%.3fs | tail=%df | continue_audio=%s",
+                "MiniMax H3 auto-extend | requested_task=%s | compiled_task=%s | duration=%.3fs | threshold=%.3fs | tail=%df | continue_audio=%s",
                 requested_task_key or str(task_mode), compiled_task_mode, float(duration_seconds),
                 native_window_seconds, int(compiled_motion_context_tail_frames), bool(compiled_motion_context_audio),
             )
@@ -4039,7 +3498,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             longvid_terminal_endpoint_mode=(
                 longvid_terminal_endpoint_mode if longvid_guides_requested else "hard_image"
             ),
-            keyframe_joint_latent_new=bool(saved_settings.get("keyframe_joint_latent_new", True)),
+            keyframe_joint_latent_new=bool(saved_settings.get("keyframe_joint_latent_new", False)),
             extended_av_profile=str(extended_av_profile or "safe_8_12gb"),
             extended_av_pin_mode=str(extended_av_pin_mode or "masked"),
             extended_av_mask_profile=str(extended_av_mask_profile or "exact"),
@@ -4050,10 +3509,6 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             extended_av_joint_refine_mode=str(extended_av_joint_refine_mode or "off"),
             extended_av_joint_window_frames=int(extended_av_joint_window_frames or 192),
             extended_av_joint_window_overlap=int(extended_av_joint_window_overlap or 39),
-            extended_av_root_task=str(extended_av_root_task),
-            extended_av_soft_audio_handover_ms=float(extended_av_soft_audio_handover_ms),
-            extended_av_boundary_polish_ms=float(extended_av_boundary_polish_ms),
-            extended_av_boundary_polish_strength=float(extended_av_boundary_polish_strength),
         )
         if isinstance(plan, dict):
             plan["duration_authority"] = (
@@ -4062,26 +3517,17 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             plan["duration_master_seconds"] = float(duration_seconds)
             plan["requested_task_mode"] = str(task_mode)
             plan["auto_extended_duration"] = {
-                "schema": "iamccs.minimax_h3.auto_extended_duration.v2",
+                "schema": "iamccs.minimax_h3.auto_extended_duration.v1",
                 "enabled": bool(auto_extend_requested),
-                "engine": (
-                    "extend_style_masked_exact" if phase_b_auto_extend_requested
-                    else "legacy_motion_context_auto_chain" if legacy_auto_extend_requested
-                    else "native_single_window"
-                ),
-                "mode": "automatic_same_slot" if phase_b_auto_extend_requested else str(auto_extend_mode),
+                "mode": str(auto_extend_mode),
                 "requested_task_mode": str(task_mode),
                 "compiled_task_mode": str(compiled_task_mode),
-                "root_task": str(extended_av_root_task) if phase_b_auto_extend_requested else "",
-                "authored_slot_count": int(authored_slot_count),
-                "same_authored_slot": bool(same_authored_slot),
-                "threshold_seconds": float(AUTO_EXTEND_SLOT_THRESHOLD_SECONDS if phase_b_auto_extend_requested else native_window_seconds),
-                "continue_audio": bool(True if phase_b_auto_extend_requested else compiled_motion_context_audio) if auto_extend_requested else False,
-                "context_frames": int(extended_av_custom_overlap_frames if phase_b_auto_extend_requested else compiled_motion_context_tail_frames) if auto_extend_requested else 0,
+                "threshold_seconds": float(native_window_seconds),
+                "continue_audio": bool(compiled_motion_context_audio) if auto_extend_requested else False,
+                "context_frames": int(compiled_motion_context_tail_frames) if auto_extend_requested else 0,
                 "reason": (
-                    "same_authored_slot_exceeds_15s" if phase_b_auto_extend_requested
-                    else "legacy_duration_exceeds_native_window" if legacy_auto_extend_requested
-                    else "single_window_or_multishot"
+                    "duration_exceeds_single_native_h3_window"
+                    if auto_extend_requested else "single_window_or_disabled"
                 ),
             }
         longvid_guides_active = bool(
@@ -5388,54 +4834,10 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
             images_to_save = images[trim_count:, ...]
             audio_to_save = _trim_audio_frames(audio, trim_count, fps)
 
-        provenance_plan = _resolve_shotplan(cine_linx) if cine_linx is not None else {}
-        checkpoint_extended_mode = bool(
-            isinstance(provenance_plan, dict)
-            and str(provenance_plan.get("task_mode", "") or "").strip().lower() == "fl2va_extended_av"
-            and isinstance(provenance_plan.get("extended_av"), dict)
-            and bool(provenance_plan.get("extended_av", {}).get("enabled", False))
-        )
-
-        if checkpoint_extended_mode and isinstance(audio_to_save, dict) and torch.is_tensor(audio_to_save.get("waveform")):
-            # Match OBVPM H3TrimPinned even for the root: the delivered video
-            # frame count owns the soundtrack length before the take saver.
-            _sr = max(1, int(audio_to_save.get("sample_rate", 0) or 0))
-            _want = max(1, int(round(int(images_to_save.shape[0]) / float(fps) * _sr)))
-            _wave = audio_to_save["waveform"]
-            if int(_wave.shape[-1]) > _want:
-                audio_to_save = dict(audio_to_save)
-                audio_to_save["waveform"] = _wave[..., :_want]
-
         segment_name = f"{base_name}_{active_render_id}_{safe_stage_label}_seg_{current_segment + 1:04d}.mp4"
         segment_path = output_folder / segment_name
         _require_new_output_path(segment_path)
-        _encode_images(
-            images_to_save, audio_to_save, fps, segment_path,
-            audio_policy="extend_exact_float" if checkpoint_extended_mode else "legacy",
-        )
-        if str(provenance_plan.get("audio_mode", "")) == "h3_custom_audio_drive":
-            if not isinstance(audio_to_save, dict) or not torch.is_tensor(audio_to_save.get("waveform")):
-                raise ValueError("Custom Audio Drive checkpoint requires the original locked audio slice")
-            np.savez(
-                segment_path.with_suffix(segment_path.suffix + ".locked_audio.npz"),
-                waveform=audio_to_save["waveform"][0].detach().cpu().float().numpy(),
-                sample_rate=int(audio_to_save["sample_rate"]),
-            )
-        if checkpoint_extended_mode:
-            LOG.info(
-                "MiniMax H3 EXTEND-style take audio | policy=native_float_pcm_direct_aac | "
-                "wav_int16=off | async_resample=off | loudnorm=off"
-            )
-            _extended_soft_audio = (
-                sampled_latent.get("_iamccs_extended_soft_audio")
-                if isinstance(sampled_latent, dict) else None
-            )
-            _extended_soft_path = _save_extend_soft_audio_context(segment_path, _extended_soft_audio)
-            if _extended_soft_path is not None:
-                LOG.info(
-                    "MiniMax H3 EXTEND-style hidden Soft-AV audio saved | segment=%d/%d | path=%s",
-                    current_segment + 1, total_segments, _extended_soft_path,
-                )
+        _encode_images(images_to_save, audio_to_save, fps, segment_path)
         audio_join_policy = (
             "extended_av_masked_trim"
             if join_contract.get("mode") == "masked_extend"
@@ -5444,6 +4846,13 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
                 if motion_context_pretrimmed
                 else ("trim_silent_tail" if bool(audio.get("iamccs_flf_locked_audio_handles", False)) else "crossfade")
             )
+        )
+        provenance_plan = _resolve_shotplan(cine_linx) if cine_linx is not None else {}
+        checkpoint_extended_mode = bool(
+            isinstance(provenance_plan, dict)
+            and str(provenance_plan.get("task_mode", "") or "").strip().lower() == "fl2va_extended_av"
+            and isinstance(provenance_plan.get("extended_av"), dict)
+            and bool(provenance_plan.get("extended_av", {}).get("enabled", False))
         )
         _write_segment_metadata(
             segment_path, int(images_to_save.shape[0]), fps, audio_join_policy,
@@ -5604,8 +5013,6 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
                 _prefix = max(0, int(_chunk.get("extended_av_context_prefix_frames", 0) or 0))
                 _visible = max(1, int(_chunk.get("unique_frames", _chunk.get("requested_frame_count", 0)) or 0))
                 _padding = max(0, int(_chunk.get("extended_av_padding_frames", 0) or 0))
-                _runway = max(0, int(_chunk.get("extended_av_boundary_runway_frames", 0) or 0))
-                _grid_padding = max(0, int(_chunk.get("extended_av_grid_padding_frames", max(0, _padding - _runway)) or 0))
                 _raw_frames = max(5, int(_chunk.get("frame_count", 0) or 0))
                 # Every NON-FINAL take must itself be a reusable exact parent.
                 # Profiles choose shared-grid raw run lengths for that reason.
@@ -5618,7 +5025,6 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
                     active_render_id, current_segment, sampled_latent,
                     contract=_extended_cfg, delivered_frames=_visible,
                     pinned_head_frames=_prefix, padding_tail_frames=_padding,
-                    boundary_runway_frames=_runway, grid_padding_frames=_grid_padding,
                     parent_segment_index=(current_segment - 1 if current_segment > 0 else None),
                 )
                 extended_sidecar_saved = True
@@ -5634,10 +5040,8 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
                     )
                     _extended_av.write_seam_report(active_render_id, current_segment, extended_seam_report)
                 LOG.info(
-                    "FL2VA Extended AV RAW AV sidecar saved | render=%s | segment=%d/%d | raw=%df | pinned_head=%df | "
-                    "delivered=%df | boundary_runway=%df | grid_pad=%df | pad_tail=%df | editorial_endpoint_raw=%df | path=%s | seam=%s",
-                    active_render_id, current_segment + 1, total_segments, _raw_frames, _prefix, _visible,
-                    _runway, _grid_padding, _padding, _prefix + _visible, _sidecar_path,
+                    "FL2VA Extended AV RAW AV sidecar saved | render=%s | segment=%d/%d | raw=%df | pinned_head=%df | delivered=%df | pad_tail=%df | path=%s | seam=%s",
+                    active_render_id, current_segment + 1, total_segments, _raw_frames, _prefix, _visible, _padding, _sidecar_path,
                     json.dumps(extended_seam_report, ensure_ascii=False) if extended_seam_report else "root",
                 )
 
@@ -5679,24 +5083,13 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
             elif overlap_stitch:
                 _concat_videos_overlap(segment_paths, final_path, decoded_overlap_frames, fps)
             else:
-                if str(provenance_plan.get("audio_mode", "")) == "h3_custom_audio_drive":
-                    _concat_videos(segment_paths, final_path, audio_edge_fade_ms=0.0, audio_join_policy="locked_master")
-                    audio_join_policy = "locked_master"
-                    LOG.info("MiniMax H3 locked audio master | pristine_pcm | seam_processing=off | final_encode=single_aac")
-                elif plan_mode == "fl2va_extended_av" or join_contract.get("mode") == "masked_extend":
+                if plan_mode == "fl2va_extended_av" or join_contract.get("mode") == "masked_extend":
                     # EXTEND-style RAW AV continuity owns the audio seam; do not
                     # add the generic independent-shot 20 ms fade-to-zero edges.
-                    _concat_videos(
-                        segment_paths, final_path,
-                        audio_edge_fade_ms=5.0,
-                        audio_join_policy="extend_soft_av",
-                        extend_soft_av_ms=float((provenance_plan.get("extended_av") or {}).get("soft_audio_handover_ms", EXTEND_SOFT_AUDIO_DEFAULT_MS)),
-                        extend_boundary_polish_ms=float((provenance_plan.get("extended_av") or {}).get("boundary_polish_ms", EXTEND_BOUNDARY_POLISH_DEFAULT_MS)),
-                        extend_boundary_polish_strength=float((provenance_plan.get("extended_av") or {}).get("boundary_polish_strength", EXTEND_BOUNDARY_POLISH_DEFAULT_STRENGTH)),
-                    )
+                    _concat_videos(segment_paths, final_path, audio_edge_fade_ms=5.0)
                     LOG.info(
-                        "MiniMax H3 Extended AV audio master | policy=hidden_context_soft_av_qsin_boundary_polish | "
-                        "hidden_child_context=on | silence_taper=off_when_context_available | final_encode=single_aac"
+                        "MiniMax H3 Extended AV audio master | policy=continuous_pcm_micro_declick | "
+                        "segment_edge_fade=5ms | final_encode=single_aac"
                     )
                 else:
                     _concat_videos(segment_paths, final_path)
@@ -7107,7 +6500,7 @@ class IAMCCS_ShotboardH3Settings:
             "h3_advisor_state": ("STRING", {"default": "{}", "multiline": False,
                 "tooltip": "Per-mode local advisor state. Proposals apply only after acceptance."}),
             "seed_policy": (["fixed_per_generation", "random_per_generation", "fixed_per_chunk", "random_per_chunk"], {"default": "fixed_per_generation", "tooltip": "Fixed/random per generation: one seed for all chunks. Fixed per chunk: base + index × stride. Random per chunk: independent seeds derived from the randomized queue seed. Random policies choose a new base when you press Queue in Settings Pro; API clients must supply their base seed."}),
-            "keyframe_joint_latent_new": ("BOOLEAN", {"default": True, "tooltip": "Keyframe Joint only: experimental B1 MASKED+EXACT windows with positioned destination guides. No LatentGoAhead dependency. OFF preserves the legacy single-sample path."}),
+            "keyframe_joint_latent_new": ("BOOLEAN", {"default": False, "tooltip": "Keyframe Joint only: chain original generated AV latent tails through the LatentGoAhead branch. Destination images remain guides. OFF keeps one joint sample."}),
             # R42 continuation fix fields are appended after every historical
             # required+optional widget so pre-patch workflow arrays keep their
             # exact positional meaning.
@@ -7229,23 +6622,6 @@ class IAMCCS_ShotboardH3Settings:
             # Phase 3 contract fix: Extended AV is genuinely append-only after
             # every historical required + optional Settings widget.
             **extended_av_optional,
-            # Phase B append-only audio seam controls.  Keeping them after all
-            # historical fields preserves saved Settings widget positions.
-            "extended_av_soft_audio_handover_ms": ("FLOAT", {
-                "default": EXTEND_SOFT_AUDIO_DEFAULT_MS, "min": 5.0, "max": 60.0, "step": 1.0,
-                "display_name": "EXTEND AUDIO · SOFT AV HANDOVER MS",
-                "tooltip": "Audio only. Length of the hidden-child equal-power handover at EXTEND joins. 15 ms is the proven baseline. Video is never changed.",
-            }),
-            "extended_av_boundary_polish_ms": ("FLOAT", {
-                "default": EXTEND_BOUNDARY_POLISH_DEFAULT_MS, "min": 0.0, "max": 12.0, "step": 0.5,
-                "display_name": "EXTEND AUDIO · BOUNDARY POLISH MS",
-                "tooltip": "Audio only. Duration-preserving endpoint correction after the hidden Soft-AV handover. 0 disables it; 2-5 ms is the recommended tuning range.",
-            }),
-            "extended_av_boundary_polish_strength": ("FLOAT", {
-                "default": EXTEND_BOUNDARY_POLISH_DEFAULT_STRENGTH, "min": 0.0, "max": 1.0, "step": 0.05,
-                "display_name": "EXTEND AUDIO · BOUNDARY POLISH STRENGTH",
-                "tooltip": "Audio only. 1.0 exactly matches the first visible child sample to the preceding handover endpoint, then the correction decays to zero. Does not alter video or duration.",
-            }),
         })}
 
     RETURN_TYPES = (SUPERNODE_LINX_TYPE,)

@@ -39,10 +39,11 @@ def _audio_ok(audio: Any) -> bool:
 class IAMCCS_MiniMaxH3EditorDeliveryMedia:
     """Decode the selected per-shot or one-film delivery for the editor.
 
-    Non-LongVid modes publish each rendered ``segment_NNNN.mp4`` to the chosen
-    editor lane.  LongVid publishes only the completed ``final_film.mp4`` as one
-    asset.  This mirrors IAMCCS_MiniMaxH3EditorTakeRoute semantics while ensuring
-    the editor receives the upscaled delivery when delivery is enabled.
+    Ordinary multishot modes publish each rendered ``segment_NNNN.mp4`` to the
+    chosen editor lane. LongVid and FL2VA Extended AV publish only the completed
+    ``final_film.mp4`` as one asset because their chunks are technical pieces of
+    a single take. This mirrors IAMCCS_MiniMaxH3EditorTakeRoute semantics while
+    ensuring the editor receives the upscaled delivery when delivery is enabled.
     """
 
     @classmethod
@@ -97,18 +98,20 @@ class IAMCCS_MiniMaxH3EditorDeliveryMedia:
         # separately decoded roll so pre/post-roll and cut decisions remain
         # available inside the Video Editor.
         longvid = task_mode.startswith("longvid") and not editorial_per_shot
+        extended_av = task_mode == "fl2va_extended_av" and not editorial_per_shot
+        one_master = bool(longvid or extended_av)
         authored = Path(str(delivery_video_path or "").strip())
 
-        if longvid and index + 1 < total:
+        if one_master and index + 1 < total:
             return (
                 native_frames,
                 native_audio,
                 False,
                 "",
-                f"H3 editor delivery waiting for LongVid master | completed={index + 1}/{total}",
+                f"H3 editor delivery waiting for {'Extended AV' if extended_av else 'LongVid'} master | completed={index + 1}/{total}",
             )
 
-        if longvid:
+        if one_master:
             resolved = authored
         else:
             # On the final pass the delivery node returns final_film.mp4.  The
@@ -129,11 +132,11 @@ class IAMCCS_MiniMaxH3EditorDeliveryMedia:
         if not _audio_ok(audio):
             raise ValueError(f"H3 editor delivery decoded no audio from: {resolved}")
 
-        master_ready = bool(longvid and index + 1 >= total)
+        master_ready = bool(one_master and index + 1 >= total)
         delivery_kind = (
-            "LongVid final master"
-            if longvid
-            else (f"LTX editorial roll {index + 1}/{total}" if editorial_per_shot else f"slot {index + 1}/{total}")
+            "Extended AV final master" if extended_av
+            else ("LongVid final master" if longvid
+                  else (f"LTX editorial roll {index + 1}/{total}" if editorial_per_shot else f"slot {index + 1}/{total}"))
         )
         report = (
             f"H3 editor delivery checkpoint ready | {delivery_kind} | "

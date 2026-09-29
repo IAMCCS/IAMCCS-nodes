@@ -413,6 +413,7 @@ from .iamccs_ideogram_sheet_builder import IAMCCS_IdeogramSheetBuilder
 from .iamccs_storyboard_auto_crop import IAMCCS_StoryboardAutoCropGrid, IAMCCS_StoryboardAutoCropGridPRO
 from .iamccs_target_crop import IAMCCS_TargetCrop
 from .iamccs_gemma_assist import IAMCCS_GemmaAssistLazyGate, IAMCCS_GemmaAssistOutput
+from .iamccs_prompt_q21_enh import IAMCCS_PromptQ21Enh
 from .iamccs_storyboard_prompt_contact_sheet import IAMCCS_StoryboardPromptContactSheet
 from .iamccs_goyai_paint import IAMCCS_GoyAICanvasPaint
 from .iamccs_flashvsr_bridge import IAMCCS_FlashVSRPanelBatchPrep, IAMCCS_FlashVSRPanelBatchRestore
@@ -776,6 +777,7 @@ NODE_CLASS_MAPPINGS = {
     "IAMCCS_TargetCrop": IAMCCS_TargetCrop,
     "IAMCCS_GemmaAssistLazyGate": IAMCCS_GemmaAssistLazyGate,
     "IAMCCS_GemmaAssistOutput": IAMCCS_GemmaAssistOutput,
+    "IAMCCS_PromptQ21Enh": IAMCCS_PromptQ21Enh,
     "IAMCCS_StoryboardPromptContactSheet": IAMCCS_StoryboardPromptContactSheet,
     "IAMCCS_GoyAICanvasPaint": IAMCCS_GoyAICanvasPaint,
     "IAMCCS_FlashVSRPanelBatchPrep": IAMCCS_FlashVSRPanelBatchPrep,
@@ -1157,6 +1159,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_IdeogramSheetBuilder": "IAMCCS Ideogram Sheet Builder",
     "IAMCCS_GemmaAssistLazyGate": "IAMCCS Gemma Assist Lazy Gate",
     "IAMCCS_GemmaAssistOutput": "IAMCCS Gemma Assist Output",
+    "IAMCCS_PromptQ21Enh": "IAMCCS PromptQ21Enh",
     "IAMCCS_StoryboardPromptContactSheet": "IAMCCS Storyboard Prompt Contact Sheet",
     "IAMCCS_GoyAICanvasPaint": "GoyAIcanvas Paint (Image + Mask)",
     "IAMCCS_FlashVSRPanelBatchPrep": "IAMCCS FlashVSR Panel Batch Prep",

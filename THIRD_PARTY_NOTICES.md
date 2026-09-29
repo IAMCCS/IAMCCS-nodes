@@ -32,6 +32,7 @@ derivative work.
 | ComfyUI-MiniMax-H3-LongMedia | Apache-2.0 | Previous-latent-tail, frozen-prefix and native continuation concepts. |
 | ComfyUI-Wan-SVI2Pro-FLF | GPL-3.0 | Logic adapted in `iamccs_wan_svipro_motion.py`. |
 | ComfyUI-KJNodes | GPL-3.0 | Logic adapted in `iamccs_wan_svipro_motion.py`. |
+| comfyui-obvpm-timeline (chanon) | GPL-3.0 | `fl2va_extended_av` masked-EXTEND architecture: fresh target AV latent, masked BEFORE pin, 39+51k shared AV window grid, delivered→RAW pin slicing, pinned-head trim, lineage-derived joins, seam diagnostics and future joint-timeline refine. Primary references reviewed for Phase 7: `nodes_masked.py` 351465c2bc2cfa0f0b1f2cec99c348698e57a999, `nodes_pins.py` 1ac2cb561e51baaf25e8742c809134c192ec79f3, `mctx.py` 890e7efa142f7e2c4b2dae6be9c908b5f239f1fe, `nodes_assemble.py` 2896c87159514706f8bfc4d2a015d51ef62d1ed8. |
 | ComfyUI | GPL-3.0 | Platform integration and compatibility reference. |
 
 The upstream projects above are credited for their relevant technical lineage.

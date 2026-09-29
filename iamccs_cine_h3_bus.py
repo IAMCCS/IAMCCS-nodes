@@ -260,20 +260,65 @@ class IAMCCS_CineH3FunControlInput:
                 return str(settings["h3_controlnet_kind"]).strip().lower()
         return "pose_dwpose"
 
+    @staticmethod
+    def _settings_dwpose_torch_gpu(cine_linx):
+        resources = _as_dict(cine_linx.get("resources"))
+        outputs = _as_dict(cine_linx.get("outputs"))
+        payload = _as_dict(resources.get("cine_payload"))
+        for candidate in (
+            resources.get("iamccs_minimax_h3_settings"),
+            outputs.get("iamccs_minimax_h3_settings"),
+            payload.get("iamccs_minimax_h3_settings"),
+        ):
+            settings = _as_dict(_as_dict(candidate).get("settings"))
+            if "h3_controlnet_dwpose_torch_gpu" in settings:
+                value = settings["h3_controlnet_dwpose_torch_gpu"]
+                return value is True or str(value).strip().lower() in {"1", "true", "yes", "on"}
+        return False
+
+    @staticmethod
+    def _settings_preprocess_resolution(cine_linx, node_resolution):
+        resources = _as_dict(cine_linx.get("resources"))
+        outputs = _as_dict(cine_linx.get("outputs"))
+        payload = _as_dict(resources.get("cine_payload"))
+        for candidate in (
+            resources.get("iamccs_minimax_h3_settings"),
+            outputs.get("iamccs_minimax_h3_settings"),
+            payload.get("iamccs_minimax_h3_settings"),
+        ):
+            settings = _as_dict(_as_dict(candidate).get("settings"))
+            selected = str(settings.get("h3_controlnet_preprocess_resolution", "node_default"))
+            if selected != "node_default":
+                return int(selected)
+        return int(node_resolution)
+
     @classmethod
-    def _preprocess(cls, images, choice, resolution):
+    def _preprocess(cls, images, choice, resolution, dwpose_torch_gpu=False):
         import nodes
 
         node_name = H3_CONTROL_AIO_NAMES.get(choice)
         if not node_name:
             return images
-        aio_cls = nodes.NODE_CLASS_MAPPINGS.get("AIO_Preprocessor")
-        if aio_cls is None:
-            raise RuntimeError(
-                "IAMCCS H3 Control preprocessing requires comfyui_controlnet_aux / AIO_Preprocessor. "
-                "Install or enable that package, or choose already_preprocessed."
+        if choice == "dwpose" and dwpose_torch_gpu:
+            if not torch.cuda.is_available():
+                raise RuntimeError("DWPose Torch GPU was selected, but CUDA is unavailable in ComfyUI.")
+            dwpose_cls = nodes.NODE_CLASS_MAPPINGS.get("DWPreprocessor")
+            if dwpose_cls is None:
+                raise RuntimeError("DWPose Torch GPU requires comfyui_controlnet_aux / DWPreprocessor.")
+            result = dwpose_cls().estimate_pose(
+                image=images,
+                resolution=int(resolution),
+                bbox_detector="yolox_l.torchscript.pt",
+                pose_estimator="dw-ll_ucoco_384_bs5.torchscript.pt",
             )
-        result = aio_cls().execute(preprocessor=node_name, image=images, resolution=int(resolution))
+        else:
+            aio_cls = nodes.NODE_CLASS_MAPPINGS.get("AIO_Preprocessor")
+            if aio_cls is None:
+                raise RuntimeError(
+                    "IAMCCS H3 Control preprocessing requires comfyui_controlnet_aux / AIO_Preprocessor. "
+                    "Install or enable that package, or choose already_preprocessed."
+                )
+            result = aio_cls().execute(preprocessor=node_name, image=images, resolution=int(resolution))
         if isinstance(result, dict):
             result = result.get("result")
         prepared = result[0] if isinstance(result, (tuple, list)) and result else None
@@ -301,8 +346,18 @@ class IAMCCS_CineH3FunControlInput:
             }.get(self._settings_kind(cine_linx), "already_preprocessed")
         if selected_preprocessor not in H3_CONTROL_PREPROCESSORS:
             raise ValueError(f"Unknown IAMCCS H3 Control preprocessor: {selected_preprocessor}")
+        dwpose_torch_gpu = (
+            selected_preprocessor == "dwpose"
+            and control_video is None
+            and torch.is_tensor(source_video)
+            and self._settings_dwpose_torch_gpu(cine_linx)
+        )
+        effective_resolution = self._settings_preprocess_resolution(cine_linx, preprocess_resolution)
         if control_video is None and torch.is_tensor(source_video):
-            control_video = self._preprocess(source_video, selected_preprocessor, preprocess_resolution)
+            control_video = self._preprocess(
+                source_video, selected_preprocessor, effective_resolution,
+                dwpose_torch_gpu=dwpose_torch_gpu,
+            )
         if control_video is None:
             # Deliberate no-media pass-through: final R39/R40 graphs can keep
             # this modular insertion point wired without evaluating a video
@@ -338,7 +393,8 @@ class IAMCCS_CineH3FunControlInput:
             "has_mask": torch.is_tensor(mask),
             "has_source_video": torch.is_tensor(source_video),
             "preprocessor": selected_preprocessor,
-            "preprocess_resolution": int(preprocess_resolution),
+            "dwpose_engine": "torch_cuda" if dwpose_torch_gpu else "controlnet_aux_default",
+            "preprocess_resolution": effective_resolution,
             "contract": "preview is the exact control IMAGE batch; Settings owns kind/model/strength/window",
         }
         resources["iamccs_minimax_h3_control_video"] = control_video
@@ -361,7 +417,9 @@ class IAMCCS_CineH3FunControlInput:
             f"{meta['width']}x{meta['height']} | mask={'yes' if meta['has_mask'] else 'no'} | "
             "connect output to the Shotboard historical cine_linx input"
         )
-        report += f" | preprocessor={selected_preprocessor}"
+        report += f" | preprocessor={selected_preprocessor} | preprocess_resolution={effective_resolution}"
+        if selected_preprocessor == "dwpose":
+            report += f" | dwpose_engine={meta['dwpose_engine']}"
         # Show a bounded representative contact preview directly on this node.
         # The full control batch still travels through CineLinX and the IMAGE
         # output; only the temporary UI preview is sampled to avoid hundreds of
@@ -422,6 +480,23 @@ def _shotplan_audio_mode(cine_linx: Any) -> str:
         if isinstance(candidate, dict) and candidate.get("schema") == "iamccs.minimax_h3.shotplan":
             return str(candidate.get("audio_mode", "h3_native_generated") or "h3_native_generated").lower()
     return "h3_native_generated"
+
+
+def _use_control_video_audio(cine_linx: Any) -> bool:
+    envelope = _as_dict(cine_linx)
+    resources = _as_dict(envelope.get("resources"))
+    outputs = _as_dict(envelope.get("outputs"))
+    payload = _as_dict(resources.get("cine_payload"))
+    for candidate in (
+        resources.get("iamccs_minimax_h3_settings"),
+        outputs.get("iamccs_minimax_h3_settings"),
+        payload.get("iamccs_minimax_h3_settings"),
+    ):
+        settings = _as_dict(_as_dict(candidate).get("settings"))
+        if "h3_controlnet_use_video_audio" in settings:
+            value = settings["h3_controlnet_use_video_audio"]
+            return value is True or str(value).strip().lower() in {"1", "true", "yes", "on"}
+    return False
 
 
 def _silent_transport_audio(sample_rate: int = 32000) -> dict[str, Any]:
@@ -547,11 +622,34 @@ class IAMCCS_CineH3AudioBus:
         timeline = _audio_timeline(cine_linx)
         segments = [item for item in timeline.get("audioSegments", []) if isinstance(item, dict)]
         audio_mode = _shotplan_audio_mode(cine_linx)
+        # A single source video's AUDIO may be wired to CineInfoH3.custom_audio
+        # without an AudioBoard file. Publish it as a real in-memory lane so
+        # AudioTimelineMix and the locked AV route share the same clock.
+        direct_custom_audio = _as_dict(cine_linx).get("resources", {}).get("iamccs_minimax_h3_custom_audio")
+        direct_custom_audio = (
+            direct_custom_audio
+            if isinstance(direct_custom_audio, dict)
+            and torch.is_tensor(direct_custom_audio.get("waveform"))
+            and direct_custom_audio["waveform"].ndim == 3
+            else None
+        )
+        use_video_audio = audio_mode == "h3_custom_audio_drive" and _use_control_video_audio(cine_linx)
+        if use_video_audio and direct_custom_audio is not None:
+            sample_rate = max(1, int(direct_custom_audio.get("sample_rate", 32000) or 32000))
+            segments = [{
+                "id": "source_video_audio", "audio_input": 1,
+                "start_seconds": 0.0,
+                "duration_seconds": int(direct_custom_audio["waveform"].shape[-1]) / sample_rate,
+                "track": 0, "gain": 1.0, "pan": 0.0,
+                "iamccs_direct_custom_audio": True,
+            }]
         native_audio_bypass = not segments and audio_mode == "h3_native_generated"
         if not segments and not native_audio_bypass:
             raise ValueError(
                 f"Cine H3 Audio Bus found no audioSegments while audio_mode={audio_mode}. "
-                "Insert an AudioBoard clip or select h3_native_generated."
+                "Insert an AudioBoard clip, or enable USE VIDEO AUDIO in Settings PRO > CONTROL "
+                "and connect GetVideoComponents AUDIO to CineInfoH3.custom_audio, "
+                "or select h3_native_generated."
             )
 
         # A visual AudioBoard track can contain many independent audio clips.
@@ -571,8 +669,11 @@ class IAMCCS_CineH3AudioBus:
             if bool(segment.get("placeholder", False)):
                 continue
             lane_index = int(segment["audio_input"]) - 1
-            filename, path = _input_audio_path(segment)
-            audio = _load_native_audio(path)
+            if bool(segment.get("iamccs_direct_custom_audio", False)):
+                filename, audio = "<source_video_audio>", direct_custom_audio
+            else:
+                filename, path = _input_audio_path(segment)
+                audio = _load_native_audio(path)
             resource_lanes.append(audio)
             if lane_index < MAX_AUDIO_LANES:
                 lanes[lane_index] = audio
@@ -591,6 +692,11 @@ class IAMCCS_CineH3AudioBus:
             "source": "shotboard_audioSegments",
             "transport": "clip_addressed_cine_linx",
             "native_audio_bypass": native_audio_bypass,
+            "video_audio_requested": use_video_audio,
+            "audio_owner": (
+                "source_video" if use_video_audio and direct_custom_audio is not None
+                else "shotboard_audioboard" if segments else "native_h3"
+            ),
             "audio_mode": audio_mode,
             "lanes": manifest_lanes,
             "timeline": canonical_timeline,

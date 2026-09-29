@@ -638,6 +638,15 @@ def sample_pianosequenza_2stage(
         _resize_keyframes(conditioning, stage_layout[i]["latent_h"], stage_layout[i]["latent_w"])
         for i in range(sampled_stage_count)
     ]
+    for stage_index, stage_conditioning in enumerate(conditioning_by_stage):
+        guides = [
+            (guide.get("resolved_frame_index"), tuple(guide["latent"].shape))
+            for _, metadata in stage_conditioning
+            for guide in metadata.get("minimax_keyframes", [])
+            if torch.is_tensor(guide.get("latent"))
+        ]
+        LOG.info("MiniMax H3 GUIDE STAGE | stage=%d | resize=latent_bilinear_mean_preserved | frame_and_shape=%s",
+                 stage_index + 1, guides)
 
     current_latent = _pack([stage_videos[0]] + audio_streams, nested)
     current_noise_mask = _pack([stage_masks[0]] + auxiliary_masks, nested) if masks is not None else None

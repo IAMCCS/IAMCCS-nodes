@@ -212,6 +212,8 @@ def _chunk_timing(shotplan: dict[str, Any], chunk: dict[str, Any]) -> tuple[floa
     )
     default_duration = max(1, int(chunk.get("frame_count", 124) or 124)) / fps
     duration_seconds = float(chunk.get("duration_seconds", default_duration) or default_duration)
+    if str(shotplan.get("task_mode", "")) == "fl2va_extended_av":
+        start_seconds = float(chunk.get("raw_timeline_start_frame", round(start_seconds * fps))) / fps
     if not math.isfinite(start_seconds) or start_seconds < 0.0:
         raise ValueError(f"Invalid MiniMax H3 chunk start time: {start_seconds}")
     if not math.isfinite(duration_seconds) or duration_seconds <= 0.0:
@@ -432,6 +434,8 @@ def _lock_audio_stream(
             audio_latent=locked_audio,
         )
     )
+    # Core split/concat owns the two tensors; retain continuation metadata.
+    locked_av = {**av_latent, **locked_av}
     video_stream, audio_stream = _validate_joint_av_latent(locked_av)
     joint_mask = locked_av.get("noise_mask") if isinstance(locked_av, dict) else None
     if joint_mask is None or not bool(getattr(joint_mask, "is_nested", False)):
@@ -710,13 +714,18 @@ class IAMCCS_MiniMaxH3AudioOutputPolicyR21:
             # audio early by motion_context_trim_frames / fps.
             motion_contract = shotplan.get("motion_context_auto_chain")
             planned_trim = max(0, int(chunk.get("motion_context_trim_frames", 0) or 0))
-            if isinstance(motion_contract, dict) and bool(motion_contract.get("enabled")) and planned_trim:
+            if str(shotplan.get("task_mode", "")) == "fl2va_extended_av":
+                planned_trim = max(0, int(chunk.get("extended_av_trim_head_frames", 0) or 0))
+                trim_enabled = True
+            else:
+                trim_enabled = isinstance(motion_contract, dict) and bool(motion_contract.get("enabled"))
+            if trim_enabled and planned_trim:
                 sample_rate = max(1, int(selected.get("sample_rate", 32000) or 32000))
                 cut = max(0, int(round(planned_trim / float(fps) * sample_rate)))
                 waveform = selected["waveform"]
                 if cut >= int(waveform.shape[-1]):
                     raise ValueError(
-                        "R37 Motion Context audio delivery trim would remove the complete locked slice: "
+                        "H3 hidden-context audio delivery trim would remove the complete locked slice: "
                         f"trim={planned_trim}f, samples={int(waveform.shape[-1])}, sample_rate={sample_rate}"
                     )
                 selected = dict(selected)
@@ -739,6 +748,7 @@ class IAMCCS_MiniMaxH3AudioOutputPolicyR21:
             "video_frames": int(video_frames.shape[0]),
             "fps": fps,
             "fit": fit_report,
+            "delivery_head_trim_frames": delivery_head_trim_frames,
             "motion_context_delivery_head_trim_frames": delivery_head_trim_frames,
             "motion_context_delivery_head_trim_samples": delivery_head_trim_samples,
             "note": (

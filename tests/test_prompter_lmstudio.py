@@ -35,6 +35,60 @@ class LMStudioTests(unittest.TestCase):
             module.rewrite_sections_with_ai('ollama', '', 'local-model', '', 't2va', {'scene':'test'})
         self.assertEqual(http.call_args.args[0], 'http://127.0.0.1:11434/api/chat')
 
+    def test_narrative_request_can_fill_blank_extended_evolving_targets(self):
+        answer = {'choices':[{'message':{'content':'{"action":"0-4 seconds: breathe steadily.\\nAt 4 seconds start walking.","shot_list":"0-4 seconds: breathe steadily.\\nAt 4 seconds start walking."}'}}]}
+        with patch.object(module, '_http_json', return_value=answer):
+            value, report = module.rewrite_sections_with_ai(
+                'lm_studio', '', 'local-model', '', 'fl2va',
+                {'action':'', 'shot_list':''},
+                user_direction='Create timed phases from this request.',
+                target_keys=['action', 'shot_list'],
+            )
+        self.assertIn('At 4 seconds', value['action'])
+        self.assertEqual(report['selected_sections'], ['action', 'shot_list'])
+
+    def test_continuous_request_can_fill_one_blank_action_target(self):
+        answer = {'message': {'content': '{"action":"A goblin swims steadily toward the camera for the complete uninterrupted take."}'}}
+        with patch.object(module, '_http_json', return_value=answer):
+            value, report = module.rewrite_sections_with_ai(
+                'ollama', '', 'gemma4:e4b', '', 'fl2va',
+                {'action': '', 'shot_list': ''},
+                user_direction='Keep the requested action continuous without times or phases.',
+                target_keys=['action'],
+            )
+        self.assertIn('complete uninterrupted take', value['action'])
+        self.assertEqual(report['selected_sections'], ['action'])
+
+    def test_ollama_retries_compact_prompt_after_repeat_limit(self):
+        answers = [
+            RuntimeError('AI provider HTTP 500: prediction aborted, token repeat limit reached'),
+            {'message': {'content': '{"scene":"An empty station.","shot_list":[{"description":"A woman walks while the camera tracks backward."}]}'}}
+        ]
+        with patch.object(module, '_http_json', side_effect=answers) as http:
+            value, report = module.rewrite_sections_with_ai(
+                'ollama', '', 'qwen2.5vl:3b', '', 't2va',
+                {'scene': '', 'shot_list': ''},
+                user_direction='A woman walks through an empty station.',
+                target_keys=['scene', 'shot_list'],
+            )
+        self.assertEqual(http.call_count, 2)
+        self.assertEqual(value['scene'], 'An empty station.')
+        self.assertIn('description:', value['shot_list'])
+        self.assertEqual(report['transport_retry'], 'ollama_compact_after_repeat_limit')
+
+    def test_evolving_recovers_user_timestamps_when_model_misformats_timeline(self):
+        answer = {'message': {'content': '{"action":"[ONSET ONCE] She walks. [THEN SUSTAIN] She keeps walking.","shot_list":"malformed"}'}}
+        with patch.object(module, '_http_json', return_value=answer):
+            value, _ = module.rewrite_sections_with_ai(
+                'ollama', '', 'gemma4:e4b', '', 'fl2va',
+                {'action': '', 'shot_list': ''},
+                user_direction='Extended Evolving. REQUEST: A woman walks toward camera; at 4 seconds she starts running.',
+                target_keys=['action', 'shot_list'],
+            )
+        self.assertEqual(value['action'], value['shot_list'])
+        self.assertIn('0-4 seconds:', value['action'])
+        self.assertIn('At 4 seconds:', value['action'])
+
     def test_prompter_returns_plain_final_prompt_without_audio(self):
         project = module.default_project()
         project['sections']['scene'] = 'A controlled one-shot performance.'

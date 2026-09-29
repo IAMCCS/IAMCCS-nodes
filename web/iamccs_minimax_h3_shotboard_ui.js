@@ -114,6 +114,7 @@ function canonicalH3ContinuityMode(value) {
     return Object.prototype.hasOwnProperty.call(H3_CONTINUITY_MODE_INFO, raw) ? raw : "stable_keyframes";
 }
 function canonicalH3TaskMode(value) {
+    if (["t2va_continuous", "fl2va_extended_av"].includes(String(value).toLowerCase())) return String(value).toLowerCase();
     const raw = String(value || "auto_from_timeline").trim().toLowerCase();
     if (["auto", "auto_from_timeline"].includes(raw)) return "auto_from_timeline";
     if (["i2v", "i2va"].includes(raw)) return "i2va";
@@ -5117,14 +5118,14 @@ function installShotboardPromptMagnifiers(root) {
             wrap.append(area);
             area.style.width = "100%";
             area.style.boxSizing = "border-box";
-            // Reserve a narrow gutter so prompt text never sits beneath the toggle.
-            area.style.paddingRight = "22px";
+            // Keep both the scrollbar and the zoom control out of the text lane.
+            area.style.paddingRight = "42px";
             const lens = document.createElement("button");
-            lens.type = "button"; lens.textContent = "⌕";
+            lens.type = "button"; lens.textContent = "+";
             lens.title = "Ingrandisci questo prompt · editor 2×";
             lens.setAttribute("aria-label", "Ingrandisci il prompt");
             lens.setAttribute("aria-pressed", "false");
-            lens.style.cssText = "position:absolute;right:3px;bottom:3px;z-index:2;width:16px;max-width:calc(100% - 6px);height:16px;padding:0;border:1px solid #b98e55;border-radius:3px;background:#261d15;color:#f8d69c;cursor:pointer;font-size:12px;line-height:13px;text-align:center;";
+            lens.style.cssText = "position:absolute;right:22px;top:5px;z-index:2;width:16px;max-width:calc(100% - 26px);height:16px;padding:0;border:1px solid #b98e55;border-radius:3px;background:#261d15;color:#f8d69c;cursor:pointer;font-size:13px;font-weight:700;line-height:13px;text-align:center;";
             lens.onpointerdown = (event) => event.stopPropagation();
             lens.onclick = (event) => {
                 event.preventDefault(); event.stopPropagation();
@@ -8487,6 +8488,33 @@ function renderShotboardV3(node) {
                     normalStartFrame: Math.max(0, Math.round(Number(data.normalStartFrame ?? data.normal_start_frame ?? 0) || 0)),
                     normalDurationFrames: Math.max(0, Math.round(Number(data.normalDurationFrames ?? data.normal_duration_frames ?? data.duration_frames ?? 0) || 0)),
                     promptBlocks: Array.isArray(data.promptBlocks) ? data.promptBlocks : Array.isArray(data.prompt_blocks) ? data.prompt_blocks : [],
+                    pan_h3_conditioning_v1: data.pan_h3_conditioning_v1 && typeof data.pan_h3_conditioning_v1 === "object"
+                        ? JSON.parse(JSON.stringify(data.pan_h3_conditioning_v1))
+                        : node.properties?.iamccs_pan_h3_conditioning_v1
+                            ? JSON.parse(JSON.stringify(node.properties.iamccs_pan_h3_conditioning_v1))
+                            : undefined,
+                    extended_prompt_blocks: Array.isArray(data.extended_prompt_blocks)
+                        ? JSON.parse(JSON.stringify(data.extended_prompt_blocks))
+                        : Array.isArray(data.extendedPromptBlocks)
+                            ? JSON.parse(JSON.stringify(data.extendedPromptBlocks))
+                            : Array.isArray(data.pan_h3_conditioning_v1?.beats)
+                                ? data.pan_h3_conditioning_v1.beats.map((beat,index) => ({
+                                    id:String(beat.id || `extended_prompt_${index+1}`), type:"extended_prompt",
+                                    start_frame:Number(beat.start_frame || 0), end_frame:Number(beat.end_frame || 1),
+                                    start:Number(beat.start_frame || 0), length:Math.max(1,Number(beat.end_frame || 1)-Number(beat.start_frame || 0)),
+                                    prompt:String(beat.action || beat.prompt || ""), action:String(beat.action || beat.prompt || ""), enabled:true,
+                                }))
+                                : Array.isArray(node.properties?.iamccs_pan_h3_conditioning_v1?.beats)
+                                    ? node.properties.iamccs_pan_h3_conditioning_v1.beats.map((beat,index) => ({
+                                        id:String(beat.id || `extended_prompt_${index+1}`), type:"extended_prompt",
+                                        start_frame:Number(beat.start_frame || 0), end_frame:Number(beat.end_frame || 1),
+                                        start:Number(beat.start_frame || 0), length:Math.max(1,Number(beat.end_frame || 1)-Number(beat.start_frame || 0)),
+                                        prompt:String(beat.action || beat.prompt || ""), action:String(beat.action || beat.prompt || ""), enabled:true,
+                                    }))
+                                    : [],
+                    extendedPromptBlocks: Array.isArray(data.extended_prompt_blocks)
+                        ? JSON.parse(JSON.stringify(data.extended_prompt_blocks))
+                        : Array.isArray(data.extendedPromptBlocks) ? JSON.parse(JSON.stringify(data.extendedPromptBlocks)) : [],
                     sourceAudioSegments: Array.isArray(data.sourceAudioSegments) ? data.sourceAudioSegments : Array.isArray(data.source_audio_segments) ? data.source_audio_segments : [],
                     audioSegments: Array.isArray(data.audioSegments) ? data.audioSegments : [],
                     audioTrackCount: Math.max(1, Number(data.audioTrackCount || 1)),
@@ -8509,7 +8537,7 @@ function renderShotboardV3(node) {
                 };
             }
         } catch {}
-        return { schema: "iamccs.cine.filmmaker_timeline", schema_version: 1, segments: [], rows: [], motionSegments: [], motionClips: [], motionTrackEnabled: isShotboardV4, useCustomMotion: false, use_custom_motion: false, overrideAudio: false, override_audio: false, inpaintAudio: false, inpaint_audio: false, audioInputEnabled: false, audio_input_enabled: false, sourceVoiceLock: false, source_voice_lock: false, videoToVideoEnabled: isShotboardV4, video_to_video_enabled: isShotboardV4, magnetEnabled: true, magnet_enabled: true, timeUnits: "seconds", time_units: "seconds", display_mode: "seconds", displayMode: "seconds", clipEditMode: "timeline_trim_split_extend", clip_edit_mode: "timeline_trim_split_extend", continuationMode: "source_video", continuation_mode: "source_video", guideFramePolicy: "prompt_behavior_guide_geography", guide_frame_policy: "prompt_behavior_guide_geography", retakeMode: false, retakeVideo: null, retakeStart: 0, retakeLength: 0, retakeStrength: 1, retakePrompt: "", retake_global_prompt: "", normalStartFrame: 0, normalDurationFrames: 0, promptBlocks: [], sourceAudioSegments: [], audioSegments: [], audioTrackCount: 1, duration_seconds: null, frame_rate: null, ic_lora_name: "None", icLoraName: "None", ic_lora_strength: 1, icLoraStrength: 1, backend_settings: { ic_lora_name: "None", ic_lora_strength: 1, backend_widgets_are_fallback: true }, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
+        return { schema: "iamccs.cine.filmmaker_timeline", schema_version: 1, segments: [], rows: [], motionSegments: [], motionClips: [], motionTrackEnabled: isShotboardV4, useCustomMotion: false, use_custom_motion: false, overrideAudio: false, override_audio: false, inpaintAudio: false, inpaint_audio: false, audioInputEnabled: false, audio_input_enabled: false, sourceVoiceLock: false, source_voice_lock: false, videoToVideoEnabled: isShotboardV4, video_to_video_enabled: isShotboardV4, magnetEnabled: true, magnet_enabled: true, timeUnits: "seconds", time_units: "seconds", display_mode: "seconds", displayMode: "seconds", clipEditMode: "timeline_trim_split_extend", clip_edit_mode: "timeline_trim_split_extend", continuationMode: "source_video", continuation_mode: "source_video", guideFramePolicy: "prompt_behavior_guide_geography", guide_frame_policy: "prompt_behavior_guide_geography", retakeMode: false, retakeVideo: null, retakeStart: 0, retakeLength: 0, retakeStrength: 1, retakePrompt: "", retake_global_prompt: "", normalStartFrame: 0, normalDurationFrames: 0, promptBlocks: [], pan_h3_conditioning_v1: node.properties?.iamccs_pan_h3_conditioning_v1 ? JSON.parse(JSON.stringify(node.properties.iamccs_pan_h3_conditioning_v1)) : undefined, extended_prompt_blocks: [], extendedPromptBlocks: [], sourceAudioSegments: [], audioSegments: [], audioTrackCount: 1, duration_seconds: null, frame_rate: null, ic_lora_name: "None", icLoraName: "None", ic_lora_strength: 1, icLoraStrength: 1, backend_settings: { ic_lora_name: "None", ic_lora_strength: 1, backend_widgets_are_fallback: true }, audioSyncMode: "timeline_audio", generationStrategy: "single_timeline", flfrealMode: "iamccs_enhanced", globalPromptOnly: false, verboseLog: true };
     }
 
     let timeline = readTimeline();
@@ -8855,8 +8883,9 @@ function renderShotboardV3(node) {
     };
     const clampSegment = (seg) => {
         const total = getTotalFrames();
+        const extendedTake = ["fl2va_extended_av", "t2va_continuous"].includes(String(node.widgets?.find(w => w.name === "task_mode")?.value || timeline.task_mode || "").toLowerCase());
         seg.length = Math.max(1, Math.round(Number(seg.length || defaultLen())));
-        if (!["audio", "motion", "video"].includes(String(seg.type || "image"))) {
+        if (!extendedTake && !["audio", "motion", "video"].includes(String(seg.type || "image"))) {
             seg.length = Math.min(362, seg.length);
         }
         seg.start = Math.max(0, Math.min(Math.round(Number(seg.start || 0)), Math.max(0, total - 1)));
@@ -9400,6 +9429,12 @@ function renderShotboardV3(node) {
     let syncShotboardToExternalH3Settings = () => false;
     const writeTimeline = (options = {}) => {
         if (!options.skipDomSync) syncTimelineTextFromDom();
+        // The node-property copy survives DOM rebuilds and old ComfyUI widget
+        // callback ordering.  Restore it before serialising Queue truth.
+        if ((!timeline.pan_h3_conditioning_v1 || typeof timeline.pan_h3_conditioning_v1 !== "object")
+            && node.properties?.iamccs_pan_h3_conditioning_v1) {
+            timeline.pan_h3_conditioning_v1 = JSON.parse(JSON.stringify(node.properties.iamccs_pan_h3_conditioning_v1));
+        }
         neutralizeLegacyStepTransitions();
         enforceDurationMinimum();
         cleanupAudioPlaceholdersOverlappingMedia();
@@ -9410,7 +9445,7 @@ function renderShotboardV3(node) {
         const effectiveDurationSeconds = getDuration();
         timeline.duration_seconds = effectiveDurationSeconds;
         timeline.frame_rate = fps;
-        const rows = timeline.segments.filter((seg) => !seg.placeholder).map(segmentToRow);
+        let rows = timeline.segments.filter((seg) => !seg.placeholder).map(segmentToRow);
         const audioHasMedia = (timeline.audioSegments || []).some((seg) => audioSegmentHasMedia(seg));
         const motionHasMedia = isShotboardV4 && (timeline.motionSegments || []).some((seg) => segmentHasMotionMedia(seg) && !seg.placeholder);
         const useCustomMotion = Boolean(isShotboardV4 && timeline.motionTrackEnabled !== false && (timeline.useCustomMotion || timeline.use_custom_motion || motionHasMedia));
@@ -9420,6 +9455,22 @@ function renderShotboardV3(node) {
         }
         const icLoraSettings = isShotboardV4 ? activeIcLoraSettings() : { name: "None", strength: 1, role: "motion_reference", imageAttentionStrength: 1 };
         const durationFrames = getTotalFrames();
+        const extendedAvMode = String(node.widgets?.find(w => w.name === "task_mode")?.value || timeline.task_mode || "").toLowerCase() === "fl2va_extended_av";
+        const extendedSourceSlots = (timeline.segments || []).filter((seg) => !seg?.placeholder && isTimelineImageSegment(seg));
+        if (extendedAvMode && extendedSourceSlots.length === 1) {
+            // Preserve the source guide's authored slot bounds. Native H3
+            // window limits belong to backend chunks, not this timeline slot.
+            extendedSourceSlots[0].extended_visual_guide = true;
+            if (Array.isArray(timeline.extended_prompt_blocks) && timeline.extended_prompt_blocks.length) {
+                extendedSourceSlots.forEach((seg) => {
+                    seg.prompt = "";
+                    seg.local_prompt = "";
+                    seg.relay_prompt = "";
+                    seg.use_prompt = false;
+                });
+            }
+            rows = timeline.segments.filter((seg) => !seg.placeholder).map(segmentToRow);
+        }
         const visual = (timeline.segments || [])
             .filter((seg) => String(seg.type || "image") !== "audio" && !seg.placeholder)
             .slice()
@@ -9519,6 +9570,9 @@ function renderShotboardV3(node) {
                 prompt: String(seg.prompt ?? seg.local_prompt ?? seg.relay_prompt ?? "").trim(),
                 enabled: seg.relay_manual_off !== true && seg.promptrelay_manual_off !== true,
             }));
+        const extendedPromptBlocks = Array.isArray(timeline.extended_prompt_blocks)
+            ? timeline.extended_prompt_blocks
+            : Array.isArray(timeline.extendedPromptBlocks) ? timeline.extendedPromptBlocks : [];
         const sourceAudioSegments = isShotboardV4 && Boolean(timeline.audioInputEnabled || timeline.audio_input_enabled) && Boolean(timeline.sourceVoiceLock || timeline.source_voice_lock)
             ? visual
                 .filter((seg) => isTimelineVideoSegment(seg) && videoPathForSegment(seg))
@@ -9537,6 +9591,8 @@ function renderShotboardV3(node) {
             : (Array.isArray(timeline.sourceAudioSegments) ? timeline.sourceAudioSegments : []);
         timeline.promptBlocks = promptBlocks;
         timeline.prompt_blocks = promptBlocks;
+        timeline.extendedPromptBlocks = extendedPromptBlocks;
+        timeline.extended_prompt_blocks = extendedPromptBlocks;
         timeline.sourceAudioSegments = sourceAudioSegments;
         timeline.source_audio_segments = sourceAudioSegments;
         const timelineControlContract = isShotboardV4 ? {
@@ -9567,15 +9623,32 @@ function renderShotboardV3(node) {
         ) + 1;
         const truthUpdatedAt = new Date().toISOString();
         timeline.truthRevision = nextTruthRevision;
+        const visibleQueuePrompt = String(promptArea?.value ?? promptWidget?.value ?? "");
+        if (timeline.pan_h3_conditioning_v1 && typeof timeline.pan_h3_conditioning_v1 === "object") {
+            // Timed beats remain an Extended AV schedule, but their global
+            // context must follow the prompt currently visible in Shotboard.
+            // A connected Prompter never regains authority during Queue.
+            timeline.pan_h3_conditioning_v1.global_context = visibleQueuePrompt;
+            timeline.pan_h3_conditioning_v1.shotboard_truth_revision = nextTruthRevision;
+        }
         const clean = {
             schema: "iamccs.cine.filmmaker_timeline",
             schema_version: 2,
             truth_revision: nextTruthRevision,
             _iamccs_v3_truth_revision: nextTruthRevision,
             truth_updated_at: truthUpdatedAt,
-            global_prompt: String(promptArea?.value ?? promptWidget?.value ?? ""),
-            prompt: String(promptArea?.value ?? promptWidget?.value ?? ""),
+            global_prompt: visibleQueuePrompt,
+            prompt: visibleQueuePrompt,
             h3_saved_settings: h3SavedSettings,
+            // IAMCCS Prompter writes this contract explicitly into the
+            // visible Shotboard. Preserve it through every UI normalization
+            // and queue flush so Extended AV can resolve different action
+            // conditioning for each technical chunk.
+            pan_h3_conditioning_v1: timeline.pan_h3_conditioning_v1 && typeof timeline.pan_h3_conditioning_v1 === "object"
+                ? JSON.parse(JSON.stringify(timeline.pan_h3_conditioning_v1))
+                : undefined,
+            extended_prompt_blocks: JSON.parse(JSON.stringify(extendedPromptBlocks)),
+            extendedPromptBlocks: JSON.parse(JSON.stringify(extendedPromptBlocks)),
             flfrealMode,
             flfreal_mode: flfrealMode,
             verbose_log: timeline.verboseLog !== false,
@@ -10065,6 +10138,66 @@ function renderShotboardV3(node) {
         writeTimeline({ force: true, skipDomSync: true });
         draw();
         return { actualTarget: `local_${selectedIndex + 1}`, mergePolicy: effectivePolicy };
+    };
+
+    // Explicit bridge used by IAMCCS_Prompter. The resulting contract is
+    // written into the visible Shotboard timeline, which remains queue truth.
+    node._iamccsMiniMaxSetConditioningSchedule = ({ policy = "continuous", beats = [], globalContext = "", sourceText = "" } = {}) => {
+        const requestedPolicy = String(policy || "default").toLowerCase();
+        const selectedPolicy = ["default", "continuous", "evolving"].includes(requestedPolicy) ? requestedPolicy : "default";
+        if (selectedPolicy === "default") {
+            delete timeline.pan_h3_conditioning_v1;
+            timeline.extended_prompt_blocks = [];
+            timeline.extendedPromptBlocks = [];
+            if (node.properties) delete node.properties.iamccs_pan_h3_conditioning_v1;
+            writeTimeline({force:true,skipDomSync:true});
+            draw();
+            return {policy:"default",eventCount:0,durationSeconds:Number(timeline.duration_seconds || 0),fps:Number(timeline.frame_rate || timeline.fps || 24)};
+        }
+        const boardMode = String(node.widgets?.find(w => w.name === "task_mode")?.value || timeline.task_mode || "").toLowerCase();
+        if (boardMode !== "fl2va_extended_av") throw new Error("Select FL2VA EXTENDED AV in the Shotboard before injecting Continuous or Evolving conditioning.");
+        const fps = Math.max(1, Number(timeline.frame_rate || timeline.fps || 24));
+        const duration = Math.max(0.01, Number(timeline.duration_seconds || node.widgets?.find(w => w.name === "duration_seconds")?.value || 0));
+        const normalized = (Array.isArray(beats) ? beats : []).map((beat, index) => {
+            const start = Math.max(0, Number(beat.start_seconds ?? beat.start ?? 0));
+            const end = Math.min(duration, Number(beat.end_seconds ?? beat.end ?? duration));
+            if (!(end > start)) throw new Error(`Evolving event ${index + 1} has an invalid time range.`);
+            return {id:`beat_${index + 1}`,start_frame:Math.round(start*fps),end_frame:Math.round(end*fps),action:String(beat.action || "").trim(),source_line:Number(beat.source_line || index + 1)};
+        });
+        if (selectedPolicy === "evolving" && !normalized.length) throw new Error("Evolving needs at least one timed action.");
+        timeline.pan_h3_conditioning_v1 = {
+            schema:"iamccs.h3.evolving.v1", policy:selectedPolicy,
+            global_context:String(globalContext || "").trim(), beats:selectedPolicy === "evolving" ? normalized : [],
+            reference_calls:[], source:"iamccs_prompter", source_text:String(sourceText || "")
+        };
+        timeline.extended_prompt_blocks = selectedPolicy === "evolving" ? normalized.map((beat, index) => ({
+            id:String(beat.id || `extended_prompt_${index + 1}`),
+            type:"extended_prompt",
+            start_frame:Number(beat.start_frame || 0),
+            end_frame:Number(beat.end_frame || 1),
+            start:Number(beat.start_frame || 0),
+            length:Math.max(1, Number(beat.end_frame || 1) - Number(beat.start_frame || 0)),
+            prompt:String(beat.action || "").trim(),
+            action:String(beat.action || "").trim(),
+            enabled:true,
+            source_line:Number(beat.source_line || index + 1),
+        })) : [];
+        timeline.extendedPromptBlocks = timeline.extended_prompt_blocks;
+        if (selectedPolicy === "evolving") {
+            // Timed blocks replace the previous one-piece local action. The
+            // global field retains identity and scene continuity only.
+            (timeline.segments || []).filter((seg) => isTimelineImageSegment(seg)).forEach((seg) => {
+                seg.prompt = "";
+                seg.local_prompt = "";
+                seg.relay_prompt = "";
+                seg.use_prompt = false;
+            });
+        }
+        node.properties = node.properties || {};
+        node.properties.iamccs_pan_h3_conditioning_v1 = JSON.parse(JSON.stringify(timeline.pan_h3_conditioning_v1));
+        writeTimeline({force:true,skipDomSync:true});
+        draw();
+        return {policy:selectedPolicy,eventCount:normalized.length,durationSeconds:duration,fps};
     };
 
     const applyExternalTimelineData = (payload = {}) => {
@@ -11809,7 +11942,9 @@ function renderShotboardV3(node) {
     ], (next) => onChange(next === "on"));
     addWidgetChoiceSetting("H3 task", "task_mode", [
         { value: "auto_from_timeline", label: "Auto from images" },
-        { value: "t2va", label: "T2VA" },
+        { value: "t2va", label: "1 · T2VA / hard-cut shots" },
+        { value: "t2va_continuous", label: "6 · T2VA Continuous / automatic EXTEND" },
+        { value: "fl2va_extended_av", label: "5 · Long Take Continuous / image" },
         { value: "i2va", label: "I2VA" },
         { value: "fl2va", label: "FL2VA / FFLF" },
         { value: "ref2va", label: "REF2VA" },
@@ -11817,12 +11952,7 @@ function renderShotboardV3(node) {
         { value: "v2va_object_swap", label: "V2VA / Object Swap" },
         { value: "v2va_face_swap", label: "FACE SWAP v1 / lazy R42 identity branch" },
         { value: "longvid_guides", label: "LongVid Guided / native audio" },
-        { value: "keyframe_joint_native", label: "KEYFRAME JOINT / one native sample · experimental" },
-        { value: "latent_go_ahead", label: "LatentGoAhead / original AV history · experimental" },
-        { value: "longvid_motion_context", label: "Long Multi-Shot / AV hand-off" },
-        { value: "longvid_continuous_guided", label: "Long Continuous Guided / one evolving take" },
-        { value: "longvid_masked_loop_guided", label: "FL2VA CONTINUOUS AV / PHASE-ALIGNED LATENT HANDOVER" },
-        { value: "guided_av_loop_experimental", label: "GUIDED AV LOOP · EXPERIMENTAL / AUTO FREEZE-TAIL" },
+        { value: "keyframe_joint_native", label: "11 · KEYFRAME JOINT LATENT NEW / experimental" },
         { value: "longvid_guided_lipsync", label: "LongVid Guided + LipSync / SAFE locked AudioBoard" },
     ], () => {
         const task = canonicalH3TaskMode(getWidget(node, "task_mode")?.value);
@@ -13944,6 +14074,8 @@ function renderShotboardV3(node) {
     }
 
     function edgeDragPreview(initItems, targetId, dragDelta, edge, durationFrames) {
+        const extendedTake = ["fl2va_extended_av", "t2va_continuous"].includes(String(node.widgets?.find(w => w.name === "task_mode")?.value || timeline.task_mode || "").toLowerCase());
+        const slotLimit = extendedTake ? durationFrames : 362;
         const items = cloneSegments(initItems).sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
         const index = items.findIndex((item) => item.id === targetId);
         if (index < 0) return items;
@@ -13956,14 +14088,14 @@ function renderShotboardV3(node) {
             const next = items[index + 1];
             if (next) {
                 const nextEnd = Number(next.start || 0) + Number(next.length || 1);
-                const boundaryMin = Math.max(Number(target.start || 0) + minLength, nextEnd - 362);
-                const boundaryMax = Math.min(nextEnd - minLength, Number(target.start || 0) + 362);
+                const boundaryMin = Math.max(Number(target.start || 0) + minLength, nextEnd - slotLimit);
+                const boundaryMax = Math.min(nextEnd - minLength, Number(target.start || 0) + slotLimit);
                 const boundary = Math.max(boundaryMin, Math.min(oldEnd + dragDelta, boundaryMax));
                 target.length = Math.round(boundary - Number(target.start || 0));
                 next.start = Math.round(boundary);
                 next.length = Math.max(minLength, Math.round(nextEnd - boundary));
             } else {
-                const maxLength = Math.min(362, durationFrames - Number(target.start || 0));
+                const maxLength = Math.min(slotLimit, durationFrames - Number(target.start || 0));
                 target.length = Math.max(minLength, Math.min(Number(target.length || 1) + dragDelta, maxLength));
             }
         } else if (edge === "left") {
@@ -13973,15 +14105,15 @@ function renderShotboardV3(node) {
             const prev = items[index - 1];
             if (prev) {
                 const prevStart = Number(prev.start || 0);
-                const boundaryMin = Math.max(prevStart + minLength, targetEnd - 362);
-                const boundaryMax = Math.min(targetEnd - minLength, prevStart + 362);
+                const boundaryMin = Math.max(prevStart + minLength, targetEnd - slotLimit);
+                const boundaryMax = Math.min(targetEnd - minLength, prevStart + slotLimit);
                 const boundary = Math.max(boundaryMin, Math.min(oldStart + dragDelta, boundaryMax));
                 prev.length = Math.round(boundary - prevStart);
                 target.start = Math.round(boundary);
                 target.length = Math.max(minLength, Math.round(targetEnd - boundary));
             } else {
                 const maxStart = targetEnd - minLength;
-                const nextStart = Math.max(0, targetEnd - 362, Math.min(oldStart + dragDelta, maxStart));
+                const nextStart = Math.max(0, targetEnd - slotLimit, Math.min(oldStart + dragDelta, maxStart));
                 target.start = Math.round(nextStart);
                 target.length = Math.max(minLength, oldLength - (nextStart - oldStart));
             }
@@ -14264,6 +14396,7 @@ function renderShotboardV3(node) {
             }
             if (!isAudio && !isMotion) {
                 const moved = (timeline.segments || []).find((item) => item.id === seg.id);
+                // Slot edits keep the separately authored take duration.
                 if (moved) {
                     const movedStart = Math.max(0, Math.round(Number(moved.start || 0)));
                     (timeline.audioSegments || []).forEach((audio) => {
@@ -14788,6 +14921,23 @@ function renderShotboardV3(node) {
             };
             menu.appendChild(btn);
         };
+        const currentMode = String(node.widgets?.find(w => w.name === "task_mode")?.value || timeline.task_mode || "").toLowerCase();
+        if (currentMode === "fl2va_extended_av") {
+            addChoice("Extended Prompt", "Add a timed action prompt inside the same Extended take", () => {
+                const total = Math.max(1, getTotalFrames());
+                const requested = Number(event?._iamccsTimelineFrame);
+                const start = Math.max(0, Math.min(total - 1, Number.isFinite(requested) ? Math.round(requested) : Math.round(playFrame || 0)));
+                const length = Math.max(1, Math.min(Math.round(getFps() * 8), total - start));
+                const blocks = Array.isArray(timeline.extended_prompt_blocks) ? timeline.extended_prompt_blocks.slice() : [];
+                blocks.push({id:newId("extended_prompt"),type:"extended_prompt",start_frame:start,end_frame:start+length,start,length,prompt:"Describe the new action for this interval",action:"Describe the new action for this interval",enabled:true});
+                blocks.sort((a,b) => Number(a.start_frame ?? a.start ?? 0) - Number(b.start_frame ?? b.start ?? 0));
+                timeline.extended_prompt_blocks = blocks;
+                timeline.extendedPromptBlocks = blocks;
+                syncExtendedPromptScheduleFromBlocks();
+                writeTimeline({force:true,skipDomSync:true});
+                draw();
+            });
+        }
         addChoice("H3 Prompt Slot", "Create a resizable prompt-only MiniMax H3 segment", () => {
             if (seg) createPlaceholderAfterSegment(seg, "text");
             else createTailTextPlaceholder();
@@ -15291,6 +15441,10 @@ function renderShotboardV3(node) {
         const innerRight = 8;
         const topRightSafe = isAudio ? innerRight : 42;
         const selected = selectedId === seg.id;
+        const extendedPromptLaneActive = !isAudio
+            && String(node.widgets?.find(w => w.name === "task_mode")?.value || timeline.task_mode || "").toLowerCase() === "fl2va_extended_av"
+            && Array.isArray(timeline.extended_prompt_blocks)
+            && timeline.extended_prompt_blocks.length > 0;
         const isAudioSnapVisualTarget = Boolean(
             !isAudio
             && dragState?.isAudio
@@ -15597,7 +15751,7 @@ function renderShotboardV3(node) {
             block.appendChild(rail);
         }
         const promptOwnedByFlfBridge = !isAudio && isTimelineImageSlot(seg) && h3FlfLayoutMode(activeVisualSegments());
-        if (!isAudio && !promptOwnedByFlfBridge) {
+        if (!isAudio && !promptOwnedByFlfBridge && !extendedPromptLaneActive) {
             const caption = document.createElement("textarea");
             caption.value = String(seg.prompt || "");
             caption.placeholder = "Action in this segment...";
@@ -16211,7 +16365,79 @@ function renderShotboardV3(node) {
         });
     }
 
+    function syncExtendedPromptScheduleFromBlocks() {
+        const blocks = (Array.isArray(timeline.extended_prompt_blocks) ? timeline.extended_prompt_blocks : [])
+            .filter((block) => block && block.enabled !== false && String(block.prompt ?? block.action ?? "").trim())
+            .sort((a,b) => Number(a.start_frame ?? a.start ?? 0) - Number(b.start_frame ?? b.start ?? 0));
+        const existing = timeline.pan_h3_conditioning_v1 && typeof timeline.pan_h3_conditioning_v1 === "object"
+            ? timeline.pan_h3_conditioning_v1 : {};
+        timeline.pan_h3_conditioning_v1 = {
+            ...existing,
+            schema:"iamccs.h3.evolving.v1",
+            policy:blocks.length ? "evolving" : "continuous",
+            global_context:String(promptArea?.value ?? promptWidget?.value ?? ""),
+            beats:blocks.map((block,index) => {
+                const start = Math.max(0, Math.round(Number(block.start_frame ?? block.start ?? 0)));
+                const end = Math.max(start + 1, Math.round(Number(block.end_frame ?? (start + Number(block.length || 1)))));
+                return {id:String(block.id || `beat_${index+1}`),start_frame:start,end_frame:end,action:String(block.prompt ?? block.action ?? "").trim(),source_line:index+1};
+            }),
+            reference_calls:Array.isArray(existing.reference_calls) ? existing.reference_calls : [],
+            source:"shotboard_extended_prompt_blocks",
+        };
+        node.properties = node.properties || {};
+        node.properties.iamccs_pan_h3_conditioning_v1 = JSON.parse(JSON.stringify(timeline.pan_h3_conditioning_v1));
+    }
+
+    function drawExtendedPromptBlocks() {
+        const mode = String(node.widgets?.find(w => w.name === "task_mode")?.value || timeline.task_mode || "").toLowerCase();
+        if (mode !== "fl2va_extended_av") return;
+        const total = Math.max(1, getTotalFrames());
+        const fps = getFps();
+        const blocks = Array.isArray(timeline.extended_prompt_blocks) ? timeline.extended_prompt_blocks : [];
+        const nativeBoundary = Math.min(total, Math.round(15 * fps));
+        if (total > nativeBoundary) {
+            const region = document.createElement("div");
+            region.className = "iamccs-h3-extended-guide-region";
+            region.style.cssText = `position:absolute;left:${(nativeBoundary/total)*100}%;right:0;top:0;height:144px;box-sizing:border-box;border-left:2px dashed #57D6CC;background:repeating-linear-gradient(135deg,rgba(87,214,204,.10) 0 9px,rgba(87,214,204,.035) 9px 18px);box-shadow:inset 10px 0 18px rgba(21,103,102,.10);z-index:7;pointer-events:none;`;
+            const badge = document.createElement("div");
+            badge.textContent = `EXTENDED · native AV continuation · ${(nativeBoundary/fps).toFixed(0)}s → ${(total/fps).toFixed(2)}s`;
+            badge.style.cssText = "position:absolute;left:8px;top:24px;padding:4px 8px;border:1px solid rgba(87,214,204,.82);border-radius:999px;background:rgba(9,49,52,.88);color:#CFFFFA;font:900 8px/1 monospace;letter-spacing:.04em;box-shadow:0 3px 10px rgba(0,0,0,.38);";
+            region.appendChild(badge);
+            imageTrack.appendChild(region);
+        }
+        blocks.forEach((item,index) => {
+            const start = Math.max(0, Math.round(Number(item.start_frame ?? item.start ?? 0)));
+            const end = Math.max(start + 1, Math.round(Number(item.end_frame ?? (start + Number(item.length || 1)))));
+            const block = document.createElement("div");
+            block.className = "iamccs-h3-extended-prompt-block";
+            block.style.cssText = `position:absolute;left:${(start/total)*100}%;width:${Math.max(1,((end-start)/total)*100)}%;top:154px;height:${74+timelineExtraH}px;box-sizing:border-box;padding:19px 6px 5px;border:1px solid ${purple.border};border-radius:5px;background:${purple.image2};box-shadow:0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,190,120,.08);z-index:78;overflow:visible;`;
+            const header = document.createElement("div");
+            header.textContent = `EXTENDED ${index+1} · ${(start/fps).toFixed(2)}–${(end/fps).toFixed(2)}s`;
+            header.title = "Drag to move this action in time";
+            header.style.cssText = "position:absolute;left:6px;right:24px;top:4px;height:12px;color:#FFF2E4;font:900 8px/1 monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:grab;text-shadow:0 1px 2px #000;";
+            const prompt = document.createElement("textarea");
+            prompt.value = String(item.prompt ?? item.action ?? "");
+            prompt.placeholder = "Action active only in this interval";
+            prompt.style.cssText = `width:100%;height:100%;box-sizing:border-box;padding:6px;border:1px solid rgba(87,214,204,.65);border-radius:5px;background:#F5FFFE;color:#10191B;font:${promptFontSize(10)}/1.2 monospace;font-weight:750;resize:none;outline:none;`;
+            prompt.onpointerdown = (event) => event.stopPropagation();
+            prompt.oninput = () => { item.prompt=prompt.value; item.action=prompt.value; syncExtendedPromptScheduleFromBlocks(); writeTimeline({force:true,skipDomSync:true}); };
+            const remove = document.createElement("button");
+            remove.type="button"; remove.textContent="×"; remove.title="Remove Extended prompt";
+            remove.style.cssText="position:absolute;right:4px;top:2px;width:18px;height:16px;border:0;background:transparent;color:#BFFFF9;font:900 15px/1 monospace;cursor:pointer;";
+            remove.onclick=(event)=>{event.stopPropagation();timeline.extended_prompt_blocks=blocks.filter(x=>x!==item);timeline.extendedPromptBlocks=timeline.extended_prompt_blocks;syncExtendedPromptScheduleFromBlocks();writeTimeline({force:true,skipDomSync:true});draw();};
+            header.onpointerdown=(event)=>{
+                event.preventDefault(); event.stopPropagation();
+                const originX=event.clientX, originStart=start, span=end-start, rect=imageTrack.getBoundingClientRect();
+                const move=(e)=>{const delta=Math.round(((e.clientX-originX)/Math.max(1,rect.width))*total);const next=Math.max(0,Math.min(total-span,originStart+delta));item.start_frame=next;item.end_frame=next+span;item.start=next;item.length=span;block.style.left=`${(next/total)*100}%`;header.textContent=`EXTENDED ${index+1} · ${(next/fps).toFixed(2)}–${((next+span)/fps).toFixed(2)}s`;};
+                const up=()=>{window.removeEventListener("pointermove",move);window.removeEventListener("pointerup",up);syncExtendedPromptScheduleFromBlocks();writeTimeline({force:true,skipDomSync:true});draw();};
+                window.addEventListener("pointermove",move);window.addEventListener("pointerup",up,{once:true});
+            };
+            block.append(header,prompt,remove); imageTrack.appendChild(block);
+        });
+    }
+
     function drawH3PromptModeOverlays(segments) {
+        drawExtendedPromptBlocks();
         const total = Math.max(1, getTotalFrames());
         const fps = getFps();
         const anchors = h3ImageAnchors(segments);
@@ -19052,7 +19278,20 @@ function renderShotboardV3(node) {
                     const nextTimelineText = String(timelineWidget.value || "");
                     if (nextTimelineText !== String(node._iamccsCineShotboardV3LastTimelineText || "")) {
                         node._iamccsCineShotboardV3LastTimelineText = nextTimelineText;
-                        timeline = readTimeline();
+                        const previousExtended = Array.isArray(timeline?.extended_prompt_blocks)
+                            ? JSON.parse(JSON.stringify(timeline.extended_prompt_blocks)) : [];
+                        const previousSchedule = timeline?.pan_h3_conditioning_v1 && typeof timeline.pan_h3_conditioning_v1 === "object"
+                            ? JSON.parse(JSON.stringify(timeline.pan_h3_conditioning_v1)) : null;
+                        const refreshed = readTimeline();
+                        // Queue-time widget normalization may legitimately
+                        // rewrite ordinary rows. It must never erase authored
+                        // Extended Prompt blocks from the visible truth.
+                        if ((!Array.isArray(refreshed.extended_prompt_blocks) || !refreshed.extended_prompt_blocks.length) && previousExtended.length) {
+                            refreshed.extended_prompt_blocks = previousExtended;
+                            refreshed.extendedPromptBlocks = previousExtended;
+                        }
+                        if (!refreshed.pan_h3_conditioning_v1 && previousSchedule) refreshed.pan_h3_conditioning_v1 = previousSchedule;
+                        timeline = refreshed;
                         syncTimingWidgetsFromTimelineTruth("external_timeline_widget_update");
                         draw();
                     }
@@ -20452,10 +20691,11 @@ const H3_SETTINGS_FULL_UI_GROUPS = [
     },
     {
         id: "controlnet", label: "CONTROL", title: "H3 FUN CONTROLNET · V2V STRUCTURE",
-        note: "Opt-in pose, depth, edge or inpaint control. Feed preprocessed frames through IAMCCS Cine H3 Fun Control Input; Settings remains model/timing truth.",
+        note: "Opt-in pose, depth, edge or inpaint control. With Custom Audio Drive, USE VIDEO AUDIO ON selects the control video's sound; OFF uses Shotboard AudioBoard. Missing video audio falls back to AudioBoard.",
         names: [
             "h3_controlnet_enabled", "h3_controlnet_name", "h3_controlnet_kind", "h3_controlnet_strength",
             "h3_controlnet_start_percent", "h3_controlnet_end_percent", "h3_controlnet_frame_scope", "h3_controlnet_end_policy",
+            "h3_controlnet_use_video_audio",
         ],
     },
     {
@@ -20564,8 +20804,8 @@ const H3_SETTINGS_PRO_UI_GROUPS = [
     },
     {
         id: "controlnet", label: "8 · CONTROL", title: "OPTIONAL H3 FUN CONTROLNET",
-        note: "Opt-in structural control. The preprocessed media comes through CineH3Input; these boxes own model, strength and interval only.",
-        names: ["h3_controlnet_enabled", "h3_controlnet_name", "h3_controlnet_kind", "h3_controlnet_strength", "h3_controlnet_start_percent", "h3_controlnet_end_percent", "h3_controlnet_frame_scope", "h3_controlnet_end_policy"],
+        note: "Opt-in structural control. With Custom Audio Drive, USE VIDEO AUDIO ON selects source-video sound; OFF uses Shotboard AudioBoard. Missing video audio falls back to AudioBoard.",
+        names: ["h3_controlnet_enabled", "h3_controlnet_name", "h3_controlnet_kind", "h3_controlnet_strength", "h3_controlnet_start_percent", "h3_controlnet_end_percent", "h3_controlnet_frame_scope", "h3_controlnet_end_policy", "h3_controlnet_use_video_audio"],
     },
 ];
 
@@ -20667,6 +20907,7 @@ function h3SettingsUiLabel(name) {
         pdd_lora_name: "PDD acceleration LoRA", pdd_strength: "PDD strength",
         h3_controlnet_enabled: "Enable H3 Fun ControlNet", h3_controlnet_name: "Fun ControlNet model",
         h3_controlnet_kind: "Control kind / preprocessor", h3_controlnet_strength: "Control strength",
+        h3_controlnet_use_video_audio: "Use control-video audio",
         h3_controlnet_start_percent: "Control start", h3_controlnet_end_percent: "Control end",
         h3_controlnet_frame_scope: "Control frame scope", h3_controlnet_end_policy: "Short-source policy",
         h3_exact_profile: "Exact preset label", h3_exact_chunk_rows: "Activation chunk rows",
@@ -20740,6 +20981,7 @@ function h3SettingsUiHelp(name) {
         h3_controlnet_enabled: "OFF preserves the original R39/R40 conditioning and sampler path exactly. ON applies native MiniMax H3 Fun ControlNet after the selected mode conditioning.",
         h3_controlnet_name: "Choose the MiniMax H3 Fun Union checkpoint from models/model_patches. Existing IAMCCS installs in models/controlnet remain compatible.",
         h3_controlnet_kind: "Select the structural representation. In IAMCCS Cine H3 Fun Control Input choose FROM IAMCCS SETTINGS to run the matching installed ControlNet Aux preprocessor, or ALREADY PREPROCESSED to preserve an explicit external graph. The node preview is the exact batch sent to H3.",
+        h3_controlnet_use_video_audio: "CUSTOM AUDIO DRIVE only: ON uses the connected control video's soundtrack. OFF uses the Shotboard AudioBoard. If the video has no audio, AudioBoard is the fallback. Native Generated audio ignores this toggle.",
         h3_controlnet_strength: "1.0 is the working pose-transfer baseline. Lower values release structure; excessive values can over-constrain identity and texture.",
         h3_controlnet_start_percent: "0.0 starts structural control at the first sampling step.",
         h3_controlnet_end_percent: "1.0 keeps control for the full pass. Releasing earlier can restore natural detail while weakening exact motion adherence.",
@@ -21627,6 +21869,7 @@ function renderShotboardH3Settings(node) {
         resolutionRow.appendChild(wrap);
     };
     const addOperatingPreset = (target, category, id, label, summary, title, values) => {
+        if (category === "mode" && ["latent_go_ahead", "longvid_motion_context", "longvid_continuous", "long_continuous_guided", "longvid_continuous_guided", "masked_loop_guided", "longvid_masked_loop_guided", "guided_av_loop_experimental"].includes(id)) return;
         const categoryMeta = presetCategories[category];
         if (!categoryMeta) return;
         const button = squareButton(label);
@@ -21644,6 +21887,7 @@ function renderShotboardH3Settings(node) {
             refreshOperatingPresets();
             const chosen = {...(typeof values === "function" ? values() : values)};
             if (category === "mode") {
+                if (canonicalH3AudioMode(getWidget(node, "audio_mode")?.value) === "h3_custom_audio_drive") delete chosen.audio_mode;
                 for (const name of Object.keys(chosen)) {
                     if (/^(width|height|image_width|image_height|upscale_width|upscale_height|steps|acceleration|performance_profile|turbo_.*|sampler_name|scheduler|shift_.*|text_encoder_device|motion_context_window_frames|secondary_lora_.*)$/.test(name)) delete chosen[name];
                 }
@@ -21658,6 +21902,12 @@ function renderShotboardH3Settings(node) {
     });
     addOperatingPreset(modePresetButtons, "mode", "t2va", "T2VA", "TEXT → AV", "Text-to-audio-video mode with native generated audio.", {
         task_mode: "t2va", audio_mode: "h3_native_generated",
+    });
+    addOperatingPreset(modePresetButtons, "mode", "t2va_continuous", "T2VA CONTINUOUS", "LONG TAKE", "Text-only take with B1 EXTEND beyond 15 seconds.", {
+        task_mode: "t2va_continuous", flf_continuity_mode: "stable_keyframes", flf_overlap_frames: 0,
+    });
+    addOperatingPreset(modePresetButtons, "mode", "fl2va_extended_av", "LONG TAKE CONTINUOUS", "IMAGE → EXTEND", "One opening image and B1 MASKED + EXACT technical joins.", {
+        task_mode: "fl2va_extended_av", flf_continuity_mode: "stable_keyframes", flf_overlap_frames: 0,
     });
     addOperatingPreset(modePresetButtons, "mode", "i2va", "I2VA", "IMAGE → AV", "Image-guided audio-video mode with native generated audio.", {
         task_mode: "i2va", audio_mode: "h3_native_generated",
@@ -22873,6 +23123,13 @@ function renderShotboardH3Settings(node) {
             if (field) grid.appendChild(field);
             if (name === "acceleration") grid.appendChild(makeH3Advisor(node, true));
         });
+        if (group.id === "controlnet" && !getWidget(node, "h3_controlnet_use_video_audio")) {
+            addGuideCard(
+                "USE VIDEO AUDIO · BACKEND RESTART REQUIRED",
+                "The running ComfyUI server still has the old Settings PRO widget schema. Finish the current Queue, restart ComfyUI, then refresh this page and reload the workflow. The toggle will appear here: ON selects source-video audio; OFF selects Shotboard AudioBoard when Custom Audio Drive is active.",
+                "#F0D695", "#8B7040",
+            );
+        }
         // auto-fit keeps FULL readable on multiple rows instead of squeezing
         // every functional panel into a single illegible strip.
         tabBar.style.gridTemplateColumns = "repeat(4,minmax(0,1fr))";

@@ -3633,10 +3633,10 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
     """Route H3 media to the editor without an automatic programme concat.
 
     Ordinary H3 modes publish the current generated chunk as T01, T02, ... .
-    LongVid is different: its chunks share one continuous guide clock, so the
-    route blocks intermediate chunks and publishes the completed native master
-    once as T01.  Lazy master inputs keep the concat/load branch out of every
-    non-LongVid execution.
+    LongVid and FL2VA Extended AV are one-take modes: their technical chunks
+    are internal generation scaffolding, so the route blocks intermediate
+    chunks and publishes the completed native master once as T01.  Lazy master
+    inputs keep the concat/load branch out of ordinary multishot execution.
     """
 
     @classmethod
@@ -3682,12 +3682,11 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             bool(plan.get("upscale_enabled", False))
             and str(plan.get("upscale_mode", "off") or "off").strip().lower() == "ltx23_per_chunk"
         )
-        longvid = (
-            str(plan.get("task_mode", "") or "").strip().lower().startswith("longvid")
-            and not per_shot_ltx
-        )
-        latent_go_ahead = str(plan.get("task_mode", "") or "").strip().lower() == "latent_go_ahead"
-        one_master = bool(longvid or latent_go_ahead)
+        task_mode = str(plan.get("task_mode", "") or "").strip().lower()
+        longvid = task_mode.startswith("longvid") and not per_shot_ltx
+        extended_av = task_mode == "fl2va_extended_av" and not per_shot_ltx
+        latent_go_ahead = task_mode == "latent_go_ahead"
+        one_master = bool(longvid or extended_av or latent_go_ahead)
         if not one_master:
             missing = []
             if slot_frames is None:
@@ -3695,9 +3694,9 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             if slot_audio is None:
                 missing.append("slot_audio")
             return missing
-        if longvid and master_ready is None:
+        if (longvid or extended_av) and master_ready is None:
             return ["master_ready"]
-        if longvid and not bool(master_ready):
+        if (longvid or extended_av) and not bool(master_ready):
             return []
         missing = []
         if master_frames is None:
@@ -3732,18 +3731,19 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             and str(plan.get("upscale_mode", "off") or "off").strip().lower() == "ltx23_per_chunk"
         )
         longvid = task_mode.startswith("longvid") and not per_shot_ltx
+        extended_av = task_mode == "fl2va_extended_av" and not per_shot_ltx
         latent_go_ahead = task_mode == "latent_go_ahead"
-        one_master = bool(longvid or latent_go_ahead)
+        one_master = bool(longvid or extended_av or latent_go_ahead)
         selected_identity = _shotboard_timeline_identity_from_linx(cine_linx) or _active_identity_from_linx(cine_linx)
         selected_timeline = max(1, min(5, _safe_int(selected_identity.get("take_index"), 1)))
         take_index = selected_timeline
         clip_index = 1 if one_master else current + 1
 
-        if longvid and not bool(master_ready):
+        if (longvid or extended_av) and not bool(master_ready):
             blocker = ExecutionBlocker(None)
             report = _json_dump({
                 "node": "IAMCCS_MiniMaxH3EditorTakeRoute",
-                "status": "waiting_for_longvid_master",
+                "status": "waiting_for_extended_av_master" if extended_av else "waiting_for_longvid_master",
                 "completed_chunk": current + 1,
                 "total_chunks": total,
                 "editor_assets_published": 0,
@@ -3762,7 +3762,10 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
                 _safe_int(plan.get("total_unique_frames"), nominal_frames),
             )
             global_start = 0
-            slot_label = "LatentGoAhead programme" if latent_go_ahead else "LongVid programme"
+            slot_label = (
+                "LatentGoAhead programme" if latent_go_ahead
+                else ("Extended AV long take" if extended_av else "LongVid programme")
+            )
             chunk = {}
         else:
             if current >= len(chunks):
@@ -3850,6 +3853,7 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             "audioTrackCount": 1,
             "slot_label": slot_label,
             "longvid_single_asset": bool(longvid),
+            "extended_av_single_asset": bool(extended_av),
             "continuous_single_asset": bool(one_master),
             "editor_clip_index": int(clip_index),
             "editor_lane_index": int(take_index),
@@ -3868,7 +3872,7 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             "editor_delivery_policy": (
                 "latent_go_ahead_single_master"
                 if latent_go_ahead
-                else ("longvid_single_master" if longvid else "one_asset_per_generated_slot")
+                else ("extended_av_single_master" if extended_av else ("longvid_single_master" if longvid else "one_asset_per_generated_slot"))
             ),
             "editor_lane_policy": "accumulate_all_slots_on_selected_timeline",
         }
@@ -3884,6 +3888,7 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             "roll_contract": roll_contract,
             "source": "IAMCCS_MiniMaxH3EditorTakeRoute",
             "longvid_single_asset": bool(longvid),
+            "extended_av_single_asset": bool(extended_av),
             "continuous_single_asset": bool(one_master),
             "editor_clip_index": int(clip_index),
             "editor_lane_index": int(take_index),
@@ -3908,7 +3913,7 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             "delivery": (
                 "latent_go_ahead_single_master"
                 if latent_go_ahead
-                else ("longvid_single_master" if longvid else "independent_generated_slot")
+                else ("extended_av_single_master" if extended_av else ("longvid_single_master" if longvid else "independent_generated_slot"))
             ),
         })
         _refresh_linx_index(out_linx)
@@ -3924,7 +3929,7 @@ class IAMCCS_MiniMaxH3EditorTakeRoute:
             "pre_roll_frames": int(pre_roll),
             "post_roll_frames": int(post_roll),
             "automatic_concat": bool(one_master),
-            "truth": "Every independent H3 slot is a distinct editor clip. LongVid and LatentGoAhead publish their completed programme once on the selected T/A lane. The Video Editor alone assembles and exports the film.",
+            "truth": "Every independent H3 slot is a distinct editor clip. LongVid, FL2VA Extended AV and LatentGoAhead publish their completed programme once on the selected T/A lane. The Video Editor alone assembles and exports the film.",
         })
         return out_linx, package_json, media_frames, media_audio, report
 

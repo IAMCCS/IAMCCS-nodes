@@ -222,6 +222,8 @@ def _chunk_interval(shotplan: dict[str, Any], chunk: dict[str, Any]) -> tuple[fl
     trim_frames = max(0, _integer(chunk.get("motion_context_trim_frames"), 0))
     if isinstance(contract, dict) and bool(contract.get("enabled")) and trim_frames:
         start = max(0.0, start - trim_frames / fps)
+    if str(shotplan.get("task_mode", "")) == "fl2va_extended_av":
+        start = max(0.0, _number(chunk.get("raw_timeline_start_frame"), start * fps) / fps)
     return start, duration
 
 
@@ -372,6 +374,7 @@ def mix_audio_timeline(
         and (
             str(shotplan.get("task_mode", "")).lower() in {
                 "longvid_guides",
+                "fl2va_extended_av",
                 "longvid_ref2vid_lipsync",
                 "longvid_motion_context",
             }
@@ -543,11 +546,20 @@ def mix_audio_timeline(
             for chunk in chunks
         ),
     )
+    extended_master = str(shotplan.get("task_mode", "")) == "fl2va_extended_av"
+    if extended_master:
+        master_samples = max(1, int(round(float(shotplan["duration_seconds"]) * rate)))
     master_waveform = torch.zeros((1, output_channels, master_samples), dtype=torch.float32)
     for index, chunk in enumerate(chunks):
         start, _ = _chunk_interval(shotplan, chunk)
         offset = max(0, int(round(start * rate)))
         waveform = chunk_audio[index]["waveform"]
+        if extended_master:
+            fps = max(1.0, _number(shotplan.get("fps"), H3_FPS))
+            head = int(round(_integer(chunk.get("extended_av_trim_head_frames"), 0) * rate / fps))
+            visible = int(round(_integer(chunk.get("visible_frame_count"), 0) * rate / fps))
+            waveform = waveform[..., head:head + visible]
+            offset = int(round(_number(chunk.get("timeline_start_seconds"), 0.0) * rate))
         take = min(int(waveform.shape[-1]), master_samples - offset)
         if take > 0:
             master_waveform[..., offset:offset + take] += waveform[..., :take]

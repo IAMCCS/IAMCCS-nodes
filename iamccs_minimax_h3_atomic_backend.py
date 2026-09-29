@@ -820,7 +820,10 @@ def _text_encoder_dynamic_reserve_mb(clip, shotplan: dict[str, Any] | None = Non
     # Stream more Qwen weights from CPU in these pressure-heavy modes while
     # retaining GPU execution.  CPU Direct remains the deterministic option.
     high_pressure = (
-        task_mode in {"longvid_guides", "longvid_guided_lipsync", "longvid_ref2vid_lipsync", "ref2va", "ref2vid_lipsync"}
+        task_mode in {
+            "longvid_guides", "longvid_guided_lipsync", "longvid_ref2vid_lipsync",
+            "fl2va_extended_av", "ref2va", "ref2vid_lipsync",
+        }
         or audio_mode == "h3_custom_audio_drive"
     )
     if total_gib <= 13.0:
@@ -1885,15 +1888,82 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 "Disable START FROM SAVED AV or choose an FL2VA-family Shotboard mode."
             )
         task = "fl2va" if external_continuation else authored_task
+        # FL2VA Extended AV is not an I2V-per-chunk mode.  The root image is
+        # an authored guide on the root take; continuation takes must start
+        # from a fresh T2VA target latent whose only opening authority is the
+        # masked RAW AV before-pin.  Ignore CineInfo task_override here so a
+        # stale i2va override cannot silently re-inject ref_image_1 on child
+        # chunks and reset the motion back to Picture 1.
+        if str(shotplan.get("task_mode", "") or "").strip().lower() == "fl2va_extended_av":
+            # Phase B AUTO EXTEND may originate from REF2VA.  Only the root
+            # keeps that authored model-family task; every continuation child
+            # is a fresh T2VA target whose opening authority is the masked RAW
+            # AV prefix.  I2V/FL2V roots remain the proven T2VA+Picture guide.
+            task = str(chunk.get("task_mode", "t2va") or "t2va").strip().lower() if int(segment_index) == 0 else "t2va"
+            if task not in {"t2va", "ref2va"}:
+                task = "t2va"
         width = int(shotplan.get("width", 960))
         height = int(shotplan.get("height", 544))
         adaptive_guide_window = bool(chunk.get("latent_tail_adaptive_window", False))
+        extended_cfg = (
+            shotplan.get("extended_av")
+            if isinstance(shotplan.get("extended_av"), dict)
+            else {}
+        )
+        extended_mode = str(shotplan.get("task_mode", "") or "").strip().lower() == "fl2va_extended_av"
+        extended_requested = bool(extended_mode and extended_cfg.get("enabled", False))
+        extended_active = bool(extended_requested and int(segment_index) > 0)
+        extended_context_frames = int(extended_cfg.get("overlap_frames", 0) or 0) if extended_active else 0
+        if extended_requested and int(segment_index) > 0:
+            planned_prefix = max(0, int(chunk.get("extended_av_context_prefix_frames", 0) or 0))
+            if planned_prefix != extended_context_frames:
+                raise ValueError(
+                    "FL2VA Extended AV planner/runtime overlap mismatch: "
+                    f"planner={planned_prefix}f runtime={extended_context_frames}f"
+                )
+            if str(chunk.get("extended_av_role", "") or "") != "extend":
+                raise ValueError("FL2VA Extended AV continuation chunk lost its masked-extend role contract.")
+            if bool(chunk.get("extended_av_retain_overlap", False)):
+                raise ValueError("FL2VA Extended AV v2 must trim masked scaffolding, not retain decoded overlap.")
         hd_context_prefix_frames = max(0, int(chunk.get("pianosequenza_hd_context_prefix_frames", 0) or 0))
         hd_hidden_context_window = bool(
             str(shotplan.get("terminal_endpoint_mode", "") or "").strip().lower() == "pianosequenza_hd"
             and hd_context_prefix_frames > 0
         )
-        if adaptive_guide_window or hd_hidden_context_window:
+        if extended_requested:
+            # Dedicated EXTEND-style geometry: ``frames`` is the RAW technical
+            # run seen by H3; ``visible_frames`` is the delivered take after
+            # the hidden before-pin/padding are removed.  Never let LongVid's
+            # historical assumption (visible == raw run) leak into EXTEND.
+            visible_frames = max(1, int(chunk.get("unique_frames", 0) or 0))
+            frames = max(5, int(chunk.get("frame_count", 0) or 0))
+            if frames % 17 != 5:
+                raise ValueError(f"FL2VA Extended AV planner emitted non-H3-grid RAW run {frames}f")
+            prefix = max(0, int(chunk.get("extended_av_context_prefix_frames", 0) or 0))
+            padding = max(0, int(chunk.get("extended_av_padding_frames", 0) or 0))
+            if (
+                "extended_av_boundary_runway_frames" in chunk
+                or "extended_av_grid_padding_frames" in chunk
+            ):
+                runway = max(0, int(chunk.get("extended_av_boundary_runway_frames", 0) or 0))
+                grid_padding = max(0, int(chunk.get("extended_av_grid_padding_frames", 0) or 0))
+                if runway + grid_padding != padding:
+                    raise ValueError(
+                        "FL2VA Extended AV split technical-tail geometry mismatch: "
+                        f"runway={runway} grid_pad={grid_padding} pad={padding}."
+                    )
+            else:
+                # Load-compatible pre-R47 plans: their single padding field is
+                # pure H3-grid padding and they carry no boundary runway.
+                runway = 0
+                grid_padding = padding
+            if prefix + visible_frames + runway + grid_padding != frames:
+                raise ValueError(
+                    "FL2VA Extended AV RAW/delivered geometry mismatch: "
+                    f"prefix={prefix} visible={visible_frames} runway={runway} "
+                    f"grid_pad={grid_padding} raw={frames}."
+                )
+        elif adaptive_guide_window or hd_hidden_context_window:
             # Planner owns the legal H3 technical window.  The visible editorial
             # suffix can be non-grid because an inherited latent tail occupies
             # the hidden prefix on continuation chunks.
@@ -1993,9 +2063,16 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 "native_av_context"
                 if native_av_context
                 else (
-                    "longvid_latent_tail_experimental"
-                    if latent_tail_active
-                    else "planned_fl2va_keyframes"
+                    # R47.1: Extended AV owns DELIVERY on the root too.  The
+                    # root has no incoming pin, but its hidden boundary runway
+                    # must still be cropped before checkpoint/R38B delivery.
+                    "fl2va_extended_av"
+                    if extended_requested
+                    else (
+                        "longvid_latent_tail_experimental"
+                        if latent_tail_active
+                        else "planned_fl2va_keyframes"
+                    )
                 )
             ),
             "render_id": str(render_id or ""),
@@ -2013,6 +2090,40 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 "sample_frames": int(native_av_context["sample_frames"]),
                 "context_frames": int(native_av_context["context_frames"]),
                 "previous_tail_trim": 0,
+            })
+        elif extended_requested:
+            # R47.1 ROOT + CHILD delivery contract.
+            #
+            # Child chunks have a masked incoming prefix which is trimmed at the
+            # head.  The root has no prefix, but it DOES have the same hidden
+            # boundary runway at the tail.  Mark both as active Extended AV so
+            # the common post-decode delivery slice keeps exactly
+            # [trim_head : trim_head + unique_frames].  Without this, the root
+            # leaked its 34f runway to R38B as 192 decoded frames while the plan
+            # correctly declared only 158 editorial frames.
+            _extended_delivery_prefix = int(extended_context_frames) if extended_active else 0
+            motion_state.update({
+                "active": True,
+                "trim_frames": (
+                    int(chunk.get("extended_av_trim_head_frames", _extended_delivery_prefix) or 0)
+                    if extended_active else 0
+                ),
+                "export_frames": int(chunk.get("unique_frames", visible_frames) or visible_frames),
+                "sample_frames": int(frames),
+                "context_frames": int(_extended_delivery_prefix),
+                "junction_overlap_frames": int(_extended_delivery_prefix),
+                "previous_tail_trim": 0,
+                "experimental": True,
+                "adaptive_guide_window": False,
+                "retain_overlap_for_seam": False,
+                "pinned_same_time_context": bool(extended_active),
+                "decoded_overlap": False,
+                # IMPORTANT: do not expose Extended AV as Motion Context
+                # config. Native Checkpoint would otherwise save decoded
+                # reference carry-over and create a second authority.
+                "config": None,
+                "extended_av_contract": dict(extended_cfg),
+                "extended_av_role": "extend" if extended_active else "root",
             })
         elif latent_tail_active:
             motion_state.update({
@@ -2509,6 +2620,38 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 "sample_frames": int(motion_state.get("sample_frames", frames) or frames),
                 "preserve_native_audio_prefix": True,
             }
+        if extended_active:
+            if not str(render_id or "").strip():
+                raise RuntimeError(
+                    "FL2VA Extended AV continuation has no render_id. Start from chunk 1 "
+                    "and let Native Checkpoint queue the continuation chunks."
+                )
+            from . import iamccs_minimax_h3_extended_av as _extended_av
+            previous_extended = _extended_av.load_sidecar(
+                str(render_id or ""), int(segment_index) - 1
+            )
+            if previous_extended is None:
+                raise RuntimeError(
+                    "FL2VA Extended AV could not load the previous RAW AV sidecar. "
+                    "Start the render from chunk 1; continuation chunks must not be run independently."
+                )
+            latent, positive, extended_details = _extended_av.apply_prefix(
+                latent, positive, previous_extended, contract=extended_cfg
+            )
+            motion_state["extended_av_details"] = extended_details
+            LOG.info(
+                "FL2VA Extended AV masked BEFORE pin applied | chunk=%d/%d | overlap=%df | "
+                "video_tokens=%d | audio_ticks=%d | role=extend | pin=masked | mask=%s | "
+                "audio_release=%dt | trim_head=%df | decoded_overlap=off",
+                int(segment_index) + 1,
+                len(shotplan.get("chunks", [])),
+                int(extended_details["overlap_frames"]),
+                int(extended_details["video_tokens"]),
+                int(extended_details["audio_ticks"]),
+                str(extended_cfg.get("mask_profile", "exact")),
+                int(extended_details.get("audio_release_ticks", 0) or 0),
+                int(extended_details.get("trim_head_frames", 0) or 0),
+            )
         if latent_tail_active:
             if not str(render_id or "").strip():
                 raise RuntimeError(
@@ -2583,7 +2726,9 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
         # chunk.  Using ComfyUI's stock AddGuide node here keeps the exact H3
         # latent encoding, resizing and audio-crop semantics in one place.
         shotboard_task = str(shotplan.get("task_mode", "") or "").lower()
-        guide_events = chunk.get("guides") if shotboard_task in {"longvid_guides", "longvid_ref2vid_lipsync"} else []
+        guide_events = chunk.get("guides") if shotboard_task in {
+            "longvid_guides", "longvid_ref2vid_lipsync", "fl2va_extended_av"
+        } else []
         applied_guides: list[str] = []
         if isinstance(guide_events, list):
             native_context_frames = (
@@ -2593,15 +2738,19 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                     int(motion_state.get("context_frames", 0) or 0)
                     if external_continuation
                     else (
-                        int(latent_tail_context_frames)
-                        if latent_tail_active
-                        else int(hd_context_prefix_frames)
+                        int(extended_context_frames)
+                        if extended_active
+                        else (
+                            int(latent_tail_context_frames)
+                            if latent_tail_active
+                            else int(hd_context_prefix_frames)
+                        )
                     )
                 )
             )
             positioned_bridge_head = (
                 max(0, int(chunk.get("trim_head_frames", 0) or 0))
-                if shotboard_task == "longvid_guides" and bool(chunk.get("uses_bridge_first_frame"))
+                if shotboard_task in {"longvid_guides", "fl2va_extended_av"} and bool(chunk.get("uses_bridge_first_frame"))
                 else 0
             )
             seen_debug_image_hashes: dict[str, str] = {}
@@ -2617,6 +2766,11 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                     image = _load_image(source_path)
                     if image is None:
                         raise ValueError(f"LongVid image guide '{guide_id}' has no source image")
+                    LOG.info(
+                        "MiniMax H3 GUIDE CANVAS | id=%s | source=%dx%d | target=%dx%d | resize=center_crop | frame=%d",
+                        guide_id, int(image.shape[2]), int(image.shape[1]),
+                        int(width), int(height), local_frame,
+                    )
                     raw_global_frame = guide.get("global_frame", -1)
                     global_frame = int(-1 if raw_global_frame is None else raw_global_frame)
                     chunk_start = int(chunk.get("timeline_start_frame", 0) or 0)
@@ -2662,7 +2816,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                             "MiniMax H3 GUIDE DEBUG effective frame outside sample | id=%s | effective_local=%d | sample_frames=%d",
                             guide_id, local_frame, int(frames),
                         )
-                    if shotboard_task == "longvid_guides" and bool(guide.get("terminal_reanchor")):
+                    if shotboard_task in {"longvid_guides", "fl2va_extended_av"} and bool(guide.get("terminal_reanchor")):
                         # IAMCCS_LONGVID_PIANOSEQUENZA_V2_UPSTREAM_PARITY
                         endpoint_mode = str(
                             shotplan.get("terminal_endpoint_mode", guide.get("terminal_endpoint_mode", "hard_image"))
@@ -2695,7 +2849,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                         int(segment_index) + 1, len(shotplan.get("chunks", [])), guide_id, local_frame, file_sha256,
                     )
                 elif kind == "audio":
-                    if shotboard_task == "longvid_guides" and str(shotplan.get("audio_mode", "")) == "h3_custom_audio_drive":
+                    if shotboard_task in {"longvid_guides", "fl2va_extended_av"} and str(shotplan.get("audio_mode", "")) == "h3_custom_audio_drive":
                         # v20 forced-audio parity: T2VA/I2VA receive source
                         # audio only through VAEEncodeAudio -> zero noise mask
                         # -> AV concat. Audio AddGuide is a different
@@ -2731,7 +2885,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             if isinstance(native_av_context, dict)
             else (
                 int(motion_state.get("context_frames", 0) or 0)
-                if external_continuation else 0
+                if (external_continuation or extended_active) else 0
             )
         )
         model, controlnet_report = _apply_h3_fun_controlnet(
@@ -2750,7 +2904,13 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             motion_tail = int(motion_state["carry"]["ref_video"].shape[0])
             motion_report = f"decoded_frame_reference_motion_carry motion_tail={motion_tail}f"
         execution_task = task
-        if shotboard_task == "longvid_guides" and task in {"t2va", "i2va"}:
+        if shotboard_task == "fl2va_extended_av" and task in {"t2va", "i2va"}:
+            execution_task = (
+                "t2va (EXTEND-style masked EXTEND root)"
+                if int(segment_index) == 0
+                else "t2va (EXTEND-style masked EXTEND continuation)"
+            )
+        elif shotboard_task == "longvid_guides" and task in {"t2va", "i2va"}:
             if task == "i2va" and positioned_bridge:
                 execution_task = "i2va (LongVid Positioned Guides V2 + generated bridge opening)"
             else:
@@ -3271,6 +3431,80 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
                     "frames": int(kept),
                 }
         if (
+            isinstance(sampled, dict)
+            and isinstance(motion_state, dict)
+            and bool(motion_state.get("active"))
+            and str(motion_state.get("method")) == "fl2va_extended_av"
+            and isinstance(native_audio, dict)
+            and torch.is_tensor(native_audio.get("waveform"))
+        ):
+            # Phase 9.2 EXTEND Soft-AV AUDIO bridge.  The child raw decode still
+            # contains the hidden MASKED head immediately before the visible
+            # suffix. Preserve only the FINAL milliseconds of that hidden head:
+            # they are the time-corresponding audio state that Run & Gun Soft AV
+            # uses to let the outgoing parent converge into the child's own
+            # sonic hand before the editorial cut. Video is never touched here.
+            _trim_head = max(0, int(motion_state.get("trim_frames", 0) or 0))
+            _contract = motion_state.get("extended_av_contract") if isinstance(motion_state.get("extended_av_contract"), dict) else {}
+            _soft_ms = max(0.0, min(100.0, float(_contract.get("soft_audio_handover_ms", 15.0) or 0.0)))
+            _sr = max(1, int(native_audio.get("sample_rate", 32000) or 32000))
+            _head_end = max(0, int(round(_trim_head * _sr / H3_FPS)))
+            _soft_samples = max(0, int(round(_soft_ms / 1000.0 * _sr)))
+            _head_start = max(0, _head_end - _soft_samples)
+            _wave = native_audio["waveform"]
+            _head_end = min(_head_end, int(_wave.shape[-1]))
+            _head_start = min(_head_start, _head_end)
+            if _head_end > _head_start:
+                sampled["_iamccs_extended_soft_audio"] = {
+                    "waveform": _wave[..., _head_start:_head_end].detach().to(device="cpu", dtype=torch.float32).contiguous(),
+                    "sample_rate": int(_sr),
+                    "duration_ms": float((_head_end - _head_start) / _sr * 1000.0),
+                    "trim_head_frames": int(_trim_head),
+                    "policy": "hidden_context_soft_av",
+                }
+                LOG.info(
+                    "FL2VA Extended AV hidden Soft-AV audio context captured | chunk=%d/%d | samples=%d | rate=%d | ms=%.3f",
+                    int(chunk_index) + 1, len(shotplan.get("chunks", [])),
+                    int(_head_end - _head_start), int(_sr),
+                    float((_head_end - _head_start) / _sr * 1000.0),
+                )
+
+        if (
+            isinstance(motion_state, dict)
+            and bool(motion_state.get("active"))
+            and str(motion_state.get("method")) == "fl2va_extended_av"
+        ):
+            prefix_frames = max(0, int(motion_state.get("junction_overlap_frames", 0) or 0))
+            trim_head = max(0, int(motion_state.get("trim_frames", prefix_frames) or 0))
+            export_frames = max(1, int(motion_state.get("export_frames", 0) or 0))
+            padding = max(0, int(chunk.get("extended_av_padding_frames", 0) or 0))
+            runway = max(0, int(chunk.get("extended_av_boundary_runway_frames", 0) or 0))
+            grid_padding = max(0, int(chunk.get("extended_av_grid_padding_frames", max(0, padding - runway)) or 0))
+            need = trim_head + export_frames
+            if not torch.is_tensor(native_frames) or native_frames.ndim != 4 or int(native_frames.shape[0]) < need:
+                raise RuntimeError(
+                    "FL2VA Extended AV decoded too few frames for masked-pin trim: "
+                    f"decoded={int(native_frames.shape[0]) if torch.is_tensor(native_frames) else 0} "
+                    f"need={need} ({trim_head} pinned head + {export_frames} delivered)."
+                )
+            # EXTEND pinned-head trim semantics: the hard/held prefix is scaffolding,
+            # not overlap for the final movie. Deliver only the generated suffix.
+            native_frames = native_frames[trim_head:trim_head + export_frames, ...]
+            if isinstance(native_audio, dict) and torch.is_tensor(native_audio.get("waveform")):
+                native_audio = dict(native_audio)
+                sample_rate = max(1, int(native_audio.get("sample_rate", 32000) or 32000))
+                start_sample = max(0, int(round(trim_head * sample_rate / H3_FPS)))
+                sample_count = max(1, int(round(export_frames * sample_rate / H3_FPS)))
+                native_audio["waveform"] = native_audio["waveform"][..., start_sample:start_sample + sample_count]
+            LOG.info(
+                "FL2VA Extended AV masked delivery | chunk=%d/%d | sample=%df | pinned_head_trimmed=%df | "
+                "delivered=%df | boundary_runway_removed=%df | grid_padding_removed=%df | "
+                "padding_removed=%df | decoded_overlap_for_master=0f",
+                int(chunk_index) + 1, len(shotplan.get("chunks", [])),
+                int(chunk.get("frame_count", 0) or 0), trim_head, export_frames,
+                runway, grid_padding, padding,
+            )
+        elif (
             isinstance(motion_state, dict)
             and bool(motion_state.get("active"))
             and str(motion_state.get("method")) == "longvid_latent_tail_experimental"

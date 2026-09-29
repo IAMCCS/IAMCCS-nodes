@@ -1,6 +1,7 @@
 """Real FFmpeg smoke for duration-preserving external Continuation Soft AV."""
 
 import importlib
+import json
 import os
 import sys
 import tempfile
@@ -10,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import av
+import numpy as np
 import torch
 
 
@@ -90,6 +92,45 @@ class ContinuationSoftAVTests(unittest.TestCase):
         self.assertEqual(_decoded_frames(master), 24)
         self.assertAlmostEqual(_decoded_audio_seconds(master), 1.0, delta=0.03)
         self.assertEqual(SHOTBOARD._read_segment_frame_count(softened), 12)
+
+    def test_locked_master_mux_receives_pristine_pcm_without_seam_processing(self):
+        parts = []
+        waves = []
+        with patch.dict(os.environ, {"VHS_FORCE_FFMPEG_PATH": self.ffmpeg}):
+            for index in range(2):
+                path = self._write(f"locked_{index}.mp4", torch.zeros(12, 64, 64, 3))
+                wave = np.full((2, 24000), 0.1 + index * 0.1, dtype=np.float32)
+                np.savez(path.with_suffix('.mp4.locked_audio.npz'), waveform=wave, sample_rate=48000)
+                parts.append(path)
+                waves.append(wave)
+            master = self.output / 'locked_master.mp4'
+            with patch.object(SHOTBOARD, '_mux_extend_video_audio_obvpm', wraps=SHOTBOARD._mux_extend_video_audio_obvpm) as mux:
+                SHOTBOARD._concat_videos(parts, master, audio_join_policy='locked_master')
+            np.testing.assert_array_equal(mux.call_args.args[2], np.concatenate(waves, axis=1))
+        self.assertEqual(_decoded_frames(master), 24)
+        self.assertAlmostEqual(_decoded_audio_seconds(master), 1.0, delta=0.03)
+
+    def test_public_planner_routes_text_continuous_and_joint_to_b1(self):
+        for mode, rows, saved, audio_mode in (
+            ('t2va_continuous', [], {}, 'h3_native_generated'),
+            ('t2va_continuous', [], {}, 'h3_custom_audio_drive'),
+            ('keyframe_joint_native', [
+                {'type': 'image', 'imageFile': f'{i}.png', 'start': i * 240, 'length': 240}
+                for i in range(3)], {'keyframe_joint_latent_new': True}, 'h3_native_generated'),
+        ):
+            result = SHOTBOARD.IAMCCS_MiniMaxH3ShotPlanner().plan(
+                global_prompt='A continuous camera move.',
+                timeline_data=json.dumps({'rows': rows, 'fps': 24, 'h3_saved_settings': saved,
+                                          'audioSegments': [{'audioFile': 'master.wav', 'start': 0, 'length': 720}]}),
+                duration_seconds=30, task_mode=mode, audio_mode=audio_mode,
+                prompt_mapping='global_plus_local', upscale_mode='off', width=640, height=384,
+                acceleration='native')
+            plan = SHOTBOARD._resolve_shotplan(result[0])
+            self.assertEqual(plan['task_mode'], 'fl2va_extended_av')
+            self.assertEqual(plan['extended_av']['video_only'], audio_mode == 'h3_custom_audio_drive')
+            self.assertFalse(plan['native_av_continuity']['enabled'])
+            self.assertFalse(plan['longvid_latent_tail']['enabled'])
+            self.assertEqual(sum(c['unique_frames'] for c in plan['chunks']), 720)
 
 
 if __name__ == "__main__":

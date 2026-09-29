@@ -144,17 +144,17 @@ const EXAMPLES = {
         negatives: "No extra people, no face drift, no plant morphing, no sudden zoom, no jump cut, no text, no logo, no exaggerated horror expression.",
     },
     i2va: {
-        reference_use: "Use <Picture 1> as the exact opening-frame authority for <Subject 1>, wardrobe, bicycle, street geometry, lens perspective and morning light. Continue from it without redesign.",
-        identity_continuity_locks: "Keep <Subject 1>'s face, yellow rain jacket, black helmet and red bicycle unchanged. Preserve left-to-right travel and the wet market street layout.",
-        scene: "The market wakes after rain as delivery shutters rise and <Subject 1> prepares to ride through the narrow lane.",
-        shot_list: "0.00-1.50s: preserve the supplied composition. 1.50-4.00s: <Subject 1> pushes off and passes the first stall. 4.00s-end: the camera follows as a flock of pigeons lifts ahead.",
-        acting: "One foot pushes, hips settle onto the saddle, hands remain fixed on the bars, gaze tracks the opening in the street.",
+        reference_use: "Use <Picture 1> as the exact opening-frame authority for <Subject 1>, wardrobe, environment, lens perspective and daylight. Continue from it without redesign.",
+        identity_continuity_locks: "Keep <Subject 1>'s face, wardrobe, held objects, screen position and the complete opening environment unchanged.",
+        scene: "The still opening frame becomes active through restrained subject movement and environmental motion that already belongs to the supplied image.",
+        shot_list: "0.00-1.50s: preserve the supplied composition. 1.50-4.00s: <Subject 1> begins the requested primary action. 4.00s-end: continue that action naturally while the environment responds with subtle secondary motion.",
+        acting: "Begin with gaze and breath, then a clear weight shift and one physically coherent primary action. Keep hands and contacts stable.",
         dialogue: "",
-        light_and_image: "Retain the source overcast light and wet color palette; moving reflections remain physically tied to the bicycle and market awnings.",
+        light_and_image: "Retain the source illumination, palette and material response; any moving reflection remains physically tied to visible subjects and surfaces.",
         camera: "Begin from the source perspective, then perform one smooth parallel tracking move with mild background parallax.",
-        production_sound: "Bicycle chain, wet tire hiss, shutters lifting, vendors in the distance, pigeon wings crossing camera perspective.",
+        production_sound: "Generate only sounds motivated by visible actions and the supplied environment, with perspective following the camera.",
         non_diegetic_music: "No score.",
-        negatives: "No wardrobe change, no bicycle deformation, no altered storefronts, no duplicate rider, no speed ramp, no cut, no captions.",
+        negatives: "No wardrobe change, added props, altered environment, duplicate subject, speed ramp, cut, captions or source-frame redesign.",
     },
     fl2va: {
         boundary_frames: "Open exactly on <Picture 1> and arrive naturally at <Picture 2> as the final composition. Treat both as complete boundary frames; do not dissolve or morph between them.",
@@ -344,14 +344,54 @@ function hideWidget(target) {
 function safeProject(raw) {
     let parsed = {};
     try { parsed = JSON.parse(String(raw || "{}")); } catch {}
+    const sections = parsed.sections && typeof parsed.sections === "object" ? { ...parsed.sections } : {};
+    let evolvingTimeline = String(parsed.evolving_timeline || "");
+    const authoredTimedLines = extractTimedEvolvingLines(sections.action || sections.shot_list || "");
+    // Never migrate a stock demo into authored prompt truth. Keep a real
+    // authored schedule; otherwise remove the legacy demo completely.
+    if (normalizeEvolvingText(evolvingTimeline) === normalizeEvolvingText(LEGACY_UMBRELLA_DEMO)) {
+        evolvingTimeline = authoredTimedLines
+            && normalizeEvolvingText(authoredTimedLines) !== normalizeEvolvingText(LEGACY_UMBRELLA_DEMO)
+            ? authoredTimedLines
+            : "";
+        sections.action = evolvingTimeline;
+        sections.shot_list = evolvingTimeline;
+    }
+    // Remove only byte-equivalent stock Army values saved by older builds.
+    // User-authored Army scenes remain untouched; this targets the known demo
+    // strings that previously leaked into unrelated projects.
+    const stockArmy = [
+        armyExampleSections(EXTENDED_ARMY_DEMO, { evolving:true }),
+        armyExampleSections(CONTINUOUS_ARMY_ACTION),
+    ];
+    Object.keys(sections).forEach((key) => {
+        const value = normalizeEvolvingText(sections[key]);
+        if (value && stockArmy.some((preset) => value === normalizeEvolvingText(preset[key]))) sections[key] = "";
+    });
+    if ([EXTENDED_ARMY_DEMO, CONTINUOUS_ARMY_ACTION].some((value) => normalizeEvolvingText(evolvingTimeline) === normalizeEvolvingText(value))) evolvingTimeline = "";
+    const stockProjectName = /^(?:Army Extended|Army Continuous)$/i.test(String(parsed.project_name || "").trim());
+    if (stockProjectName) {
+        Object.keys(sections).forEach((key) => { sections[key] = ""; });
+        evolvingTimeline = "";
+    }
+    const cleanRequest = stockProjectName || [EXTENDED_ARMY_REQUEST, CONTINUOUS_ARMY_REQUEST].some((value) => normalizeEvolvingText(parsed.request) === normalizeEvolvingText(value)) ? "" : String(parsed.request || "");
+    const cleanName = stockProjectName ? "Untitled H3 Prompt" : String(parsed.project_name || "Untitled H3 Prompt");
+    const sourceVersion = Number(parsed.schema_version || 0);
+    const savedPolicy = String(parsed.extended_conditioning_policy || "").toLowerCase();
+    const conditioningPolicy = savedPolicy === "evolving" ? "evolving"
+        : savedPolicy === "continuous" && (sourceVersion >= 7 || parsed.conditioning_mode_explicit === true) ? "continuous"
+        : "default";
     return {
         schema: "iamccs.minimax_h3.prompter_project",
-        schema_version: 4,
-        project_name: String(parsed.project_name || "Untitled H3 Prompt"),
+        schema_version: 7,
+        project_name: cleanName,
         task_mode: canonicalMode(parsed.task_mode),
         injection_target: ["global", "local_auto", "local_1", "local_2", "local_3"].includes(parsed.injection_target) ? parsed.injection_target : "global",
         writing_mode: ["manual", "guided", "assistant_fill"].includes(parsed.writing_mode) ? parsed.writing_mode : "guided",
         merge_policy: ["replace", "append"].includes(parsed.merge_policy) ? parsed.merge_policy : "replace",
+        extended_conditioning_policy: conditioningPolicy,
+        conditioning_mode_explicit: sourceVersion >= 7 || parsed.conditioning_mode_explicit === true,
+        evolving_timeline: evolvingTimeline,
         ai_direction: String(parsed.ai_direction || ""),
         ai_scope: String(parsed.ai_scope || "active_field"),
         ai_visual_roles: parsed.ai_visual_roles && typeof parsed.ai_visual_roles === "object" ? { ...parsed.ai_visual_roles } : {},
@@ -361,13 +401,375 @@ function safeProject(raw) {
         })).filter((item) => item.name && item.path) : [],
         visual_story_relationship: String(parsed.visual_story_relationship || ""),
         visual_story_plan: parsed.visual_story_plan && typeof parsed.visual_story_plan === "object" ? { ...parsed.visual_story_plan } : {},
-        request: String(parsed.request || ""),
+        request: cleanRequest,
+        final_prompt_override_enabled: parsed.final_prompt_override_enabled === true,
+        final_prompt_override: String(parsed.final_prompt_override || ""),
+        final_local_prompt_override_enabled: parsed.final_local_prompt_override_enabled === true,
+        final_local_prompt_override: String(parsed.final_local_prompt_override || ""),
         audio_transcript: String(parsed.audio_transcript || ""),
         audio_dialogue_tag: String(parsed.audio_dialogue_tag || ""),
-        local_prompts: Array.isArray(parsed.local_prompts) ? parsed.local_prompts.map(row => ({...row})) : [],
+        local_prompts: stockProjectName ? [] : (Array.isArray(parsed.local_prompts) ? parsed.local_prompts.map(row => ({...row})) : []),
         authority_map: parsed.authority_map && typeof parsed.authority_map === "object" ? { ...parsed.authority_map } : {},
-        sections: parsed.sections && typeof parsed.sections === "object" ? { ...parsed.sections } : {},
+        sections,
     };
+}
+
+const LEGACY_UMBRELLA_DEMO = `0-5 seconds: the woman walks steadily through the city, looking ahead.
+At 5 seconds she notices a red umbrella and slows down while turning her gaze toward it.
+At 10 seconds she stops beside the umbrella, reaches for it, and smiles.
+At 15 seconds she opens the umbrella and continues walking as the camera gently follows.`;
+
+const EXTENDED_ARMY_DEMO = `0-8 seconds: the commander remains still, holds the camera's gaze and takes one controlled breath while the formation remains ready behind her.
+At 8 seconds she raises her right hand and the soldiers tighten their formation while the banners continue moving in the same wind.
+At 16 seconds she lowers her hand and begins a steady forward march; the formation advances with her while the camera tracks backward at matching speed.
+At 24 seconds, without stopping the march, she draws her sword and the soldiers raise their shields while preserving direction, momentum and camera trajectory.`;
+
+const EXTENDED_ARMY_REQUEST = `Create one continuous 30-second shot from the supplied opening image. From 0 to 8 seconds the commander remains still, looks into the camera and takes one controlled breath. At 8 seconds she raises her right hand and the soldiers tighten their formation. At 16 seconds she lowers her hand and begins a steady forward march while the camera tracks backward. At 24 seconds she draws her sword without stopping and the soldiers raise their shields. Preserve the commander, armor, soldiers, banners, weapons, daylight, geography, wind and camera axis. Do not perform later actions early.`;
+
+const CONTINUOUS_ARMY_REQUEST = `Create one uninterrupted 30-second shot from the supplied opening image. The commander leads the formation in one steady forward march for the complete take while the camera tracks backward at matching speed. Keep her sword sheathed and preserve the same pace, formation, banners, wind, daylight, geography and camera axis without introducing a new action phase.`;
+
+const CONTINUOUS_ARMY_ACTION = `For the complete take, the commander leads the soldiers in one steady forward march while the camera tracks backward at matching speed. Her sword remains sheathed. Preserve a single continuous action, pace and direction without a timed change, cut or reset.`;
+
+function armyExampleSections(action, { evolving = false } = {}) {
+    return {
+        boundary_frames:"Use <Picture 1> as the exact opening-frame authority for the complete take.",
+        reference_use:"<Picture 1> defines the commander, soldiers, armor, banners, weapons, landscape, daylight, formation and opening camera axis.",
+        identity_continuity_locks:"Preserve the commander, armor, soldiers, banners, weapons, daylight, geography, wind and camera axis.",
+        action,
+        shot_list:action,
+        acting:evolving
+            ? "Restrained command performance with readable, sequential gestures; every later gesture begins only at its authored second."
+            : "One controlled, steady marching performance with consistent posture, pace and formation response for the complete take.",
+        dialogue:"",
+        light_and_image:"Preserve the source daylight, armor reflections, banner colors, terrain and atmospheric depth without redesign.",
+        camera:evolving
+            ? "One smooth backward tracking move; no cut, reset or early change of trajectory."
+            : "One uninterrupted backward tracking move at the formation's constant marching speed; no cut or reset.",
+        production_sound:evolving
+            ? "Wind, armor movement, formation ambience and footsteps in chronological perspective."
+            : "Continuous wind, armor movement, formation ambience and synchronized marching footsteps.",
+        non_diegetic_music:"No score.",
+        negatives:evolving
+            ? "No early action, added props, cut, reset, identity drift, duplicated soldiers, disappearing weapons, altered heraldry or camera jump."
+            : "No action-phase change, raised hand, drawn sword, added props, cut, reset, identity drift, duplicated soldiers, disappearing weapons, altered heraldry or camera jump.",
+    };
+}
+
+function normalizeEvolvingText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function extractTimedEvolvingLines(value) {
+    const second = "\\d+(?::\\d+(?:[.,]\\d+)?)?|\\d+(?:[.,]\\d+)?";
+    const range = new RegExp(`^(?:[-*•]\\s*)?(?:(?:from|da)\\s+)?${second}\\s*(?:sec(?:ond(?:s|i)?)?|s)?\\s*(?:-|–|—|to|a|fino\\s+a)`, "i");
+    const point = new RegExp(`^(?:[-*•]\\s*)?(?:at|a|from|da|dal\\s+secondo)\\s+${second}\\s*(?:sec(?:ond(?:s|i)?)?|s)\\b`, "i");
+    return String(value || "").split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => range.test(line) || point.test(line))
+        .join("\n");
+}
+
+function extractTimedEvolvingRequest(value) {
+    const second = "\\d+(?::\\d+(?:[.,]\\d+)?)?|\\d+(?:[.,]\\d+)?";
+    const separated = String(value || "")
+        .replace(new RegExp(`\\s+(?=(?:at|from|da|dal\\s+secondo)\\s+${second}\\s*(?:sec|second|seconds|secondi|s|to|a|fino\\s+a)\\b)`, "gi"), "\n")
+        .trim();
+    return extractTimedEvolvingLines(separated);
+}
+
+function canonicalEvolvingTagText(value) {
+    return String(value || "")
+        .replace(/\[ONSET(?:_|\s+)ONCE\]/gi, "[ONSET ONCE]")
+        .replace(/\[RESOLVED(?:_|\s+)STATE\]/gi, "[RESOLVED STATE]")
+        .replace(/\[(?:THEN(?:_|\s+))?SUSTAIN\]/gi, "[THEN SUSTAIN]");
+}
+
+function evolvingGerund(verb) {
+    const word = String(verb || "").trim().toLowerCase();
+    if (!word) return "";
+    if (word.endsWith("ie")) return `${word.slice(0, -2)}ying`;
+    if (word.endsWith("e") && !word.endsWith("ee")) return `${word.slice(0, -1)}ing`;
+    if (/^(run|sit|stop|swim)$/.test(word)) return `${word}${word.slice(-1)}ing`;
+    return `${word}ing`;
+}
+
+function positiveEvolvingSustain(value) {
+    let text = String(value || "").trim();
+    const patterns = [
+        /^after\s+[^,.;:]+?\s+(?:has|have)\s+finished[,;:\-]*\s*/i,
+        /^once\s+[^,.;:]+?\s+(?:ends?|finishes?)[,;:\-]*\s*/i,
+        /\bwithout\s+repeating\s+[^,.;:]+(?:\s+before\s+\d+(?:[.,]\d+)?\s*seconds?)?/gi,
+        /\bdo\s+not\s+repeat\s+[^,.;:]+/gi,
+        /\bno\s+more\s+[^,.;:]+/gi,
+        /\bbefore\s+\d+(?:[.,]\d+)?\s*seconds?\b/gi,
+    ];
+    patterns.forEach((pattern) => { text = text.replace(pattern, " "); });
+    return text.replace(/\s{2,}/g, " ").replace(/\s+([.,;:!?])/g, "$1").replace(/^[,;:\-\s]+|[,;:\-\s]+$/g, "").trim();
+}
+
+function autoStructureEvolvingAction(value) {
+    const action = String(value || "").trim();
+    if (!action || /\[(?:ONSET ONCE|RESOLVED STATE|THEN SUSTAIN)\]/i.test(action)) return action;
+    let match = action.match(/^(.+?)\s+(takes?\s+(?:one|a)\s+(?:deep\s+)?breath)\s+and\s+(.+)$/i);
+    if (match) {
+        const subject = match[1].trim();
+        return `[ONSET ONCE] ${subject} ${match[2].trim()}; [THEN SUSTAIN] ${subject} ${match[3].trim()}`;
+    }
+    match = action.match(/^(.+?)\s+(stops?(?:\s+(?:advancing|walking|moving|marching))?)\s+and\s+(?:then\s+)?starts?\s+to\s+([a-z]+)([\s\S]*)$/i);
+    if (match) {
+        const subject = match[1].trim();
+        const onset = `${subject} ${match[2].trim()}`;
+        let rest = String(match[4] || "");
+        rest = rest.replace(/\bstarts?\s+to\s+([a-z]+)/gi, (_all, verb) => `continues ${evolvingGerund(verb)}`);
+        const sustain = `${subject} continues ${evolvingGerund(match[3])}${rest}`.replace(/\s{2,}/g, " ").trim();
+        return `[ONSET ONCE] ${onset}; [THEN SUSTAIN] ${sustain}`;
+    }
+    return action;
+}
+
+function canonicalizeEvolvingAction(value) {
+    let action = canonicalEvolvingTagText(value).replace(/\s{2,}/g, " ").trim();
+    action = autoStructureEvolvingAction(action);
+    const tag = /\[(ONSET ONCE|RESOLVED STATE|THEN SUSTAIN)\]/gi;
+    const matches = [...action.matchAll(tag)];
+    if (!matches.length) return action;
+    const values = { onset:"", resolved:"", sustain:"" };
+    const prefix = action.slice(0, matches[0].index).trim().replace(/^[;,:\-\s]+|[;,:\-\s]+$/g, "");
+    matches.forEach((match, index) => {
+        const end = index + 1 < matches.length ? matches[index + 1].index : action.length;
+        const body = action.slice(match.index + match[0].length, end).trim().replace(/^[;,:\-\s]+|[;,:\-\s]+$/g, "");
+        const kind = match[1].toUpperCase() === "ONSET ONCE" ? "onset" : match[1].toUpperCase() === "RESOLVED STATE" ? "resolved" : "sustain";
+        if (body) values[kind] = body;
+    });
+    if (prefix && !values.sustain) values.sustain = prefix;
+    values.resolved = positiveEvolvingSustain(values.resolved);
+    values.sustain = positiveEvolvingSustain(values.sustain);
+    const out = [];
+    if (values.onset) out.push(`[ONSET ONCE] ${values.onset}`);
+    if (values.resolved) out.push(`[RESOLVED STATE] ${values.resolved}`);
+    if (values.sustain) out.push(`[THEN SUSTAIN] ${values.sustain}`);
+    return out.join("; ") || action;
+}
+
+function canonicalizeEvolvingTimeline(value) {
+    const number = "(?:\\d+(?::\\d+(?:[.,]\\d+)?)?|\\d+(?:[.,]\\d+)?)";
+    const unit = "(?:sec(?:ond(?:s|i)?)?|s)";
+    const rangeText = `${number}\\s*${unit}?\\s*(?:-|–|—|to|a|fino\\s+a)\\s*${number}\\s*${unit}\\s*:`;
+    const pointText = `(?:at|a|from|da|dal\\s+secondo)\\s+${number}\\s*${unit}\\s*:`;
+    let text = canonicalEvolvingTagText(value).replace(/\r?\n/g, " ").replace(/\s{2,}/g, " ").trim();
+    const tagBeforeRange = new RegExp(`(\\[(?:ONSET ONCE|RESOLVED STATE|THEN SUSTAIN)\\])\\s*(${rangeText})`, "gi");
+    text = text.replace(tagBeforeRange, "$2 $1 ");
+    text = text.replace(new RegExp(`\\s+(?=${rangeText})`, "gi"), "\n");
+    text = text.replace(new RegExp(`\\s+(?=${pointText})`, "gi"), "\n");
+    const range = new RegExp(`^\\s*(${number})\\s*${unit}?\\s*(?:-|–|—|to|a|fino\\s+a)\\s*(${number})\\s*${unit}\\s*:\\s*(.+)$`, "i");
+    const point = new RegExp(`^\\s*((?:at|a|from|da|dal\\s+secondo)\\s+${number}\\s*${unit})\\s*:\\s*(.+)$`, "i");
+    return text.split(/\n+/).map((raw) => raw.trim()).filter(Boolean).map((line) => {
+        const ranged = line.match(range);
+        if (ranged) return `${ranged[1]}-${ranged[2]} seconds: ${canonicalizeEvolvingAction(ranged[3])}`;
+        const pointed = line.match(point);
+        if (pointed) return `${pointed[1]}: ${canonicalizeEvolvingAction(pointed[2])}`;
+        return line;
+    }).join("\n");
+}
+
+function validateCanonicalEvolvingTimeline(value, durationSeconds) {
+    const text = canonicalizeEvolvingTimeline(value);
+    const duration = Math.max(Number(durationSeconds || 0), 0.01);
+    const beats = parseEvolvingTimeline(text, duration);
+    if (!beats.length) throw new Error("Evolving needs at least one timed phase.");
+    for (const beat of beats) {
+        const action = String(beat.action || "");
+        if (/\[ONSET_once\]|\[SUSTAIN\]|\[RESOLVED_state\]/i.test(action)) throw new Error(`Evolving phase at ${beat.start_seconds}s still uses non-canonical tags.`);
+        const onset = /\[ONSET ONCE\]/i.test(action);
+        const sustain = /\[THEN SUSTAIN\]/i.test(action);
+        if (onset && !sustain) throw new Error(`Evolving phase at ${beat.start_seconds}s has ONSET ONCE but no positive THEN SUSTAIN state.`);
+        const carriedParts = action.split(/\[(?:ONSET ONCE|RESOLVED STATE|THEN SUSTAIN)\]/i).slice(onset ? 2 : 1).join(" ");
+        if (/\b(?:do\s+not|don't|never|without\s+repeating|no\s+more|avoid)\b/i.test(carriedParts) || /^\s*after\s+.+?\s+(?:has|have)\s+finished/i.test(carriedParts)) {
+            throw new Error(`Evolving phase at ${beat.start_seconds}s contains a negative reminder in its carried state. Describe only the positive resulting state.`);
+        }
+        if (!onset && /\b(?:takes?\s+(?:one|a)\s+(?:deep\s+)?breath\s+and|stops?(?:\s+(?:advancing|walking|moving|marching))?\s+and\s+(?:then\s+)?starts?\s+to)\b/i.test(action)) {
+            throw new Error(`Evolving phase at ${beat.start_seconds}s mixes a one-shot onset with an ongoing action. Use ONSET ONCE + THEN SUSTAIN.`);
+        }
+    }
+    return text;
+}
+
+function validateEvolvingGlobalPrompt(value) {
+    const text = String(value || "");
+    if (/(?:^|\n)\s*(?:(?:at|from)\s+)?\d+(?::\d+(?:[.,]\d+)?)?\s*(?:sec(?:ond(?:s|i)?)?|s)?\s*(?:-|–|—|to|a|:)|\[(?:ONSET|RESOLVED|THEN|SUSTAIN)/i.test(text)) {
+        throw new Error("FINAL GLOBAL contains timed/action syntax. Move actions and events to FINAL LOCAL / TIMELINE.");
+    }
+    const withoutMusic = text.replace(/non_diegetic_music:\s*[\s\S]*$/i, "");
+    if (/(?:^|[.!?]\s+|\n)\s*(?:No\b|Do\s+not\b|Don't\b|Never\b|Without\b|Avoid\b)/i.test(withoutMusic)) {
+        throw new Error("FINAL GLOBAL contains negative H3 instructions. Rewrite them as positive stable visual/camera state; music may still use 'No score'.");
+    }
+}
+
+function parseEvolvingTimeline(text, durationSeconds) {
+    const duration = Math.max(0.01, Number(durationSeconds || 0));
+    const number = "(?:\\d+(?::\\d+(?:[.,]\\d+)?)?|\\d+(?:[.,]\\d+)?)";
+    const range = new RegExp(`^\\s*(?:(?:from|da)\\s+)?(${number})\\s*(?:sec(?:ond(?:s|i)?)?|s)?\\s*(?:-|–|—|to|a|fino\\s+a)\\s*(${number})\\s*(?:sec(?:ond(?:s|i)?)?|s)?\\s*[:;,\\-]?\\s*(.+)$`, "i");
+    const point = new RegExp(`^\\s*(?:(?:at|a|from|da|dal\\s+secondo)\\s+)?(${number})\\s*(?:sec(?:ond(?:s|i)?)?|s)\\s*[:;,\\-]?\\s*(.+)$`, "i");
+    const seconds = (value) => {
+        const token = String(value).replace(",", ".");
+        if (!token.includes(":")) return Number(token);
+        const parts = token.split(":"); return Number(parts[0]) * 60 + Number(parts[1]);
+    };
+    const events = String(text || "").split(/\r?\n/).map((raw, index) => ({line:raw.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, "").trim(),source_line:index+1})).filter(item => item.line).map(item => {
+        const match = item.line.match(range) || item.line.match(point);
+        if (!match) throw new Error(`Evolving line ${item.source_line} needs seconds: use “0-5 seconds: action” or “At 5 seconds action”.`);
+        const ranged = match.length === 4;
+        return {start_seconds:seconds(match[1]),end_seconds:ranged?seconds(match[2]):null,action:String(match[ranged?3:2] || "").replace(/^[ .:\-]+|[ .:\-]+$/g,""),source_line:item.source_line};
+    }).sort((a,b) => a.start_seconds-b.start_seconds || a.source_line-b.source_line);
+    return events.map((event,index) => {
+        const end = Math.min(duration, event.end_seconds ?? events[index+1]?.start_seconds ?? duration);
+        if (!(event.start_seconds >= 0 && event.start_seconds < duration && end > event.start_seconds && event.action)) throw new Error(`Evolving line ${event.source_line} is outside the ${duration}s Shotboard duration or has no action.`);
+        return {...event,end_seconds:end};
+    });
+}
+
+function extractExplicitEvolvingSeconds(value) {
+    const number = "(?:\\d+(?::\\d+(?:[.,]\\d+)?)?|\\d+(?:[.,]\\d+)?)";
+    const token = new RegExp(`(?:from\\s+)?(${number})(?:\\s*(?:-|–|—|to|a|fino\\s+a)\\s*(${number}))?\\s*(?:sec(?:ond(?:s|i)?)?|s)\\b`, "gi");
+    const seconds = (raw) => {
+        const text = String(raw || "").replace(",", ".");
+        if (!text.includes(":")) return Number(text);
+        const parts = text.split(":");
+        return Number(parts[0]) * 60 + Number(parts[1]);
+    };
+    const out = [];
+    let match;
+    while ((match = token.exec(String(value || "")))) {
+        out.push({ value: seconds(match[1]), index: match.index });
+        if (match[2] != null) out.push({ value: seconds(match[2]), index: match.index });
+    }
+    return out.filter((item) => Number.isFinite(item.value));
+}
+
+function validateEvolvingTimelineAgainstRequest(request, timed) {
+    const supplied = extractExplicitEvolvingSeconds(request);
+    if (!supplied.length) return;
+    const generated = extractExplicitEvolvingSeconds(timed);
+    const has = (items, value) => items.some((item) => Math.abs(item.value - value) < 0.01);
+    const uniqueSupplied = [...new Set(supplied.map((item) => Number(item.value.toFixed(4))))];
+    const uniqueGenerated = [...new Set(generated.map((item) => Number(item.value.toFixed(4))))];
+    const missing = uniqueSupplied.filter((value) => !has(generated, value));
+    if (missing.length) throw new Error(`AI changed or omitted immutable Evolving timestamp(s): ${missing.join(", ")}s. Nothing was injected.`);
+    const maxSupplied = Math.max(...uniqueSupplied);
+    const inventedInterior = uniqueGenerated.filter((value) => value > 0.001 && value < maxSupplied - 0.001 && !has(supplied, value));
+    if (inventedInterior.length) throw new Error(`AI invented Evolving timestamp(s) not present in REQUEST: ${inventedInterior.join(", ")}s. Nothing was injected.`);
+    const firstMarker = supplied.reduce((best, item) => item.index < best.index ? item : best, supplied[0]);
+    const prefix = String(request || "").slice(0, firstMarker.index).trim();
+    if (prefix && firstMarker.value > 0) {
+        const horizon = Math.max(maxSupplied + 1, ...uniqueGenerated.map((value) => value + 1));
+        const beats = parseEvolvingTimeline(timed, horizon);
+        const first = beats[0];
+        if (!first || Math.abs(first.start_seconds) > 0.01 || Math.abs(first.end_seconds - firstMarker.value) > 0.01) {
+            throw new Error(`Untimed opening action must remain 0-${firstMarker.value}s before the first user timestamp. Nothing was injected.`);
+        }
+    }
+}
+
+function positiveH3Text(value) {
+    return String(value || "")
+        .split(/\r?\n/)
+        .map((line) => line.split(/;\s*/).filter((part) => !/^\s*(?:no\b|do\s+not\b|don't\b|never\b|without\b|avoid\b)/i.test(part)).join("; ").trim())
+        .filter(Boolean)
+        .join("\n")
+        .replace(/(?:^|[.!?]\s+)(?:No\b|Do\s+not\b|Never\b|Without\b|Avoid\b)[^.!?]*(?=[.!?]|$)/gi, " ")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+}
+
+function uniquePromptParts(values) {
+    const seen = new Set();
+    const out = [];
+    for (const value of values) {
+        const text = String(value || "").trim();
+        if (!text) continue;
+        const key = text.replace(/\s+/g, " ").trim().toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push(text);
+    }
+    return out;
+}
+
+function sanitizeEvolvingGlobalSections(sections) {
+    const out = { ...(sections || {}) };
+    const timed = /(?:^|\n)\s*(?:(?:from|at)\s+)?\d+(?::\d+(?:[.,]\d+)?)?\s*(?:sec(?:ond(?:s|i)?)?|s)?\s*(?:-|–|—|to|a|:)|\[(?:ONSET|RESOLVED|THEN|SUSTAIN)/i;
+    for (const key of ["boundary_frames", "reference_use", "identity_continuity_locks", "light_and_image", "camera"]) {
+        out[key] = String(out[key] || "").split(/\r?\n/).filter((line) => !timed.test(line)).join("\n").trim();
+    }
+    return out;
+}
+
+function composeFl2vaGlobalPrompt(project) {
+    const sections = project?.sections || {};
+    const alignment = positiveH3Text(sections.boundary_frames);
+    const detail = uniquePromptParts([
+        positiveH3Text(sections.reference_use),
+        positiveH3Text(sections.identity_continuity_locks),
+        positiveH3Text(sections.light_and_image),
+        positiveH3Text(sections.camera),
+    ]).join("\n");
+    return [
+        alignment,
+        `integrated_multimodal_description:\n${detail ? `[Shot 1] ${detail}` : "N/A"}`,
+        "overall_soundscape:\nN/A",
+        `non_diegetic_music:\n${String(sections.non_diegetic_music || "").trim() || "N/A"}`,
+    ].filter(Boolean).join("\n\n");
+}
+
+function composeFl2vaLocalPrompt(project) {
+    if (project?.extended_conditioning_policy === "evolving") return String(project.evolving_timeline || project.sections?.action || project.sections?.shot_list || "").trim();
+    const sections = project?.sections || {};
+    return uniquePromptParts([
+        sections.action,
+        sections.shot_list,
+        sections.acting,
+        sections.dialogue,
+        sections.production_sound,
+    ]).join("\n");
+}
+
+function withoutTimeDivisions(value) {
+    return String(value || "").split(/\r?\n/).map((line) => line
+        .replace(/^\s*(?:[-*•]\s*)?(?:timeline\s+)?(?:from\s+|at\s+)?\d+(?::\d+(?:[.,]\d+)?)?(?:\s*(?:sec(?:ond(?:s|i)?)?|s))?(?:\s*(?:-|–|—|to|a|fino\s+a)\s*\d+(?::\d+(?:[.,]\d+)?)?(?:\s*(?:sec(?:ond(?:s|i)?)?|s))?)?\s*[:;,\-]?\s*/i, "")
+        .trim()).filter(Boolean).join("\n");
+}
+
+function composeContinuousGlobalPrompt(project) {
+    const stable = composeFl2vaGlobalPrompt(project);
+    const sections = project?.sections || {};
+    const authoredAction = withoutTimeDivisions(uniquePromptParts([
+        sections.action, sections.shot_list, sections.acting, sections.dialogue, sections.production_sound,
+    ]).join("\n"));
+    if (!authoredAction) return stable;
+    return uniquePromptParts([
+        stable,
+        `continuous_action:\nPerform only the following user-authored action as one uninterrupted continuous action throughout the complete take. Preserve the same action, direction, identity, environment and camera continuity across every technical generation boundary. Do not divide it into timed phases or local prompts.\n${authoredAction}`,
+    ]).join("\n\n");
+}
+
+
+function generatedGlobalPrompt(project) {
+    if (canonicalMode(project?.task_mode) !== "fl2va") return composePrompt(project);
+    return project?.extended_conditioning_policy === "continuous"
+        ? composeContinuousGlobalPrompt(project) : composeFl2vaGlobalPrompt(project);
+}
+
+function generatedLocalPrompt(project) {
+    if (canonicalMode(project?.task_mode) !== "fl2va" || project?.extended_conditioning_policy === "continuous") return "";
+    return composeFl2vaLocalPrompt(project);
+}
+
+function effectiveGlobalPrompt(project) {
+    return project?.final_prompt_override_enabled ? String(project.final_prompt_override || "") : generatedGlobalPrompt(project);
+}
+
+function effectiveLocalPrompt(project) {
+    return project?.final_local_prompt_override_enabled ? String(project.final_local_prompt_override || "") : generatedLocalPrompt(project);
 }
 
 function composePrompt(project) {
@@ -375,6 +777,7 @@ function composePrompt(project) {
     const value = (key) => String(project.sections?.[key] || "").trim();
     if (!MODE_META[mode].sections.some(([key]) => value(key))) return "";
     const join = (keys) => keys.map(value).filter(Boolean).join("\n");
+    const joinBasePositive = (keys) => uniquePromptParts(keys.map((key) => key === "dialogue" ? value(key) : positiveH3Text(value(key)))).join("\n");
     if (mode === "ref2va") {
         return MODE_META[mode].sections.map(([key, label]) => {
             let body = value(key) || "N/A";
@@ -399,16 +802,16 @@ function composePrompt(project) {
     let sound = "";
     let music = "";
     if (mode === "t2va") {
-        detailKeys = ["scene", "shot_list", "acting", "dialogue", "light_and_image", "camera", "negatives"];
-        sound = value("production_sound");
+        detailKeys = ["scene", "shot_list", "acting", "dialogue", "light_and_image", "camera"];
+        sound = positiveH3Text(value("production_sound"));
         music = value("non_diegetic_music");
     } else if (mode === "i2va") {
-        detailKeys = ["reference_use", "identity_continuity_locks", "scene", "shot_list", "acting", "dialogue", "light_and_image", "camera", "negatives"];
+        detailKeys = ["reference_use", "identity_continuity_locks", "scene", "shot_list", "acting", "dialogue", "light_and_image", "camera"];
         alignment = "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced.";
-        sound = value("production_sound");
+        sound = positiveH3Text(value("production_sound"));
         music = value("non_diegetic_music");
     } else if (mode === "fl2va") {
-        detailKeys = ["reference_use", "identity_continuity_locks", "action", "shot_list", "acting", "dialogue", "light_and_image", "camera", "negatives"];
+        detailKeys = ["reference_use", "identity_continuity_locks", "action", "shot_list", "acting", "dialogue", "light_and_image", "camera"];
         alignment = value("boundary_frames");
         sound = value("production_sound");
         music = value("non_diegetic_music");
@@ -421,7 +824,7 @@ function composePrompt(project) {
         sound = value("multishot_environment");
         music = "N/A";
     }
-    let detail = join(detailKeys);
+    let detail = ["t2va", "i2va", "fl2va"].includes(mode) ? joinBasePositive(detailKeys) : join(detailKeys);
     if (detail && !/^\s*\[Shot\s+1\]/i.test(detail)) detail = `[Shot 1] ${detail}`;
     return [
         alignment,
@@ -429,6 +832,14 @@ function composePrompt(project) {
         `overall_soundscape:\n${sound || "N/A"}`,
         `non_diegetic_music:\n${music || "N/A"}`,
     ].filter(Boolean).join("\n\n");
+}
+
+// Evolving actions must never remain in the global prompt.  H3 sees the
+// global text in every technical chunk and will otherwise perform later
+// actions as soon as the first chunk.  The timed actions are published as
+// editable Shotboard blocks by the conditioning bridge below.
+function composeEvolvingGlobalPrompt(project) {
+    return canonicalMode(project?.task_mode) === "fl2va" ? composeFl2vaGlobalPrompt(project) : composePrompt(project);
 }
 
 function el(tag, className = "", text = "") {
@@ -441,6 +852,8 @@ function el(tag, className = "", text = "") {
 function button(label, className = "") {
     const result = el("button", `iamccs-pr-btn ${className}`, label);
     result.type = "button";
+    result.addEventListener("pointerdown", (event) => event.stopPropagation());
+    result.addEventListener("click", (event) => event.stopPropagation());
     return result;
 }
 
@@ -546,8 +959,8 @@ function mountPrompter(node) {
     const root = el("div", "iamccs-pr-root");
     root.innerHTML = `
         <style>
-            .iamccs-pr-root{--ink:#17191d;--paper:#f3efe5;--paper2:#e7e0d0;--gold:#d9ad58;--blue:#79a8d8;--muted:#9aa3ad;width:960px;height:720px;background:linear-gradient(140deg,#151820,#0c0e13 72%);color:#e9edf2;border:1px solid #363c48;border-radius:12px;overflow:hidden;font:12px Inter,Segoe UI,sans-serif;box-shadow:0 18px 50px #0008;display:flex;flex-direction:column}
-            .iamccs-pr-root *{box-sizing:border-box}.iamccs-pr-top{height:58px;display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid #303641;background:#10131a}.iamccs-pr-mark{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:linear-gradient(135deg,#e0b660,#9b6a25);color:#17130a;font:800 15px Georgia}.iamccs-pr-brand{min-width:180px}.iamccs-pr-title{font:700 15px Georgia,serif;letter-spacing:.4px}.iamccs-pr-sub{font-size:10px;color:#9fa8b5;margin-top:2px}.iamccs-pr-name{height:34px;flex:1;min-width:160px;border:1px solid #38404d!important;border-radius:7px!important;background:#171b23!important;color:#f4f6f8!important;padding:0 10px!important}.iamccs-pr-actions{display:flex;gap:6px}.iamccs-pr-btn{height:30px;border:1px solid #3b4350;border-radius:6px;background:#202630;color:#e6ebf0;padding:0 10px;cursor:pointer;font:600 11px Inter,Segoe UI,sans-serif}.iamccs-pr-btn:hover{border-color:#d9ad58;color:#fff}.iamccs-pr-btn.primary{background:#b78537;border-color:#e1ba70;color:#15110a}.iamccs-pr-btn.danger{color:#e9a29c}.iamccs-pr-modes{height:46px;min-width:0;padding:7px 10px;display:flex;align-items:center;gap:5px;border-bottom:1px solid #303641;background:#141820;overflow:hidden}.iamccs-pr-mode{height:30px;min-width:0;flex:0 0 auto;padding:0 7px;font-size:9px;white-space:nowrap}.iamccs-pr-mode.active{background:#30455d;border-color:#79a8d8;color:#fff}.iamccs-pr-mode-note{min-width:0;max-width:132px;margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#9ea7b2;font-size:9px}.iamccs-pr-layout{display:grid;grid-template-columns:236px minmax(0,1fr) 272px;min-height:0;flex:1}.iamccs-pr-left{min-width:0;border-right:1px solid #303641;padding:11px;background:#11151c;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable}.iamccs-pr-kicker{font-size:9px;text-transform:uppercase;letter-spacing:1.4px;color:#d9ad58;margin:2px 0 7px}.iamccs-pr-targets,.iamccs-pr-writing{display:grid;gap:5px;margin-bottom:13px}.iamccs-pr-target,.iamccs-pr-write{height:29px;text-align:left}.iamccs-pr-target.active,.iamccs-pr-write.active{border-color:#d9ad58;background:#382f20;color:#ffe6ad}.iamccs-pr-hint{font-size:10px;line-height:1.45;color:#929ba7;padding:8px;border-radius:7px;background:#181d25;border:1px solid #2c333e;margin-bottom:12px}.iamccs-pr-policy{width:100%;height:30px;background:#1b2029;color:#e9edf2;border:1px solid #343c48;border-radius:6px;padding:0 7px}.iamccs-pr-center{min-width:0;overflow:auto;padding:12px 14px;background:radial-gradient(circle at 50% -10%,#262d3a 0,#181c24 45%,#141820 100%)}.iamccs-pr-section{background:#f4f0e6;color:#17191d;border-radius:6px;margin-bottom:10px;box-shadow:0 4px 12px #0005;overflow:hidden;border:1px solid #cfc5b1}.iamccs-pr-section-head{height:35px;display:flex;align-items:center;gap:8px;padding:0 10px;background:#e7e0d2;border-bottom:1px solid #cdc3b1}.iamccs-pr-num{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:#1e2938;color:#f4d596;font:700 10px Georgia}.iamccs-pr-section-title{font:700 12px Georgia,serif;letter-spacing:.3px}.iamccs-pr-state{margin-left:auto;color:#75808c;font-size:9px;text-transform:uppercase}.iamccs-pr-text{display:block;width:100%;min-height:82px;resize:vertical;border:0!important;outline:0!important;background:#f8f5ed!important;color:#181a1d!important;padding:10px 12px!important;font:12px/1.5 'Courier New',monospace!important}.iamccs-pr-tip{padding:7px 11px;background:#eee8dc;color:#66645e;font-size:10px;line-height:1.35;border-top:1px dashed #d3c8b5}.iamccs-pr-right{min-width:0;border-left:1px solid #303641;background:#10141a;padding:11px;display:flex;min-height:0;flex-direction:column}.iamccs-pr-status{display:flex;gap:6px;margin-bottom:8px}.iamccs-pr-pill{border-radius:10px;padding:3px 7px;background:#222a35;color:#aeb7c2;font-size:9px}.iamccs-pr-pill.ok{background:#1d3a2b;color:#99ddb2}.iamccs-pr-pill.warn{background:#493322;color:#f3c184}.iamccs-pr-preview{flex:1;min-height:0;overflow:auto;border:1px solid #3a414c;border-radius:6px;background:#f4f0e7;color:#1b1b1b;padding:12px;white-space:pre-wrap;font:11px/1.5 'Courier New',monospace}.iamccs-pr-preview:empty:before{content:'The composed H3 prompt will appear here.';color:#8c8981}.iamccs-pr-footer{margin-top:8px;display:flex;gap:6px}.iamccs-pr-footer .iamccs-pr-btn{flex:1}.iamccs-pr-assist{display:none;margin-bottom:8px;padding:8px;border:1px solid #44637d;background:#172635;color:#bed8ec;border-radius:6px;font-size:10px;line-height:1.4}.iamccs-pr-assist.show{display:block}.iamccs-pr-load{display:none}.iamccs-pr-empty .iamccs-pr-section-head{background:#f0e0d7}.iamccs-pr-empty .iamccs-pr-state{color:#b26751}.iamccs-pr-root.mode-manual .iamccs-pr-tip{display:none}
+            .iamccs-pr-root{--ink:#17191d;--paper:#f3efe5;--paper2:#e7e0d0;--gold:#d9ad58;--blue:#79a8d8;--muted:#9aa3ad;width:100%;height:100%;min-width:0;min-height:0;background:linear-gradient(140deg,#151820,#0c0e13 72%);color:#e9edf2;border:1px solid #363c48;border-radius:7px;overflow:hidden;font:12px Inter,Segoe UI,sans-serif;box-shadow:none;display:flex;flex-direction:column}
+            .iamccs-pr-root *{box-sizing:border-box}.iamccs-pr-top{height:58px;display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid #303641;background:#10131a}.iamccs-pr-mark{width:34px;height:34px;border-radius:9px;display:grid;place-items:center;background:linear-gradient(135deg,#e0b660,#9b6a25);color:#17130a;font:800 15px Georgia}.iamccs-pr-brand{min-width:180px}.iamccs-pr-title{font:700 15px Georgia,serif;letter-spacing:.4px}.iamccs-pr-sub{font-size:10px;color:#9fa8b5;margin-top:2px}.iamccs-pr-name{height:34px;flex:1;min-width:160px;border:1px solid #38404d!important;border-radius:7px!important;background:#171b23!important;color:#f4f6f8!important;padding:0 10px!important}.iamccs-pr-actions{display:flex;gap:6px}.iamccs-pr-btn{height:30px;border:1px solid #3b4350;border-radius:6px;background:#202630;color:#e6ebf0;padding:0 10px;cursor:pointer;font:600 11px Inter,Segoe UI,sans-serif}.iamccs-pr-btn:hover{border-color:#d9ad58;color:#fff}.iamccs-pr-actions .iamccs-pr-btn.active{border-color:#7fe7ff!important;background:linear-gradient(135deg,#17647a,#153c56)!important;color:#fff!important;box-shadow:0 0 0 1px #7fe7ff55,0 0 15px #21c7ef55!important}.iamccs-pr-btn.primary{background:#b78537;border-color:#e1ba70;color:#15110a}.iamccs-pr-btn.danger{color:#e9a29c}.iamccs-pr-modes{height:46px;min-width:0;padding:7px 10px;display:flex;align-items:center;gap:5px;border-bottom:1px solid #303641;background:#141820;overflow:hidden}.iamccs-pr-mode{height:30px;min-width:0;flex:0 0 auto;padding:0 7px;font-size:9px;white-space:nowrap}.iamccs-pr-mode.active{background:#30455d;border-color:#79a8d8;color:#fff}.iamccs-pr-mode-note{min-width:0;max-width:132px;margin-left:auto;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#9ea7b2;font-size:9px}.iamccs-pr-layout{display:grid;grid-template-columns:236px minmax(0,1fr) 272px;min-height:0;flex:1}.iamccs-pr-left{min-width:0;border-right:1px solid #303641;padding:11px;background:#11151c;overflow-y:auto;overflow-x:hidden;scrollbar-gutter:stable}.iamccs-pr-kicker{font-size:9px;text-transform:uppercase;letter-spacing:1.4px;color:#d9ad58;margin:2px 0 7px}.iamccs-pr-targets,.iamccs-pr-writing{display:grid;gap:5px;margin-bottom:13px}.iamccs-pr-target,.iamccs-pr-write{height:29px;text-align:left}.iamccs-pr-target.active,.iamccs-pr-write.active{border-color:#d9ad58;background:#382f20;color:#ffe6ad}.iamccs-pr-hint{font-size:10px;line-height:1.45;color:#929ba7;padding:8px;border-radius:7px;background:#181d25;border:1px solid #2c333e;margin-bottom:12px}.iamccs-pr-policy{width:100%;height:30px;background:#1b2029;color:#e9edf2;border:1px solid #343c48;border-radius:6px;padding:0 7px}.iamccs-pr-center{min-width:0;overflow:auto;padding:12px 14px;background:radial-gradient(circle at 50% -10%,#262d3a 0,#181c24 45%,#141820 100%)}.iamccs-pr-section{background:#f4f0e6;color:#17191d;border-radius:6px;margin-bottom:10px;box-shadow:0 4px 12px #0005;overflow:hidden;border:1px solid #cfc5b1}.iamccs-pr-section-head{height:35px;display:flex;align-items:center;gap:8px;padding:0 10px;background:#e7e0d2;border-bottom:1px solid #cdc3b1}.iamccs-pr-num{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;background:#1e2938;color:#f4d596;font:700 10px Georgia}.iamccs-pr-section-title{font:700 12px Georgia,serif;letter-spacing:.3px}.iamccs-pr-state{margin-left:auto;color:#75808c;font-size:9px;text-transform:uppercase}.iamccs-pr-text{display:block;width:100%;min-height:82px;resize:vertical;border:0!important;outline:0!important;background:#f8f5ed!important;color:#181a1d!important;padding:10px 12px!important;font:12px/1.5 'Courier New',monospace!important}.iamccs-pr-tip{padding:7px 11px;background:#eee8dc;color:#66645e;font-size:10px;line-height:1.35;border-top:1px dashed #d3c8b5}.iamccs-pr-right{min-width:0;border-left:1px solid #303641;background:#10141a;padding:11px;display:flex;min-height:0;flex-direction:column}.iamccs-pr-status{display:flex;gap:6px;margin-bottom:8px}.iamccs-pr-pill{border-radius:10px;padding:3px 7px;background:#222a35;color:#aeb7c2;font-size:9px}.iamccs-pr-pill.ok{background:#1d3a2b;color:#99ddb2}.iamccs-pr-pill.warn{background:#493322;color:#f3c184}.iamccs-pr-preview{flex:1;min-height:0;overflow:auto;border:1px solid #3a414c;border-radius:6px;background:#f4f0e7;color:#1b1b1b;padding:12px;white-space:pre-wrap;font:11px/1.5 'Courier New',monospace}.iamccs-pr-preview:empty:before{content:'The composed H3 prompt will appear here.';color:#8c8981}.iamccs-pr-footer{margin-top:8px;display:flex;gap:6px}.iamccs-pr-footer .iamccs-pr-btn{flex:1}.iamccs-pr-assist{display:none;margin-bottom:8px;padding:8px;border:1px solid #44637d;background:#172635;color:#bed8ec;border-radius:6px;font-size:10px;line-height:1.4}.iamccs-pr-assist.show{display:block}.iamccs-pr-load{display:none}.iamccs-pr-empty .iamccs-pr-section-head{background:#f0e0d7}.iamccs-pr-empty .iamccs-pr-state{color:#b26751}.iamccs-pr-root.mode-manual .iamccs-pr-tip{display:none}
         </style>`;
     const aiStyle = document.createElement("style");
     aiStyle.textContent = `
@@ -564,10 +977,11 @@ function mountPrompter(node) {
         .iamccs-pr-example-select{height:30px;max-width:146px;border:1px solid #3b4350;border-radius:6px;background:#171b23;color:#e9edf2;padding:0 6px;font:600 10px Inter,Segoe UI,sans-serif}
         .iamccs-pr-inject{width:100%;height:38px!important;margin:0 0 7px;background:linear-gradient(135deg,#d3a447,#8d5c20)!important;border:1px solid #f0ca7d!important;color:#171109!important;font-size:12px!important;font-weight:900!important;letter-spacing:.06em;box-shadow:0 5px 14px #0007}
         .iamccs-pr-inject-status{min-height:30px;margin-bottom:12px;padding:7px;border:1px solid #303944;border-radius:6px;background:#151b22;color:#91a0ae;font-size:9px;line-height:1.35}.iamccs-pr-inject-status.ok{border-color:#3f7957;color:#9fe0b7}.iamccs-pr-inject-status.error{border-color:#824b45;color:#efaaa1}
-        .iamccs-pr-field-ai{margin-left:4px!important;height:25px!important;min-width:54px;padding:0 8px!important;border:1px solid #9271d8!important;border-radius:4px!important;background:linear-gradient(145deg,#5b3f93,#302452)!important;color:#f4ebff!important;box-shadow:inset 0 1px 0 #ffffff25,0 2px 7px #2b174f55!important;font-size:9px!important;font-weight:900!important;letter-spacing:.045em!important}.iamccs-pr-field-ai:hover{border-color:#c8a9ff!important;background:linear-gradient(145deg,#7555b5,#3d2d68)!important;box-shadow:0 0 0 1px #b68cff33,0 3px 10px #28134688!important}.iamccs-pr-field-ai:disabled{cursor:wait;opacity:.72}
+        .iamccs-pr-field-ai{margin:0!important;width:auto!important;max-width:180px!important;height:25px!important;min-height:25px!important;max-height:25px!important;min-width:0!important;flex:0 0 auto!important;align-self:center!important;position:static!important;inset:auto!important;transform:none!important;padding:0 8px!important;border:1px solid #9271d8!important;border-radius:4px!important;background:linear-gradient(145deg,#5b3f93,#302452)!important;color:#f4ebff!important;box-shadow:inset 0 1px 0 #ffffff25,0 2px 7px #2b174f55!important;font-size:9px!important;font-weight:900!important;line-height:23px!important;letter-spacing:.045em!important;white-space:nowrap!important;overflow:hidden!important;text-overflow:ellipsis!important}.iamccs-pr-field-ai:hover{border-color:#c8a9ff!important;background:linear-gradient(145deg,#7555b5,#3d2d68)!important;box-shadow:0 0 0 1px #b68cff33,0 3px 10px #28134688!important}.iamccs-pr-field-ai:disabled{cursor:wait;opacity:.72}.iamccs-pr-field-tools{margin-left:4px;display:flex;align-items:center;justify-content:flex-end;gap:4px;flex:0 0 auto;min-width:0;max-width:220px;height:25px;overflow:hidden}.iamccs-pr-field-tools .iamccs-pr-field-ai{max-width:96px!important}.iamccs-pr-request-actions{margin-left:auto;display:flex;align-items:center;justify-content:flex-end;gap:5px;flex:0 1 auto;min-width:0;max-width:100%;height:25px}.iamccs-pr-request-actions .iamccs-pr-field-ai{max-width:220px!important}.iamccs-pr-section-head>.iamccs-pr-section-title{min-width:0;flex:1 1 auto}.iamccs-pr-section-head>.iamccs-pr-state{flex:0 0 auto;margin-left:6px}
         .iamccs-pr-tagdeck{position:sticky;top:-12px;z-index:4;margin:-2px 0 12px;padding:9px 10px;border:1px solid #45505f;border-radius:8px;background:linear-gradient(145deg,#111720f5,#1c2430f5);box-shadow:0 5px 16px #0008;backdrop-filter:blur(6px)}
         .iamccs-pr-taghead{display:flex;align-items:center;gap:8px;margin-bottom:7px}.iamccs-pr-tagtitle{color:#f1d492;font:800 10px Georgia,serif;letter-spacing:.09em}.iamccs-pr-taghint{margin-left:auto;color:#93a1b1;font-size:9px}.iamccs-pr-tag-toggle{height:23px!important;padding:0 7px!important;font-size:9px!important}.iamccs-pr-tagdeck.is-collapsed{padding:6px 10px}.iamccs-pr-tagdeck.is-collapsed .iamccs-pr-taghead{margin-bottom:0}.iamccs-pr-tagdeck.is-collapsed .iamccs-pr-tagrows{display:none}.iamccs-pr-tagrows{display:grid;gap:5px}.iamccs-pr-tagrow{display:flex;align-items:center;gap:4px;flex-wrap:wrap}.iamccs-pr-taglabel{width:51px;color:#718297;font-size:8px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.iamccs-pr-tag{height:24px!important;padding:0 7px!important;border-color:#3d4a5b!important;background:#1c2632!important;color:#dce7f2!important;font:700 9px 'Courier New',monospace!important}.iamccs-pr-tag:hover{border-color:#d9ad58!important;color:#ffe5ab!important}.iamccs-pr-tag.syntax{background:#342a1c!important;border-color:#685536!important;color:#f5d38e!important}
         .iamccs-pr-zoom-wrap{position:relative;min-width:0;width:100%}.iamccs-pr-zoom-wrap textarea{width:100%;padding-right:38px!important}.iamccs-pr-zoom-btn{position:absolute;top:5px;right:5px;z-index:2;width:25px;height:25px;border:1px solid #8b7650;border-radius:5px;background:#262a31;color:#ffe0a0;cursor:pointer;font-size:15px;line-height:1}.iamccs-pr-zoom-overlay{position:fixed;inset:0;z-index:100000;display:grid;place-items:center;background:#05070bdc;padding:24px}.iamccs-pr-zoom-panel{display:flex;flex-direction:column;gap:10px;width:min(1100px,94vw);height:min(820px,90vh);padding:16px;border:1px solid #9c7842;border-radius:12px;background:#171c25;box-shadow:0 20px 80px #000c}.iamccs-pr-zoom-head{display:flex;align-items:center;gap:10px;color:#f3d99f;font-weight:800}.iamccs-pr-zoom-head .iamccs-pr-btn{margin-left:auto}.iamccs-pr-zoom-editor{flex:1;min-height:0;width:100%;resize:none;border:1px solid #71869b;border-radius:8px;background:#f8f5ed;color:#181a1d;padding:18px;font:24px/1.5 'Courier New',monospace;outline:none}
+        .iamccs-pr-top{height:auto!important;min-height:58px;gap:10px!important;overflow:hidden}.iamccs-pr-mark{flex:0 0 34px}.iamccs-pr-brand{min-width:165px!important;flex:0 1 205px}.iamccs-pr-name{flex:1 1 210px!important;min-width:145px!important}.iamccs-pr-actions{min-width:0;flex:0 1 auto;justify-content:flex-end}.iamccs-pr-actions .iamccs-pr-btn{min-width:0;flex:0 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:9px;padding-right:9px}.iamccs-pr-zoom-wrap textarea{padding-right:54px!important}.iamccs-pr-ai .iamccs-pr-zoom-btn{right:19px!important;width:25px!important;min-width:25px!important;max-width:25px!important;height:25px!important;min-height:25px!important;max-height:25px!important;padding:0!important;font-size:18px!important;font-weight:900!important;line-height:23px!important;white-space:nowrap!important}
     `;
     root.appendChild(aiStyle);
 
@@ -596,7 +1010,17 @@ function mountPrompter(node) {
     fileInput.hidden = true;
     fileInput.tabIndex = -1;
     fileInput.setAttribute("aria-hidden", "true");
-    actions.append(exampleSelect, exampleBtn, restoreBtn, loadBtn, saveBtn, fileInput);
+    const conditioningMode = el("select", "iamccs-pr-example-select");
+    conditioningMode.setAttribute("aria-label", "Prompter conditioning mode");
+    conditioningMode.title = "DEFAULT uses the normal Prompter. CONTINUOUS keeps one action only in GLOBAL. EVOLVING uses authored timed phases.";
+    conditioningMode.append(
+        new Option("DEFAULT", "default"),
+        new Option("CONTINUOUS", "continuous"),
+        new Option("EVOLVING", "evolving"),
+    );
+    // Production projects begin from authored content. Stock examples are not
+    // mounted, so no example can become prompt truth by an accidental click.
+    actions.append(conditioningMode, restoreBtn, loadBtn, saveBtn, fileInput);
     top.appendChild(actions);
 
     const modeBar = el("div", "iamccs-pr-modes");
@@ -777,9 +1201,9 @@ function mountPrompter(node) {
     aiBaseUrl.placeholder = "Provider base URL";
     const aiModel = el("input");
     aiModel.placeholder = "Model name";
-    const aiModelList = el("datalist");
-    aiModelList.id = `iamccs-prompter-models-${node.id || Math.random().toString(16).slice(2)}`;
-    aiModel.setAttribute("list", aiModelList.id);
+    const aiModelPicker = el("select");
+    aiModelPicker.setAttribute("aria-label", "Installed local AI model");
+    aiModelPicker.title = "All models reported by the selected local provider";
     const refreshModelsBtn = button("↻");
     refreshModelsBtn.title = "Read the models installed in Ollama";
     const connectOllamaBtn = button("CONNECT OLLAMA", "iamccs-pr-write");
@@ -797,7 +1221,7 @@ function mountPrompter(node) {
     const aiRow1 = el("div", "iamccs-pr-ai-row");
     const providerLabel = el("label", "", "Provider"); providerLabel.appendChild(aiProvider);
     const modelLabel = el("label", "", "Model");
-    const modelRow = el("div", "iamccs-pr-ai-modelrow"); modelRow.append(aiModel, refreshModelsBtn, aiModelList); modelLabel.appendChild(modelRow);
+    const modelRow = el("div", "iamccs-pr-ai-modelrow"); modelRow.append(aiModel, aiModelPicker, refreshModelsBtn); modelLabel.appendChild(modelRow);
     aiRow1.append(providerLabel, modelLabel);
     const aiRow2 = el("div", "iamccs-pr-ai-row");
     const urlLabel = el("label", "", "Base URL"); urlLabel.appendChild(aiBaseUrl);
@@ -880,13 +1304,13 @@ function mountPrompter(node) {
         editor.setSelectionRange(area.selectionStart, area.selectionEnd);
     };
     const decorateTextEditors = () => {
-        root.querySelectorAll("textarea:not(.iamccs-pr-zoom-editor)").forEach((area) => {
+        root.querySelectorAll("textarea:not(.iamccs-pr-zoom-editor):not(.iamccs-pr-preview)").forEach((area) => {
             if (area.dataset.iamccsZoomReady) return;
             area.dataset.iamccsZoomReady = "1";
             const wrap = el("div", "iamccs-pr-zoom-wrap");
             area.parentNode.insertBefore(wrap, area);
             wrap.appendChild(area);
-            const zoom = button("⌕", "iamccs-pr-zoom-btn");
+            const zoom = button("+", "iamccs-pr-zoom-btn");
             zoom.type = "button";
             zoom.title = "Open this text box in the 2× expanded editor";
             zoom.setAttribute("aria-label", "Expand text editor");
@@ -976,20 +1400,35 @@ function mountPrompter(node) {
     const right = el("aside", "iamccs-pr-right");
     const promptPanel = el("div");
     promptPanel.style.cssText = "height:100%;min-height:0;display:flex;flex-direction:column";
-    promptPanel.appendChild(el("div", "iamccs-pr-kicker", "Final prompt"));
-    const assistantBanner = el("div", "iamccs-pr-assist", "AI Rewrite is active. Write a rough idea in any field, choose an engine, then rewrite. Review and edit the result before queueing MiniMax H3.");
+    const finalKicker = el("div", "iamccs-pr-kicker", "Final prompt · editable queue truth");
+    promptPanel.appendChild(finalKicker);
+    const assistantBanner = el("div", "iamccs-pr-assist", "AI Rewrite is active. Write a rough idea in any field, choose an engine, then rewrite. Review and edit the final prompt before injection. The editable final text is authoritative.");
     promptPanel.appendChild(assistantBanner);
     const status = el("div", "iamccs-pr-status");
     const charPill = el("div", "iamccs-pr-pill");
     const completePill = el("div", "iamccs-pr-pill");
-    status.append(charPill, completePill);
+    const manualPill = el("div", "iamccs-pr-pill");
+    status.append(charPill, completePill, manualPill);
     promptPanel.appendChild(status);
-    const preview = el("div", "iamccs-pr-preview");
+    const preview = el("textarea", "iamccs-pr-preview");
+    preview.spellcheck = false;
+    preview.title = "Editable final GLOBAL prompt. Any manual edit becomes the exact global text injected into Shotboard.";
     promptPanel.appendChild(preview);
+    const localFinalWrap = el("div");
+    localFinalWrap.style.cssText = "display:none;min-height:0;flex:1 1 42%;margin-top:8px;flex-direction:column";
+    const localFinalKicker = el("div", "iamccs-pr-kicker", "Final local / timeline · editable");
+    localFinalKicker.style.marginTop = "0";
+    const localPreview = el("textarea", "iamccs-pr-preview");
+    localPreview.spellcheck = false;
+    localPreview.style.cssText = "flex:1 1 auto;min-height:110px";
+    localPreview.title = "Editable FL2VA LOCAL prompt. For Extended Evolving this is the exact timed schedule parsed into Shotboard blocks.";
+    localFinalWrap.append(localFinalKicker, localPreview);
+    promptPanel.appendChild(localFinalWrap);
     const footer = el("div", "iamccs-pr-footer");
-    const copyBtn = button("Copy Prompt");
+    const copyBtn = button("Copy Final");
+    const resetFinalBtn = button("Use Generated");
     const clearBtn = button("Clear Mode", "danger");
-    footer.append(copyBtn, clearBtn);
+    footer.append(copyBtn, resetFinalBtn, clearBtn);
     promptPanel.appendChild(footer);
     const inspectorHost = el("div");
     inspectorHost.style.cssText = "height:100%;min-height:0";
@@ -1063,6 +1502,8 @@ function mountPrompter(node) {
         aiProviderChip.textContent = isLocal ? `${isOllama ? "OLLAMA" : "LM STUDIO"} · LOCAL` : "CLOUD / API";
         aiProviderChip.classList.toggle("ok", isLocal);
         aiBaseUrl.placeholder = isOllama ? "http://127.0.0.1:11434" : "Provider API base URL";
+        aiModel.hidden = isLocal;
+        aiModelPicker.hidden = !isLocal;
     };
     let aiVisualFiles = [];
     const restoreAIVisualFiles = () => {
@@ -1176,11 +1617,12 @@ function mountPrompter(node) {
             const response = await api.fetchApi(`/iamccs/prompter/${endpoint}/models?base_url=${encodeURIComponent(aiBaseUrl.value.trim() || aiDefaults[aiProvider.value].baseUrl)}`);
             const data = await response.json();
             if (!response.ok || !data?.ok) throw new Error(data?.error || `HTTP ${response.status}`);
-            const names = (data.models || []).map((item) => String(item.name || "")).filter(Boolean);
-            aiModelList.replaceChildren(...names.map((name) => {
-                const option = document.createElement("option"); option.value = name; return option;
-            }));
-            if ((!aiModel.value.trim() || !names.includes(aiModel.value.trim())) && names.length) aiModel.value = names[0];
+            const names = [...new Set((data.models || []).map((item) => String(item.name || "").trim()).filter(Boolean))];
+            const previousModel = aiModel.value.trim();
+            aiModelPicker.replaceChildren(...names.map((name) => new Option(name, name)));
+            const selectedModel = names.includes(previousModel) ? previousModel : (names[0] || "");
+            aiModelPicker.value = selectedModel;
+            aiModel.value = selectedModel;
             persistAI();
             aiStatus.className = "iamccs-pr-ai-status ok";
             aiStatus.textContent = names.length ? `${names.length} ${providerName} model(s) available. Selected: ${aiModel.value}.` : `${providerName} is reachable but exposes no models.`;
@@ -1201,6 +1643,12 @@ function mountPrompter(node) {
             refreshModelsBtn.disabled = false;
             connectOllamaBtn.disabled = false;
         }
+    };
+    aiModelPicker.onchange = () => {
+        aiModel.value = aiModelPicker.value;
+        persistAI();
+        aiStatus.className = "iamccs-pr-ai-status ok";
+        aiStatus.textContent = `${aiProvider.value === "lm_studio" ? "LM Studio" : "Ollama"} model selected: ${aiModel.value}.`;
     };
     aiProvider.onchange = async () => {
         const selected = aiDefaults[aiProvider.value] || {};
@@ -1256,7 +1704,6 @@ function mountPrompter(node) {
             const plan = payload.plan || {};
             project.visual_story_plan = { ...plan, image_paths: aiVisualFiles.map((item) => item.path).filter(Boolean) };
             const globalKey = ({
-                fl2va: "action",
                 ref2va: "detailed_description",
                 v2va_object_swap: "v2va_interval_edits",
                 audio_driven: "audio_timed_performance",
@@ -1264,7 +1711,10 @@ function mountPrompter(node) {
             })[project.task_mode] || "scene";
             const globalText = String(plan.global_prompt || [plan.global_direction,
                 plan.continuity_locks ? `Continuity locks: ${plan.continuity_locks}` : ""].filter(Boolean).join("\n")).trim();
-            if (globalText) project.sections[globalKey] = globalText;
+            if (project.task_mode === "fl2va") {
+                project.final_prompt_override_enabled = Boolean(globalText);
+                project.final_prompt_override = globalText;
+            } else if (globalText) project.sections[globalKey] = globalText;
             if (project.task_mode === "multi_shot_lipsync") {
                 project.sections.multishot_global_direction = String(plan.global_direction || project.sections.multishot_global_direction || "");
                 project.sections.multishot_continuity_locks = String(plan.continuity_locks || project.sections.multishot_continuity_locks || "");
@@ -1282,12 +1732,43 @@ function mountPrompter(node) {
         } finally { buildVisualStoryBtn.disabled = false; }
     };
 
-    const renderPreview = () => {
-        const prompt = composePrompt(project);
-        preview.textContent = prompt;
+    const refreshFinalStatus = () => {
+        const globalPrompt = String(preview.value || "");
+        const localPrompt = canonicalMode(project.task_mode) === "fl2va" && project.extended_conditioning_policy !== "continuous" ? String(localPreview.value || "") : "";
+        const total = globalPrompt.length + localPrompt.length;
         const budget = Number(widget(node, "character_budget")?.value || 6800);
-        charPill.textContent = `${prompt.length} / ${budget} chars`;
-        charPill.className = `iamccs-pr-pill ${prompt.length > 7000 ? "warn" : "ok"}`;
+        charPill.textContent = `${total} / ${budget} chars`;
+        charPill.className = `iamccs-pr-pill ${total > 7000 ? "warn" : "ok"}`;
+        const manual = project.final_prompt_override_enabled || project.final_local_prompt_override_enabled;
+        manualPill.textContent = manual ? "MANUAL FINAL" : "GENERATED";
+        manualPill.className = `iamccs-pr-pill ${manual ? "warn" : "ok"}`;
+    };
+
+    preview.oninput = () => {
+        project.final_prompt_override_enabled = true;
+        project.final_prompt_override = preview.value;
+        refreshFinalStatus();
+        commit();
+    };
+    localPreview.oninput = () => {
+        project.final_local_prompt_override_enabled = true;
+        project.final_local_prompt_override = localPreview.value;
+        if (project.extended_conditioning_policy === "evolving" && canonicalMode(project.task_mode) === "fl2va") {
+            project.evolving_timeline = localPreview.value;
+            project.sections.action = localPreview.value;
+            project.sections.shot_list = localPreview.value;
+        }
+        refreshFinalStatus();
+        commit();
+    };
+
+    const renderPreview = () => {
+        const isFl2va = canonicalMode(project.task_mode) === "fl2va";
+        finalKicker.textContent = isFl2va ? "Final GLOBAL prompt · editable queue truth" : "Final prompt · editable queue truth";
+        localFinalWrap.style.display = isFl2va && project.extended_conditioning_policy !== "continuous" ? "flex" : "none";
+        preview.value = effectiveGlobalPrompt(project);
+        if (isFl2va) localPreview.value = effectiveLocalPrompt(project);
+        refreshFinalStatus();
         const fields = MODE_META[project.task_mode].sections;
         const filled = fields.filter(([key]) => String(project.sections?.[key] || "").trim()).length;
         completePill.textContent = `${filled}/${fields.length} sections`;
@@ -1318,7 +1799,7 @@ function mountPrompter(node) {
         apply.onclick = () => {
             snapshotProject("camera builder apply");
             const [framing, angle, movement, speed, target, ending] = controls.map((control) => control.value);
-            const sentence = `Begin in a ${framing} at ${angle}, then use one ${speed} ${movement} keeping ${target} readable; ${ending}. No competing camera move or unmotivated cut.`;
+            const sentence = `Begin in a ${framing} at ${angle}, then use one ${speed} ${movement} keeping ${target} readable; ${ending}. Maintain this single motivated camera path and continuous spatial logic.`;
             const key = ({ ref2va:"detailed_description", v2va_object_swap:"v2va_source_video_authority", audio_driven:"audio_camera_sync", multi_shot_lipsync:"multishot_shot_plan" })[project.task_mode] || "camera";
             project.sections[key] = sentence;
             renderSections(); commit();
@@ -1336,8 +1817,11 @@ function mountPrompter(node) {
         requestCard.style.cssText = "border:2px solid #a077cf;background:#271c3c;padding:12px";
         const requestHead = el("div", "iamccs-pr-section-head");
         requestHead.style.cssText="height:auto;min-height:38px;flex-wrap:wrap;padding:6px 10px";
-        const requestAI = button("✦ REQUEST → GLOBAL", "iamccs-pr-field-ai");
+        const extendedEvolving = project.task_mode === "fl2va" && project.extended_conditioning_policy === "evolving";
+        const extendedContinuous = project.task_mode === "fl2va" && project.extended_conditioning_policy === "continuous";
+        const requestAI = button(extendedEvolving ? "✦ REQUEST AI + TIMED PROMPTS" : extendedContinuous ? "✦ REQUEST → CONTINUOUS GLOBAL" : "✦ REQUEST → GLOBAL", "iamccs-pr-field-ai");
         const requestStory = button("✦ REQUEST → GLOBAL + LOCALS", "iamccs-pr-field-ai");
+        requestStory.style.display = extendedEvolving || extendedContinuous ? "none" : "";
         requestStory.onclick = async () => {
             if (!project.request.trim()) { aiStatus.textContent = "Write the global idea and numbered local prompt directions first."; return; }
             try {
@@ -1353,8 +1837,13 @@ function mountPrompter(node) {
                 if (!response.ok || !data.ok) throw Error(data.error || `HTTP ${response.status}`);
                 snapshotProject("request global and locals");
                 project.sections = {};
-                const globalKey = ({fl2va:"action",ref2va:"detailed_description",v2va_object_swap:"v2va_interval_edits",audio_driven:"audio_timed_performance",multi_shot_lipsync:"multishot_shot_plan"})[project.task_mode] || "scene";
-                project.sections[globalKey] = data.plan.global_prompt;
+                const globalKey = ({ref2va:"detailed_description",v2va_object_swap:"v2va_interval_edits",audio_driven:"audio_timed_performance",multi_shot_lipsync:"multishot_shot_plan"})[project.task_mode] || "scene";
+                if (project.task_mode === "fl2va") {
+                    project.final_prompt_override_enabled = true;
+                    project.final_prompt_override = String(data.plan.global_prompt || "");
+                } else {
+                    project.sections[globalKey] = data.plan.global_prompt;
+                }
                 project.local_prompts = data.plan.shots.map(shot => ({slot:shot.slot, enabled:true,
                     prompt:[shot.local_prompt,shot.h3_transition_prompt].filter(Boolean).join("\n")}));
                 project.injection_target = "global";
@@ -1364,13 +1853,46 @@ function mountPrompter(node) {
             } catch (error) { aiStatus.className = "iamccs-pr-ai-status error"; aiStatus.textContent = error.message; }
             finally { requestStory.disabled = false; }
         };
-        requestHead.append(el("div","iamccs-pr-section-title","REQUEST · describe what you want"),requestAI,requestStory);
+        const requestActions = el("div", "iamccs-pr-request-actions");
+        requestActions.append(requestAI, requestStory);
+        requestHead.append(el("div","iamccs-pr-section-title","REQUEST · describe what you want"), requestActions);
         const requestBox = el("textarea", "iamccs-pr-text"); requestBox.value = project.request;
-        requestBox.placeholder = "Describe the global scene, then: Prompt 1: I want… Prompt 2: then… Prompt 3: finally… Choose GLOBAL + LOCALS to develop all numbered prompts and inject them together.";
+        requestBox.placeholder = extendedEvolving
+            ? "Describe the complete take in natural language and state the real action-change times you want. Example: she walks toward camera; at 12 seconds she changes action; at 22 seconds another action begins. Untimed opening action runs from 0 to the first explicit timestamp."
+            : extendedContinuous
+                ? "Describe the single action that must continue uninterrupted for the complete take. Do not divide it into times or phases."
+                : "Describe the global scene, then: Prompt 1: I want… Prompt 2: then… Prompt 3: finally… Choose GLOBAL + LOCALS to develop all numbered prompts and inject them together.";
         requestBox.oninput = () => { project.request = requestBox.value; commit(); };
         requestBox.onfocus = () => { activePromptArea = requestBox; activePromptKey = "request"; };
-        requestAI.onclick = () => runAIRewrite({directTargetKeys:MODE_META[project.task_mode].sections.map(([key]) => key), triggerButton:requestAI, narrativeRequest:requestBox.value});
-        requestCard.append(requestHead, requestBox, el("div","iamccs-pr-tip","GLOBAL fills the structured global boxes. GLOBAL + LOCALS replaces the global and local draft with an ordered development of your numbered directions. Review the local slot numbers before INJECT; no generation is queued."));
+        requestAI.onclick = () => {
+            project.request = requestBox.value;
+            return runAIRewrite({
+            directTargetKeys: extendedEvolving
+                ? ["boundary_frames", "reference_use", "identity_continuity_locks", "light_and_image", "camera", "action", "shot_list", "non_diegetic_music"]
+                : extendedContinuous
+                    ? ["action"]
+                    : MODE_META[project.task_mode].sections.map(([key]) => key),
+            triggerButton:requestAI,
+            narrativeRequest:requestBox.value,
+            });
+        };
+        requestCard.append(requestHead, requestBox, el("div","iamccs-pr-tip", extendedEvolving
+            ? "REQUEST AI + TIMED PROMPTS prepares the timed phases without changing the Shotboard. Press INJECT → SHOTBOARD to create the editable Extended Prompt blocks; this happens only while EXTENDED EVOLVING is active. The visible Shotboard blocks then remain Queue truth."
+            : extendedContinuous
+                ? "REQUEST → CONTINUOUS GLOBAL rewrites only the single ACTION field. The same action is composed into GLOBAL for the whole take; no timed phases or local prompts are created."
+                : "GLOBAL fills the structured global boxes. GLOBAL + LOCALS replaces the global and local draft with an ordered development of your numbered directions. Review the local slot numbers before INJECT; no generation is queued."));
+        const requestStatus = el("div", "iamccs-pr-ai-status");
+        requestStatus.setAttribute("role", "status");
+        requestStatus.style.cssText = "padding:8px;white-space:pre-wrap;overflow-wrap:anywhere";
+        const syncRequestStatus = () => {
+            requestStatus.textContent = aiStatus.textContent;
+            requestStatus.className = aiStatus.className;
+        };
+        syncRequestStatus();
+        node._iamccsRequestStatusObserver?.disconnect();
+        node._iamccsRequestStatusObserver = new MutationObserver(syncRequestStatus);
+        node._iamccsRequestStatusObserver.observe(aiStatus, {childList:true,characterData:true,subtree:true,attributes:true,attributeFilter:["class"]});
+        requestCard.append(requestStatus);
         center.append(requestCard);
         center.appendChild(renderCameraBuilder());
         const meta = MODE_META[project.task_mode];
@@ -1396,6 +1918,16 @@ function mountPrompter(node) {
             };
             area.addEventListener("input", () => {
                 project.sections[key] = area.value;
+                if (project.task_mode === "fl2va"
+                    && project.extended_conditioning_policy === "evolving"
+                    && (key === "action" || key === "shot_list")) {
+                    const timed = extractTimedEvolvingLines(area.value);
+                    if (timed) {
+                        project.evolving_timeline = timed;
+                        project.sections.action = timed;
+                        project.sections.shot_list = timed;
+                    }
+                }
                 refreshState();
                 renderPreview();
                 commit();
@@ -1421,7 +1953,9 @@ function mountPrompter(node) {
                 activePromptArea = area; activePromptKey = key; insertIntoActiveField(project.audio_dialogue_tag);
                 audioStatus.textContent = `Inserted into GLOBAL · ${label}.`;
             };
-            head.append(fieldAIButton, fieldAudioButton);
+            const fieldTools = el("div", "iamccs-pr-field-tools");
+            fieldTools.append(fieldAIButton, fieldAudioButton);
+            head.appendChild(fieldTools);
             card.append(head, area, el("div", "iamccs-pr-tip", tip));
             center.appendChild(card);
             refreshState();
@@ -1455,13 +1989,31 @@ function mountPrompter(node) {
     const renderControls = () => {
         nameInput.value = project.project_name;
         policy.value = project.merge_policy;
-        exampleSelect.disabled = project.task_mode !== "t2va";
+        conditioningMode.value = project.extended_conditioning_policy;
+        const desiredExamples = project.task_mode === "fl2va"
+            ? [[project.extended_conditioning_policy === "evolving" ? "army_extended" : "army_continuous",
+                project.extended_conditioning_policy === "evolving" ? "Army Extended" : "Army Continuous"]]
+            : project.task_mode === "t2va"
+                ? T2V_PROJECTS.map((preset) => [preset.id, preset.name])
+                : [];
+        const exampleSignature = JSON.stringify(desiredExamples);
+        if (exampleSelect.dataset.signature !== exampleSignature) {
+            exampleSelect.replaceChildren(...desiredExamples.map(([value, label]) => new Option(label, value)));
+            exampleSelect.dataset.signature = exampleSignature;
+        }
+        exampleSelect.disabled = !desiredExamples.length;
         exampleSelect.title = project.task_mode === "t2va"
             ? "Choose a cinematic T2V prompt project"
+            : project.task_mode === "fl2va"
+                ? `Load the ${project.extended_conditioning_policy === "evolving" ? "Army Extended" : "Army Continuous"} example for the active conditioning policy.`
             : project.task_mode === "audio_driven"
                 ? "Audio Drive loads a content-free structural template; write the user's own scene and transcript."
                 : "T2V cinematic projects are available in T2VA mode";
-        exampleBtn.textContent = project.task_mode === "audio_driven"
+        exampleBtn.textContent = project.task_mode === "fl2va" && project.extended_conditioning_policy === "evolving"
+            ? "Load Army Extended"
+            : project.task_mode === "fl2va"
+                ? "Load Army Continuous"
+            : project.task_mode === "audio_driven"
             ? "Load Audio Drive Template"
             : project.task_mode === "multi_shot_lipsync"
                 ? "Load Long Multi-Shot Demo"
@@ -1486,6 +2038,24 @@ function mountPrompter(node) {
     const loadExample = (mode) => {
         snapshotProject("load example");
         project.task_mode = mode;
+        if (mode === "fl2va" && project.extended_conditioning_policy === "evolving") {
+            project.project_name = "Army Extended";
+            project.request = EXTENDED_ARMY_REQUEST;
+            project.evolving_timeline = EXTENDED_ARMY_DEMO;
+            project.sections = armyExampleSections(EXTENDED_ARMY_DEMO, { evolving:true });
+            project.local_prompts = [];
+            renderControls(); renderSections(); commit();
+            return;
+        }
+        if (mode === "fl2va") {
+            project.project_name = "Army Continuous";
+            project.request = CONTINUOUS_ARMY_REQUEST;
+            project.evolving_timeline = "";
+            project.sections = armyExampleSections(CONTINUOUS_ARMY_ACTION);
+            project.local_prompts = [];
+            renderControls(); renderSections(); commit();
+            return;
+        }
         const selectedT2V = mode === "t2va" ? T2V_PROJECTS.find((item) => item.id === exampleSelect.value) : null;
         const exampleSections = selectedT2V?.sections || EXAMPLES[mode] || {};
         project.sections = { ...project.sections, ...exampleSections };
@@ -1498,6 +2068,15 @@ function mountPrompter(node) {
         renderSections();
         commit();
     };
+
+    const activateConditioningMode = (policyName) => {
+        snapshotProject(`conditioning mode ${policyName}`);
+        if (policyName !== "default") project.task_mode = "fl2va";
+        project.extended_conditioning_policy = policyName;
+        project.conditioning_mode_explicit = true;
+        renderControls(); renderSections(); commit();
+    };
+    conditioningMode.onchange = () => activateConditioningMode(conditioningMode.value);
 
     applyReferencePresetBtn.onclick = () => {
         snapshotProject("reference baseline");
@@ -1545,6 +2124,12 @@ function mountPrompter(node) {
     };
 
     const runAIRewrite = async ({ directTargetKeys = null, triggerButton = rewriteBtn, narrativeRequest = null } = {}) => {
+        if (narrativeRequest === null && activePromptKey === "request") {
+            narrativeRequest = activePromptArea?.value ?? project.request;
+            project.request = narrativeRequest;
+            directTargetKeys = project.extended_conditioning_policy === "continuous"
+                ? ["action"] : MODE_META[project.task_mode].sections.map(([key]) => key);
+        }
         if (node._iamccsPromptAiBusy) { aiStatus.textContent = "An AI rewrite is already running; wait for the spinner to finish."; return; }
         const requestMode = project.task_mode;
         const allSections = Object.fromEntries(
@@ -1556,12 +2141,22 @@ function mountPrompter(node) {
         if (!targetKeys.length && aiScope.value === "all_filled") {
             targetKeys = Object.entries(allSections).filter(([, value]) => value).map(([key]) => key);
         } else if (!targetKeys.length && aiScope.value === "active_field") {
-            if (activePromptKey) targetKeys = [activePromptKey];
+            if (activePromptKey && Object.prototype.hasOwnProperty.call(allSections, activePromptKey)) targetKeys = [activePromptKey];
         } else if (!targetKeys.length && Object.prototype.hasOwnProperty.call(allSections, aiScope.value)) {
             targetKeys = [aiScope.value];
         }
+        const isExtendedEvolvingRequest = narrativeRequest !== null
+            && requestMode === "fl2va"
+            && project.extended_conditioning_policy === "evolving";
+        const isExtendedContinuousRequest = narrativeRequest !== null
+            && requestMode === "fl2va"
+            && project.extended_conditioning_policy === "continuous";
         const direction = narrativeRequest !== null
-            ? `Turn this REQUEST into the selected MiniMax global fields. Preserve supplied dialogue verbatim; do not invent a transcript. REQUEST: ${String(narrativeRequest).trim()}`
+            ? (isExtendedEvolvingRequest
+                ? `Turn this REQUEST into MiniMax H3 FL2VA Extended Evolving conditioning. Treat every timestamp supplied by the user as immutable. ACTION and SHOT_LIST must be IDENTICAL canonical timelines with EXACTLY ONE PHASE PER LINE. EVERY LINE MUST START WITH ITS TIMESTAMP OR RANGE; NEVER PLACE [ONSET ONCE], [RESOLVED STATE] OR [THEN SUSTAIN] BEFORE THE TIMESTAMP. If the REQUEST begins with untimed action before its first explicit timestamp T, encode that opening phase as “0-T seconds: ...”. Every later phase boundary must come only from timestamps explicitly supplied by the user. Use ONLY these exact tags: [ONSET ONCE], [RESOLVED STATE], [THEN SUSTAIN]. Never output [ONSET_once], [SUSTAIN], or tag aliases. For any transient event followed by continued behavior, put the transient event only in ONSET ONCE and the continuing positive state only in THEN SUSTAIN. Example grammar: “0-T seconds: [ONSET ONCE] <single event>; [THEN SUSTAIN] <ongoing observable state>”. RESOLVED STATE is optional and, when used, must state the immediate positive post-event state. RESOLVED STATE and THEN SUSTAIN must NEVER repeat, negate, or refer back to the completed onset event: never write phrases such as “after the scream has finished”, “without repeating the scream”, “do not repeat”, or “before N seconds”. Keep stable visual information only in BOUNDARY_FRAMES, REFERENCE_USE, IDENTITY_CONTINUITY_LOCKS, LIGHT_AND_IMAGE and CAMERA. Keep all actions, vocal events, performance changes and time-dependent sound only inside ACTION and SHOT_LIST. A breath, brief vocalization, glance, impact, gesture, stop, turn, opening/closing action, or performance start is an ONSET ONCE when it initiates a longer phase. Use positive observable H3 language. The only normal negative wording allowed is an explicit music absence such as “No score” in NON_DIEGETIC_MUSIC. REQUEST: ${String(narrativeRequest).trim()}`
+                : isExtendedContinuousRequest
+                    ? `Turn this REQUEST into one MiniMax H3 FL2VA CONTINUOUS prompt. Preserve exactly the single action requested by the user and make that same action continue uninterrupted through the complete take. Do not create timestamps, phases, shot divisions, local prompts, additional actions or editorial cuts. Put the action in ACTION and keep identity, environment and camera continuity in their proper fields; the Prompter will compose all of it into GLOBAL only. Preserve supplied dialogue verbatim and do not invent a transcript. REQUEST: ${String(narrativeRequest).trim()}`
+                    : `Turn this REQUEST into the selected MiniMax global fields. Preserve supplied dialogue verbatim; do not invent a transcript. REQUEST: ${String(narrativeRequest).trim()}`)
             : aiDirection.value.trim();
         if (narrativeRequest !== null && !String(narrativeRequest).trim()) { aiStatus.textContent = "Write your narrative REQUEST first."; return; }
         const hasRoughText = targetKeys.some((key) => String(allSections[key] || "").trim());
@@ -1575,15 +2170,16 @@ function mountPrompter(node) {
             aiStatus.textContent = "Write a rough idea in the selected field or in User direction first.";
             return;
         }
-        project.ai_direction = direction;
-        project.ai_scope = aiScope.value;
-        persistAI();
-        commit();
-        node._iamccsPromptAiBusy = true;
-        const finishBusy = beginAiBusy(triggerButton);
-        aiStatus.className = "iamccs-pr-ai-status";
-        aiStatus.textContent = `Sending ${targetKeys.join(", ")} to ${aiProvider.options[aiProvider.selectedIndex]?.text || aiProvider.value}.`;
+        let finishBusy = () => {};
         try {
+            project.ai_direction = direction;
+            project.ai_scope = aiScope.value;
+            persistAI();
+            commit();
+            node._iamccsPromptAiBusy = true;
+            finishBusy = beginAiBusy(triggerButton);
+            aiStatus.className = "iamccs-pr-ai-status";
+            aiStatus.textContent = `Sending ${targetKeys.join(", ")} to ${aiProvider.options[aiProvider.selectedIndex]?.text || aiProvider.value}.`;
             const imagePayload = await buildAIImagePayload();
             const response = await api.fetchApi("/iamccs/prompter/rewrite", {
                 method: "POST",
@@ -1604,18 +2200,66 @@ function mountPrompter(node) {
             });
             const data = await response.json();
             if (!response.ok || !data?.ok) throw new Error(data?.error || `HTTP ${response.status}`);
+            if (!targetKeys.some(key => String(data.sections?.[key] || "").trim()))
+                throw new Error("The model returned no H3 prompt fields. Choose another model and retry.");
             if (project.task_mode !== requestMode || (narrativeRequest !== null && project.request !== narrativeRequest) || targetKeys.some(key => String(project.sections?.[key] || "").trim() !== allSections[key]))
                 throw new Error("The mode or target boxes changed while AI was working. Your edits were kept; request a new rewrite.");
-            snapshotProject(narrativeRequest !== null ? "AI request rewrite" : "AI field rewrite");
+            const rewrittenSections = { ...project.sections };
             Object.entries(data.sections || {}).forEach(([key, value]) => {
-                if (targetKeys.includes(key)) project.sections[key] = String(value || "");
+                if (targetKeys.includes(key)) rewrittenSections[key] = String(value || "");
             });
+            if (isExtendedEvolvingRequest) {
+                const cleanedGlobal = sanitizeEvolvingGlobalSections(rewrittenSections);
+                Object.assign(rewrittenSections, cleanedGlobal);
+            }
+            let timed = "";
+            if (isExtendedEvolvingRequest) {
+                const rawTimed = String(rewrittenSections.action || rewrittenSections.shot_list || narrativeRequest || "").trim();
+                if (!rawTimed) throw new Error("The AI response has no readable action timeline. Nothing was injected.");
+                const shotboard = shotboardsForPrompter(node)[0];
+                let duration = 0;
+                try {
+                    const timeline = JSON.parse(String(widget(shotboard, "timeline_data")?.value || "{}"));
+                    duration = Number(timeline.duration_seconds || widget(shotboard, "duration_seconds")?.value || 0);
+                } catch {}
+                if (!(duration > 0)) {
+                    const suppliedSeconds = extractExplicitEvolvingSeconds(narrativeRequest).map((item) => item.value);
+                    duration = Math.max(1, ...suppliedSeconds, ...extractExplicitEvolvingSeconds(rawTimed).map((item) => item.value));
+                }
+                timed = validateCanonicalEvolvingTimeline(rawTimed, duration);
+                validateEvolvingTimelineAgainstRequest(narrativeRequest, timed);
+                rewrittenSections.action = timed;
+                rewrittenSections.shot_list = timed;
+            }
+            snapshotProject(narrativeRequest !== null ? "AI request rewrite" : "AI field rewrite");
+            project.sections = rewrittenSections;
+            project.final_prompt_override_enabled = false;
+            project.final_prompt_override = "";
+            project.final_local_prompt_override_enabled = false;
+            project.final_local_prompt_override = "";
+            if (isExtendedEvolvingRequest) {
+                project.evolving_timeline = timed;
+                project.sections.action = timed;
+                project.sections.shot_list = timed;
+                project.local_prompts = [];
+            } else if (isExtendedContinuousRequest) {
+                // Continuous owns one user-authored action in GLOBAL. Remove
+                // any stale timeline/local material left by Default/Evolving.
+                project.sections.shot_list = "";
+                project.evolving_timeline = "";
+                project.local_prompts = [];
+            }
             renderControls();
             renderSections();
+            renderPreview();
             commit();
             aiStatus.className = "iamccs-pr-ai-status ok";
             const visualCount = Number(data.report?.visual_references?.length || 0);
-            aiStatus.textContent = `Improved: ${(data.report?.rewritten_sections || Object.keys(data.sections || {})).join(", ")}${visualCount ? ` with ${visualCount} visual reference(s)` : ""}. Review, then inject.`;
+            aiStatus.textContent = isExtendedEvolvingRequest
+                ? `Timed prompts ready${visualCount ? ` with ${visualCount} visual reference(s)` : ""}. Review them, then press INJECT → SHOTBOARD to create the Extended Prompt blocks.`
+                : isExtendedContinuousRequest
+                    ? `Continuous action ready${visualCount ? ` with ${visualCount} visual reference(s)` : ""}. It will be injected in GLOBAL only, without timed or local divisions.`
+                : `Improved: ${(data.report?.rewritten_sections || Object.keys(data.sections || {})).join(", ")}${visualCount ? ` with ${visualCount} visual reference(s)` : ""}. Review, then inject.`;
         } catch (error) {
             aiStatus.className = "iamccs-pr-ai-status error";
             aiStatus.textContent = `Rewrite failed: ${error?.message || error}`;
@@ -1695,7 +2339,7 @@ function mountPrompter(node) {
                 node._iamccsPromptAiBusy=true; const done=beginAiBusy(ai);
                 try {
                     persistAI();
-                    const response=await api.fetchApi("/iamccs/prompter/rewrite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:aiProvider.value,base_url:aiBaseUrl.value.trim(),model:aiModel.value.trim(),api_key:aiApiKey.value,task_mode:requestMode,sections:{[key]:rough},target_keys:[key],user_direction:`Rewrite only LOCAL slot ${row.slot}. Keep its active speaker and supplied dialogue unchanged; do not write a new global story. Global context: ${composePrompt(project).slice(0,3500)}`,images:await buildAIImagePayload(),temperature:Number(aiTemperature.value||0.35),timeout:180})});
+                    const response=await api.fetchApi("/iamccs/prompter/rewrite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:aiProvider.value,base_url:aiBaseUrl.value.trim(),model:aiModel.value.trim(),api_key:aiApiKey.value,task_mode:requestMode,sections:{[key]:rough},target_keys:[key],user_direction:`Rewrite only LOCAL slot ${row.slot}. Keep its active speaker and supplied dialogue unchanged; do not write a new global story. Global context: ${generatedGlobalPrompt(project).slice(0,3500)}`,images:await buildAIImagePayload(),temperature:Number(aiTemperature.value||0.35),timeout:180})});
                     const result=await response.json(); if(!response.ok||!result.ok) throw new Error(result.error||`HTTP ${response.status}`);
                     if(project.task_mode!==requestMode || row.prompt!==rough) throw new Error("Your box changed while AI was working; your edit was kept.");
                     if(!result.sections?.[key]) throw new Error("No local prompt returned.");
@@ -1714,10 +2358,10 @@ function mountPrompter(node) {
             const previousMode = project.task_mode;
             if (previousMode !== key) snapshotProject(`mode change ${previousMode} → ${key}`);
             project.task_mode = key;
-            if (key === "multi_shot_lipsync" && previousMode !== key) {
-                project.sections = { ...project.sections, ...EXAMPLES.multi_shot_lipsync };
-                project.project_name = "Long Multi-Shot Guided Cuts Demo";
-            }
+            project.final_prompt_override_enabled = false;
+            project.final_prompt_override = "";
+            project.final_local_prompt_override_enabled = false;
+            project.final_local_prompt_override = "";
             renderControls();
             renderSections();
             commit();
@@ -1731,10 +2375,39 @@ function mountPrompter(node) {
         };
     });
     injectBtn.onclick = () => {
+        const isFl2va = canonicalMode(project.task_mode) === "fl2va";
+        const continuousOnly = isFl2va && project.extended_conditioning_policy === "continuous";
+        let finalGlobalPrompt = effectiveGlobalPrompt(project).trim();
+        let finalLocalPrompt = continuousOnly ? "" : effectiveLocalPrompt(project).trim();
+        if (project.extended_conditioning_policy === "evolving" && isFl2va) {
+            try {
+                validateEvolvingGlobalPrompt(finalGlobalPrompt);
+                const shotboard = shotboardsForPrompter(node)[0];
+                let duration = 0;
+                try {
+                    const timeline = JSON.parse(String(widget(shotboard, "timeline_data")?.value || "{}"));
+                    duration = Number(timeline.duration_seconds || widget(shotboard, "duration_seconds")?.value || 0);
+                } catch {}
+                if (!(duration > 0)) duration = Math.max(1, ...extractExplicitEvolvingSeconds(finalLocalPrompt).map((item) => item.value));
+                finalLocalPrompt = validateCanonicalEvolvingTimeline(finalLocalPrompt, duration);
+                if (String(project.request || "").trim()) validateEvolvingTimelineAgainstRequest(project.request, finalLocalPrompt);
+                // The editable FINAL LOCAL/TIMELINE box is the exact schedule authority.
+                // Canonicalization is visible immediately so what the filmmaker reads is Queue Truth.
+                project.final_local_prompt_override_enabled = true;
+                project.final_local_prompt_override = finalLocalPrompt;
+                localPreview.value = finalLocalPrompt;
+                project.evolving_timeline = finalLocalPrompt;
+                project.sections.action = finalLocalPrompt;
+                project.sections.shot_list = finalLocalPrompt;
+            } catch (error) {
+                injectStatus.className = "iamccs-pr-inject-status error";
+                injectStatus.textContent = `Evolving validation failed: ${error?.message || error}`;
+                return;
+            }
+        }
         commit();
-        const prompt = composePrompt(project);
-        const activeLocals = (project.local_prompts || []).filter(row => row.enabled !== false && String(row.prompt || "").trim());
-        if (!prompt.trim() && !activeLocals.length) {
+        const activeLocals = continuousOnly ? [] : (project.local_prompts || []).filter(row => row.enabled !== false && String(row.prompt || "").trim());
+        if (!finalGlobalPrompt && !finalLocalPrompt && !activeLocals.length) {
             injectStatus.className = "iamccs-pr-inject-status error";
             injectStatus.textContent = "Nothing injected: fill at least one prompt section.";
             return;
@@ -1769,33 +2442,68 @@ function mountPrompter(node) {
                 ...aiVisualFiles.map((item) => item.path),
             ].map((value) => String(value || "").trim()).filter(Boolean);
             if (visualPaths.length) setWidget(shotboard, "image_paths", JSON.stringify([...new Set(visualPaths)]));
-            const targetIsGlobal = project.injection_target === "global";
-            const localFallbackKeys = {
-                t2va:["shot_list","acting","dialogue","camera"],
-                i2va:["shot_list","acting","dialogue","camera"],
-                fl2va:["action","shot_list","acting","dialogue","camera"],
-                ref2va:["detailed_description"],
-                v2va_object_swap:["v2va_interval_edits"],
-                audio_driven:["audio_timed_performance","audio_dialogue_map","audio_visual_sync"],
-                multi_shot_lipsync:["multishot_shot_plan","multishot_dialogue_map","multishot_lip_sync"],
-            };
-            const localFallback = (localFallbackKeys[project.task_mode] || ["acting","camera"])
-                .map(key => String(project.sections?.[key] || "").trim()).filter(Boolean).join("\n");
-            const result = targetIsGlobal && prompt.trim()
-                ? shotboard._iamccsMiniMaxInjectPrompt({prompt,target:"global",mergePolicy:project.merge_policy})
-                : (!activeLocals.length && (localFallback || prompt.trim())
-                    ? shotboard._iamccsMiniMaxInjectPrompt({prompt:localFallback || prompt,target:project.injection_target,createMissing:true,taskMode:project.task_mode,mergePolicy:project.merge_policy})
-                    : null);
+            const boardMode = String(widget(shotboard, "task_mode")?.value || "").toLowerCase();
+            const evolvingExtended = isFl2va
+                && project.extended_conditioning_policy === "evolving"
+                && boardMode === "fl2va_extended_av";
+            // DEFAULT keeps the normal GLOBAL/LOCAL authoring contract.
+            // CONTINUOUS deliberately folds the one authored action into GLOBAL.
+            // EVOLVING keeps timed actions in its dedicated schedule.
+            const queuePrompt = finalGlobalPrompt;
+            const injectedResults = [];
+            if (isFl2va) {
+                if (queuePrompt) injectedResults.push(shotboard._iamccsMiniMaxInjectPrompt({
+                    prompt:queuePrompt,target:"global",mergePolicy:project.merge_policy
+                }));
+            } else {
+                const localFallbackKeys = {
+                    t2va:["shot_list","acting","dialogue","camera"],
+                    i2va:["shot_list","acting","dialogue","camera"],
+                    ref2va:["detailed_description"],
+                    v2va_object_swap:["v2va_interval_edits"],
+                    audio_driven:["audio_timed_performance","audio_dialogue_map","audio_visual_sync"],
+                    multi_shot_lipsync:["multishot_shot_plan","multishot_dialogue_map","multishot_lip_sync"],
+                };
+                const localFallback = (localFallbackKeys[project.task_mode] || ["acting","camera"])
+                    .map(key => String(project.sections?.[key] || "").trim()).filter(Boolean).join("\n");
+                const targetIsGlobal = project.injection_target === "global";
+                if (targetIsGlobal && queuePrompt) injectedResults.push(shotboard._iamccsMiniMaxInjectPrompt({prompt:queuePrompt,target:"global",mergePolicy:project.merge_policy}));
+                else if (!activeLocals.length && (localFallback || queuePrompt)) injectedResults.push(shotboard._iamccsMiniMaxInjectPrompt({prompt:localFallback || queuePrompt,target:project.injection_target,createMissing:true,taskMode:project.task_mode,mergePolicy:project.merge_policy}));
+            }
+
             // A Shotboard rebuild can legitimately replace segment ids while
-            // preserving the visible chronological slots.  Treat the stable id
-            // as the first choice, but always pass the visible one-based slot as
-            // the deterministic fallback.  This keeps LOCAL prompts attached to
-            // the boxes the filmmaker sees instead of failing on a stale id.
-            const localResults = activeLocals.map(row =>
+            // preserving the visible chronological slots. Treat the stable id
+            // as first choice and the visible one-based slot as fallback.
+            const localResults = evolvingExtended ? [] : activeLocals.map(row =>
                 shotboard._iamccsMiniMaxInjectPrompt({prompt:row.prompt,target:`local_${Math.max(1, Number(row.slot) || 1)}`,slotId:row.slot_id || "",strictSlot:true,createMissing:true,taskMode:project.task_mode,mergePolicy:project.merge_policy}));
-            if (!result && !localResults.length) throw new Error("LOCAL target selected: fill or enable at least one LOCAL slot action.");
+            injectedResults.push(...localResults);
+            if (isFl2va && !continuousOnly && !evolvingExtended && !activeLocals.length && finalLocalPrompt) {
+                const requestedLocal = /^local_[1-9][0-9]*$/i.test(String(project.injection_target || ""))
+                    ? String(project.injection_target).toLowerCase()
+                    : "local_1";
+                injectedResults.push(shotboard._iamccsMiniMaxInjectPrompt({
+                    prompt:finalLocalPrompt,target:requestedLocal,createMissing:true,taskMode:"fl2va",mergePolicy:project.merge_policy
+                }));
+            }
+            if (!injectedResults.length && !evolvingExtended) throw new Error("No effective GLOBAL or LOCAL prompt is available for injection.");
+            let conditioningResult = null;
+            if (project.extended_conditioning_policy === "default") {
+                conditioningResult = typeof shotboard._iamccsMiniMaxSetConditioningSchedule === "function"
+                    ? shotboard._iamccsMiniMaxSetConditioningSchedule({policy:"default"}) : null;
+            } else if (boardMode === "fl2va_extended_av") {
+                if (typeof shotboard._iamccsMiniMaxSetConditioningSchedule !== "function") throw new Error("Reload ComfyUI so the Extended AV conditioning bridge is available.");
+                let timeline = {};
+                try { timeline = JSON.parse(String(widget(shotboard, "timeline_data")?.value || "{}")); } catch {}
+                const duration = Number(timeline.duration_seconds || widget(shotboard, "duration_seconds")?.value || 0);
+                const sourceText = project.extended_conditioning_policy === "evolving" ? finalLocalPrompt : "";
+                const beats = project.extended_conditioning_policy === "evolving" ? parseEvolvingTimeline(sourceText, duration) : [];
+                conditioningResult = shotboard._iamccsMiniMaxSetConditioningSchedule({
+                    policy:project.extended_conditioning_policy, beats, globalContext:queuePrompt, sourceText
+                });
+            }
             injectStatus.className = "iamccs-pr-inject-status ok";
-            injectStatus.textContent = `Injected into ${[result,...localResults].filter(Boolean).map(r => r.actualTarget).join(", ")}.${visualPaths.length ? ` ${visualPaths.length} visual path(s) synchronized to Shotboard.` : ""} Shotboard visible boxes are now the only Queue truth; Queue was not started.`;
+            const injectedTargets = injectedResults.filter(Boolean).map(r => r.actualTarget);
+            injectStatus.textContent = `Injected into ${injectedTargets.join(", ") || "Extended timed blocks"}.${conditioningResult ? ` Extended AV ${conditioningResult.policy.toUpperCase()} · ${conditioningResult.eventCount} timed event(s).` : ""}${visualPaths.length ? ` ${visualPaths.length} visual path(s) synchronized to Shotboard.` : ""} The editable FINAL GLOBAL/LOCAL text and visible Shotboard boxes are now Queue truth; Queue was not started.`;
             injectBtn.textContent = "INJECTED ✓";
             setTimeout(() => { injectBtn.textContent = "INJECT → SHOTBOARD"; }, 1200);
         } catch (error) {
@@ -1827,6 +2535,15 @@ function mountPrompter(node) {
         injectStatus.className = "iamccs-pr-inject-status ok";
         injectStatus.textContent = "Previous Prompter state restored. Press again to toggle back; Queue was not started.";
     };
+    resetFinalBtn.onclick = () => {
+        snapshotProject("reset final prompt to generated");
+        project.final_prompt_override_enabled = false;
+        project.final_prompt_override = "";
+        project.final_local_prompt_override_enabled = false;
+        project.final_local_prompt_override = "";
+        renderPreview();
+        commit();
+    };
     saveBtn.onclick = () => { commit(); downloadProject(project); };
     loadBtn.onclick = () => fileInput.click();
     fileInput.onchange = async () => {
@@ -1846,7 +2563,11 @@ function mountPrompter(node) {
         }
     };
     copyBtn.onclick = async () => {
-        const prompt = composePrompt(project);
+        const globalPrompt = effectiveGlobalPrompt(project);
+        const localPrompt = effectiveLocalPrompt(project);
+        const prompt = canonicalMode(project.task_mode) === "fl2va" && localPrompt
+            ? `GLOBAL PROMPT:\n${globalPrompt}\n\nLOCAL PROMPT / TIMELINE:\n${localPrompt}`
+            : globalPrompt;
         try {
             await navigator.clipboard.writeText(prompt);
             copyBtn.textContent = "Copied";
@@ -1864,13 +2585,19 @@ function mountPrompter(node) {
         if (!confirm(`Clear all ${MODE_META[project.task_mode].label} boxes?`)) return;
         snapshotProject("clear mode");
         MODE_META[project.task_mode].sections.forEach(([key]) => { project.sections[key] = ""; });
+        project.final_prompt_override_enabled = false;
+        project.final_prompt_override = "";
+        project.final_local_prompt_override_enabled = false;
+        project.final_local_prompt_override = "";
         renderSections();
+        renderPreview();
         commit();
     };
 
     const domWidget = node.addDOMWidget("IAMCCS Prompter", "iamccs_prompter", root, { serialize: false });
-    domWidget.computeSize = () => [980, 740];
-    node.size = [980, 790];
+    const PROMPTER_NODE_SIZE = [980, 790];
+    domWidget.computeSize = () => [960, 720];
+    node.size = PROMPTER_NODE_SIZE.slice();
     node.resizable = false;
 
     // Edits already commit on input. Do not flush UI state during serialization:
@@ -1882,6 +2609,11 @@ function mountPrompter(node) {
         project = safeProject(widget(node, "project_data")?.value);
         renderControls();
         renderSections();
+        // Saved workflows may retain an old oversized node rectangle. Keep the
+        // DOM surface flush with the normal node frame instead of leaving a
+        // large empty canvas-colored gutter around it.
+        this.size = PROMPTER_NODE_SIZE.slice();
+        this.setDirtyCanvas?.(true, true);
         return result;
     };
 

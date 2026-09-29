@@ -1,4 +1,31 @@
+# Phase B1 — Audio Boundary Polish + ENGINES + Automatic Same-Slot EXTEND (2026-09-27)
+
+- Added an audio-only EXTEND boundary polish after the proven hidden-child-context Soft-AV handover. The first visible child sample is matched to the completed parent/handover endpoint and the correction decays over a short configurable cosine-squared window; no samples are inserted/removed and video is untouched.
+- Added Settings PRO AUDIO controls: Soft-AV Handover (default 15 ms), Boundary Polish (default 3 ms) and Polish Strength (default 1.0).
+- Renamed the mode-specific rail folder to ENGINES, moved it after the numbered production panels, and grouped AHEAD CONTROL ROOM, LONG TAKE · EXTEND, SAVED TAKE · CONTINUATION, REFMOD, CONTROLNET, SAM3 SWAP, FACE REFINE and SCOUT under the purple engine rail.
+- Phase B automatic duration resolver: one authored image/prompt slot longer than 15 s automatically compiles to EXTEND-style MASKED+EXACT. T2V/I2V/FL2V roots use the proven T2VA+guide root; REF2VA keeps REF2VA on the root and uses T2VA for continuation children. Multi-shot timelines are not collapsed into one long take.
+- Pianosequenza Shotboard no longer treats 15 s as an editorial drag limit; slots can extend freely and show a 15 s boundary plus an EXTENDED · AUTO / MASKED + EXACT region.
+- Verified the existing long-form continuous-audio mode and promoted its user-facing name to LONGVID · MULTI-ANGLE LIPSYNC: multiple positioned image guides share one rebased locked AudioBoard performance across technical H3 windows.
+- LongVid EXTEND-style junction migration is intentionally staged for Phase B2: locked AudioBoard lip-sync uses a zero audio mask and must receive an exact-video-only junction, while native-audio LongVid can use full AV EXTEND. GUIDED AV LOOP already owns one persistent AV latent and must not receive a second junction authority.
+
+# Phase 9.3 — EXTEND Soft-AV Rate Parity (2026-09-27)
+
+- Fixed R38B EXTEND segments silently reverting to legacy 48 kHz async-resampled audio after the native checkpoint.
+- R38B now preserves EXTEND native float PCM/sample-rate in native, upscale and RTX finish paths.
+- Added PyAV hidden-context rate conformance as compatibility fallback for older/mixed segments.
+- Video MASKED+EXACT EXTEND junction remains unchanged.
+- Expected smoke invariant: `soft_av=2 | fallback_declick=0` for a 3-take / 2-seam render.
+
 # IAMCCS Nodes - Changelog
+
+## 2026-09-27 - Phase 9.2 - EXTEND hidden-context Soft AV + Settings PRO mode-control rail
+
+- EXTEND video junction remains MASKED + EXACT with hidden pinned-head trim and direct butt join.
+- Added audio-only hidden-context Soft AV handover: each continuation child preserves the final milliseconds of its hidden audio head before trim; the outgoing parent tail converges into that time-corresponding child context with qsin/equal-power gains.
+- Removed the need to dip EXTEND seams to digital silence when hidden context is available; Phase 9.1 5 ms cos^2 de-click remains a per-seam fallback only.
+- Mirrored EXTEND hidden audio context next to R38B delivery segments so R38B final masters consume the same Soft AV seam source.
+- Added explicit EXTEND contract metadata `soft_audio_handover_ms=15.0` and `audio_master_policy=hidden_context_soft_av`.
+- Refactored Settings PRO left rail: LONG TAKE · EXTEND, SAVED TAKE · CONTINUATION and REFMOD now live under a collapsible, visually distinct MODE CONTROLS folder.
 
 ## 2026-09-19 - version 1.5.5 - IAMCCS MiniMax H3 Engine
 

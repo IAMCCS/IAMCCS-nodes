@@ -5,6 +5,8 @@ const path = require('node:path');
 const root = path.join(__dirname, '..');
 const read = name => fs.readFileSync(path.join(root, 'web', name), 'utf8');
 const settings = read('iamccs_h3_settings_pro_ui.js');
+assert.match(settings, /id: "control"[\s\S]*?"h3_controlnet_dwpose_torch_gpu"/);
+assert.match(settings, /DWPOSE · USE TORCH GPU/);
 const proRestore = settings.slice(settings.indexOf('function restoreNamedValues('), settings.indexOf('function serializeNamedValues('));
 const migratedPro = {widgets:[{name:'h3_pixel_tiled_overlap',value:''},{name:'h3_continuation_context_frames',value:'fixed_per_generation'}]};
 vm.runInNewContext(proRestore + 'restoreNamedValues(node, info, nodeData)', {
@@ -73,6 +75,7 @@ const autoContext = vm.createContext({
   setValue:(owner,key,value)=>{const item=(owner.widgets||[]).find(entry=>entry.name===key);if(item)item.value=value;},
   shotboardMode:()=> 'longvid_guides',document:{dispatchEvent(){}},CustomEvent:class{},app:{graph:{change(){}}},alert:message=>{throw Error(message)},Date
 });
+vm.runInContext(settings.match(/const HIDDEN_MODES = .*;/)[0], autoContext);
 vm.runInContext(autoImportCode+'importSettingsFromShotboard(node)',autoContext);
 assert.equal(autoNodeValues.width,1344);
 assert.equal(autoNodeValues.steps,8);
@@ -170,7 +173,7 @@ const inject = prompter.slice(prompter.indexOf('    injectBtn.onclick = () => {'
 for (const target of ['global','local_1','local_auto']) {
   const calls=[]; const project={injection_target:target,task_mode:'t2va',sections:{scene:'scene only'},local_prompts:[],merge_policy:'replace'};
   const shotboard={_iamccsMiniMaxInjectPrompt:args=>{calls.push(args);return{actualTarget:args.target}}};
-  vm.runInNewContext(inject+'injectBtn.onclick()',{injectBtn:{},injectStatus:{},project,commit(){},composePrompt:()=> 'scene only',shotboardsForPrompter:()=>[shotboard],node:{},aiVisualFiles:[],setTimeout(){}});
+  vm.runInNewContext(inject+'injectBtn.onclick()',{injectBtn:{},injectStatus:{},project,commit(){},canonicalMode:value=>String(value||'').toLowerCase(),effectiveGlobalPrompt:()=> 'scene only',effectiveLocalPrompt:()=> '',composePrompt:()=> 'scene only',shotboardsForPrompter:()=>[shotboard],node:{},aiVisualFiles:[],widget:()=>({value:''}),setTimeout(){}});
   assert.equal(calls.length,1,target); assert.equal(calls[0].target,target); assert.equal(calls[0].prompt,'scene only');
 }
 console.log('UI regression tests OK: Settings PRO full-monitor editor, Prompter field mount and audio partial queue, AUTO Shotboard import, cache group scope, asset-family guard, 5 recipes, 4 Turbo step contracts, linked collision both directions, 3 injection targets');

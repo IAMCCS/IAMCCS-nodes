@@ -25,7 +25,7 @@ from typing import Any
 SUPERNODE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX"
 CATEGORY = "IAMCCS/MiniMax H3/Prompting"
 PROJECT_SCHEMA = "iamccs.minimax_h3.prompter_project"
-PROJECT_VERSION = 4
+PROJECT_VERSION = 7
 H3_ABSOLUTE_CHAR_LIMIT = 7000
 AI_IMAGE_LIMIT = 4
 AI_IMAGE_MAX_BYTES = 16 * 1024 * 1024
@@ -35,6 +35,12 @@ AUDIO_HANDOFF_AUTHORING_RULE = (
     "reserve the final 1.00 second for only the ambience and sounds requested by the user. "
     "Every following chunk must also reserve its first 1.00 second for that same ambience and continued physical action before any new line starts. "
     "Do not impose this restriction on the final or only chunk."
+)
+EVOLVING_DEMO_TIMELINE = (
+    "0-5 seconds: the woman walks steadily through the city, looking ahead.\n"
+    "At 5 seconds she notices a red umbrella and slows down while turning her gaze toward it.\n"
+    "At 10 seconds she stops beside the umbrella, reaches for it, and smiles.\n"
+    "At 15 seconds she opens the umbrella and continues walking as the camera gently follows."
 )
 TASK_MODE_ALIASES = {
     "v2v_object_swap": "v2va_object_swap",
@@ -198,9 +204,16 @@ def default_project() -> dict[str, Any]:
         "injection_target": "global",
         "writing_mode": "guided",
         "merge_policy": "replace",
+        "extended_conditioning_policy": "default",
+        "conditioning_mode_explicit": True,
+        "evolving_timeline": "",
         "ai_direction": "",
         "ai_scope": "active_field",
         "ai_visual_roles": {},
+        "final_prompt_override_enabled": False,
+        "final_prompt_override": "",
+        "final_local_prompt_override_enabled": False,
+        "final_local_prompt_override": "",
         "audio_transcript": "",
         "audio_dialogue_tag": "",
         # Examples remain available through Load Example, but a newly added
@@ -254,10 +267,90 @@ def _safe_project(value: Any) -> dict[str, Any]:
     project["ai_scope"] = str(project.get("ai_scope") or "active_field")
     visual_roles = project.get("ai_visual_roles")
     project["ai_visual_roles"] = visual_roles if isinstance(visual_roles, dict) else {}
+    source_version = int(source.get("schema_version") or 0)
     project["schema"] = PROJECT_SCHEMA
     project["schema_version"] = PROJECT_VERSION
     project["task_mode"] = _normalise_task_mode(project.get("task_mode"))
+    policy = str(project.get("extended_conditioning_policy") or "default").strip().lower()
+    if policy == "evolving":
+        project["extended_conditioning_policy"] = "evolving"
+    elif policy == "continuous" and (source_version >= PROJECT_VERSION or project.get("conditioning_mode_explicit") is True):
+        project["extended_conditioning_policy"] = "continuous"
+    else:
+        project["extended_conditioning_policy"] = "default"
+    project["conditioning_mode_explicit"] = source_version >= PROJECT_VERSION or project.get("conditioning_mode_explicit") is True
+    project["evolving_timeline"] = str(project.get("evolving_timeline") or "")
+    project["final_prompt_override_enabled"] = bool(project.get("final_prompt_override_enabled"))
+    project["final_prompt_override"] = str(project.get("final_prompt_override") or "")
+    project["final_local_prompt_override_enabled"] = bool(project.get("final_local_prompt_override_enabled"))
+    project["final_local_prompt_override"] = str(project.get("final_local_prompt_override") or "")
     return project
+
+
+def _parse_seconds_token(value: str) -> float:
+    token = str(value or "").strip().replace(",", ".")
+    if ":" in token:
+        minutes, seconds = token.rsplit(":", 1)
+        return float(minutes) * 60.0 + float(seconds)
+    return float(token)
+
+
+def parse_evolving_timeline(value: Any, *, duration_seconds: float | None = None, fps: int = 24) -> list[dict[str, Any]]:
+    """Parse readable timed actions into the H3 evolving beat contract."""
+    text = str(value or "").strip()
+    if not text:
+        return []
+    number = r"(?:\d+(?::\d+(?:[.,]\d+)?)?|\d+(?:[.,]\d+)?)"
+    range_re = re.compile(
+        rf"^\s*(?:(?:from|da)\s+)?(?P<start>{number})\s*(?:sec(?:ond(?:s|i)?)?|s)?\s*"
+        rf"(?:-|–|—|to|a|fino\s+a)\s*(?P<end>{number})\s*(?:sec(?:ond(?:s|i)?)?|s)?\s*[:;,\-]?\s*(?P<action>.+)$",
+        re.IGNORECASE,
+    )
+    point_re = re.compile(
+        rf"^\s*(?:(?:at|a|from|da|dal\s+secondo)\s+)?(?P<start>{number})\s*"
+        rf"(?:sec(?:ond(?:s|i)?)?|s)\s*[:;,\-]?\s*(?P<action>.+)$",
+        re.IGNORECASE,
+    )
+    parsed: list[dict[str, Any]] = []
+    for line_number, raw_line in enumerate(text.splitlines(), 1):
+        line = re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", raw_line).strip()
+        if not line:
+            continue
+        match = range_re.match(line) or point_re.match(line)
+        if not match:
+            raise ValueError(
+                f"Evolving timeline line {line_number} has no readable second marker. "
+                "Use '0-5 seconds: action' or 'At 5 seconds action'."
+            )
+        start = _parse_seconds_token(match.group("start"))
+        end_token = match.groupdict().get("end")
+        end = _parse_seconds_token(end_token) if end_token else None
+        action = str(match.group("action") or "").strip(" .:-")
+        if start < 0 or (end is not None and end <= start) or not action:
+            raise ValueError(f"Invalid evolving event at line {line_number}.")
+        parsed.append({"start_seconds": start, "end_seconds": end, "action": action, "line": line_number})
+    parsed.sort(key=lambda item: (item["start_seconds"], item["line"]))
+    limit = float(duration_seconds) if duration_seconds is not None else None
+    beats: list[dict[str, Any]] = []
+    for index, item in enumerate(parsed):
+        start = float(item["start_seconds"])
+        following = float(parsed[index + 1]["start_seconds"]) if index + 1 < len(parsed) else None
+        end = item["end_seconds"] if item["end_seconds"] is not None else following
+        if end is None:
+            end = limit
+        if end is None:
+            raise ValueError("The final Evolving event needs an end second or the Shotboard duration.")
+        if limit is not None:
+            if start >= limit:
+                raise ValueError(f"Evolving event at {start:g}s starts outside the {limit:g}s Shotboard duration.")
+            end = min(float(end), limit)
+        if float(end) <= start:
+            raise ValueError(f"Evolving event at {start:g}s has no positive duration.")
+        beats.append({
+            "id": f"beat_{index + 1}", "start_frame": round(start * fps),
+            "end_frame": round(float(end) * fps), "action": item["action"], "source_line": item["line"],
+        })
+    return beats
 
 
 def _normalise_heading(value: str) -> str:
@@ -292,6 +385,184 @@ def _parse_assistant_draft(value: str) -> dict[str, str]:
         sections["detailed_description"] = text
         sections["scene"] = text
     return sections
+
+
+def _canonical_evolving_tag_text(value: Any) -> str:
+    text = str(value or "")
+    text = re.sub(r"\[ONSET(?:_|\s+)ONCE\]", "[ONSET ONCE]", text, flags=re.I)
+    text = re.sub(r"\[RESOLVED(?:_|\s+)STATE\]", "[RESOLVED STATE]", text, flags=re.I)
+    text = re.sub(r"\[(?:THEN(?:_|\s+))?SUSTAIN\]", "[THEN SUSTAIN]", text, flags=re.I)
+    return text
+
+
+def _evolving_gerund(verb: str) -> str:
+    word = str(verb or "").strip().lower()
+    if not word:
+        return ""
+    if word.endswith("ie"):
+        return f"{word[:-2]}ying"
+    if word.endswith("e") and not word.endswith("ee"):
+        return f"{word[:-1]}ing"
+    if word in {"run", "sit", "stop", "swim"}:
+        return f"{word}{word[-1]}ing"
+    return f"{word}ing"
+
+
+def _positive_evolving_sustain(value: Any) -> str:
+    text = str(value or "").strip()
+    patterns = (
+        r"^after\s+[^,.;:]+?\s+(?:has|have)\s+finished[,;:\-]*\s*",
+        r"^once\s+[^,.;:]+?\s+(?:ends?|finishes?)[,;:\-]*\s*",
+        r"\bwithout\s+repeating\s+[^,.;:]+(?:\s+before\s+\d+(?:[.,]\d+)?\s*seconds?)?",
+        r"\bdo\s+not\s+repeat\s+[^,.;:]+",
+        r"\bno\s+more\s+[^,.;:]+",
+        r"\bbefore\s+\d+(?:[.,]\d+)?\s*seconds?\b",
+    )
+    for pattern in patterns:
+        text = re.sub(pattern, " ", text, flags=re.I)
+    text = re.sub(r"\s{2,}", " ", text)
+    text = re.sub(r"\s+([.,;:!?])", r"\1", text)
+    return re.sub(r"^[,;:\-\s]+|[,;:\-\s]+$", "", text).strip()
+
+
+def _auto_structure_evolving_action(value: Any) -> str:
+    action = str(value or "").strip()
+    if not action or re.search(r"\[(?:ONSET ONCE|RESOLVED STATE|THEN SUSTAIN)\]", action, flags=re.I):
+        return action
+    match = re.match(r"^(.+?)\s+(takes?\s+(?:one|a)\s+(?:deep\s+)?breath)\s+and\s+(.+)$", action, flags=re.I)
+    if match:
+        subject = match.group(1).strip()
+        return f"[ONSET ONCE] {subject} {match.group(2).strip()}; [THEN SUSTAIN] {subject} {match.group(3).strip()}"
+    match = re.match(r"^(.+?)\s+(stops?(?:\s+(?:advancing|walking|moving|marching))?)\s+and\s+(?:then\s+)?starts?\s+to\s+([a-z]+)([\s\S]*)$", action, flags=re.I)
+    if match:
+        subject = match.group(1).strip()
+        onset = f"{subject} {match.group(2).strip()}"
+        rest = re.sub(r"\bstarts?\s+to\s+([a-z]+)", lambda m: f"continues {_evolving_gerund(m.group(1))}", match.group(4), flags=re.I)
+        sustain = re.sub(r"\s{2,}", " ", f"{subject} continues {_evolving_gerund(match.group(3))}{rest}").strip()
+        return f"[ONSET ONCE] {onset}; [THEN SUSTAIN] {sustain}"
+    return action
+
+
+def _canonicalize_evolving_action(value: Any) -> str:
+    action = re.sub(r"\s{2,}", " ", _canonical_evolving_tag_text(value)).strip()
+    action = _auto_structure_evolving_action(action)
+    matches = list(re.finditer(r"\[(ONSET ONCE|RESOLVED STATE|THEN SUSTAIN)\]", action, flags=re.I))
+    if not matches:
+        return action
+    values = {"onset": "", "resolved": "", "sustain": ""}
+    prefix = re.sub(r"^[;,:\-\s]+|[;,:\-\s]+$", "", action[:matches[0].start()]).strip()
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(action)
+        body = re.sub(r"^[;,:\-\s]+|[;,:\-\s]+$", "", action[match.end():end]).strip()
+        kind = match.group(1).upper()
+        key = "onset" if kind == "ONSET ONCE" else "resolved" if kind == "RESOLVED STATE" else "sustain"
+        if body:
+            values[key] = body
+    if prefix and not values["sustain"]:
+        values["sustain"] = prefix
+    values["resolved"] = _positive_evolving_sustain(values["resolved"])
+    values["sustain"] = _positive_evolving_sustain(values["sustain"])
+    out = []
+    if values["onset"]:
+        out.append(f"[ONSET ONCE] {values['onset']}")
+    if values["resolved"]:
+        out.append(f"[RESOLVED STATE] {values['resolved']}")
+    if values["sustain"]:
+        out.append(f"[THEN SUSTAIN] {values['sustain']}")
+    return "; ".join(out) or action
+
+
+def _canonicalize_evolving_timeline(value: Any) -> str:
+    number = r"(?:\d+(?::\d+(?:[.,]\d+)?)?|\d+(?:[.,]\d+)?)"
+    unit = r"(?:sec(?:ond(?:s|i)?)?|s)"
+    range_text = rf"{number}\s*{unit}?\s*(?:-|–|—|to|a|fino\s+a)\s*{number}\s*{unit}\b\s*[:;,\-]?"
+    point_text = rf"(?:at|a|from|da|dal\s+secondo)\s+{number}\s*{unit}\b\s*[:;,\-]?"
+    text = re.sub(r"\s{2,}", " ", _canonical_evolving_tag_text(value).replace("\r", " ").replace("\n", " ")).strip()
+    text = re.sub(rf"(\[(?:ONSET ONCE|RESOLVED STATE|THEN SUSTAIN)\])\s*({range_text})", r"\2 \1 ", text, flags=re.I)
+    text = re.sub(rf"\s+(?={range_text})", "\n", text, flags=re.I)
+    text = re.sub(rf"\s+(?={point_text})", "\n", text, flags=re.I)
+    range_re = re.compile(rf"^\s*({number})\s*{unit}?\s*(?:-|–|—|to|a|fino\s+a)\s*({number})\s*{unit}\b\s*[:;,\-]?\s*(.+)$", flags=re.I)
+    point_re = re.compile(rf"^\s*((?:at|a|from|da|dal\s+secondo)\s+{number}\s*{unit})\b\s*[:;,\-]?\s*(.+)$", flags=re.I)
+    lines = []
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        match = range_re.match(line)
+        if match:
+            lines.append(f"{match.group(1)}-{match.group(2)} seconds: {_canonicalize_evolving_action(match.group(3))}")
+            continue
+        match = point_re.match(line)
+        if match:
+            lines.append(f"{match.group(1)}: {_canonicalize_evolving_action(match.group(2))}")
+            continue
+        lines.append(line)
+    return "\n".join(lines)
+
+
+def _validate_canonical_evolving_timeline(value: Any) -> str:
+    text = _canonicalize_evolving_timeline(value)
+    if not text.strip():
+        raise ValueError("Evolving timeline is empty")
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        match = re.match(r"^\s*(?:(?:at|a|from|da|dal\s+secondo)\s+)?(?:\d+(?::\d+(?:[.,]\d+)?)?|\d+(?:[.,]\d+)?)(?:\s*(?:sec(?:ond(?:s|i)?)?|s))?(?:\s*(?:-|–|—|to|a|fino\s+a)\s*(?:\d+(?::\d+(?:[.,]\d+)?)?|\d+(?:[.,]\d+)?)\s*(?:sec(?:ond(?:s|i)?)?|s))?\s*:\s*(.+)$", line, flags=re.I)
+        if not match:
+            raise ValueError(f"Evolving phase must start with its timestamp: {line[:120]}")
+        action = match.group(1)
+        onset = bool(re.search(r"\[ONSET ONCE\]", action, flags=re.I))
+        sustain = bool(re.search(r"\[THEN SUSTAIN\]", action, flags=re.I))
+        if onset and not sustain:
+            raise ValueError("Evolving ONSET ONCE requires a positive THEN SUSTAIN state")
+        carried = re.split(r"\[ONSET ONCE\]", action, maxsplit=1, flags=re.I)[-1] if not onset else re.split(r"\[(?:RESOLVED STATE|THEN SUSTAIN)\]", action, maxsplit=1, flags=re.I)[-1]
+        if re.search(r"\b(?:do\s+not|don't|never|without\s+repeating|no\s+more|avoid)\b", carried, flags=re.I) or re.match(r"^\s*after\s+.+?\s+(?:has|have)\s+finished", carried, flags=re.I):
+            raise ValueError("Evolving carried state must be positive and must not refer back to a completed onset")
+    return text
+
+
+def _validate_evolving_global_prompt(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return text
+    if re.search(r"(?:^|\n)\s*(?:(?:at|from)\s+)?\d+(?::\d+(?:[.,]\d+)?)?\s*(?:sec(?:ond(?:s|i)?)?|s)?\s*(?:-|–|—|to|a|:)|\[(?:ONSET|RESOLVED|THEN|SUSTAIN)", text, flags=re.I):
+        raise ValueError("FL2VA Evolving GLOBAL contains timed/action syntax; actions belong only to LOCAL/TIMELINE")
+    without_music = re.sub(r"non_diegetic_music:\s*[\s\S]*$", "", text, flags=re.I)
+    if re.search(r"(?:^|[.!?]\s+|\n)\s*(?:No\b|Do\s+not\b|Don't\b|Never\b|Without\b|Avoid\b)", without_music, flags=re.I):
+        raise ValueError("FL2VA Evolving GLOBAL contains negative H3 instructions; describe the positive stable visual/camera state")
+    return text
+
+
+def _positive_h3_text(value: Any) -> str:
+    text = str(value or "")
+    lines: list[str] = []
+    for raw_line in text.splitlines():
+        parts = [
+            part.strip()
+            for part in re.split(r";\s*", raw_line)
+            if part.strip() and not re.match(r"^(?:no\b|do\s+not\b|don't\b|never\b|without\b|avoid\b)", part.strip(), flags=re.I)
+        ]
+        if parts:
+            lines.append("; ".join(parts))
+    result = "\n".join(lines)
+    result = re.sub(r"(?:^|[.!?]\s+)(?:No\b|Do\s+not\b|Never\b|Without\b|Avoid\b)[^.!?]*(?=[.!?]|$)", " ", result, flags=re.I)
+    return re.sub(r"\s{2,}", " ", result).strip()
+
+
+def _unique_prompt_parts(values: Any) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for value in values:
+        item = str(value or "").strip()
+        if not item:
+            continue
+        key = re.sub(r"\s+", " ", item).strip().lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(item)
+    return out
 
 
 def _compose_prompt(project: dict[str, Any], task_mode: str, writing_mode: str, assistant_draft: str) -> tuple[str, dict[str, Any]]:
@@ -338,19 +609,22 @@ def _compose_prompt(project: dict[str, Any], task_mode: str, writing_mode: str, 
             ]
         else:
             if mode == "t2va":
-                detail_keys = ("scene", "shot_list", "acting", "dialogue", "light_and_image", "camera", "negatives")
+                detail_keys = ("scene", "shot_list", "acting", "dialogue", "light_and_image", "camera")
                 alignment = ""
                 sound = resolved.get("production_sound", "").strip()
                 music = resolved.get("non_diegetic_music", "").strip()
             elif mode == "i2va":
-                detail_keys = ("reference_use", "identity_continuity_locks", "scene", "shot_list", "acting", "dialogue", "light_and_image", "camera", "negatives")
+                detail_keys = ("reference_use", "identity_continuity_locks", "scene", "shot_list", "acting", "dialogue", "light_and_image", "camera")
                 alignment = "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced."
                 sound = resolved.get("production_sound", "").strip()
                 music = resolved.get("non_diegetic_music", "").strip()
             elif mode == "fl2va":
-                detail_keys = ("reference_use", "identity_continuity_locks", "action", "shot_list", "acting", "dialogue", "light_and_image", "camera", "negatives")
-                alignment = resolved.get("boundary_frames", "").strip()
-                sound = resolved.get("production_sound", "").strip()
+                # FL2VA / first-last-frame / keyframe contract: GLOBAL carries
+                # stable image/reference/camera continuity only. All actions,
+                # performance events, dialogue and timed sound remain LOCAL.
+                detail_keys = ("reference_use", "identity_continuity_locks", "light_and_image", "camera")
+                alignment = _positive_h3_text(resolved.get("boundary_frames", ""))
+                sound = ""
                 music = resolved.get("non_diegetic_music", "").strip()
             else:  # audio_driven
                 detail_keys = (
@@ -361,7 +635,16 @@ def _compose_prompt(project: dict[str, Any], task_mode: str, writing_mode: str, 
                 alignment = ""
                 sound = resolved.get("audio_environment", "").strip()
                 music = "N/A"
-            detail = join_fields(detail_keys)
+            if mode == "fl2va":
+                detail = "\n".join(_unique_prompt_parts(_positive_h3_text(resolved.get(key, "")) for key in detail_keys))
+            elif mode in {"t2va", "i2va"}:
+                detail = "\n".join(_unique_prompt_parts(
+                    resolved.get(key, "") if key == "dialogue" else _positive_h3_text(resolved.get(key, ""))
+                    for key in detail_keys
+                ))
+                sound = _positive_h3_text(sound)
+            else:
+                detail = join_fields(detail_keys)
             if detail and not re.match(r"^\s*\[Shot\s+1\]", detail, flags=re.I):
                 detail = f"[Shot 1] {detail}"
             if alignment:
@@ -372,8 +655,18 @@ def _compose_prompt(project: dict[str, Any], task_mode: str, writing_mode: str, 
                 f"non_diegetic_music:\n{music or 'N/A'}",
             ])
     prompt = "\n\n".join(blocks).strip()
+    local_prompt = ""
+    if mode == "fl2va":
+        local_prompt = "\n".join(_unique_prompt_parts((
+            resolved.get("action", ""),
+            resolved.get("shot_list", ""),
+            resolved.get("acting", ""),
+            resolved.get("dialogue", ""),
+            resolved.get("production_sound", ""),
+        )))
     return prompt, {
         "task_mode": mode,
+        "local_prompt": local_prompt,
         "included_sections": [key for key, _label in MODE_SECTIONS[mode] if resolved.get(key)],
         "missing_sections": [key for key, _label in MODE_SECTIONS[mode] if not resolved.get(key)],
         "assistant_fills": assistant_fills,
@@ -388,6 +681,32 @@ def _merge_text(existing: str, incoming: str, policy: str) -> str:
     if not new:
         return old
     return f"{old}\n\n{new}"
+
+
+def _continuous_global_prompt(global_prompt: Any, authored_action: Any) -> str:
+    """Fold FL2VA action authority into one untimed GLOBAL prompt."""
+    time_prefix = re.compile(
+        r"^\s*(?:[-*•]\s*)?(?:timeline\s+)?(?:from\s+|at\s+)?"
+        r"\d+(?::\d+(?:[.,]\d+)?)?(?:\s*(?:sec(?:ond(?:s|i)?)?|s))?"
+        r"(?:\s*(?:-|–|—|to|a|fino\s+a)\s*\d+(?::\d+(?:[.,]\d+)?)?"
+        r"(?:\s*(?:sec(?:ond(?:s|i)?)?|s))?)?\s*[:;,\-]?\s*",
+        re.IGNORECASE,
+    )
+    action = "\n".join(
+        cleaned for cleaned in (
+            time_prefix.sub("", line).strip() for line in str(authored_action or "").splitlines()
+        ) if cleaned
+    )
+    stable = str(global_prompt or "").strip()
+    if not action:
+        return stable
+    contract = (
+        "continuous_action:\nPerform only the following user-authored action as one uninterrupted "
+        "continuous action throughout the complete take. Preserve the same action, direction, identity, "
+        "environment and camera continuity across every technical generation boundary. Do not divide it "
+        f"into timed phases or local prompts.\n{action}"
+    )
+    return "\n\n".join(part for part in (stable, contract) if part)
 
 
 def _normalise_ai_images(value: Any) -> list[dict[str, str]]:
@@ -445,7 +764,7 @@ def _assistant_instruction(
     mode_rules = {
         "t2va": "Build the requested event from text. Keep the action chronological, filmable and compatible with one continuous audiovisual clip.",
         "i2va": "Treat <Picture 1> as the exact opening-frame authority. Animate from it without redesigning identity, wardrobe, composition or screen geography.",
-        "fl2va": "Treat the opening and closing pictures as exact boundary frames. Describe one physically continuous path from the first frame to the last; do not solve the transition with a cut, dissolve or unrelated redesign.",
+        "fl2va": "Treat the opening and closing pictures as exact boundary frames. Keep stable image/reference/camera description in global fields and put actions, performance events, dialogue and time-dependent sound in local/timed fields. For Extended Evolving timelines, every phase line starts with its timestamp/range, then uses only canonical [ONSET ONCE], optional [RESOLVED STATE], and [THEN SUSTAIN] tags. A completed onset is never mentioned again in resolved/sustain text. Describe one physically continuous path from the first frame to the last using positive observable language.",
         "ref2va": "Use explicit <Picture N>, <Video N>, <Audio N> and <Subject N> references. State what each reference contributes and what must be ignored; preserve the lowercase REF2VA section semantics.",
         "v2va_object_swap": (
             "Write a MiniMax H3 video-to-video object/subject replacement contract. Use <Picture N> only for connected replacement/identity references, <Video 1> for the connected source video's temporal motion, camera and environment authority, and stable <Subject N> labels. "
@@ -469,7 +788,7 @@ def _assistant_instruction(
         "When rewriting shot_list, do not add a second [Shot 1] marker because the composer supplies it; mark only a real later cut as [Shot N] At MM:SS.mmm, and do not invent cuts merely to make the description longer. "
         "Separate diegetic ambience, dialogue and contact effects from non-diegetic score. Use <Subject N> consistently and keep dialogue inside <d>[Language] ...</d> with stable speaker labels such as (S1) when those tags are present. "
         f"Chunk-boundary sound rule: {AUDIO_HANDOFF_AUTHORING_RULE} "
-        "Do not invent extra characters, products, dialogue, scene changes, cuts, subtitles or logos. Turn negative wishes into concrete continuity safeguards, not vague quality adjectives. "
+        "Do not invent extra characters, products, dialogue, scene changes, cuts, subtitles or logos. Express generated H3 fields in positive observable language: describe the desired stable state instead of writing negative prompt lists or phrases such as no/do not/never/without/avoid. The normal exception is an explicit music absence such as 'No score' inside NON_DIEGETIC_MUSIC, or an explicit source-audio policy requested by the user. "
         f"Mode rule: {mode_rules} "
         "When images are attached, analyze only the contribution named by each image role. An opening image governs the first frame; a closing image governs the last frame; identity, composition and style images govern only those named attributes. "
         "Never mention unavailable media or claim to have seen a detail that is not visible."
@@ -564,7 +883,93 @@ def _extract_json_payload(text: str) -> dict[str, Any]:
 
 def _extract_json_object(text: str) -> dict[str, str]:
     value = _extract_json_payload(text)
-    return {str(key): str(item or "").strip() for key, item in value.items() if isinstance(item, (str, int, float))}
+    def section_text(item: Any) -> str:
+        if item is None:
+            return ""
+        if isinstance(item, str):
+            return item.strip()
+        if isinstance(item, (int, float)):
+            return str(item).strip()
+        if isinstance(item, list):
+            return "\n".join(part for part in (section_text(entry) for entry in item) if part).strip()
+        if isinstance(item, dict):
+            parts = []
+            for key, nested in item.items():
+                body = section_text(nested)
+                if body:
+                    parts.append(f"{str(key).replace('_', ' ').strip()}: {body}")
+            return "; ".join(parts).strip()
+        return ""
+    return {
+        str(key): rendered
+        for key, item in value.items()
+        if (rendered := section_text(item))
+    }
+
+
+def _compact_assistant_instruction(task_mode: str, sections: dict[str, str], user_direction: str,
+                                   target_keys: Any) -> tuple[str, str]:
+    """Small local-model fallback used only after Ollama aborts for repetition."""
+    mode = _normalise_task_mode(task_mode or "t2va")
+    allowed = [key for key, _label in MODE_SECTIONS.get(mode, MODE_SECTIONS["t2va"])]
+    selected = [str(key) for key in (target_keys if isinstance(target_keys, list) else []) if str(key) in allowed]
+    if not selected:
+        selected = [key for key in allowed if str(sections.get(key, "") or "").strip()]
+    if not selected:
+        raise ValueError("Select a MiniMax prompt section or write a rough idea before calling the AI")
+    evolving = mode == "fl2va" and "extended evolving" in str(user_direction or "").lower()
+    continuous = mode == "fl2va" and "continuous" in str(user_direction or "").lower()
+    special = (
+        "For ACTION and SHOT_LIST, return identical lines. Every line begins with a user-supplied timestamp or range. "
+        "Use [ONSET ONCE] only with a positive [THEN SUSTAIN] state."
+        if evolving else
+        "Return one uninterrupted untimed action in ACTION only."
+        if continuous else
+        "Use chronological visible action and one coherent camera movement."
+    )
+    system = (
+        "Convert the user's natural-language request into concise MiniMax H3 production fields. "
+        "Return one JSON object only, without markdown. Every value must be one plain string. "
+        f"Use only these keys: {selected}. Omit a key when the user supplied no relevant content. "
+        "Preserve requested identity, action, camera direction, timestamps, language and quoted dialogue. "
+        f"{special}"
+    )
+    user = json.dumps({
+        "task_mode": mode,
+        "request": str(user_direction or "").strip(),
+        "existing_fields": {key: str(sections.get(key, "") or "").strip() for key in selected if str(sections.get(key, "") or "").strip()},
+    }, ensure_ascii=False)
+    return system, user
+
+
+def _evolving_timeline_from_request(user_direction: Any) -> str:
+    """Recover immutable user-authored phase boundaries when a local LLM misformats them."""
+    text = re.split(r"\bREQUEST\s*:\s*", str(user_direction or ""), flags=re.I)[-1].strip()
+    if not text:
+        return ""
+    try:
+        return _validate_canonical_evolving_timeline(text)
+    except ValueError:
+        pass
+    number = r"(?:\d+(?::\d+(?:[.,]\d+)?)?|\d+(?:[.,]\d+)?)"
+    point_re = re.compile(
+        rf"\b(?:at|a|from|da|dal\s+secondo)\s+(?P<start>{number})\s*(?:sec(?:ond(?:s|i)?)?|s)\b\s*[:;,\-]?\s*",
+        flags=re.I,
+    )
+    matches = list(point_re.finditer(text))
+    if not matches:
+        return ""
+    lines: list[str] = []
+    opening = re.sub(r"^[\s,;:.\-]+|[\s,;:.\-]+$", "", text[:matches[0].start()]).strip()
+    first_seconds = _parse_seconds_token(matches[0].group("start"))
+    if opening and first_seconds > 0:
+        lines.append(f"0-{matches[0].group('start')} seconds: {_canonicalize_evolving_action(opening)}")
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        action = re.sub(r"^[\s,;:.\-]+|[\s,;:.\-]+$", "", text[match.end():end]).strip()
+        if action:
+            lines.append(f"At {match.group('start')} seconds: {_canonicalize_evolving_action(action)}")
+    return _validate_canonical_evolving_timeline("\n".join(lines)) if lines else ""
 
 
 def rewrite_sections_with_ai(
@@ -598,28 +1003,40 @@ def rewrite_sections_with_ai(
             "anthropic": os.environ.get("ANTHROPIC_API_KEY", ""),
         }.get(provider, "")
     content = ""
+    transport_retry = ""
 
     if provider == "ollama":
         root = _ollama_native_base(base_url)
-        result = _http_json(
-            f"{root}/api/chat",
-            {
+        def ollama_payload(system_text: str, user_text: str, *, compact: bool = False) -> dict[str, Any]:
+            return {
                 "model": model,
                 "stream": False,
                 "format": "json",
                 "messages": [
-                    {"role": "system", "content": system},
+                    {"role": "system", "content": system_text},
                     {
                         "role": "user",
-                        "content": user,
+                        "content": user_text,
                         **({"images": [item["data"] for item in visual_inputs]} if visual_inputs else {}),
                     },
                 ],
-                "options": {"temperature": float(temperature)},
-            },
-            {},
-            timeout,
-        )
+                "options": {
+                    "temperature": min(float(temperature), 0.25) if compact else float(temperature),
+                    **({"num_predict": 1600, "repeat_penalty": 1.1} if compact else {}),
+                },
+            }
+        try:
+            result = _http_json(f"{root}/api/chat", ollama_payload(system, user), {}, timeout)
+        except RuntimeError as exc:
+            if "token repeat limit reached" not in str(exc).lower():
+                raise
+            compact_system, compact_user = _compact_assistant_instruction(
+                task_mode, sections, user_direction, target_keys,
+            )
+            result = _http_json(
+                f"{root}/api/chat", ollama_payload(compact_system, compact_user, compact=True), {}, timeout,
+            )
+            transport_retry = "ollama_compact_after_repeat_limit"
         content = str((result.get("message") or {}).get("content") or "")
     elif provider in {"openai_compatible", "lm_studio"}:
         root = str(base_url or "https://api.openai.com/v1").rstrip("/")
@@ -712,6 +1129,21 @@ def rewrite_sections_with_ai(
     filtered = {key: value for key, value in rewritten.items() if key in requested and value}
     if not filtered:
         raise RuntimeError("The AI did not return any valid filled MiniMax section")
+    mode_name = _normalise_task_mode(task_mode)
+    if mode_name == "fl2va" and "extended evolving" in str(user_direction or "").lower():
+        raw_timeline = str(filtered.get("action") or filtered.get("shot_list") or "").strip()
+        if not raw_timeline:
+            raise RuntimeError("Extended Evolving AI response did not return ACTION/SHOT_LIST timeline text")
+        try:
+            canonical_timeline = _validate_canonical_evolving_timeline(raw_timeline)
+        except ValueError:
+            canonical_timeline = _evolving_timeline_from_request(user_direction)
+            if not canonical_timeline:
+                raise
+        if "action" in requested:
+            filtered["action"] = canonical_timeline
+        if "shot_list" in requested:
+            filtered["shot_list"] = canonical_timeline
     # An AI rewrite may paraphrase a Whisper transcript even when told not to.
     # Restore the exact H3 dialogue line supplied by the user after parsing.
     authored = "\n".join([str(user_direction or ""), *(str(value or "") for value in sections.values())])
@@ -738,6 +1170,7 @@ def rewrite_sections_with_ai(
             for item in visual_inputs
         ],
         "system_prompt_characters": len(system),
+        "transport_retry": transport_retry,
         "audio_handoff_authoring_rule": AUDIO_HANDOFF_AUTHORING_RULE,
     }
 
@@ -816,9 +1249,9 @@ VISUAL_STORY_SYSTEM_PROMPT = """You are IAMCCS Visual Story Planner for MiniMax 
 Read every supplied image in exact Picture/Shotboard slot order and obey the user's action idea. Return JSON only:
 {"global_prompt":"...","global_direction":"...","recommended_mode":"auto|i2va|fl2va|longvid_guides","continuity_locks":"...","shots":[{"slot":1,"local_prompt":"...","h3_transition_prompt":"..."}]}
 
-global_prompt must be a complete, directly usable MiniMax H3 global prompt for one consecutive audiovisual sequence. Use this structure inside the text: subject definitions; reference/guide authority for every <Picture N>; integrated chronological action with explicit [Shot N] beats in slot order; camera path and transition mechanics; continuity locks; overall soundscape; non-diegetic music. Treat the pictures as ordered visual guide states, never as a collage. Do not invent timestamps, dialogue, cuts, new characters or story events unless the user supplied them. If the user asks for continuous action, describe causal movement between guides and explicitly forbid reset, loop-back, unmotivated cut, dissolve, morph, teleport, T2V drift and action restarting from Picture 1. If the user asks for editorial cuts, state the cut boundaries explicitly instead.
+global_prompt must be a directly usable MiniMax H3 GLOBAL prompt. In FL2VA / first-last-frame / keyframe work, GLOBAL contains only stable visual authority: subject identity, reference/guide roles, environment, wardrobe, props, geography, lighting, image texture, screen direction and the persistent camera/lens language. Keep chronological actions, performance changes, dialogue, transient vocal events and time-dependent sound out of GLOBAL; they belong in local_prompt / h3_transition_prompt. For other modes, keep global_prompt limited to information shared by every local shot. Treat pictures as ordered visual guide states, never as a collage. Preserve user-supplied timing exactly. Use positive observable H3 language in generated prompt strings rather than negative reminder lists; an explicit music absence such as “No score” is allowed in the music field.
 
-Create one shot object per image in slot order. local_prompt is a filmable H3 instruction for that guide with framing, active movement, performance, camera and audible visible events. h3_transition_prompt describes the causal action/camera hand-off from the preceding guide into this guide; slot 1 describes how motion begins from <Picture 1>. Preserve identity, wardrobe, anatomy, props, screen direction, geography, lighting, lens logic and action state. English only; no Markdown outside the plain prompt strings."""
+Create one shot object per image in slot order. local_prompt is the filmable H3 action authority for that guide: active movement, performance, interval-specific camera behavior and audible visible events. h3_transition_prompt describes the causal action/camera hand-off from the preceding guide into this guide; slot 1 describes how motion begins from <Picture 1>. Preserve identity, wardrobe, anatomy, props, screen direction, geography, lighting, lens logic and action state. English only; no Markdown outside the plain prompt strings."""
 
 
 def build_visual_story_plan_with_ai(provider: str, base_url: str, model: str, api_key: str,
@@ -1557,8 +1990,29 @@ class IAMCCS_Prompter:
         project["injection_target"] = str(injection_target)
         project["writing_mode"] = str(writing_mode)
         project["merge_policy"] = str(merge_policy)
-        final_prompt, details = _compose_prompt(project, mode, str(writing_mode), str(assistant_draft or ""))
-        if not final_prompt and not transcribe_once:
+        generated_prompt, details = _compose_prompt(project, mode, str(writing_mode), str(assistant_draft or ""))
+        if mode == "fl2va" and project.get("extended_conditioning_policy") == "continuous":
+            generated_prompt = _continuous_global_prompt(generated_prompt, details.get("local_prompt"))
+        final_prompt = (
+            str(project.get("final_prompt_override") or "").strip()
+            if project.get("final_prompt_override_enabled")
+            else generated_prompt
+        )
+        local_prompt = str(details.get("local_prompt") or "").strip()
+        if mode == "fl2va" and project.get("extended_conditioning_policy") == "continuous":
+            local_prompt = ""
+        if mode == "fl2va" and project.get("extended_conditioning_policy") == "evolving":
+            local_prompt = str(project.get("evolving_timeline") or local_prompt).strip()
+        if mode == "fl2va" and project.get("final_local_prompt_override_enabled"):
+            local_prompt = str(project.get("final_local_prompt_override") or "").strip()
+        if mode == "fl2va" and project.get("extended_conditioning_policy") == "evolving":
+            final_prompt = _validate_evolving_global_prompt(final_prompt)
+            if local_prompt:
+                local_prompt = _validate_canonical_evolving_timeline(local_prompt)
+                project["evolving_timeline"] = local_prompt
+                project["sections"]["action"] = local_prompt
+                project["sections"]["shot_list"] = local_prompt
+        if not final_prompt and not local_prompt and not transcribe_once:
             raise ValueError("IAMCCS_Prompter: compila almeno un box prima di accodare il workflow")
 
         primary_target = str(injection_target or "global").strip().lower()
@@ -1570,7 +2024,7 @@ class IAMCCS_Prompter:
         primary_vision_context = vision_contexts.pop(primary_target, "")
         if primary_vision_context:
             final_prompt = _merge_text(final_prompt, primary_vision_context, vision_merge_policy)
-        char_count = len(final_prompt)
+        char_count = len(final_prompt) + (len(local_prompt) if mode == "fl2va" else 0)
         budget = min(H3_ABSOLUTE_CHAR_LIMIT, max(1000, int(character_budget)))
         if char_count > H3_ABSOLUTE_CHAR_LIMIT:
             raise ValueError(
@@ -1578,18 +2032,33 @@ class IAMCCS_Prompter:
                 f"{H3_ABSOLUTE_CHAR_LIMIT}. Riduci i box di almeno {char_count - H3_ABSOLUTE_CHAR_LIMIT} caratteri."
             )
 
+        effective_primary_target = "global" if mode == "fl2va" else str(injection_target)
         injection = {
             "schema": "iamccs.minimax_h3.prompt_injection",
-            "schema_version": 1,
+            "schema_version": 2,
             "prompt": final_prompt,
-            "target": str(injection_target),
+            "target": effective_primary_target,
             "merge_policy": str(merge_policy),
             "task_mode": mode,
             "project_name": str(project.get("project_name") or "Untitled Prompt"),
             "source": "iamccs_prompter",
+            "extended_conditioning_policy": project["extended_conditioning_policy"],
+            "evolving_timeline": project["evolving_timeline"],
         }
 
-        injections = [injection]
+        injections = [injection] if final_prompt else []
+        if mode == "fl2va" and local_prompt and project.get("extended_conditioning_policy") == "default":
+            local_target = primary_target if re.match(r"^local_[1-9][0-9]*$", primary_target) else "local_1"
+            injections.append({
+                "schema": "iamccs.minimax_h3.prompt_injection",
+                "schema_version": 2,
+                "prompt": local_prompt,
+                "target": local_target,
+                "merge_policy": str(merge_policy),
+                "task_mode": mode,
+                "project_name": str(project.get("project_name") or "Untitled Prompt"),
+                "source": "iamccs_prompter_fl2va_local",
+            })
         for target, context in vision_contexts.items():
             if not str(context or "").strip():
                 continue
@@ -1645,12 +2114,22 @@ class IAMCCS_Prompter:
             "requested_target": str(injection_target),
             "merge_policy": str(merge_policy),
             "characters": char_count,
+            "global_characters": len(final_prompt),
+            "local_characters": len(local_prompt),
+            "final_prompt_override": bool(project.get("final_prompt_override_enabled")),
+            "final_local_prompt_override": bool(project.get("final_local_prompt_override_enabled")),
             "character_budget": budget,
             "within_recommended_budget": char_count <= budget,
             "injection_count": len(injections),
             "injection_targets": [item["target"] for item in injections],
             "vision_context": vision_report,
             "audio_handoff_authoring_rule": AUDIO_HANDOFF_AUTHORING_RULE,
+            "extended_conditioning": {
+                "policy": project["extended_conditioning_policy"],
+                "evolving_event_count": len(parse_evolving_timeline(project["evolving_timeline"], duration_seconds=86400.0))
+                if project["extended_conditioning_policy"] == "evolving" else 0,
+                "required_shotboard_mode": "fl2va_extended_av",
+            },
             "audio_driven_dialogue_template": "<Subject 1> (S1): <d>[Language] ...</d>",
             "audio_transcription": {
                 "requested": transcribe_once,
@@ -1681,6 +2160,7 @@ class IAMCCS_Prompter:
         resources = out_linx.setdefault("resources", {})
         resources["iamccs_prompter_audio_transcript"] = transcript
         resources["iamccs_prompter_h3_dialogue_tag"] = dialogue_tag
+        resources["iamccs_prompter_local_prompt"] = local_prompt
         out_linx.setdefault("outputs", {})["audio_transcript"] = transcript
         out_linx["outputs"]["h3_dialogue_tag"] = dialogue_tag
         ui_status = (

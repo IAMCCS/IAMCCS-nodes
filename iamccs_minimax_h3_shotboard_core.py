@@ -33,6 +33,42 @@ def align_h3_frames(value: int) -> int:
         frames += (5 - remainder) % 17
     return frames
 
+def _extended_av_module():
+    """Load the pure Extended-AV contract module in package or standalone tests."""
+    try:
+        from . import iamccs_minimax_h3_extended_av as module
+        return module
+    except (ImportError, ValueError):
+        import importlib.util
+        from pathlib import Path
+
+        path = Path(__file__).with_name("iamccs_minimax_h3_extended_av.py")
+        spec = importlib.util.spec_from_file_location("iamccs_h3_extended_av_contract", path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("Cannot load IAMCCS Extended AV contract module")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
+def _conditioning_schedule_module():
+    """Load the pure evolving-conditioning helper in package or standalone tests."""
+    try:
+        from . import iamccs_minimax_h3_conditioning_schedule as module
+        return module
+    except (ImportError, ValueError):
+        import importlib.util
+        from pathlib import Path
+
+        path = Path(__file__).with_name("iamccs_minimax_h3_conditioning_schedule.py")
+        spec = importlib.util.spec_from_file_location("iamccs_h3_conditioning_schedule", path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError("Cannot load IAMCCS H3 conditioning schedule module")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+
 
 def _float(value: Any, default: float) -> float:
     try:
@@ -799,6 +835,8 @@ def _longvid_guide_plan(
     motion_context_guide_boundary: str = "safe_handoff",
     terminal_endpoint_mode: str = "hard_image",  # IAMCCS_LONGVID_TERMINAL_ENDPOINT_MODE_V1
     pianosequenza_hd_context_frames: int = 22,
+    generated_bridge_enabled: bool = True,
+    suppress_root_terminal_reanchor: bool = False,
 ) -> dict[str, Any]:
     """Compile the long-video timeline into stock ``MiniMaxH3AddGuide`` events.
 
@@ -818,7 +856,7 @@ def _longvid_guide_plan(
     # Direct sampled-latent carry shares the 362f physical H3 window but
     # remains standard longvid_guides, not Motion Context.
     latent_tail_context_frames = int(latent_tail_context_frames or 0)
-    if latent_tail_context_frames not in {0, 22, 39, 56}:
+    if latent_tail_context_frames not in {0, 22, 39, 56, 90, 141, 192, 243, 294, 345}:
         latent_tail_context_frames = 22
     latent_tail_planner_enabled = bool(
         latent_tail_context_frames > 0 and not motion_context_enabled
@@ -1207,6 +1245,10 @@ def _longvid_guide_plan(
                 and isinstance(terminal_truth_guide, dict)
                 and int(terminal_truth_guide.get("end_frame", 0) or 0) >= requested_frames
                 and visible_frame_count > 0
+                and not (
+                    bool(suppress_root_terminal_reanchor)
+                    and int(terminal_truth_guide.get("global_frame", 0) or 0) == 0
+                )
             ):
                 # The previous generated frame owns the opening; the exact
                 # authored Shotboard image owns the final visible frame.
@@ -1242,6 +1284,7 @@ def _longvid_guide_plan(
         )
         use_generated_bridge = bool(
             positioned_guides_v2
+            and bool(generated_bridge_enabled)
             and chunk_index > 0
             and not authored_opening_guide
             and terminal_endpoint_mode != "pianosequenza_hd"
@@ -1813,6 +1856,20 @@ def build_shotplan(
     motion_context_window_frames: int = H3_MAX_TRAINED_FRAMES,
     longvid_terminal_endpoint_mode: str = "hard_image",
     keyframe_joint_latent_new: bool = False,
+    extended_av_profile: str = "safe_8_12gb",
+    extended_av_pin_mode: str = "masked",
+    extended_av_mask_profile: str = "exact",
+    extended_av_custom_window_frames: int = 192,
+    extended_av_custom_overlap_frames: int = 39,
+    extended_av_handover_mode: str = "auto",
+    extended_av_level_lock_mode: str = "auto",
+    extended_av_joint_refine_mode: str = "off",
+    extended_av_joint_window_frames: int = 192,
+    extended_av_joint_window_overlap: int = 39,
+    extended_av_root_task: str = "t2va",
+    extended_av_soft_audio_handover_ms: float = 15.0,
+    extended_av_boundary_polish_ms: float = 3.0,
+    extended_av_boundary_polish_strength: float = 1.0,
 ) -> dict[str, Any]:
     """Translate a Shotboard timeline into executable MiniMax H3 chunks.
 
@@ -1821,13 +1878,30 @@ def build_shotplan(
     """
     if task_mode == "keyframe_joint_native" and keyframe_joint_latent_new:
         arguments = dict(locals())
-        arguments.update(task_mode="latent_go_ahead", keyframe_joint_latent_new=False)
+        arguments.update(task_mode="fl2va_extended_av", keyframe_joint_latent_new=False)
         result = build_shotplan(**arguments)
+        images = [event for event in result.get("guide_track", {}).get("events", []) if event.get("kind") == "image"]
+        if len(images) < 2:
+            raise ValueError("KEYFRAME JOINT LATENT NEW requires at least two authored image guides.")
         result["requested_task_mode"] = "keyframe_joint_native"
         result["mode_contract"].update(
             mode="keyframe_joint_latent_new", latent_new=True,
-            destination="authored_image_guide", history="original_generated_av_tail",
-            sample_count=len(result["chunks"]), context_handover=True)
+            destination="authored_image_guide", history="raw_av_masked_exact",
+            sample_count=len(result["chunks"]), context_handover=True,
+            experimental=True, motion_guaranteed=False,
+            backend="b1_extend_positioned_destinations")
+        for chunk, prompt_entry in zip(result["chunks"], result["prompt_map"]):
+            start = chunk["timeline_start_frame"]
+            end = start + chunk["visible_frame_count"]
+            active = [guide for guide in images
+                      if guide["global_frame"] < end and guide.get("end_frame", guide["global_frame"] + 1) > start]
+            local_prompt = "\n\n".join(guide["prompt"] for guide in active if guide.get("prompt"))
+            prompt = _compose_prompt(global_prompt=global_prompt, local_prompt=local_prompt,
+                                     audio_prompt="", prompt_mapping=prompt_mapping)
+            chunk.update(prompt=prompt, creative_prompt=prompt, local_prompt=local_prompt,
+                         prompt_guide_bindings=[{"guide_id": guide["id"], "final_prompt_only": False}
+                                                for guide in active])
+            prompt_entry["prompt"] = prompt
         return result
     if task_mode == "latent_go_ahead":
         arguments = dict(locals())
@@ -1915,6 +1989,26 @@ def build_shotplan(
         roles.append(("subject_identity", "subject_identity", "composition", "style")[len(roles)])
 
     requested_task_mode = _text(task_mode).lower() or "auto_from_timeline"
+    if requested_task_mode == "t2va_continuous":
+        # This is a preset on the B1 engine, not another continuation planner.
+        rows = [row for row in _timeline_rows(timeline)
+                if _text(row.get("type", "image")).lower() not in {"audio", "motion", "video"}
+                and not _bool(row.get("placeholder"), False)]
+        if len(rows) <= 1 and float(duration_seconds) > 15.0 + 1e-6:
+            local = rows[0] if rows else {}
+            global_prompt = _compose_prompt(
+                global_prompt=global_prompt, local_prompt=_slot_prompt(local),
+                audio_prompt=_slot_audio_prompt(local), prompt_mapping=prompt_mapping,
+            )
+            # Text-only roots must not inherit image guides from a previous mode.
+            timeline = dict(timeline)
+            timeline["rows"] = [row for row in _timeline_rows(timeline)
+                                if _text(row.get("type")).lower() == "audio"]
+            timeline["image_paths"] = []
+            requested_task_mode = task_mode = "fl2va_extended_av"
+            extended_av_root_task = "t2va"
+        else:
+            requested_task_mode = task_mode = "t2va"
     # Compatibility: the former serialized mode id remains the stable IAMCCS
     # FL2VA Continuous AV route.  A new, explicitly experimental mode enables
     # automatic freeze-tail trimming without altering saved workflows.
@@ -1938,6 +2032,319 @@ def build_shotplan(
     motion_context_requested = requested_task_mode in {
         "longvid_motion_context", "longvid_motion_context_auto_chain", "motion_context_auto_chain",
     }
+    extended_av_requested = requested_task_mode in {
+        "fl2va_extended_av", "extended_av", "long_i2v_extended_av",
+    }
+    if extended_av_requested:
+        extended = _extended_av_module()
+        extended_av_root_task = _text(extended_av_root_task).lower() or "t2va"
+        if extended_av_root_task not in {"t2va", "i2va", "ref2va"}:
+            extended_av_root_task = "t2va"
+        if str(extended_av_mask_profile or "exact").strip().lower() != "exact":
+            raise ValueError(
+                "FL2VA Extended AV production path currently requires MASKED + EXACT. "
+                "Runway/soft masks move the handover inside the pin and need a "
+                "lineage-aware parent cut; they will be re-exposed only with that assembler."
+            )
+        contract = extended.resolve_contract(
+            profile=extended_av_profile,
+            pin_mode=extended_av_pin_mode,
+            mask_profile=extended_av_mask_profile,
+            custom_window_frames=extended_av_custom_window_frames,
+            custom_overlap_frames=extended_av_custom_overlap_frames,
+            handover_mode=extended_av_handover_mode,
+            level_lock_mode=extended_av_level_lock_mode,
+            joint_refine_mode=extended_av_joint_refine_mode,
+            joint_window_frames=extended_av_joint_window_frames,
+            joint_window_overlap=extended_av_joint_window_overlap,
+            soft_audio_handover_ms=extended_av_soft_audio_handover_ms,
+            boundary_polish_ms=extended_av_boundary_polish_ms,
+            boundary_polish_strength=extended_av_boundary_polish_strength,
+        )
+        contract["video_only"] = audio_mode == "h3_custom_audio_drive"
+        contract["audio_authority"] = "locked_master" if contract["video_only"] else "native_h3"
+        base = _longvid_guide_plan(
+            timeline=timeline,
+            global_prompt=global_prompt,
+            duration_seconds=max(0.01, _float(duration_seconds, 10.0)),
+            prompt_mapping=prompt_mapping,
+            resolved_width=resolved_width,
+            resolved_height=resolved_height,
+            audio_mode=audio_mode,
+            acceleration=acceleration,
+            ref_image_size=ref_image_size,
+            text_encoder_device=text_encoder_device,
+            roles=roles,
+            reference_video_role=reference_video_role,
+            reference_audio_role=reference_audio_role,
+            sol_conditioning=sol_conditioning,
+            spectrum_profile=spectrum_profile,
+            vram_clean_before_decode=vram_clean_before_decode,
+            rife_mode=rife_mode,
+            active_upscale_mode=active_upscale_mode,
+            upscale_enabled=upscale_enabled,
+            voice_reference_picture_index=voice_reference_picture_index,
+            lipsync=False,
+            motion_context_tail_frames=0,
+            latent_tail_context_frames=int(contract["overlap_frames"]),
+            motion_context_audio=True,
+            motion_context_window_frames=int(contract["sample_window_frames"]),
+            motion_context_guide_boundary="positioned",
+            terminal_endpoint_mode=longvid_terminal_endpoint_mode,
+            generated_bridge_enabled=False,
+            # One-image I2V boards use Picture 1 as the SOURCE state, not as
+            # an implicit final destination. Multi-guide boards still receive
+            # their later authored endpoint anchors normally.
+            suppress_root_terminal_reanchor=True,
+        )
+        # EXTEND-style EXTEND planning is not a LongVid chunk topology.
+        # We use LongVid only to parse the authored guide track, then replace
+        # its chunks with dedicated takes: root take, followed by fresh target
+        # AV runs whose HEAD is a masked pin from the previous delivered tail.
+        overlap = int(contract["overlap_frames"])
+        window = int(contract["sample_window_frames"])
+        boundary_runway = max(0, int(contract.get("boundary_runway_frames", 0) or 0))
+        authored_total = max(1, int(round(max(0.01, _float(duration_seconds, 10.0)) * H3_FPS)))
+        if not extended.shared_av_window_ok(window):
+            raise ValueError("FL2VA Extended AV reusable sample window must be on the shared AV grid.")
+        if boundary_runway % extended.H3_FRAME_STEP != 0:
+            raise ValueError("FL2VA Extended AV boundary runway lost its 17-frame H3 alignment.")
+        if window - overlap - boundary_runway < extended.H3_FRAME_STEP:
+            raise ValueError(
+                "FL2VA Extended AV boundary runway leaves less than one 17-frame visible "
+                "continuation step in the selected technical window."
+            )
+
+        parsed_events = []
+        if isinstance(base.get("guide_track"), dict):
+            parsed_events = [
+                dict(event) for event in (base["guide_track"].get("events") or [])
+                if isinstance(event, dict)
+            ]
+        old_chunks = base.get("chunks") if isinstance(base.get("chunks"), list) else []
+        template = dict(old_chunks[0]) if old_chunks and isinstance(old_chunks[0], dict) else {}
+        chunks = []
+        prompt_map = []
+        conditioning = _conditioning_schedule_module()
+        conditioning_schedule = conditioning.validate_schedule(timeline.get("pan_h3_conditioning_v1"))
+        # The visible Extended Prompt blocks are the editorial authority.  The
+        # serialized schedule is a cache used by older workflows; whenever
+        # blocks exist, rebuild the backend contract from their exact timeline
+        # positions so moving or editing a block changes the sampled chunk.
+        extended_prompt_blocks = timeline.get("extended_prompt_blocks", timeline.get("extendedPromptBlocks", []))
+        if isinstance(extended_prompt_blocks, list) and extended_prompt_blocks:
+            block_beats = []
+            for block_index, block in enumerate(extended_prompt_blocks):
+                if not isinstance(block, dict) or block.get("enabled", True) is False:
+                    continue
+                start = max(0, int(block.get("start_frame", block.get("start", 0)) or 0))
+                end = int(block.get("end_frame", start + int(block.get("length", 1) or 1)) or (start + 1))
+                action = _text(block.get("prompt", block.get("action", "")))
+                if end <= start or not action:
+                    continue
+                block_beats.append({
+                    "id": _text(block.get("id")) or f"extended_prompt_{block_index + 1}",
+                    "start_frame": start,
+                    "end_frame": end,
+                    "action": action,
+                    "source_line": block_index + 1,
+                })
+            if block_beats:
+                conditioning_schedule = conditioning.validate_schedule({
+                    "schema": conditioning.SCHEMA,
+                    "policy": "evolving",
+                    "global_context": _text(global_prompt),
+                    "beats": block_beats,
+                    "reference_calls": (conditioning_schedule or {}).get("reference_calls", []),
+                    "source": "shotboard_extended_prompt_blocks",
+                })
+        if conditioning_schedule:
+            # The schedule owns only timed beat selection. The visible
+            # Shotboard global prompt is always queue truth, including after
+            # the user edits it following a Prompter injection. Never let a
+            # serialized Prompter-era global_context resurrect stale text.
+            conditioning_schedule = {
+                **conditioning_schedule,
+                "global_context": _text(global_prompt),
+            }
+        editorial_cursor = 0
+        chunk_index = 0
+
+        while editorial_cursor < authored_total:
+            prefix = overlap if chunk_index > 0 else 0
+            remaining = authored_total - editorial_cursor
+
+            # R47 universal hidden-boundary runway. Every sample deliberately
+            # continues beyond its editorial endpoint. H3 may reinterpret the
+            # composition near the physical end of a native window, but those
+            # frames are technical-only and never reach delivery or lineage.
+            capacity = window - prefix - boundary_runway
+            if capacity < 1:
+                raise ValueError(
+                    "FL2VA Extended AV boundary runway consumed the complete visible capacity: "
+                    f"window={window} prefix={prefix} runway={boundary_runway}."
+                )
+            visible = min(capacity, remaining)
+            is_final_editorial_chunk = remaining <= capacity
+            if is_final_editorial_chunk:
+                required = prefix + visible + boundary_runway
+                raw_frames = align_h3_frames(required)
+                if raw_frames > window:
+                    raise ValueError(
+                        "FL2VA Extended AV final run cannot fit visible suffix + hidden runway: "
+                        f"prefix={prefix} visible={visible} runway={boundary_runway} "
+                        f"required={required}f legal={raw_frames}f window={window}f."
+                    )
+                grid_padding = raw_frames - required
+            else:
+                raw_frames = window
+                grid_padding = 0
+
+            padding = boundary_runway + grid_padding
+
+            visible_start = editorial_cursor
+            visible_end = editorial_cursor + visible
+            local_guides = []
+            for event in parsed_events:
+                try:
+                    global_frame = int(event.get("global_frame", -1))
+                except (TypeError, ValueError):
+                    continue
+                # Root Picture 1 is an authored starting anchor. Later authored
+                # anchors belong only to the NEW visible suffix of the take;
+                # never duplicate them into the masked prefix.
+                if global_frame < visible_start or global_frame >= visible_end:
+                    continue
+                guide = dict(event)
+                guide["local_frame"] = int(global_frame - visible_start)
+                guide["continued_from_previous_chunk"] = False
+                local_guides.append(guide)
+
+            chunk = dict(template)
+            chunk.update({
+                "index": chunk_index,
+                "slot_index": chunk_index,
+                "slot_id": f"extended_av_take_{chunk_index + 1}",
+                "slot_label": f"Extended AV Take {chunk_index + 1:02d}",
+                "task_mode": (extended_av_root_task if chunk_index == 0 else "t2va"),
+                "frame_count": int(raw_frames),
+                "requested_frame_count": int(raw_frames),
+                "visible_frame_count": int(visible),
+                "unique_frames": int(visible),
+                "fps": H3_FPS,
+                "duration_seconds": float(raw_frames) / H3_FPS,
+                "visible_duration_seconds": float(visible) / H3_FPS,
+                "timeline_start_frame": int(visible_start),
+                "timeline_start_seconds": float(visible_start) / H3_FPS,
+                "raw_timeline_start_frame": int(max(0, visible_start - prefix)),
+                "overlap_frames": 0,
+                "trim_head_frames": 0,
+                "join_mode": "extended_av_masked_extend" if chunk_index > 0 else "extended_av_root",
+                "transition": "extended_av_masked_extend" if chunk_index > 0 else "extended_av_root",
+                "first_image": "",
+                "last_image": "",
+                "prompt": _text(global_prompt),
+                "creative_prompt": _text(global_prompt),
+                "alignment_prompt": "",
+                "local_prompt": "",
+                "audio_prompt": "",
+                "uses_bridge_first_frame": False,
+                "uses_explicit_first_keyframe": False,
+                "uses_explicit_last_keyframe": False,
+                "flf_anchor_contract": "extended_av_masked_extend",
+                "frame_source": "extended_av_masked_extend",
+                "guides": local_guides,
+                "prompt_guide_bindings": [],
+                "extended_av_context_prefix_frames": int(prefix),
+                "extended_av_trim_head_frames": int(extended.handover_frames(overlap, contract) if chunk_index > 0 else 0),
+                "extended_av_sample_frames": int(raw_frames),
+                "extended_av_boundary_runway_frames": int(boundary_runway),
+                "extended_av_grid_padding_frames": int(grid_padding),
+                "extended_av_padding_frames": int(padding),
+                "extended_av_editorial_endpoint_raw_frame": int(prefix + visible),
+                "extended_av_boundary_protection": "hidden_runway",
+                "extended_av_role": "extend" if chunk_index > 0 else "root",
+                "extended_av_place": "before" if chunk_index > 0 else "",
+                "extended_av_retain_overlap": False,
+            })
+            resolved_conditioning = conditioning.resolve_chunk_conditioning(
+                conditioning_schedule,
+                start_frame=visible_start,
+                visible_frames=visible,
+                context_prefix_frames=prefix,
+                fps=H3_FPS,
+            )
+            if resolved_conditioning:
+                chunk.update({
+                    "prompt": resolved_conditioning["prompt"],
+                    "creative_prompt": resolved_conditioning["prompt"],
+                    "local_prompt": resolved_conditioning["local_prompt"],
+                    "conditioning_revision": resolved_conditioning["conditioning_revision"],
+                    "conditioning_beat_bindings": resolved_conditioning["beat_bindings"],
+                    "conditioning_reference_calls": resolved_conditioning["reference_calls"],
+                })
+            # Remove LongVid-only metadata that can accidentally activate a
+            # second continuation authority.
+            for key in list(chunk):
+                if key.startswith("latent_tail_") or key.startswith("pianosequenza_hd_"):
+                    chunk.pop(key, None)
+            chunk.pop("positioned_guides_v2", None)
+            chunks.append(chunk)
+            prompt_map.append({
+                "chunk_index": chunk_index,
+                "slot_index": chunk_index,
+                "slot_label": chunk["slot_label"],
+                "task_mode": (extended_av_root_task if chunk_index == 0 else "t2va"),
+                "start_seconds": float(visible_start) / H3_FPS,
+                "duration_seconds": float(visible) / H3_FPS,
+                "prompt": chunk["prompt"],
+                "guide_count": len(local_guides),
+                **({"conditioning_revision": chunk["conditioning_revision"]} if resolved_conditioning else {}),
+            })
+            editorial_cursor += visible
+            chunk_index += 1
+
+        base["chunks"] = chunks
+        base["prompt_map"] = prompt_map
+        base["duration_seconds"] = float(authored_total) / H3_FPS
+        base["duration_frames"] = int(authored_total)
+        base.update({
+            "schema_version": max(14, int(base.get("schema_version", 0) or 0)),
+            "backend_revision": "r47-extend-style-v4-boundary-runway",
+            "backend_variant": "iamccs_fl2va_extend_style_v4_boundary_runway",
+            "task_mode": extended.EXTENDED_AV_MODE,
+            "generation_mode": extended.EXTENDED_AV_MODE,
+            "requested_task_mode": extended.EXTENDED_AV_MODE,
+            "extended_av_root_task": extended_av_root_task,
+            "continuation_mode": "extend_masked_before_pin_trimmed_delivery",
+            "chunk_policy": f"shared_av_window_{window}f_overlap_{overlap}f_runway_{boundary_runway}f",
+            "chunk_max_frames": window,
+            "extended_av": contract,
+            "conditioning_schedule": {
+                "schema": conditioning_schedule.get("schema"),
+                "policy": conditioning_schedule.get("policy"),
+                "beat_count": len(conditioning_schedule.get("beats", [])),
+            } if conditioning_schedule else None,
+            "mode_contract": {
+                "mode": extended.EXTENDED_AV_MODE,
+                "public_name": "FL2VA Extended AV · Experimental",
+                "backend": "iamccs_extend_style_v4_boundary_runway",
+                "legacy_backend_untouched": True,
+                "raw_av_sidecars": True,
+                "same_time_handover": False,
+                "masked_pin_trimmed_delivery": True,
+                "boundary_runway_frames": int(boundary_runway),
+                "boundary_runway_policy": "hidden_tail_trimmed_never_inherited",
+                "decoded_crossfade": False,
+                "pixel_crossfade_between_different_times": False,
+                "joint_refine_mode": contract["joint_refine_mode"],
+                "conditioning_schedule_schema": conditioning.SCHEMA,
+                "evolving_conditioning": True,
+            },
+        })
+        if isinstance(base.get("guide_track"), dict):
+            base["guide_track"] = {**base["guide_track"], "mode": extended.EXTENDED_AV_MODE, "backend": "iamccs_fl2va_extend_style_v4_boundary_runway"}
+        return base
     if experimental_loop_requested:
         # One Queue execution, one persistent full AV master latent. The
         # looping sampler divides it into internal masked windows; these are
@@ -2103,6 +2510,7 @@ def build_shotplan(
         task_mode = requested_task_mode
     explicit_flf_mode = requested_task_mode in {"flf", "fflf", "fl2va"} or continuous_guided_requested
     explicit_i2v_mode = requested_task_mode in {"i2v", "i2va"}
+    t2v_hard_cut_mode = requested_task_mode in {"t2v", "t2va"}
     explicit_ref2v_mode = requested_task_mode in {
         "ref2va", "ref2va_audio", "ref2va_reference", "ref2vid_lipsync", "lipsync_ref2vid", "v2va_object_swap", "v2va_face_swap",
     }
@@ -2186,12 +2594,12 @@ def build_shotplan(
                     f"MiniMax H3's {H3_MAX_TRAINED_FRAMES}-frame limit. Move the guides closer or add a guide."
                 )
         hard_cut_start = slot_index > 0 and (
-            slot["transition"] == "hard_cut" or i2v_hard_cut_mode or ref2v_hard_cut_mode
+            slot["transition"] == "hard_cut" or t2v_hard_cut_mode or i2v_hard_cut_mode or ref2v_hard_cut_mode
         )
         next_slot = slots[slot_index + 1] if slot_index + 1 < len(slots) else None
         next_is_cut = bool(
             next_slot
-            and (next_slot["transition"] == "hard_cut" or i2v_hard_cut_mode or ref2v_hard_cut_mode)
+            and (next_slot["transition"] == "hard_cut" or t2v_hard_cut_mode or i2v_hard_cut_mode or ref2v_hard_cut_mode)
         )
         next_anchor = ""
         if next_slot and not next_is_cut:
@@ -2224,6 +2632,8 @@ def build_shotplan(
         # isolated R19A research workflow, but never feeds this stable planner.
         bridge_first = False
         last_path = terminal_anchor
+        if t2v_hard_cut_mode:
+            first_path = last_path = ""
         has_first = bool(first_path or bridge_first)
         overlap = 0
         if chunk_index > 0 and not hard_cut_start and has_first and not continuous_guided_requested:
@@ -2253,14 +2663,12 @@ def build_shotplan(
             is_first_chunk=slot_index == 0,
             is_final_chunk=slot_index + 1 >= len(slots),
         )
-        locked_audio_hard_cut = bool(
+        locked_audio = bool(
             _text(audio_mode).lower() == "h3_custom_audio_drive"
-            and (i2v_hard_cut_mode or ref2v_hard_cut_mode or hard_cut_start or next_is_cut)
         )
-        if locked_audio_hard_cut:
-            # AudioBoard already owns the exact per-slot timing.  A generated
-            # ambience/action handoff would contradict an editorial hard cut
-            # and can make H3 visually continue or reconstruct the prior take.
+        if locked_audio:
+            # A locked performance must never acquire synthetic silence handles,
+            # including continuous FLF intervals.
             audio_handoff_prompt = ""
         lipsync_audio = _lipsync_audio_event(slot, timeline, lipsync_audio_rows) if lipsync_requested else None
         if lipsync_requested:
@@ -2311,9 +2719,9 @@ def build_shotplan(
             "alignment_prompt": alignment_prompt,
             "audio_handoff_prompt": audio_handoff_prompt,
             # Legacy field keeps its original meaning: speech-free tail.
-            "audio_handoff_silence_seconds": 0.0 if lipsync_requested or locked_audio_hard_cut or slot_index + 1 >= len(slots) else 1.0,
-            "audio_handoff_silence_head_seconds": 0.0 if lipsync_requested or locked_audio_hard_cut or slot_index == 0 else 1.0,
-            "audio_handoff_silence_tail_seconds": 0.0 if lipsync_requested or locked_audio_hard_cut or slot_index + 1 >= len(slots) else 1.0,
+            "audio_handoff_silence_seconds": 0.0 if lipsync_requested or locked_audio or slot_index + 1 >= len(slots) else 1.0,
+            "audio_handoff_silence_head_seconds": 0.0 if lipsync_requested or locked_audio or slot_index == 0 else 1.0,
+            "audio_handoff_silence_tail_seconds": 0.0 if lipsync_requested or locked_audio or slot_index + 1 >= len(slots) else 1.0,
             "local_prompt": slot["prompt"],
             "audio_prompt": slot["audio_prompt"],
             "prompt_guide_bindings": [{
@@ -2497,11 +2905,11 @@ def build_shotplan(
         "flf_join_mode": resolved_join_mode,
         "flf_overlap_frames": resolved_overlap_frames,
         "audio_handoff_policy": {
-            "scope": "source_audio_is_the_performance_timing_authority" if lipsync_requested else "both_sides_of_every_internal_independent_chunk_boundary",
-            "speech_free_head_seconds_after_first": 0.0 if lipsync_requested else 1.0,
-            "speech_free_tail_seconds": 0.0 if lipsync_requested else 1.0,
+            "scope": "source_audio_is_the_performance_timing_authority" if lipsync_requested or locked_audio else "both_sides_of_every_internal_independent_chunk_boundary",
+            "speech_free_head_seconds_after_first": 0.0 if lipsync_requested or locked_audio else 1.0,
+            "speech_free_tail_seconds": 0.0 if lipsync_requested or locked_audio else 1.0,
             "final_chunk_restricted": False,
-            "purpose": "preserve direct AudioBoard lip-sync timing" if lipsync_requested else "keep dialogue and new vocalisations outside AV edit and overlap handles",
+            "purpose": "preserve direct AudioBoard lip-sync timing" if lipsync_requested or locked_audio else "keep dialogue and new vocalisations outside AV edit and overlap handles",
         },
         "acceleration": acceleration,
         "ref_image_size": ref_image_size,

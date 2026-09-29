@@ -117,8 +117,8 @@ def _refine(model, conditioning, latent, cine_linx, segment_index):
     return result
 
 
-def _finish_segment(intermediate, output, audio, trim, frames, width, height, fps):
-    from .iamccs_minimax_h3_shotboard import _find_ffmpeg, _write_wav
+def _finish_segment(intermediate, output, audio, trim, frames, width, height, fps, *, exact_audio=False):
+    from .iamccs_minimax_h3_shotboard import _find_ffmpeg, _write_wav, _write_extend_audio_raw_float
 
     ffmpeg = _find_ffmpeg()
     if not ffmpeg:
@@ -126,16 +126,29 @@ def _finish_segment(intermediate, output, audio, trim, frames, width, height, fp
     if output.exists():
         raise FileExistsError(f"R38B refuses to overwrite an existing segment: {output}")
     with tempfile.TemporaryDirectory(prefix="iamccs_r38b_mux_") as temp:
-        wav = Path(temp) / "native_audio.wav"
-        if not _write_wav(audio, wav):
-            raise ValueError("R38B requires the native AUDIO output, not a new audio loader.")
+        temp_path = Path(temp)
+        wav = temp_path / "native_audio.wav"
+        raw = temp_path / "native_audio.f32le"
+        if exact_audio:
+            ok, audio_rate, audio_channels = _write_extend_audio_raw_float(audio, frames, fps, raw)
+            if not ok:
+                raise ValueError("R38B EXTEND requires native float AUDIO output.")
+            audio_input = ["-f", "f32le", "-ar", str(audio_rate), "-ac", str(audio_channels), "-i", str(raw)]
+            audio_filter = []
+            audio_encode = ["-c:a", "aac"]
+        else:
+            if not _write_wav(audio, wav):
+                raise ValueError("R38B requires the native AUDIO output, not a new audio loader.")
+            audio_input = ["-i", str(wav)]
+            audio_filter = ["-af", f"apad,atrim=duration={frames / fps:.9f},asetpts=PTS-STARTPTS"]
+            audio_encode = ["-c:a", "aac", "-b:a", "192k"]
         vf = f"trim=start_frame={trim}:end_frame={trim + frames},setpts=PTS-STARTPTS,crop={width}:{height}"
         command = [ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
-                   "-i", str(intermediate), "-i", str(wav), "-map", "0:v:0", "-map", "1:a:0",
+                   "-i", str(intermediate), *audio_input, "-map", "0:v:0", "-map", "1:a:0",
                    "-vf", vf, "-frames:v", str(frames), "-r", str(fps),
-                   "-af", f"apad,atrim=duration={frames / fps:.9f},asetpts=PTS-STARTPTS",
+                   *audio_filter,
                    "-c:v", "libx264", "-preset", "medium", "-crf", "16", "-pix_fmt", "yuv420p",
-                   "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart", str(output)]
+                   *audio_encode, "-movflags", "+faststart", str(output)]
         completed = subprocess.run(command, capture_output=True)
         if completed.returncode:
             raise RuntimeError("R38B delivery encode failed: " + completed.stderr.decode("utf8", "replace")[-2000:])
@@ -256,27 +269,40 @@ def _concat_videos_incoming_overlap(paths, output, overlap_frames: int, fps: flo
 
 
 def _rtx_finish_segment(intermediate, output, audio, trim, frames, crop_width, crop_height,
-                        width, height, fps, quality):
+                        width, height, fps, quality, *, exact_audio=False):
     """Final RTX pass from a file, one frame at a time; no UHD IMAGE batch."""
     import av
     import comfy.model_management as mm
     from .iamccs_rtx_vfx import _import_video_super_res
-    from .iamccs_minimax_h3_shotboard import _find_ffmpeg, _write_wav
+    from .iamccs_minimax_h3_shotboard import _find_ffmpeg, _write_wav, _write_extend_audio_raw_float
 
     ffmpeg = _find_ffmpeg()
     if not ffmpeg or output.exists():
         raise ValueError("RTX delivery needs ffmpeg and a new output filename.")
     VideoSuperRes = _import_video_super_res()
     with tempfile.TemporaryDirectory(prefix="iamccs_r38b_rtx_") as temp, tempfile.TemporaryFile() as errors:
-        wav = Path(temp) / "native_audio.wav"
-        if not _write_wav(audio, wav):
-            raise ValueError("RTX delivery requires native audio.")
+        temp_path = Path(temp)
+        wav = temp_path / "native_audio.wav"
+        raw = temp_path / "native_audio.f32le"
+        if exact_audio:
+            ok, audio_rate, audio_channels = _write_extend_audio_raw_float(audio, frames, fps, raw)
+            if not ok:
+                raise ValueError("RTX EXTEND delivery requires native float audio.")
+            audio_input = ["-f","f32le","-ar",str(audio_rate),"-ac",str(audio_channels),"-i",str(raw)]
+            audio_filter = []
+            audio_encode = ["-c:a","aac"]
+        else:
+            if not _write_wav(audio, wav):
+                raise ValueError("RTX delivery requires native audio.")
+            audio_input = ["-i",str(wav)]
+            audio_filter = ["-af",f"apad,atrim=duration={frames/fps:.9f},asetpts=PTS-STARTPTS"]
+            audio_encode = ["-c:a","aac","-b:a","192k"]
         command = [ffmpeg,"-hide_banner","-loglevel","error","-nostdin","-n",
             "-f","rawvideo","-pix_fmt","rgb24","-s",f"{width}x{height}","-r",str(fps),"-i","pipe:0",
-            "-i",str(wav),"-map","0:v:0","-map","1:a:0","-frames:v",str(frames),
-            "-af",f"apad,atrim=duration={frames/fps:.9f},asetpts=PTS-STARTPTS",
+            *audio_input,"-map","0:v:0","-map","1:a:0","-frames:v",str(frames),
+            *audio_filter,
             "-c:v","libx264","-preset","medium","-crf","16","-pix_fmt","yuv420p",
-            "-c:a","aac","-b:a","192k","-movflags","+faststart",str(output)]
+            *audio_encode,"-movflags","+faststart",str(output)]
         process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=errors)
         written = 0
         try:
@@ -364,10 +390,21 @@ class IAMCCS_MiniMaxH3PixelRefineR38B:
         import comfy.model_management as mm
         from .iamccs_minimax_h3_shotboard import (
             _concat_videos, _concat_videos_overlap, _current_prompt, _encode_images, _enqueue,
-            _joined_frame_count, _trim_audio_frames, _write_segment_metadata,
+            _joined_frame_count, _read_segment_frame_count, _trim_audio_frames, _write_segment_metadata,
+            _save_extend_soft_audio_context,
         )
 
         plan = _resolve_shotplan(cine_linx)
+        extended_cfg = plan.get("extended_av") if isinstance(plan.get("extended_av"), dict) else {}
+        extended_mode = bool(
+            extended_cfg.get("enabled", False)
+            and str(plan.get("task_mode", "") or "").strip().lower() == "fl2va_extended_av"
+        )
+        extended_overlap = max(0, int(extended_cfg.get("overlap_frames", 0) or 0)) if extended_mode else 0
+        if extended_mode and extended_overlap < 1:
+            raise ValueError("R38B Extended AV requires a masked prefix window.")
+        extended_handover = "masked_trim" if extended_mode else ""
+
         enabled = bool(plan.get("upscale_enabled")) and plan.get("upscale_mode", "off") != "off"
         if enabled and plan["upscale_mode"] != "h3_pixel_refine":
             raise ValueError("R38B wires Native / RTX → H3 only. Choose h3_pixel_refine or Off; existing other delivery workflows remain separate.")
@@ -475,9 +512,25 @@ class IAMCCS_MiniMaxH3PixelRefineR38B:
             )
         else:
             from .iamccs_minimax_h3_shotboard import _delivery_join_frames
-            join = _delivery_join_frames(cine_linx, index, join_trim_frames)
-            frames = visible - (1 if join == 1 else 0)
-            audio = _trim_audio_frames(native_audio, 1, 24) if join == 1 else native_audio
+            # Extended AV v2 reaches R38B AFTER EXTEND-style H3TrimPinned
+            # semantics in Atomic delivery. There is no decoded overlap left
+            # to consume here; the segment is already its delivered take.
+            if extended_mode:
+                join = 0
+                chunks = plan.get("chunks") if isinstance(plan.get("chunks"), list) else []
+                chunk = chunks[index] if index < len(chunks) and isinstance(chunks[index], dict) else {}
+                expected_visible = max(1, int(chunk.get("unique_frames", 0) or 0))
+                if visible != expected_visible:
+                    raise RuntimeError(
+                        "R38B Extended AV delivered-frame mismatch after masked trim: "
+                        f"decoded={visible}f expected={expected_visible}f segment={index + 1}."
+                    )
+                frames = visible
+                audio = native_audio
+            else:
+                join = _delivery_join_frames(cine_linx, index, join_trim_frames)
+                frames = visible - (1 if join == 1 else 0)
+                audio = _trim_audio_frames(native_audio, 1, 24) if join == 1 else native_audio
         if enabled:
             settings = _upres_settings(plan)
             width, height = _delivery_size(plan)
@@ -520,23 +573,43 @@ class IAMCCS_MiniMaxH3PixelRefineR38B:
                     mm.unload_all_models()
                     mm.soft_empty_cache()
                     _rtx_finish_segment(intermediate, output, audio, trim + (1 if join == 1 else 0), frames,
-                                        crop_width,crop_height,width,height,24,settings.get("rtx_quality","ULTRA"))
+                                        crop_width,crop_height,width,height,24,settings.get("rtx_quality","ULTRA"),
+                                        exact_audio=extended_mode)
                 else:
-                    _finish_segment(intermediate, output, audio, trim + (1 if join == 1 else 0), frames, width, height, 24)
+                    _finish_segment(intermediate, output, audio, trim + (1 if join == 1 else 0), frames, width, height, 24,
+                                    exact_audio=extended_mode)
             finally:
                 mm.unload_all_models()
                 gc.collect()
                 mm.soft_empty_cache()
         else:
-            _encode_images(native_frames[1:] if join == 1 else native_frames, audio, 24, output)
+            _encode_images(
+                native_frames[1:] if join == 1 else native_frames, audio, 24, output,
+                audio_policy="extend_exact_float" if extended_mode else "legacy",
+            )
         source_workflow = extra_pnginfo.get("workflow") if isinstance(extra_pnginfo, dict) else None
+        segment_audio_policy = (
+            "extended_av_masked_trim"
+            if extended_mode
+            else ("trim_silent_tail" if native_audio.get("iamccs_flf_locked_audio_handles", False) else "crossfade")
+        )
         _write_segment_metadata(
             output, frames, 24,
-            "trim_silent_tail" if native_audio.get("iamccs_flf_locked_audio_handles", False) else "crossfade",
+            segment_audio_policy,
             provenance={"render_id": run, "stage": "h3_pixel_refine" if enabled else "native_windowed",
-                        "segment_index": index, "total_segments": total, "shotplan": plan},
+                        "segment_index": index, "total_segments": total, "shotplan": plan,
+                        "extended_av_handover": extended_handover if extended_mode else ""},
             source_workflow=source_workflow,
         )
+        if extended_mode and isinstance(sampled_latent, dict):
+            _soft_audio_path = _save_extend_soft_audio_context(
+                output, sampled_latent.get("_iamccs_extended_soft_audio")
+            )
+            if _soft_audio_path is not None:
+                LOG.info(
+                    "R38B EXTEND hidden Soft-AV audio mirrored | segment=%d/%d | path=%s",
+                    index + 1, total, _soft_audio_path,
+                )
         preview = output
         if index == total - 1:
             paths = [root / f"segment_{i + 1:04d}.mp4" for i in range(total)]
@@ -544,7 +617,46 @@ class IAMCCS_MiniMaxH3PixelRefineR38B:
             if preview.exists():
                 raise FileExistsError(f"R38B final film already exists: {preview}")
             final_tail_cfg = plan.get("longvid_latent_tail")
-            if (
+            if extended_mode:
+                # EXTEND-style masked EXTEND delivery: every child file has already
+                # had its pinned head removed. Plain extensions therefore butt
+                # join: parent plays whole, child enters at delivered frame 0.
+                chunks = plan.get("chunks") if isinstance(plan.get("chunks"), list) else []
+                expected_master_frames = sum(
+                    max(0, int(chunk.get("unique_frames", 0) or 0))
+                    for chunk in chunks if isinstance(chunk, dict)
+                )
+                measured_master_frames = sum(_read_segment_frame_count(path) for path in paths)
+                if expected_master_frames > 0 and measured_master_frames != expected_master_frames:
+                    raise RuntimeError(
+                        "R38B Extended AV masked-delivery invariant failed: "
+                        f"segments={measured_master_frames}f authored={expected_master_frames}f."
+                    )
+                # EXTEND-style masked joins already converge in RAW AV latent space.
+                # Do not apply the generic per-shot 20 ms edge treatment. A 5 ms
+                # micro-declick is short enough to avoid the audible micro-dip while
+                # smoothing the PCM discontinuity that otherwise presents as a click.
+                # _concat_videos still decodes all audio to PCM and encodes ONE AAC
+                # programme; video remains a strict butt join.
+                _concat_videos(
+                    paths, preview,
+                    audio_edge_fade_ms=5.0,
+                    audio_join_policy="extend_soft_av",
+                    extend_soft_av_ms=float((plan.get("extended_av") or {}).get("soft_audio_handover_ms", 15.0)),
+                    extend_boundary_polish_ms=float((plan.get("extended_av") or {}).get("boundary_polish_ms", 3.0)),
+                    extend_boundary_polish_strength=float((plan.get("extended_av") or {}).get("boundary_polish_strength", 1.0)),
+                )
+                LOG.info(
+                    "R38B Extended AV audio master | policy=hidden_context_soft_av_qsin_boundary_polish | "
+                    "hidden_child_context=on | silence_taper=off_when_context_available | final_encode=single_aac"
+                )
+                overlap = 0
+                LOG.info(
+                    "R38B Extended AV EXTEND-style master complete | chunks=%d | mode=masked_trim_butt_join | "
+                    "master_frames=%d | authored_frames=%d | decoded_crossfade=off",
+                    len(paths), measured_master_frames, expected_master_frames,
+                )
+            elif (
                 isinstance(final_tail_cfg, dict)
                 and bool(final_tail_cfg.get("enabled", False))
                 and int(final_tail_cfg.get("tail_frames", 0) or 0) > 0
@@ -555,15 +667,13 @@ class IAMCCS_MiniMaxH3PixelRefineR38B:
                     int(final_tail_cfg.get("tail_frames", 0) or 0),
                     24.0,
                 )
+                overlap = int(final_tail_cfg.get("tail_frames", 0) or 0)
             elif join > 1:
                 _concat_videos_overlap(paths, preview, join, 24)
+                overlap = join
             else:
                 _concat_videos(paths, preview)
-            overlap = (
-                int(final_tail_cfg.get("tail_frames", 0) or 0)
-                if isinstance(final_tail_cfg, dict) and bool(final_tail_cfg.get("enabled", False))
-                else (join if join > 1 else 0)
-            )
+                overlap = 0
             _write_segment_metadata(
                 preview, _joined_frame_count(paths, overlap), 24,
                 "incoming_overlap" if overlap else "direct",

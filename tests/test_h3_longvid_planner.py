@@ -324,13 +324,13 @@ class KeyframeJointPromptBindingTests(unittest.TestCase):
             width=640,
             height=384,
         )
-        self.assertEqual(result["task_mode"], "latent_go_ahead")
+        self.assertEqual(result["task_mode"], "fl2va_extended_av")
         self.assertIn("GLOBAL IDENTITY CONTRACT", result["chunks"][0]["creative_prompt"])
         final = result["chunks"][-1]
         self.assertIn("GLOBAL IDENTITY CONTRACT", final["creative_prompt"])
         self.assertIn(final["local_prompt"], final["creative_prompt"])
         self.assertFalse(final["prompt_guide_bindings"][0]["final_prompt_only"])
-        self.assertEqual(final["prompt_guide_bindings"][0]["guide_id"], final["slot_id"])
+        self.assertEqual(final["prompt_guide_bindings"][0]["guide_id"], "pose_4")
 
 
 class HerrgottsDirectAVContractTests(unittest.TestCase):
