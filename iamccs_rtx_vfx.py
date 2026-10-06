@@ -339,6 +339,54 @@ def _import_video_super_res():
     return VideoSuperRes
 
 
+def rtx_vfx_runtime_probe() -> dict:
+    """Return a non-throwing RTX VFX availability report for UI/export preflight.
+
+    IAMCCS never mutates Deno.  It only discovers either the normal Python
+    ``nvvfx`` package or the optional runtime path prepared by Deno's official
+    installer and reports exactly what the Exporter will use.
+    """
+    runtime_path = _read_runtime_path()
+    loaded_before = _current_nvvfx_package_path()
+    base = {
+        "available": False,
+        "python_executable": str(sys.executable),
+        "python_version": f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+        "cuda_available": bool(torch.cuda.is_available()),
+        "cuda_device_count": int(torch.cuda.device_count()) if torch.cuda.is_available() else 0,
+        "runtime_source": "Deno prepared runtime" if runtime_path is not None else "Python environment",
+        "runtime_path": str(runtime_path or ""),
+        "module_path": str(loaded_before or ""),
+        "video_super_res": "NOT AVAILABLE",
+        "install_guide": RTX_INSTALL_GUIDE_URL,
+        "status": _runtime_status(),
+    }
+    if not torch.cuda.is_available():
+        base["reason"] = "CUDA is not available in this ComfyUI Python."
+        base["runtime_source"] = "CUDA unavailable"
+        return base
+    try:
+        video_super_res = _import_video_super_res()
+    except Exception as exc:
+        base["reason"] = str(exc)
+        base["status"] = _runtime_status()
+        base["module_path"] = str(_current_nvvfx_package_path() or loaded_before or "")
+        if runtime_path is None and not base["module_path"]:
+            base["runtime_source"] = "Not installed"
+        return base
+
+    module_path = _current_nvvfx_package_path()
+    base.update({
+        "available": True,
+        "reason": "NVIDIA RTX VFX runtime is importable.",
+        "runtime_source": "Deno prepared runtime" if runtime_path is not None else "Python site-packages",
+        "module_path": str(module_path or ""),
+        "video_super_res": "AVAILABLE" if video_super_res is not None else "UNKNOWN",
+        "status": _runtime_status(),
+    })
+    return base
+
+
 def _quality_attr(mode: str) -> str:
     return {
         "VSR Low": "LOW", "VSR Medium": "MEDIUM", "VSR High": "HIGH", "VSR Ultra": "ULTRA",
@@ -410,6 +458,10 @@ def apply_rtx_vfx(
     target_width, target_height = _target_size(
         int(source_width), int(source_height), mode, resize_type, float(scale), float(megapixels), int(width), int(height), alignment, ratio_preset
     )
+    # Import/preflight before touching the source tensor or unloading Comfy
+    # models. A missing optional runtime must fail fast and predictably.
+    VideoSuperRes = _import_video_super_res()
+
     # RTX accepts float32 RGB frames, but keeping a complete float32 4K batch
     # on CUDA can consume tens of GiB.  Detach the source before unloading any
     # previous diffusion stack, then retain completed frames on CPU/float16.
@@ -417,8 +469,6 @@ def apply_rtx_vfx(
     source_dtype = str(images.dtype)
     source = images[..., :3].detach().to(device="cpu")
     _release_comfy_models_for_rtx()
-
-    VideoSuperRes = _import_video_super_res()
     quality = getattr(VideoSuperRes.QualityLevel, _quality_attr(mode))
     device_index = _safe_cuda_device_index(device)
     cuda_device = torch.device(f"cuda:{device_index}")

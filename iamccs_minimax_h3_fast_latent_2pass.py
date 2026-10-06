@@ -412,7 +412,7 @@ def _target_conditioning(model, clip, video_vae, audio_vae, cine_linx, segment_i
     target_conditioning = result[1]
     guide_report = "none"
     task_mode = str(plan.get("task_mode", "") or "").lower()
-    if task_mode == "longvid_motion_context":
+    if task_mode in {"longvid_motion_context", "longvid_continuous_guided"}:
         from .iamccs_minimax_h3_motion_context_variant import _apply_positioned_guides
 
         chunks = plan.get("chunks") or []
@@ -486,6 +486,23 @@ def _sample_stage2(model, conditioning, latent, cine_linx, segment_index):
     guider = _result_item(BasicGuider.execute(model=active_model, conditioning=conditioning), 0)
     plan = _resolve_shotplan(cine_linx)
     window_frames, overlap_frames, policy_source = _stage2_window_policy(plan)
+    from .iamccs_h3_stage2_guides import conditioning_guides, pin_still_guides
+    from .iamccs_minimax_h3_pixel_refine_variant import _provider
+    guides = conditioning_guides(conditioning)
+    guide_mode = str(_upres_settings(plan).get("fast_latent_stage2_guides", "soft")).lower()
+    if guide_mode == "masked":
+        from comfy.nested_tensor import NestedTensor
+        common = _provider("common")
+        loop = _provider("nodes_looping_sampler")
+        if not loop.per_row_mask_is_continuous():
+            raise RuntimeError("Stage-2 Masked guides require H3 per-row mask support")
+        video, audio = common.unpack_av(latent, "Stage-2 guides")
+        vm, am = loop._split_mask(latent)
+        video, vm, count = pin_still_guides(video, vm, guides)
+        am = torch.ones_like(audio) if am is None else am
+        latent = common.pack_av(latent, video, audio, noise_mask=NestedTensor([vm, am]))
+        LOG.info("FAST LATENT Stage-2 Masked: pinned %d image guides; audio mask preserved", count)
+    LOG.info("FAST LATENT Stage-2 guides=%d mode=%s", len(guides), guide_mode)
 
     if window_frames is None:
         LOG.warning(
@@ -517,7 +534,7 @@ def _sample_stage2(model, conditioning, latent, cine_linx, segment_index):
     )
     sampled = loop.MMH3LoopingSampler.execute(
         noise=noise, guider=guider, sampler=sampler, sigmas=sigmas,
-        cond_set={"conds": [conditioning]}, latent=latent,
+        cond_set={"conds": [conditioning], "encoded_keyframes": guides}, latent=latent,
         chunk_frames=int(window_frames), overlap_frames=int(overlap_frames),
         carry="mask", overlap_strength_video=1.0, overlap_strength_audio=1.0,
         audio_denoise_mask=torch.zeros((1, 1, 1)),

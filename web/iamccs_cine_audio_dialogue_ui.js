@@ -9874,7 +9874,72 @@ function renderAudioBoardMixer(node) {
         } catch {}
         return { arranger: null, widget: null, data: {} };
     };
-    const arrangerTransport = () => upstreamArranger()?._iamccsAudioBoardTransport || null;
+    const downstreamVideoEditor = () => {
+        const queue = [node];
+        const seen = new Set();
+        const links = () => {
+            const raw = app.graph?.links;
+            if (!raw) return [];
+            return Array.isArray(raw) ? raw.filter(Boolean) : Object.values(raw).filter(Boolean);
+        };
+        while (queue.length) {
+            const current = queue.shift();
+            if (!current || seen.has(current.id)) continue;
+            seen.add(current.id);
+            const type = String(current?.comfyClass || current?.type || current?.constructor?.type || "");
+            if (current !== node && type === "IAMCCS_ShotboardVideoEditorV1") return current;
+            for (const link of links()) {
+                const originId = link?.origin_id ?? link?.originId ?? (Array.isArray(link) ? link[1] : undefined);
+                const targetId = link?.target_id ?? link?.targetId ?? (Array.isArray(link) ? link[3] : undefined);
+                if (String(originId) !== String(current.id)) continue;
+                const target = app.graph?.getNodeById?.(targetId);
+                if (target && !seen.has(target.id)) queue.push(target);
+            }
+        }
+        return null;
+    };
+    const readVideoEditorSlave = () => {
+        const editor = downstreamVideoEditor();
+        const api = editor?._iamccsVideoEditorAudioSlave || null;
+        const fromApi = api?.getMixerState?.();
+        if (fromApi && typeof fromApi === "object") return { editor, api, data: fromApi };
+        const manifestWidget = editor ? findWidget(editor, "editor_manifest_json") : null;
+        try {
+            const manifest = JSON.parse(String(manifestWidget?.value || editor?.properties?.iamccs_video_editor_manifest || "{}"));
+            const tracks = Array.isArray(manifest?.tracks) ? manifest.tracks : [];
+            const trackSettings = Array.from({ length: 5 }, (_, index) => {
+                const track = tracks.find((item) => String(item?.id || "") === `A${index + 1}`) || {};
+                return {
+                    name: `A${index + 1}`,
+                    mute: Boolean(track.muted ?? track.mute ?? false),
+                    solo: Boolean(track.solo ?? false),
+                    volume: Number(track.volume ?? 1),
+                    gainDb: Number(track.gainDb ?? 0),
+                    pan: Number(track.pan ?? 0),
+                    normalize: Boolean(track.normalize ?? false),
+                    bypassEffects: Boolean(track.bypassEffects ?? false),
+                    reverb: Boolean(track.reverb ?? false),
+                    reverbSend: Number(track.reverbSend ?? 0),
+                    effectChain: Array.isArray(track.effectChain) ? track.effectChain : [],
+                };
+            });
+            return {
+                editor,
+                api,
+                data: {
+                    schema: "iamccs.audio_board_mixer",
+                    schema_version: 1,
+                    audioTrackCount: 5,
+                    trackSettings,
+                    mirrorTrackSettings: trackSettings,
+                    masterBus: manifest?.audio_master_bus && typeof manifest.audio_master_bus === "object" ? manifest.audio_master_bus : {},
+                    masterAudioGain: Number(manifest?.masterAudioGain ?? 1),
+                },
+            };
+        } catch {}
+        return { editor, api, data: {} };
+    };
+    const arrangerTransport = () => upstreamArranger()?._iamccsAudioBoardTransport || downstreamVideoEditor()?._iamccsVideoEditorAudioSlave || null;
     const fmtMixerTime = (frames, fpsValue = 24) => {
         const safeFps = Math.max(1, Number(fpsValue || 24) || 24);
         const total = Math.max(0, Number(frames || 0) / safeFps);
@@ -9916,6 +9981,16 @@ function renderAudioBoardMixer(node) {
             document.dispatchEvent(new CustomEvent("iamccs:audio_arranger_state_changed", {
                 detail: { node_id: arranger?.id, reason: `mixer_${reason}`, selectedMixer: data.selectedMixer || null },
             }));
+        } else {
+            const { editor, api } = readVideoEditorSlave();
+            if (api?.applyExternalState) {
+                api.applyExternalState(data, `mixer_${reason}`);
+            } else if (editor) {
+                document.dispatchEvent(new CustomEvent("iamccs:audio_mixer_video_editor_slave", {
+                    detail: { node_id: editor.id, reason: `mixer_${reason}`, data },
+                }));
+            }
+            editor?.setDirtyCanvas?.(true, true);
         }
         writeLocal({
             audioSegments: data.audioSegments || [],
@@ -9987,12 +10062,15 @@ function renderAudioBoardMixer(node) {
         const meters = snap?.meters || {};
         const playing = Boolean(snap?.playing);
         const source = readArranger();
-        const liveData = source.arranger ? source.data : { ...parseLocal() };
+        const editorSource = source.arranger ? null : readVideoEditorSlave();
+        const liveData = source.arranger
+            ? source.data
+            : { ...(editorSource?.data || {}), ...parseLocal() };
         const masterState = liveData.masterBus && typeof liveData.masterBus === "object" ? liveData.masterBus : {};
         const timeEl = root.querySelector(".iamccs-mixer-time");
         if (timeEl && snap) timeEl.textContent = `${fmtMixerTime(Math.max(0, Number(snap.playhead || 0)), snap.fps)} / ${fmtMixerTime(Math.max(1, Number(snap.totalFrames || 1)), snap.fps)}`;
         const stateEl = root.querySelector(".iamccs-mixer-state");
-        if (stateEl) stateEl.textContent = api ? (playing ? "[playing]" : "[stopped]") : "[no arranger]";
+        if (stateEl) stateEl.textContent = api ? (playing ? "[playing]" : "[stopped]") : "[no audio slave]";
         const playBtn = root.querySelector("[data-mixer-transport='play']");
         if (playBtn) {
             playBtn.classList.toggle("is-active", playing);
@@ -10019,7 +10097,8 @@ function renderAudioBoardMixer(node) {
     }
     const draw = () => {
         const source = readArranger();
-        const data = source.data;
+        const editorSource = source.arranger ? null : readVideoEditorSlave();
+        const data = source.arranger ? source.data : { ...(editorSource?.data || {}) };
         const local = parseLocal();
         if (!source.arranger) {
             Object.assign(data, local);
@@ -10029,7 +10108,7 @@ function renderAudioBoardMixer(node) {
         } else if (!Array.isArray(data.audioSegments) && Array.isArray(local.audioSegments)) {
             Object.assign(data, local);
         }
-        data.audioTrackCount = Math.max(1, Number(data.audioTrackCount || (Array.isArray(data.trackSettings) ? data.trackSettings.length : 4) || 4));
+        data.audioTrackCount = Math.max(editorSource?.editor ? 5 : 1, Number(data.audioTrackCount || (Array.isArray(data.trackSettings) ? data.trackSettings.length : 4) || 4));
         data.masterBus = data.masterBus && typeof data.masterBus === "object" ? data.masterBus : {};
         data.masterBus.postFaderMeter = data.masterBus.postFaderMeter !== false;
         data.masterBus.meterMode = String(data.masterBus.meterMode || "peak").toLowerCase() === "rms" ? "rms" : "peak";
@@ -10038,10 +10117,14 @@ function renderAudioBoardMixer(node) {
         const head = document.createElement("div");
         head.className = "iamccs-mixer-head";
         const title = document.createElement("div");
-        title.innerHTML = `<div class="iamccs-mixer-title">IAMCCS AudioBoard Mixer</div><div class="iamccs-mixer-sub">${data.audioSegments?.length || 0} clips / ${data.audioTrackCount} channel strips / sync ${upstreamArranger() ? "Arranger" : "cine_linx"}</div>`;
+        const syncTargetLabel = upstreamArranger() ? "Arranger" : (editorSource?.editor ? "Video Editor Audio Slave" : "local cine_linx");
+        title.innerHTML = `<div class="iamccs-mixer-title">IAMCCS AudioBoard Mixer</div><div class="iamccs-mixer-sub">${data.audioSegments?.length || 0} clips / ${data.audioTrackCount} channel strips / sync ${syncTargetLabel}</div>`;
         const refresh = document.createElement("button");
-        refresh.textContent = "Sync From Arranger";
-        refresh.onclick = () => draw();
+        refresh.textContent = upstreamArranger() ? "Sync From Arranger" : (editorSource?.editor ? "Sync Video Editor Slave" : "Refresh");
+        refresh.onclick = () => {
+            if (!source.arranger && editorSource?.editor) syncArranger(data, "manual_video_editor_slave_sync");
+            draw();
+        };
         head.append(title, refresh);
         if (mixerMeterRaf) {
             cancelAnimationFrame(mixerMeterRaf);
@@ -10076,7 +10159,7 @@ function renderAudioBoardMixer(node) {
         time.textContent = `${fmtMixerTime(0, data.frame_rate)} / ${fmtMixerTime(Math.max(1, Math.round(Number(data.duration_seconds || 0) * Number(data.frame_rate || 24))), data.frame_rate)}`;
         const stateBadge = document.createElement("span");
         stateBadge.className = "iamccs-mixer-state";
-        stateBadge.textContent = upstreamArranger() ? "[Mixer Sync]" : "[no arranger]";
+        stateBadge.textContent = upstreamArranger() ? "[Mixer ↔ Arranger]" : (editorSource?.editor ? "[Mixer → Video Editor]" : "[no audio slave]");
         transport.append(rewind, play, loop, stop, time, stateBadge);
         const strips = document.createElement("div");
         strips.className = "iamccs-mixer-strips";
@@ -10234,7 +10317,11 @@ function renderAudioBoardMixer(node) {
         for (let i = 0; i < data.audioTrackCount; i += 1) strips.appendChild(makeStrip(i, false));
         root.append(head, transport, strips);
         updateMixerLiveMeters();
-        writeLocal({ audioSegments: data.audioSegments || [], audioTrackCount: data.audioTrackCount, mirrorTrackSettings: data.trackSettings || [], masterBus: data.masterBus || {}, masterAudioGain: data.masterAudioGain ?? 1 });
+        writeLocal({ audioSegments: data.audioSegments || [], audioTrackCount: data.audioTrackCount, trackSettings: data.trackSettings || [], mirrorTrackSettings: data.trackSettings || [], masterBus: data.masterBus || {}, masterAudioGain: data.masterAudioGain ?? 1 });
+        if (!source.arranger && editorSource?.editor) {
+            const slave = editorSource.api || editorSource.editor?._iamccsVideoEditorAudioSlave;
+            if (slave?.applyExternalState) slave.applyExternalState(data, "mixer_ui_video_editor_slave_sync");
+        }
     };
     draw();
     const domWidget = node.addDOMWidget("AudioBoardMixer", "iamccs_audio_board_mixer", root, { serialize: false });

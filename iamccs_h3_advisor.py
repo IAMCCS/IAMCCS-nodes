@@ -15,7 +15,7 @@ def task_family(task):
     if task in {"v2va_controlnet", "controlnet_v2v", "h3_fun_controlnet"}:
         return "fl2va"
     return "ref2va" if task.startswith("ref2va") or task in {
-        "ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap"
+        "reference_image", "ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap"
     } else "fl2va"
 
 

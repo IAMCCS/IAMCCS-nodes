@@ -165,6 +165,67 @@ class LongVidPositionedGuidesV2RegressionTests(unittest.TestCase):
         self.assertEqual(second["trim_head_frames"], 0)
         self.assertEqual(second["positioned_guides_v2"]["opening_authority"], "authored_guide")
 
+    def test_adaptive_latent_tail_is_the_only_continuation_authority(self):
+        rows = [image_row(i + 1, i * 102, 102, "start" if i == 0 else "continuous") for i in range(7)]
+        result = CORE._longvid_guide_plan(
+            timeline={"rows": rows, "fps": 24, "duration_seconds": 30},
+            global_prompt="One uninterrupted continuous action.",
+            duration_seconds=30,
+            prompt_mapping="global_plus_local",
+            resolved_width=640,
+            resolved_height=384,
+            audio_mode="h3_native_generated",
+            acceleration="native",
+            ref_image_size="match",
+            text_encoder_device="gpu_auto",
+            roles=["composition"] * 4,
+            reference_video_role="off",
+            reference_audio_role="off",
+            sol_conditioning="exact_kv",
+            spectrum_profile="low_vram",
+            vram_clean_before_decode=True,
+            rife_mode="off",
+            active_upscale_mode="off",
+            upscale_enabled=False,
+            voice_reference_picture_index=0,
+            latent_tail_context_frames=22,
+            motion_context_window_frames=209,
+        )
+
+        second = result["chunks"][1]
+        self.assertTrue(second["latent_tail_adaptive_window"])
+        self.assertEqual(second["latent_tail_context_prefix_frames"], 22)
+        self.assertEqual(second["task_mode"], "t2va")
+        self.assertFalse(second["uses_bridge_first_frame"])
+        self.assertEqual(second["trim_head_frames"], 0)
+        guide = next(item for item in second["guides"] if item["id"] == "pose_4")
+        self.assertEqual(guide["global_frame"] - second["timeline_start_frame"], guide["local_frame"])
+
+
+class I2VAMultiShotRegressionTests(unittest.TestCase):
+    def test_text_only_followup_shots_reuse_master_opening_and_hard_cut(self):
+        rows = [
+            {"id": "shot_1", "type": "image", "start": 0, "length": 120,
+             "imageFile": "opening.png", "use_guide": True, "relay_prompt": "First take."},
+            {"id": "shot_2", "type": "image", "start": 120, "length": 120,
+             "imageFile": "", "use_guide": False, "relay_prompt": "Second take."},
+            {"id": "shot_3", "type": "image", "start": 240, "length": 120,
+             "imageFile": "", "use_guide": False, "relay_prompt": "Third take."},
+        ]
+        result = CORE.build_shotplan(
+            timeline_data={"rows": rows, "fps": 24, "duration_seconds": 15},
+            global_prompt="Three independent shots.",
+            duration_seconds=15,
+            task_mode="i2va",
+            width=640,
+            height=384,
+        )
+
+        self.assertEqual([chunk["task_mode"] for chunk in result["chunks"]], ["i2va"] * 3)
+        self.assertEqual([chunk["first_image"] for chunk in result["chunks"]], ["opening.png"] * 3)
+        self.assertEqual([chunk["transition"] for chunk in result["chunks"]], ["keyframe_adjacency", "hard_cut", "hard_cut"])
+        self.assertTrue(result["i2v_hard_cut_mode"])
+
 
 class LongVidMotionContextRegressionTests(unittest.TestCase):
     def test_legacy_workflow_defaults_to_proven_r37_full_window(self):

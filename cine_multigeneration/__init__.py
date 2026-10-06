@@ -4319,7 +4319,7 @@ def _editor_manifest_default(session_key: Any, fps: float = 24.0) -> Dict[str, A
         "tracks": tracks,
         "duration_seconds": 0.0,
         "assembly_order": [],
-        "ui_state": {"playhead": 0.0, "zoom_seconds": 20.0, "selected_clip_id": ""},
+        "ui_state": {"playhead": 0.0, "zoom_seconds": 20.0, "selected_clip_id": "", "link_enabled": True, "snap_enabled": False},
     }
 
 
@@ -4356,12 +4356,83 @@ def _normalize_editor_manifest(value: Any, session_key: Any, fps: float = 24.0) 
     data.setdefault("ui_state", {})
     if not isinstance(data["ui_state"], dict):
         data["ui_state"] = {}
+    data["ui_state"].setdefault("link_enabled", True)
+    data["ui_state"].setdefault("snap_enabled", False)
+    _enforce_h3_generated_sequence(data)
     _enforce_editor_audio_hard_cuts(data)
     return data
 
 
+def _enforce_h3_generated_sequence(manifest: Dict[str, Any]) -> int:
+    """Ripple IAMCCS H3 generated clips edge-to-edge inside each editorial lane.
+
+    Generated H3 slots are editorial programme clips, not compositing layers.  Their
+    clipIndex is the canonical sequence order.  Reflow only those managed clips; manual
+    imports and user-created overlays retain their authored timing.  Paired take audio
+    follows the corresponding video start exactly.
+    """
+    clips = manifest.get("clips") if isinstance(manifest.get("clips"), list) else []
+    managed_video = [
+        clip for clip in clips
+        if isinstance(clip, dict)
+        and str(clip.get("type") or "").lower() == "video"
+        and _safe_int(clip.get("takeIndex"), 0) > 0
+        and _safe_int(clip.get("clipIndex"), 0) > 0
+        and (
+            str(clip.get("id") or "").startswith("clip_T")
+            or str(clip.get("assetId") or "").startswith("take_T")
+        )
+    ]
+    by_take: Dict[int, list[Dict[str, Any]]] = {}
+    for clip in managed_video:
+        by_take.setdefault(_safe_int(clip.get("takeIndex"), 1), []).append(clip)
+    changed = 0
+    for take_index, group in by_take.items():
+        group.sort(key=lambda clip: (
+            _safe_int(clip.get("clipIndex"), 0),
+            _safe_float(clip.get("startTime"), 0.0),
+            str(clip.get("id") or ""),
+        ))
+        cursor = max(0.0, _safe_float(group[0].get("startTime"), 0.0)) if group else 0.0
+        for video_clip in group:
+            old_start = _safe_float(video_clip.get("startTime"), 0.0)
+            if abs(old_start - cursor) > 1e-6:
+                video_clip["startTime"] = float(cursor)
+                changed += 1
+            video_clip["editorCollisionPolicy"] = "ripple_no_overlap_touching_edges"
+            clip_index = _safe_int(video_clip.get("clipIndex"), 0)
+            paired_audio = [
+                clip for clip in clips
+                if isinstance(clip, dict)
+                and str(clip.get("type") or "").lower() == "audio"
+                and _safe_int(clip.get("takeIndex"), 0) == take_index
+                and _safe_int(clip.get("clipIndex"), 0) == clip_index
+                and str(clip.get("trackId") or "").strip().upper() not in {"AM", "MASTER"}
+            ]
+            for audio_clip in paired_audio:
+                if abs(_safe_float(audio_clip.get("startTime"), 0.0) - cursor) > 1e-6:
+                    audio_clip["startTime"] = float(cursor)
+                    changed += 1
+                audio_clip["editorCollisionPolicy"] = "follow_linked_video"
+            cursor += max(0.0, _safe_float(video_clip.get("duration"), 0.0))
+    return changed
+
+
+def _editor_audio_lane_key(clip: Dict[str, Any]) -> str:
+    track = str(clip.get("trackId") or "").strip().upper()
+    if track:
+        return f"track:{track}"
+    lane = str(clip.get("audioLane") or "").strip().upper()
+    return f"lane:{lane or 'UNASSIGNED'}"
+
+
 def _enforce_editor_audio_hard_cuts(manifest: Dict[str, Any]) -> int:
-    """Stop each take-audio clip at the next take-audio edit point."""
+    """Stop an audio clip only at the next edit point on the same audio lane.
+
+    R44.4 also heals durations that were truncated by the older global-lane
+    rule. A clip is restored only when it carries the system hard-cut marker,
+    so intentional user trims remain untouched.
+    """
     clips = manifest.get("clips") if isinstance(manifest.get("clips"), list) else []
     fps = max(1.0, _safe_float(manifest.get("fps"), 24.0))
     audio_clips = [
@@ -4372,38 +4443,71 @@ def _enforce_editor_audio_hard_cuts(manifest: Dict[str, Any]) -> int:
         and str(clip.get("audioLane") or "").strip().upper() != "MASTER"
         and str(clip.get("role") or "").strip().lower() not in {"master_audio", "master_excerpt"}
     ]
-    audio_clips.sort(key=lambda clip: (
-        _safe_float(clip.get("startTime"), 0.0),
-        _safe_int(clip.get("takeIndex"), 0),
-        _safe_int(clip.get("clipIndex"), 0),
-    ))
     changed = 0
-    for index, clip in enumerate(audio_clips):
-        start = max(0.0, _safe_float(clip.get("startTime"), 0.0))
-        later_starts = [
-            _safe_float(other.get("startTime"), 0.0)
-            for other in audio_clips[index + 1:]
-            if _safe_float(other.get("startTime"), 0.0) > start + 1e-6
-        ]
-        if not later_starts:
+
+    for clip in audio_clips:
+        if str(clip.get("audioCollisionPolicy") or "") != "stop_at_next_audio_edit" or clip.get("audioHardCutAt") is None:
             continue
-        hard_out = min(later_starts)
-        duration = max(0.0, _safe_float(clip.get("duration"), 0.0))
-        if start + duration <= hard_out + 1e-6:
-            continue
-        new_duration = max(1.0 / fps, hard_out - start)
         trim_start = max(0.0, _safe_float(clip.get("trimStart"), 0.0))
         source_limit = max(
-            trim_start + new_duration,
+            trim_start + _safe_float(clip.get("duration"), 0.0),
             _safe_float(clip.get("sourceDurationLimit"), 0.0),
             _safe_float(clip.get("sourceDuration"), 0.0),
+            _safe_float(clip.get("trimEnd"), 0.0),
         )
-        clip["duration"] = float(new_duration)
-        clip["trimEnd"] = float(min(source_limit, trim_start + new_duration))
-        clip["audioHardCutAt"] = float(hard_out)
-        clip["audioCollisionPolicy"] = "stop_at_next_audio_edit"
-        changed += 1
+        restored_duration = max(1.0 / fps, source_limit - trim_start)
+        if restored_duration > _safe_float(clip.get("duration"), 0.0) + 1e-6:
+            clip["duration"] = float(restored_duration)
+            clip["trimEnd"] = float(trim_start + restored_duration)
+            changed += 1
+        clip.pop("audioHardCutAt", None)
+        clip.pop("audioCollisionPolicy", None)
+
+    by_lane: Dict[str, list[Dict[str, Any]]] = {}
+    for clip in audio_clips:
+        by_lane.setdefault(_editor_audio_lane_key(clip), []).append(clip)
+
+    for lane_clips in by_lane.values():
+        lane_clips.sort(key=lambda clip: (
+            _safe_float(clip.get("startTime"), 0.0),
+            _safe_int(clip.get("takeIndex"), 0),
+            _safe_int(clip.get("clipIndex"), 0),
+        ))
+        for index, clip in enumerate(lane_clips):
+            start = max(0.0, _safe_float(clip.get("startTime"), 0.0))
+            later_starts = [
+                _safe_float(other.get("startTime"), 0.0)
+                for other in lane_clips[index + 1:]
+                if _safe_float(other.get("startTime"), 0.0) > start + 1e-6
+            ]
+            if not later_starts:
+                continue
+            hard_out = min(later_starts)
+            duration = max(0.0, _safe_float(clip.get("duration"), 0.0))
+            if start + duration <= hard_out + 1e-6:
+                continue
+            new_duration = max(1.0 / fps, hard_out - start)
+            trim_start = max(0.0, _safe_float(clip.get("trimStart"), 0.0))
+            source_limit = max(
+                trim_start + new_duration,
+                _safe_float(clip.get("sourceDurationLimit"), 0.0),
+                _safe_float(clip.get("sourceDuration"), 0.0),
+            )
+            clip["duration"] = float(new_duration)
+            clip["trimEnd"] = float(min(source_limit, trim_start + new_duration))
+            clip["audioHardCutAt"] = float(hard_out)
+            clip["audioCollisionPolicy"] = "stop_at_next_audio_edit"
+            changed += 1
     return changed
+
+
+def _manual_editor_pair_key(clip: Dict[str, Any]) -> str:
+    explicit = str(clip.get("manualPairId") or clip.get("manual_pair_id") or clip.get("linkPairId") or "").strip()
+    if explicit:
+        return explicit
+    clip_id = str(clip.get("id") or "")
+    match = re.match(r"^clip_manual_(?:video|audio)_(\d+)(?:_\d+)?$", clip_id, flags=re.IGNORECASE)
+    return match.group(1) if match else ""
 
 
 def _editor_track_for_take(take_index: int, kind: str) -> Tuple[str, int]:
@@ -4685,11 +4789,22 @@ def _append_video_take_to_manifest(
             "muted": False,
             "volume": 1.0,
             "linkedClipIds": [video_clip_id],
+            "linked": True,
         })
+        # Audio/video are one editorial unit by default. Keep the relation
+        # symmetric so UI link-moves, trims and ripple operations work from
+        # either side of the pair.
+        for _clip in manifest.get("clips", []):
+            if isinstance(_clip, dict) and str(_clip.get("id") or "") == video_clip_id:
+                _clip["linkedClipIds"] = [audio_clip_id]
+                _clip["linked"] = True
+                break
     order = manifest.setdefault("assembly_order", [])
     label = f"T{take_index:02d}/A{take_index}"
     if label not in order:
         order.append(label)
+    _enforce_h3_generated_sequence(manifest)
+    _enforce_editor_audio_hard_cuts(manifest)
     _update_manifest_duration(manifest)
     return manifest
 
@@ -4843,6 +4958,7 @@ class IAMCCS_ShotboardVideoEditorV1:
         mixer_source = ""
         imported_effect_graph: Dict[str, Any] = {}
         imported_master_bus: Dict[str, Any] = {}
+        imported_master_gain: Optional[float] = None
         # Prefer the explicit editorial bus, then fall back to the generation
         # CineLinX so older workflows also retain AudioBoard mixer/FX truth.
         mixer_linx_candidates = (
@@ -4875,21 +4991,24 @@ class IAMCCS_ShotboardVideoEditorV1:
                 ("cine_payload.audioMixer", linx_payload.get("audioMixer")),
                 ("cine_payload", linx_payload),
             )
-            if not mixer_settings:
-                for candidate_source, candidate in mixer_candidates:
-                    if not isinstance(candidate, dict):
-                        continue
+            for candidate_source, candidate in mixer_candidates:
+                if not isinstance(candidate, dict):
+                    continue
+                if imported_master_gain is None and candidate.get("masterAudioGain") is not None:
+                    imported_master_gain = max(0.01, min(2.0, _safe_float(candidate.get("masterAudioGain"), 1.0)))
+                if not mixer_settings:
                     raw_settings = candidate.get("trackSettings", candidate.get("track_settings"))
                     if isinstance(raw_settings, list) and raw_settings:
                         mixer_settings = [copy.deepcopy(item) for item in raw_settings if isinstance(item, dict)]
                         mixer_source = f"{linx_name}.{candidate_source}"
-                        break
         if imported_effect_graph:
             manifest["audio_effect_graph"] = imported_effect_graph
             if not imported_master_bus and isinstance(imported_effect_graph.get("masterBus"), dict):
                 imported_master_bus = copy.deepcopy(imported_effect_graph["masterBus"])
         if imported_master_bus:
             manifest["audio_master_bus"] = imported_master_bus
+        if imported_master_gain is not None:
+            manifest["masterAudioGain"] = imported_master_gain
         if mixer_settings:
             manifest_tracks = manifest.get("tracks") if isinstance(manifest.get("tracks"), list) else []
             tracks_by_id = {
@@ -4920,7 +5039,9 @@ class IAMCCS_ShotboardVideoEditorV1:
                 ],
                 "effect_graph_imported": bool(imported_effect_graph),
                 "master_bus_imported": bool(imported_master_bus),
-                "truth": "AudioBoard mixer, insert FX and master bus imported without replacing the H3 generation cine_linx",
+                "master_gain_imported": imported_master_gain is not None,
+                "masterAudioGain": imported_master_gain if imported_master_gain is not None else _safe_float(manifest.get("masterAudioGain", 1.0), 1.0),
+                "truth": "IAMCCS AudioBoard Mixer/BusOut is editorial audio master; Video Editor is the synchronized audio slave without replacing H3 generation cine_linx.",
             }
         active_identity = _active_identity_from_linx(out_linx)
         videos = [video_1, video_2, video_3, video_4, video_5]
@@ -5523,10 +5644,33 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
             return bool(clip.get("solo", False)) or bool(editor_track(clip).get("solo", False))
 
         def companion_audio_clip(video_clip: Dict[str, Any]) -> Dict[str, Any] | None:
+            video_id = str(video_clip.get("id") or "")
+            linked_ids = {str(value) for value in (video_clip.get("linkedClipIds") or []) if str(value)}
+            if linked_ids:
+                exact = next((clip for clip in editor_audio_clips if str(clip.get("id") or "") in linked_ids), None)
+                if exact is not None:
+                    return exact
+
+            # Manual imports must never bind to an unrelated A-lane clip merely
+            # because it shares T01/T02. Pair only the embedded audio created by
+            # the same import transaction.
+            if bool(video_clip.get("manual")):
+                pair_key = _manual_editor_pair_key(video_clip)
+                if not pair_key:
+                    return None
+                for audio_clip in editor_audio_clips:
+                    if not bool(audio_clip.get("manual")):
+                        continue
+                    if _manual_editor_pair_key(audio_clip) == pair_key:
+                        return audio_clip
+                return None
+
             take_index = _safe_int(video_clip.get("takeIndex"), 0)
             clip_index = _safe_int(video_clip.get("clipIndex"), 0)
             timeline_id = str(video_clip.get("timelineId") or "")
             for audio_clip in editor_audio_clips:
+                if bool(audio_clip.get("manual")):
+                    continue
                 if take_index > 0 and _safe_int(audio_clip.get("takeIndex"), 0) != take_index:
                     continue
                 if clip_index > 0 and _safe_int(audio_clip.get("clipIndex"), 0) != clip_index:
@@ -5670,6 +5814,9 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
                 if waveform is not None:
                     audio = dict(audio)
                     audio["waveform"] = torch.clamp(waveform, -ceiling, ceiling).contiguous()
+        master_audio_gain = max(0.0, min(2.0, _safe_float(manifest.get("masterAudioGain", 1.0), 1.0)))
+        if audio is not None and abs(master_audio_gain - 1.0) > 1e-8:
+            audio = _audio_with_gain(audio, master_audio_gain)
         video = InputImpl.VideoFromComponents(Types.VideoComponents(
             images=frames,
             audio=audio,
@@ -5690,6 +5837,7 @@ class IAMCCS_ShotboardVideoEditorRenderV1:
             "editor_audio_solo_active": bool(editor_solo_active),
             "audioboard_effect_graph_imported": bool(manifest.get("audio_effect_graph")),
             "audioboard_master_bus_baked": bool(master_bus),
+            "masterAudioGain": master_audio_gain,
             "audioboard_track_fx_baked": sum(
                 1 for track in tracks_by_id.values()
                 if isinstance(track, dict)

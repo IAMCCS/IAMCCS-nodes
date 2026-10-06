@@ -298,7 +298,13 @@ _H3_SETTINGS_NODE_GROUPS = (
         "ltx_looper_vertical_tiles", "ltx_looper_spatial_overlap",
     )),
     ("08 · OPTIONAL H3 FACE DETAILER", (
-        "face_detailer_enabled", "face_detailer_profile", "face_detailer_use_sam_mask",
+        "face_detailer_enabled", "face_detailer_profile", "face_detailer_mode",
+        "face_detailer_max_faces", "face_detailer_min_coverage", "face_detailer_use_sam_mask",
+        "face_detailer_canvas_width", "face_detailer_canvas_height", "face_detailer_crop_factor",
+        "face_detailer_confidence", "face_detailer_steps", "face_detailer_denoise",
+        "face_detailer_window_frames", "face_detailer_window_overlap",
+        "face_detailer_strength_small_face", "face_detailer_strength_large_face",
+        "face_detailer_blend", "face_detailer_paste_region", "face_detailer_feather",
     )),
 )
 
@@ -328,6 +334,10 @@ _H3_SECONDARY_LORA_SETTINGS_NODE_FIELDS = (
 # the persisted R38/R39/R40 fields.
 _H3_PDD_SETTINGS_NODE_FIELDS = (
     "pdd_lora_name", "pdd_strength",
+)
+# R44 Face MultiFace controls are append-only on Settings / Settings PRO.
+_H3_FACE_MULTIFACE_SETTINGS_NODE_FIELDS = (
+    "face_detailer_mode", "face_detailer_max_faces", "face_detailer_min_coverage",
 )
 # Native Fun ControlNet fields are append-only after PDD.  They stay outside
 # the historical grouping pass so no pre-R41 Settings widget index moves.
@@ -2744,7 +2754,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 # result replaces the native master before the optional
                 # upscaler.
                 "face_detailer_enabled": ("BOOLEAN", {"default": False}),
-                "face_detailer_profile": (["balanced", "small_faces", "gentle", "sam_face_mask", "wide_character_12gb"], {"default": "balanced"}),
+                "face_detailer_profile": (["balanced", "small_faces", "gentle", "sam_face_mask", "wide_character_12gb", "multi_face"], {"default": "balanced"}),
                 "face_detailer_use_sam_mask": ("BOOLEAN", {"default": False}),
                 # Optional creative/style H3 LoRA. It is model-only and never
                 # changes the authored H3 sampling controls. These fields are
@@ -3305,8 +3315,13 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         if ltx_4k_quality not in {"ULTRA", "HIGH", "MEDIUM", "LOW"}:
             ltx_4k_quality = "ULTRA"
         face_detailer_profile = str(face_detailer_profile or "balanced").lower()
-        if face_detailer_profile not in {"balanced", "small_faces", "gentle", "sam_face_mask"}:
+        if face_detailer_profile not in {"balanced", "small_faces", "gentle", "sam_face_mask", "wide_character_12gb", "multi_face"}:
             face_detailer_profile = "balanced"
+        face_detailer_mode = str(saved_settings.get("face_detailer_mode", "auto_from_profile") or "auto_from_profile").strip().lower()
+        if face_detailer_mode not in {"auto_from_profile", "single", "multi_face"}:
+            face_detailer_mode = "auto_from_profile"
+        face_detailer_max_faces = max(1, min(8, int(_finite_float(saved_settings.get("face_detailer_max_faces", 4), 4, 1, 8))))
+        face_detailer_min_coverage = max(0.0, min(1.0, _finite_float(saved_settings.get("face_detailer_min_coverage", 0.10), 0.10, 0.0, 1.0)))
 
         requested_turbo_mode = str(turbo_mode or "off")
         validate_settings({"task_mode": task_mode, "turbo_mode": requested_turbo_mode,
@@ -4058,14 +4073,34 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "retention": max(0.0, min(1.0, _finite_float(saved_settings.get("h3_refmod_retention", 1.0), 1.0, 0.0, 1.0))),
             "max_tokens": max(0, min(1048576, int(_finite_float(saved_settings.get("h3_refmod_max_tokens", 0), 0, 0, 1048576)))),
         }
+        resolved_face_mode = (
+            "multi_face" if face_detailer_profile == "multi_face" else "single"
+        ) if face_detailer_mode == "auto_from_profile" else face_detailer_mode
         plan["face_detailer_settings"] = {
             "schema": "iamccs.minimax_h3.face_detailer",
-            "schema_version": 1,
+            "schema_version": 3,
             "enabled": bool(face_detailer_enabled),
             "profile": face_detailer_profile,
+            "mode": face_detailer_mode,
+            "resolved_mode": resolved_face_mode,
+            "max_faces": int(face_detailer_max_faces),
+            "min_face_coverage": float(face_detailer_min_coverage),
             "use_sam_mask": bool(face_detailer_use_sam_mask),
+            "canvas_width": max(256, min(1536, int(_finite_float(saved_settings.get("face_detailer_canvas_width", 512), 512, 256, 1536)))),
+            "canvas_height": max(256, min(1536, int(_finite_float(saved_settings.get("face_detailer_canvas_height", 512), 512, 256, 1536)))),
+            "crop_factor": max(1.0, min(6.0, float(_finite_float(saved_settings.get("face_detailer_crop_factor", 2.5), 2.5, 1.0, 6.0)))),
+            "confidence": max(0.01, min(1.0, float(_finite_float(saved_settings.get("face_detailer_confidence", 0.35), 0.35, 0.01, 1.0)))),
+            "steps": max(1, min(100, int(_finite_float(saved_settings.get("face_detailer_steps", 4), 4, 1, 100)))),
+            "denoise": max(0.0, min(1.0, float(_finite_float(saved_settings.get("face_detailer_denoise", 0.20), 0.20, 0.0, 1.0)))),
+            "window_frames": max(34, min(510, int(_finite_float(saved_settings.get("face_detailer_window_frames", 73), 73, 34, 510)))),
+            "window_overlap": max(0, min(170, int(_finite_float(saved_settings.get("face_detailer_window_overlap", 22), 22, 0, 170)))),
+            "strength_small_face": max(0.0, min(1.0, float(_finite_float(saved_settings.get("face_detailer_strength_small_face", 1.0), 1.0, 0.0, 1.0)))),
+            "strength_large_face": max(0.0, min(1.0, float(_finite_float(saved_settings.get("face_detailer_strength_large_face", 0.35), 0.35, 0.0, 1.0)))),
+            "blend": max(0.0, min(1.0, float(_finite_float(saved_settings.get("face_detailer_blend", 0.70), 0.70, 0.0, 1.0)))),
+            "paste_region": str(saved_settings.get("face_detailer_paste_region", "face_only") or "face_only"),
+            "feather": max(0, min(128, int(_finite_float(saved_settings.get("face_detailer_feather", 6), 6, 0, 128)))),
             "route": "face_detailer_then_optional_upscale" if bool(face_detailer_enabled) else "native_then_optional_upscale",
-            "source": "shotboard",
+            "source": "IAMCCS_ShotboardH3Settings" if _h3_settings_from_cine_linx(cine_linx) else "shotboard_defaults",
         }
         chunk_frames = [int(chunk.get("frame_count", 0) or 0) for chunk in plan.get("chunks", [])]
         max_chunk_frames = max(chunk_frames, default=0)
@@ -4241,7 +4276,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             f"ltx_seam_safe={'on' if ltx_seam_safe else 'off'} ltx_4k={'on' if effective_ltx_4k else 'off'}:{ltx_4k_quality} "
             f"ltx_looper={int(ltx_looper_temporal_tile_size)}/{int(ltx_looper_temporal_overlap)} "
             f"wan_denoise={float(wan_upscale_denoise):.2f} | "
-            f"face_detailer={'on' if bool(face_detailer_enabled) else 'off'}:{face_detailer_profile}/sam={'on' if bool(face_detailer_use_sam_mask) else 'off'} | "
+            f"face_detailer={'on' if bool(face_detailer_enabled) else 'off'}:{face_detailer_profile}/mode={resolved_face_mode}/max={face_detailer_max_faces}/coverage={face_detailer_min_coverage:.2f}/sam={'on' if bool(face_detailer_use_sam_mask) else 'off'} | "
             f"prompter={injection_summary} | dialogue={dialogue_summary} | audioboard={audioboard_summary} | "
             f"warnings={'; '.join(warnings) if warnings else 'none'}"
         )
@@ -5962,6 +5997,7 @@ class IAMCCS_ShotboardH3Settings:
                 and name not in _H3_SETTINGS_NODE_EXCLUDED_FIELDS
                 and name not in _H3_SECONDARY_LORA_SETTINGS_NODE_FIELDS
                 and name not in _H3_PDD_SETTINGS_NODE_FIELDS
+                and name not in _H3_FACE_MULTIFACE_SETTINGS_NODE_FIELDS
                 and name not in _H3_FUN_CONTROLNET_SETTINGS_NODE_FIELDS
                 and name not in _H3_FUSED_TURBO_SETTINGS_NODE_FIELDS
                 and name not in _H3_EXTENDED_AV_SETTINGS_NODE_FIELDS
@@ -6622,6 +6658,88 @@ class IAMCCS_ShotboardH3Settings:
             # Phase 3 contract fix: Extended AV is genuinely append-only after
             # every historical required + optional Settings widget.
             **extended_av_optional,
+            # R44 append-only FaceRefine subject policy. Keep these after every
+            # historical Settings widget so old positional arrays remain valid.
+            "face_detailer_mode": (["auto_from_profile", "single", "multi_face"], {
+                "default": "auto_from_profile",
+                "display_name": "FACE REFINE · SUBJECT MODE",
+                "tooltip": "AUTO keeps profile behavior; SINGLE tracks one subject; MULTI FACE refines up to the configured number of distinct subjects sequentially.",
+            }),
+            "face_detailer_max_faces": ("INT", {
+                "default": 4, "min": 1, "max": 8, "step": 1,
+                "display_name": "FACE REFINE · MULTI FACE MAX SUBJECTS",
+                "tooltip": "Upper bound only. One detected face performs one pass.",
+            }),
+            "face_detailer_min_coverage": ("FLOAT", {
+                "default": 0.10, "min": 0.0, "max": 1.0, "step": 0.01,
+                "display_name": "FACE REFINE · MIN TRACK COVERAGE",
+                "tooltip": "Multi Face only. Skip incidental face tracks visible for less than this fraction of frames.",
+            }),
+            "face_detailer_canvas_width": ("INT", {
+                "default": 512, "min": 256, "max": 1536, "step": 32,
+                "display_name": "FACE REFINE · CANVAS WIDTH",
+                "tooltip": "Crop render width for the face pass. Larger canvases can recover more detail but increase VRAM and time.",
+            }),
+            "face_detailer_canvas_height": ("INT", {
+                "default": 512, "min": 256, "max": 1536, "step": 32,
+                "display_name": "FACE REFINE · CANVAS HEIGHT",
+                "tooltip": "Crop render height for the face pass. Keep width and height equal unless you have a deliberate reason not to.",
+            }),
+            "face_detailer_crop_factor": ("FLOAT", {
+                "default": 2.50, "min": 1.0, "max": 6.0, "step": 0.05,
+                "display_name": "FACE REFINE · CROP FACTOR",
+                "tooltip": "How much context around the face is included. Lower values make the face larger inside the crop; higher values preserve more head/background context.",
+            }),
+            "face_detailer_confidence": ("FLOAT", {
+                "default": 0.35, "min": 0.01, "max": 1.0, "step": 0.01,
+                "display_name": "FACE REFINE · DETECTION CONFIDENCE",
+                "tooltip": "Lower values catch smaller or softer faces; higher values are stricter and can reduce false positives.",
+            }),
+            "face_detailer_steps": ("INT", {
+                "default": 4, "min": 1, "max": 100,
+                "display_name": "FACE REFINE · STEPS",
+                "tooltip": "Sampling steps for each face-refine crop. Higher values can improve detail at the cost of time.",
+            }),
+            "face_detailer_denoise": ("FLOAT", {
+                "default": 0.20, "min": 0.0, "max": 1.0, "step": 0.01,
+                "display_name": "FACE REFINE · DENOISE",
+                "tooltip": "How freely the face pass may rebuild the crop. Higher values increase detail and change; lower values preserve the native take more strongly.",
+            }),
+            "face_detailer_window_frames": ("INT", {
+                "default": 73, "min": 34, "max": 510,
+                "display_name": "FACE REFINE · WINDOW FRAMES",
+                "tooltip": "Temporal chunk size for the face pass. Larger windows can improve coherence but raise memory and time.",
+            }),
+            "face_detailer_window_overlap": ("INT", {
+                "default": 22, "min": 0, "max": 170,
+                "display_name": "FACE REFINE · WINDOW OVERLAP",
+                "tooltip": "Temporal overlap between face chunks. Must stay smaller than the window size.",
+            }),
+            "face_detailer_strength_small_face": ("FLOAT", {
+                "default": 1.00, "min": 0.0, "max": 1.0, "step": 0.01,
+                "display_name": "FACE REFINE · SMALL FACE MULTIPLIER",
+                "tooltip": "Relative denoise multiplier for smaller detected faces. Keep near 1.0 when distant faces need help.",
+            }),
+            "face_detailer_strength_large_face": ("FLOAT", {
+                "default": 0.35, "min": 0.0, "max": 1.0, "step": 0.01,
+                "display_name": "FACE REFINE · LARGE FACE MULTIPLIER",
+                "tooltip": "Relative denoise multiplier for larger detected faces. Lower values preserve identity more strongly on close faces.",
+            }),
+            "face_detailer_blend": ("FLOAT", {
+                "default": 0.70, "min": 0.0, "max": 1.0, "step": 0.01,
+                "display_name": "FACE REFINE · BLEND",
+                "tooltip": "How much of the refined face is pasted back. Higher values reveal more generated detail; lower values keep more of the native pixels.",
+            }),
+            "face_detailer_paste_region": (["face_only", "crop"], {
+                "default": "face_only",
+                "display_name": "FACE REFINE · PASTE REGION",
+                "tooltip": "FACE ONLY pastes only the refined face area. CROP pastes the full refined crop back to the frame.",
+            }),
+            "face_detailer_feather": ("INT", {
+                "default": 6, "min": 0, "max": 128, "step": 1,
+                "display_name": "FACE REFINE · FEATHER",
+                "tooltip": "Blend softness around the pasted region. Slight feathering helps avoid visible seams.",
+            }),
         })}
 
     RETURN_TYPES = (SUPERNODE_LINX_TYPE,)

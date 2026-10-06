@@ -73,8 +73,8 @@ def _pixel_upscale(latent, vae, width, height, settings):
         module.upscale_frames = original
 
 
-def _refine(model, conditioning, latent, cine_linx, segment_index):
-    from comfy_extras.nodes_custom_sampler import BasicGuider
+def _refine(model, conditioning, latent, cine_linx, segment_index, pre_scheduler_transform=None):
+    from comfy_extras.nodes_custom_sampler import BasicGuider, BasicScheduler
 
     loop = _provider("nodes_looping_sampler")
     if not loop.per_row_mask_is_continuous():
@@ -89,11 +89,31 @@ def _refine(model, conditioning, latent, cine_linx, segment_index):
     # our own clone once using the existing delivery contract and authored values.
     active_model, noise, sampler, sigmas, _ = IAMCCS_MiniMaxH3LatentUpresSamplingR38().prepare(
         model, cine_linx, segment_index)
+    common = _provider("common")
+    original_video, original_audio = common.unpack_av(latent, "R38B source")
+    working_latent = latent
+
+    # FaceRefine 1.1+ patches the MODEL as well as the latent. Apply that patch after
+    # IAMCCS has prepared LoRAs/shifts/attention, then rebuild BasicScheduler from the
+    # patched model so BOTH scheduler and guider receive the provider's model contract.
+    if pre_scheduler_transform is not None:
+        transformed = pre_scheduler_transform(active_model, working_latent)
+        if not isinstance(transformed, (tuple, list)) or len(transformed) < 2:
+            raise RuntimeError(
+                "R38B pre_scheduler_transform must return at least (latent, model)."
+            )
+        working_latent, active_model = transformed[0], transformed[1]
+        transform_report = str(transformed[2] if len(transformed) > 2 else "" or "")
+        scheduler_name = str(settings.get("scheduler", "simple") or "simple")
+        sigmas = BasicScheduler.execute(
+            model=active_model, scheduler=scheduler_name, steps=steps, denoise=denoise
+        )[0]
+        if transform_report:
+            LOG.info("R38B pre-scheduler transform | %s", transform_report.replace("\n", " | "))
+
     # Refine the already rendered clip, not the original still guides again.
     # The provider removes guides per window without mutating incoming conditioning.
     guider = BasicGuider.execute(model=active_model, conditioning=conditioning)[0]
-    common = _provider("common")
-    original_video, original_audio = common.unpack_av(latent, "R38B source")
     total_frames = common.latents_to_frames(int(original_video.shape[2]))
     length, overlap, _, _, windows = _provider("nodes_windows")._plan(
         total_frames, int(settings.get("window_frames", 136)),
@@ -103,7 +123,7 @@ def _refine(model, conditioning, latent, cine_linx, segment_index):
              common.frame_at_latent(overlap) if overlap else 0, total_frames, settings.get("pixel_groups", 1))
     result = loop.MMH3LoopingSampler.execute(
         noise=noise, guider=guider, sampler=sampler, sigmas=sigmas,
-        cond_set={"conds": [conditioning]}, latent=latent,
+        cond_set={"conds": [conditioning]}, latent=working_latent,
         chunk_frames=int(settings.get("window_frames", 136)),
         overlap_frames=int(settings.get("window_overlap", 22)),
         carry="mask", overlap_strength_video=1.0, overlap_strength_audio=1.0,

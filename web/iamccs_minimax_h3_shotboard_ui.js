@@ -131,7 +131,7 @@ function canonicalH3TaskMode(value) {
     if (["guided_av_loop_experimental", "longvid_guided_av_loop_experimental"].includes(raw)) return "guided_av_loop_experimental";
     if (["longvid", "long_video_guides", "longvid_guides"].includes(raw)) return "longvid_guides";
     if (raw === "keyframe_joint_native") return raw;
-    if (raw === "latent_go_ahead") return raw;
+    if (raw === "latent_go_ahead" || raw === "reference_image") return raw;
     if (["v2va_controlnet", "controlnet_v2v", "h3_fun_controlnet"].includes(raw)) return "v2va_controlnet";
     return ["v2va_object_swap", "v2va_face_swap"].includes(raw) ? raw : "t2va";
 }
@@ -162,7 +162,7 @@ function h3TaskUiCapabilities(value, audioValue = "h3_native_generated") {
         task,
         effectiveTask,
         flf: effectiveTask === "fl2va" || effectiveTask === "longvid_continuous_guided" || auto,
-        roles: ["ref2va", "ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap"].includes(effectiveTask),
+        roles: ["reference_image", "ref2va", "ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap"].includes(effectiveTask),
         v2va: ["v2va_controlnet", "v2va_object_swap", "v2va_face_swap"].includes(effectiveTask),
         longvid: ["longvid_guides", "longvid_motion_context", "longvid_continuous_guided", "longvid_masked_loop_guided", "guided_av_loop_experimental", "longvid_guided_lipsync"].includes(effectiveTask),
         lipsync: h3LipsyncTask(effectiveTask),
@@ -720,7 +720,7 @@ const MINIMAX_H3_V2V_DEFAULTS = [
 ];
 const MINIMAX_H3_CONTINUITY_DEFAULTS = ["stable_keyframes", "22", true, 0];
 const MINIMAX_H3_FACE_DETAILER_DEFAULTS = [false, "balanced", false];
-const MINIMAX_H3_FACE_DETAILER_PROFILES = new Set(["balanced", "small_faces", "gentle", "sam_face_mask", "wide_character_12gb"]);
+const MINIMAX_H3_FACE_DETAILER_PROFILES = new Set(["balanced", "small_faces", "gentle", "sam_face_mask", "wide_character_12gb", "multi_face"]);
 const MINIMAX_H3_SECOND_LORA_DEFAULTS = [false, "", 0.0];
 const MINIMAX_H3_PDD_DEFAULTS = ["", 1.0];
 const MINIMAX_H3_CONTROLNET_DEFAULTS = [
@@ -5116,7 +5116,12 @@ function installShotboardPromptMagnifiers(root) {
             }
             area.parentNode.insertBefore(wrap, area);
             wrap.append(area);
+            wrap.style.zIndex = area.style.zIndex || "40";
+            wrap.style.pointerEvents = "auto";
             area.style.width = "100%";
+            area.style.pointerEvents = "auto";
+            area.style.userSelect = "text";
+            area.style.webkitUserSelect = "text";
             area.style.boxSizing = "border-box";
             // Keep both the scrollbar and the zoom control out of the text lane.
             area.style.paddingRight = "42px";
@@ -8488,6 +8493,7 @@ function renderShotboardV3(node) {
                     normalStartFrame: Math.max(0, Math.round(Number(data.normalStartFrame ?? data.normal_start_frame ?? 0) || 0)),
                     normalDurationFrames: Math.max(0, Math.round(Number(data.normalDurationFrames ?? data.normal_duration_frames ?? data.duration_frames ?? 0) || 0)),
                     promptBlocks: Array.isArray(data.promptBlocks) ? data.promptBlocks : Array.isArray(data.prompt_blocks) ? data.prompt_blocks : [],
+                    img_generator_reference_paths: Array.isArray(data.img_generator_reference_paths) ? data.img_generator_reference_paths.slice(0, 4) : undefined,
                     pan_h3_conditioning_v1: data.pan_h3_conditioning_v1 && typeof data.pan_h3_conditioning_v1 === "object"
                         ? JSON.parse(JSON.stringify(data.pan_h3_conditioning_v1))
                         : node.properties?.iamccs_pan_h3_conditioning_v1
@@ -9644,6 +9650,7 @@ function renderShotboardV3(node) {
             // visible Shotboard. Preserve it through every UI normalization
             // and queue flush so Extended AV can resolve different action
             // conditioning for each technical chunk.
+            img_generator_reference_paths: Array.isArray(timeline.img_generator_reference_paths) ? timeline.img_generator_reference_paths.slice(0, 4) : undefined,
             pan_h3_conditioning_v1: timeline.pan_h3_conditioning_v1 && typeof timeline.pan_h3_conditioning_v1 === "object"
                 ? JSON.parse(JSON.stringify(timeline.pan_h3_conditioning_v1))
                 : undefined,
@@ -10097,6 +10104,10 @@ function renderShotboardV3(node) {
             if (wanted < 0 || wanted >= visual.length) throw new Error(`Local target ${slotId || requested} no longer exists. Read Shotboard slots again; no arbitrary fallback applied.`);
             const selected = visual[wanted], merged = merge(selected.prompt ?? selected.local_prompt ?? selected.relay_prompt ?? "");
             Object.assign(selected, {prompt:merged,local_prompt:merged,relay_prompt:merged,use_prompt:true,relay_manual_off:false,promptrelay_manual_off:false});
+            // draw() flushes DOM text before rebuilding the editors. Publish the
+            // injected value to every peer first, or that flush restores old text.
+            syncSegmentTextPeers(String(selected.id), "prompt", merged, null);
+            syncSegmentRelayPeers(String(selected.id), true, null);
             timeline.globalPromptOnly = false;
             writeTimeline({force:true,skipDomSync:true}); draw();
             return {actualTarget:`local_${wanted+1}`,mergePolicy:policy};
@@ -10134,6 +10145,8 @@ function renderShotboardV3(node) {
         selected.use_prompt = true;
         selected.relay_manual_off = false;
         selected.promptrelay_manual_off = false;
+        syncSegmentTextPeers(String(selected.id), "prompt", merged, null);
+        syncSegmentRelayPeers(String(selected.id), true, null);
         timeline.globalPromptOnly = false;
         writeTimeline({ force: true, skipDomSync: true });
         draw();
@@ -10142,6 +10155,88 @@ function renderShotboardV3(node) {
 
     // Explicit bridge used by IAMCCS_Prompter. The resulting contract is
     // written into the visible Shotboard timeline, which remains queue truth.
+    node._iamccsMiniMaxSetImageReferences = (paths) => {
+        if (String(getWidget(node, "task_mode")?.value) !== "reference_image")
+            throw new Error("Image reference injection requires IMAGE GENERATOR mode.");
+        if (!Array.isArray(paths) || paths.length > 4 || paths.some(path => !String(path || "").trim()))
+            throw new Error("Provide up to four saved reference image paths.");
+        timeline.img_generator_reference_paths = paths.map(String);
+        writeTimeline({force:true,skipDomSync:true});
+    };
+    // I2VA owns one opening image per authored shot. Prompter references are
+    // therefore timeline media in this mode, rather than shared REF2VA
+    // conditioning references. Keep this bridge explicit so REF2VA can never
+    // turn its identity/style references into editorial slots by accident.
+    node._iamccsMiniMaxSetI2VHardCutSlots = ({ paths = [] } = {}) => {
+        const boardMode = String(getWidget(node, "task_mode")?.value || "").trim().toLowerCase();
+        if (!["i2v", "i2va"].includes(boardMode))
+            throw new Error("Select I2VA in Settings Pro before injecting I2V image slots.");
+        const orderedPaths = (Array.isArray(paths) ? paths : [])
+            .map(path => String(path || "").trim())
+            .filter(Boolean)
+            .slice(0, 4);
+        if (!orderedPaths.length)
+            throw new Error("I2VA injection needs at least one saved Prompter reference image.");
+
+        syncTimelineTextFromDom();
+        setOwnReferencePaths(node, orderedPaths);
+        const visual = (timeline.segments || [])
+            .filter(seg => !["audio", "motion", "video"].includes(String(seg?.type || "image").toLowerCase()))
+            .sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
+        while (visual.length < orderedPaths.length) {
+            const index = visual.length;
+            const seg = {
+                id: newId("seg"), type: "image", placeholder: false,
+                start: endOfSegments(timeline.segments), length: defaultLen(),
+                ref: index + 1, label: `local_${index + 1}`,
+                prompt: "", local_prompt: "", relay_prompt: "", use_prompt: true,
+                camera: index ? "cut to" : "cinematic motion",
+                transition: index ? "hard_cut" : "continuous",
+                use_guide: true,
+            };
+            timeline.segments.push(seg);
+            visual.push(seg);
+        }
+
+        const defaultStrength = Math.max(0, Number(defaultForceWidget?.value ?? 1));
+        orderedPaths.forEach((path, index) => {
+            const seg = visual[index];
+            const strength = Math.max(0, Number(seg.guideStrength ?? seg.guide_strength ?? defaultStrength));
+            Object.assign(seg, {
+                type: "image", placeholder: false, ref: index + 1,
+                imageFile: path, image: path, image_path: path, path,
+                imageTruthPath: path,
+                imageTruthName: path.split(/[\\/]/).pop() || path,
+                imageName: path.split(/[\\/]/).pop() || path,
+                imageTruthRef: index + 1,
+                imageTruthPinned: true,
+                imageTruthSource: "prompter_i2va_inject",
+                prompterI2VManaged: true,
+                label: `local_${index + 1}`,
+                transition: index ? "hard_cut" : "continuous",
+                camera: index ? "cut to" : String(seg.camera || "cinematic motion"),
+                use_guide: true,
+                guideStrength: strength,
+                guide_strength: strength,
+                force: strength,
+                strength,
+                imageLockStrength: Math.max(0, Number(seg.imageLockStrength ?? seg.image_lock_strength ?? strength)),
+                image_lock_strength: Math.max(0, Number(seg.imageLockStrength ?? seg.image_lock_strength ?? strength)),
+            });
+            delete seg.image_file;
+            delete seg.image_truth_path;
+        });
+        ensureDurationForFrames(endOfSegments(timeline.segments));
+        timeline.globalPromptOnly = false;
+        writeTimeline({force:true,skipDomSync:true});
+        draw();
+        return {
+            mode: "i2va",
+            slotCount: orderedPaths.length,
+            slotIds: visual.slice(0, orderedPaths.length).map(seg => String(seg.id || "")),
+            transitions: visual.slice(0, orderedPaths.length).map(seg => String(seg.transition || "")),
+        };
+    };
     node._iamccsMiniMaxSetConditioningSchedule = ({ policy = "continuous", beats = [], globalContext = "", sourceText = "" } = {}) => {
         const requestedPolicy = String(policy || "default").toLowerCase();
         const selectedPolicy = ["default", "continuous", "evolving"].includes(requestedPolicy) ? requestedPolicy : "default";
@@ -12452,7 +12547,7 @@ function renderShotboardV3(node) {
         if (String(value) !== "pdd_native_8step") return;
         const pddValues = getWidget(node, "pdd_lora_name")?.options?.values;
         const task = canonicalH3TaskMode(getWidget(node, "task_mode")?.value);
-        const wantsRef = ["ref2va", "ref2vid_lipsync", "longvid_ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap"].includes(task);
+        const wantsRef = ["reference_image", "ref2va", "ref2vid_lipsync", "longvid_ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap"].includes(task);
         const family = wantsRef ? "ref2va" : "fl2va";
         const selectedPdd = (Array.isArray(pddValues) ? pddValues : []).map(item => String(item || "")).find(item => item.toLowerCase().includes(family))
             || "";
@@ -12502,7 +12597,7 @@ function renderShotboardV3(node) {
             return;
         }
         const task = canonicalH3TaskMode(getWidget(node, "task_mode")?.value);
-        const wantsRef = ["ref2va", "ref2vid_lipsync", "longvid_ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap"].includes(task);
+        const wantsRef = ["reference_image", "ref2va", "ref2vid_lipsync", "longvid_ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap"].includes(task);
         const choices = (getWidget(node, "turbo_lora_name")?.options?.values || []).map(item => String(item || "")).filter(Boolean);
         const compatible = choices.filter(item => {
             const text = item.toLowerCase();
@@ -15758,10 +15853,12 @@ function renderShotboardV3(node) {
             caption.spellcheck = false;
             caption.dataset.iamccsV3SegmentId = String(seg.id);
             caption.dataset.iamccsV3Key = "prompt";
-            caption.style.cssText = `position:absolute;left:${innerLeft}px;right:${innerRight}px;top:${promptTop}px;height:${promptHeight}px;box-sizing:border-box;padding:7px 9px;background:${purple.valueBg};border:1px solid ${purple.border};border-radius:5px;color:${purple.valueText};font:${promptFontSize(10)}/1.28 monospace;font-weight:700;outline:none;resize:none;overflow-y:auto;overflow-x:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.66);`;
+            caption.style.cssText = `position:absolute;left:${innerLeft}px;right:${innerRight}px;top:${promptTop}px;height:${promptHeight}px;box-sizing:border-box;padding:7px 9px;background:${purple.valueBg};border:1px solid ${purple.border};border-radius:5px;color:${purple.valueText};font:${promptFontSize(10)}/1.28 monospace;font-weight:700;outline:none;resize:none;overflow-y:auto;overflow-x:hidden;box-shadow:inset 0 1px 0 rgba(255,255,255,.66);z-index:40;pointer-events:auto;user-select:text;-webkit-user-select:text;cursor:text;touch-action:manipulation;`;
             caption.onpointerdown = (event) => event.stopPropagation();
             caption.onclick = (event) => event.stopPropagation();
             caption.ondblclick = (event) => event.stopPropagation();
+            caption.onkeydown = (event) => event.stopPropagation();
+            caption.onkeypress = (event) => event.stopPropagation();
             caption.oninput = () => {
                 markPromptFieldEdited(caption);
                 seg.prompt = caption.value;
@@ -15778,7 +15875,8 @@ function renderShotboardV3(node) {
             };
             caption.onchange = flushTimelineWrite;
             caption.onblur = flushTimelineWrite;
-            caption.onkeyup = () => {
+            caption.onkeyup = (event) => {
+                event?.stopPropagation?.();
                 markPromptFieldEdited(caption);
                 writeTimeline({ force: true });
                 logPromptPersistence(seg, "timeline_caption_keyup");
@@ -15885,6 +15983,7 @@ function renderShotboardV3(node) {
         }
 
         block.onpointerdown = (event) => {
+            if (event.target?.closest?.("textarea,input,select,button,[contenteditable='true']")) return;
             if (resize && (event.target === resize || resize.contains(event.target))) return;
             if (resizeLeft && (event.target === resizeLeft || resizeLeft.contains(event.target))) return;
             if (isAudio && !event.target?.closest?.("textarea,input,select,button")) {
@@ -15926,7 +16025,11 @@ function renderShotboardV3(node) {
                 else splitImageSlotAfterSegment(seg);
             };
         }
-        block.onclick = () => { selectedId = seg.id; draw(); };
+        block.onclick = (event) => {
+            if (event.target?.closest?.("textarea,input,select,button,[contenteditable='true']")) return;
+            selectedId = seg.id;
+            draw();
+        };
         return block;
     }
 
@@ -21656,7 +21759,7 @@ function renderShotboardH3Settings(node) {
         const choices = (getWidget(node, "pdd_lora_name")?.options?.values || [])
             .map(value => String(value || "")).filter(Boolean);
         const task = canonicalH3TaskMode(taskValue);
-        const wantsRef = ["ref2va", "ref2vid_lipsync", "longvid_ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap"].includes(task);
+        const wantsRef = ["reference_image", "ref2va", "ref2vid_lipsync", "longvid_ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap"].includes(task);
         const familyToken = wantsRef ? "ref2va" : "fl2va";
         return selectH3SpeedAsset(getWidget(node, "turbo_lora_name")?.options?.iamccs_h3_assets || [], task, "pdd");
     };
@@ -22159,6 +22262,29 @@ function renderShotboardH3Settings(node) {
     addOperatingPreset(facePresetButtons, "face", "wide_character_12gb", "WIDE CHARACTER", "12 GB · DISTANT FACE", "For medium/wide shots: larger 640px tracked crop, lower detection threshold and gentler large-face strength. It refines a visible tracked face/upper-body region; it is not a whole-frame super-resolution pass.", {
         face_detailer_enabled: true, face_detailer_profile: "wide_character_12gb", face_detailer_use_sam_mask: false,
     });
+    addOperatingPreset(facePresetButtons, "face", "multi_face", "MULTI FACE", "CROWD · SEQUENTIAL", "Track and refine multiple distinct faces sequentially. Each pass tracks the untouched native source while stitches accumulate, avoiding subject hopping and keeping VRAM bounded. The backend detailer defaults to 4 faces and can be raised to 8.", {
+        face_detailer_enabled: true, face_detailer_profile: "multi_face", face_detailer_use_sam_mask: false,
+    });
+    {
+        const multiEntry = presetControls.get("face:multi_face");
+        const originalClick = multiEntry?.button?.onclick;
+        if (multiEntry?.button && originalClick) multiEntry.button.onclick = () => {
+            originalClick();
+            const detailer = (node.graph?._nodes || []).find((item) =>
+                nodeClassName(item) === "IAMCCS_MiniMaxH3FaceDeliveryR38B");
+            if (!detailer) {
+                showSettingsToast("MULTI FACE selected. Add/wire IAMCCS MiniMax H3 Face Delivery to execute sequential crowd refinement.");
+                return;
+            }
+            Object.entries({
+                face_mode: "from_shotboard", max_faces: 4, min_face_coverage: 0.10,
+                canvas_width: 512, canvas_height: 512, crop_factor: 2.5, confidence: 0.30,
+                steps: 4, denoise: 0.20, blend: 0.70,
+            }).forEach(([name, value]) => setWidgetValue(detailer, name, value));
+            app.graph?.setDirtyCanvas?.(true, true);
+            showSettingsToast("MULTI FACE applied: sequential tracking/refinement, up to 4 distinct subjects by default.");
+        };
+    }
     {
         const wideEntry = presetControls.get("face:wide_character_12gb");
         const originalClick = wideEntry?.button?.onclick;

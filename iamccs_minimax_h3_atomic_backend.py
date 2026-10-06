@@ -479,6 +479,8 @@ def _apply_h3_refmod(positive, shotplan: dict[str, Any]):
 
 
 def _effective_task(cine_linx: Any, chunk: dict[str, Any]) -> str:
+    if chunk.get("reference_still"):
+        return "ref2va"
     config, _ = _cine_info_h3(cine_linx)
     override = str(config.get("task_override", "from_shotboard") or "from_shotboard").lower()
     if override in {"t2va", "i2va", "fl2va", "ref2va"}:
@@ -511,6 +513,9 @@ def _effective_shotplan(cine_linx: Any, shotplan: dict[str, Any]) -> dict[str, A
         if resize_policy not in {"from_shotboard", "inherit", "shotboard"}:
             result["reference_resize"] = resize_override
     result["reference_source"] = str(config.get("reference_source", "cine_info_h3_only"))
+    if shotplan.get("reference_image", {}).get("enabled"):
+        result["reference_video_role"] = "off"
+        result["reference_audio_role"] = "off"
     return result
 
 
@@ -2462,7 +2467,12 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             # first-priority reference. A main Shotboard image on the current
             # performance slot is the fallback, even when an older CineInfo
             # node still says `cine_info_h3_only`.
-            if slot_lipsync_mode:
+            prompter_paths = shotplan.get("reference_image", {}).get("prompter_paths")
+            if isinstance(prompter_paths, list):
+                plan_paths = prompter_paths
+                external_images = [None] * 4
+                roles = ["subject_identity"] * 4
+            elif slot_lipsync_mode:
                 plan_paths = []
                 slot_image = str(chunk.get("first_image", "") or "").strip()
                 if slot_image:
@@ -2481,6 +2491,8 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 image = external_images[index]
                 if not torch.is_tensor(image) and index < len(plan_paths):
                     image = _load_image(plan_paths[index])
+                    if isinstance(prompter_paths, list) and not torch.is_tensor(image):
+                        raise ValueError(f"IMG Generator: Picture {index + 1} could not be loaded: {plan_paths[index]}")
                     if torch.is_tensor(image):
                         image, resized = _resize_reference_image(image[:1], reference_shotplan, f"ref{index + 1}")
                         resize_reports.append(resized)
@@ -2585,7 +2597,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 else:
                     voice_pairing_note = ""
 
-            if not refs and not ref_videos and not ref_audios:
+            if not refs and not ref_videos and not ref_audios and not chunk.get("reference_still"):
                 raise ValueError("REF2VA requires at least one enabled image, video, or audio reference")
             prompt = _reference_header(manifest, prompt)
             if voice_pairing_note:
@@ -3659,6 +3671,15 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
         ):
             visible_frames = max(1, int(chunk.get("unique_frames", 0) or 0))
             head_frames = max(0, int(chunk.get("trim_head_frames", 0) or 0))
+            hidden_context_frames = 0
+            if int(chunk_index) > 0 and bool(chunk.get("latent_tail_adaptive_window", False)):
+                hidden_context_frames = max(
+                    0, int(chunk.get("latent_tail_context_prefix_frames", 0) or 0)
+                )
+            elif int(chunk_index) > 0 and bool(chunk.get("pianosequenza_hd_hidden_context", False)):
+                hidden_context_frames = max(
+                    0, int(chunk.get("pianosequenza_hd_context_prefix_frames", 0) or 0)
+                )
             latent_tail_cfg = shotplan.get("longvid_latent_tail")
             latent_tail_overlap = 0
             if (
@@ -3670,36 +3691,59 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
                 latent_tail_overlap = max(
                     0, int(latent_tail_cfg.get("tail_frames", 0) or 0)
                 )
-            # Pianosequenza incoming-overlap semantics: the carried prefix is part
-            # of the delivered continuation segment.  It is NOT discarded by
-            # the editorial crop; assembly later lets the incoming segment own
-            # exactly this overlap.
-            planned_decoded_frames = (
-                visible_frames + head_frames + latent_tail_overlap
-            )
             decoded_before_crop = int(native_frames.shape[0])
-            if decoded_before_crop < planned_decoded_frames:
-                raise RuntimeError(
-                    "LongVid Positioned Guides decoded fewer frames than its Shotboard-visible contract "
-                    f"({decoded_before_crop}/{planned_decoded_frames})."
-                )
-            if decoded_before_crop > planned_decoded_frames:
-                native_frames = native_frames[:planned_decoded_frames, ...]
-                if isinstance(native_audio, dict) and torch.is_tensor(native_audio.get("waveform")):
-                    native_audio = dict(native_audio)
-                    sample_rate = max(1, int(native_audio.get("sample_rate", 32000)))
-                    target_samples = max(1, int(round(planned_decoded_frames * sample_rate / H3_FPS)))
-                    native_audio["waveform"] = native_audio["waveform"][..., :target_samples]
+            if hidden_context_frames:
+                # The dedicated Adaptive/HD delivery stage above has already
+                # removed the inherited prefix. Do not apply the generic
+                # bridge-head crop a second time: the old path expected
+                # visible+1 frames after it had already produced exactly the
+                # visible suffix, causing 187/188 failures on chunk 2.
+                if decoded_before_crop < visible_frames:
+                    raise RuntimeError(
+                        "LongVid Positioned Guides hidden-context delivery lost visible frames "
+                        f"({decoded_before_crop}/{visible_frames})."
+                    )
+                if decoded_before_crop > visible_frames:
+                    native_frames = native_frames[:visible_frames, ...]
+                    if isinstance(native_audio, dict) and torch.is_tensor(native_audio.get("waveform")):
+                        native_audio = dict(native_audio)
+                        sample_rate = max(1, int(native_audio.get("sample_rate", 32000)))
+                        target_samples = max(1, int(round(visible_frames * sample_rate / H3_FPS)))
+                        native_audio["waveform"] = native_audio["waveform"][..., :target_samples]
                 LOG.info(
-                    "MiniMax H3 Positioned Guides V3 editorial crop | chunk=%d/%d | decoded=%df -> planned=%df "
-                    "(visible=%df + bridge_head=%df)",
+                    "MiniMax H3 Positioned Guides post-context contract | chunk=%d/%d | "
+                    "delivered=%df | inherited_prefix_already_removed=%df | guide_clock=authored_exact",
                     int(chunk_index) + 1,
                     len(shotplan.get("chunks", [])),
-                    decoded_before_crop,
-                    planned_decoded_frames,
                     visible_frames,
-                    head_frames,
+                    hidden_context_frames,
                 )
+            else:
+                # Legacy positioned-guide windows may carry a single decoded
+                # bridge head or an explicitly delivered incoming overlap.
+                planned_decoded_frames = visible_frames + head_frames + latent_tail_overlap
+                if decoded_before_crop < planned_decoded_frames:
+                    raise RuntimeError(
+                        "LongVid Positioned Guides decoded fewer frames than its Shotboard-visible contract "
+                        f"({decoded_before_crop}/{planned_decoded_frames})."
+                    )
+                if decoded_before_crop > planned_decoded_frames:
+                    native_frames = native_frames[:planned_decoded_frames, ...]
+                    if isinstance(native_audio, dict) and torch.is_tensor(native_audio.get("waveform")):
+                        native_audio = dict(native_audio)
+                        sample_rate = max(1, int(native_audio.get("sample_rate", 32000)))
+                        target_samples = max(1, int(round(planned_decoded_frames * sample_rate / H3_FPS)))
+                        native_audio["waveform"] = native_audio["waveform"][..., :target_samples]
+                    LOG.info(
+                        "MiniMax H3 Positioned Guides V3 editorial crop | chunk=%d/%d | decoded=%df -> planned=%df "
+                        "(visible=%df + bridge_head=%df)",
+                        int(chunk_index) + 1,
+                        len(shotplan.get("chunks", [])),
+                        decoded_before_crop,
+                        planned_decoded_frames,
+                        visible_frames,
+                        head_frames,
+                    )
         expected_width = max(1, int(shotplan.get("width", native_frames.shape[2]) or native_frames.shape[2]))
         expected_height = max(1, int(shotplan.get("height", native_frames.shape[1]) or native_frames.shape[1]))
         decoded_width = int(native_frames.shape[2])

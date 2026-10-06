@@ -1277,6 +1277,17 @@ __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS", "WEB_DIRECTORY"]
 
 from .iamccs_h3_face_swap import NODE_CLASS_MAPPINGS as _FACE_SWAP_NODES, NODE_DISPLAY_NAME_MAPPINGS as _FACE_SWAP_NAMES
 NODE_CLASS_MAPPINGS.update(_FACE_SWAP_NODES)
+from .iamccs_h3_reference_image import (
+    IAMCCS_H3ReferenceImageSaveR42,
+    IAMCCS_H3OptionalSameSizeDetail,
+    IAMCCS_R42ReferenceImagePromptBridge,
+)
+NODE_CLASS_MAPPINGS["IAMCCS_H3ReferenceImageSaveR42"] = IAMCCS_H3ReferenceImageSaveR42
+NODE_DISPLAY_NAME_MAPPINGS["IAMCCS_H3ReferenceImageSaveR42"] = "IAMCCS H3 Reference Image · R42"
+NODE_CLASS_MAPPINGS["IAMCCS_R42ReferenceImagePromptBridge"] = IAMCCS_R42ReferenceImagePromptBridge
+NODE_DISPLAY_NAME_MAPPINGS["IAMCCS_R42ReferenceImagePromptBridge"] = "IAMCCS R42 Reference Image · Prompt + Preset"
+NODE_CLASS_MAPPINGS["IAMCCS_H3OptionalSameSizeDetail"] = IAMCCS_H3OptionalSameSizeDetail
+NODE_DISPLAY_NAME_MAPPINGS["IAMCCS_H3OptionalSameSizeDetail"] = "IAMCCS H3 Image · Optional Same-Size Detail"
 NODE_DISPLAY_NAME_MAPPINGS.update(_FACE_SWAP_NAMES)
 
 
@@ -1349,87 +1360,50 @@ def setup_api_routes() -> None:
 
         @routes.post("/api/iamccs/cine/video_editor/purge_parking")
         async def iamccs_video_editor_purge_parking(request):
-            """Remove only the active Video Editor session's parked media."""
+            """Remove unreferenced parking files, preserving known editor projects."""
             try:
+                import json
+                import folder_paths
                 from .cine_multigeneration import _parking_root, _safe_slug
 
+                running, pending = PromptServer.instance.prompt_queue.get_current_queue()
+                if running or pending:
+                    return web.json_response({"error": "Wait until the render queue is empty before cleaning editor parking."}, status=409)
                 try:
                     payload = await request.json()
                 except Exception:
                     payload = {}
                 session_key = _safe_slug(payload.get("session_key") or "shotboard_video_editor_v1")
-                all_sessions = bool(payload.get("all_sessions", False))
                 session_dir = os.path.abspath(_parking_root(session_key))
                 parking_root = os.path.abspath(os.path.dirname(session_dir))
-                if os.path.commonpath([parking_root, session_dir]) != parking_root:
+                if os.path.dirname(os.path.realpath(session_dir)) != os.path.realpath(parking_root):
                     return web.json_response({"error": "Invalid parking session path."}, status=400)
 
-                targets = [session_dir]
-                if all_sessions:
-                    targets = []
-                    if os.path.isdir(parking_root):
-                        for entry in os.scandir(parking_root):
-                            if entry.is_dir() and not entry.is_symlink():
-                                target = os.path.abspath(entry.path)
-                                if os.path.commonpath([parking_root, target]) == parking_root:
-                                    targets.append(target)
-
-                deleted_files = 0
-                deleted_bytes = 0
-                failed_paths = []
-                for target in targets:
-                    if not os.path.isdir(target):
-                        continue
-                    for base, _, names in os.walk(target, followlinks=False):
-                        for name in names:
-                            candidate = os.path.join(base, name)
-                            try:
-                                if os.path.islink(candidate) or os.path.isfile(candidate):
-                                    deleted_bytes += int(os.lstat(candidate).st_size)
-                                    deleted_files += 1
-                            except Exception:
-                                pass
-                    for entry in list(os.scandir(target)):
-                        try:
-                            if entry.is_symlink() or entry.is_file():
-                                os.remove(entry.path)
-                            elif entry.is_dir():
-                                shutil.rmtree(entry.path)
-                        except FileNotFoundError:
-                            pass
-                        except Exception as exc:
-                            failed_paths.append({"path": entry.path, "error": str(exc)})
-                    os.makedirs(target, exist_ok=True)
-
-                remaining_files = 0
-                remaining_bytes = 0
-                remaining_root = parking_root if all_sessions else session_dir
-                if os.path.isdir(remaining_root):
-                    for base, _, names in os.walk(remaining_root, followlinks=False):
-                        for name in names:
-                            candidate = os.path.join(base, name)
-                            try:
-                                if os.path.islink(candidate) or os.path.isfile(candidate):
-                                    remaining_files += 1
-                                    remaining_bytes += int(os.lstat(candidate).st_size)
-                            except Exception:
-                                pass
-
-                return web.json_response({
-                    "ok": True,
-                    "session_key": session_key,
-                    "folder": parking_root if all_sessions else session_dir,
-                    "all_sessions": all_sessions,
-                    "sessions": len(targets),
-                    "deleted_files": deleted_files,
-                    "deleted_bytes": deleted_bytes,
-                    "failed_files": len(failed_paths),
-                    "failed_paths": failed_paths[:20],
-                    "remaining_files": remaining_files,
-                    "remaining_bytes": remaining_bytes,
-                })
+                from .iamccs_editor_parking_cleanup import purge_unused
+                # User workflows and exported editor projects can still own parking media.
+                saved_roots = [folder_paths.get_user_directory(),
+                               os.path.join(os.path.expanduser("~"), "Downloads")]
+                config = os.path.join(os.path.dirname(__file__), "editor_purge_project_roots.json")
+                if os.path.isfile(config):
+                    with open(config, encoding="utf-8") as handle:
+                        saved_roots.extend(json.load(handle))
+                result = purge_unused(session_dir, payload.get("manifests"), saved_roots)
+                return web.json_response(result)
             except Exception as exc:
                 return web.json_response({"error": str(exc)}, status=500)
+
+        @routes.get("/api/iamccs/rtx_vfx/status")
+        async def iamccs_rtx_vfx_status(request):
+            """Non-throwing RTX VFX runtime preflight for the Exporter PRO UI."""
+            try:
+                from .iamccs_rtx_vfx import rtx_vfx_runtime_probe
+                return web.json_response(rtx_vfx_runtime_probe())
+            except Exception as exc:
+                return web.json_response({
+                    "available": False,
+                    "reason": f"RTX preflight failed: {type(exc).__name__}: {exc}",
+                    "status": "probe_failed",
+                })
 
         @routes.post("/api/iamccs/cine/video_editor/ensure_preview_video")
         async def iamccs_video_editor_ensure_preview_video(request):

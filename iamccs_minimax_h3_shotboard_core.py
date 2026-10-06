@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from typing import Any
 
 
@@ -506,6 +507,40 @@ def _normalise_flf_bridge_slots(
     return bridge_slots
 
 
+def _split_h3_structured_prompt(value: Any) -> tuple[list[str], dict[str, str]]:
+    """Parse the two H3 prompt grammars without changing authored wording.
+
+    Base H3 uses three sections; full-reference H3 uses six. Returning an
+    empty heading list means the text is an ordinary freeform prompt and must
+    retain the legacy concatenate behavior.
+    """
+    text = str(value or "").strip()
+    if not text:
+        return [], {}
+    heading_re = re.compile(
+        r"(?im)^(integrated_multimodal_description|subject_definitions|summary|retention_analysis|detailed_description|overall_soundscape|non_diegetic_music)\s*:\s*"
+    )
+    matches = list(heading_re.finditer(text))
+    if not matches:
+        return [], {}
+    headings = [match.group(1).lower() for match in matches]
+    valid_base = headings == [
+        "integrated_multimodal_description", "overall_soundscape", "non_diegetic_music"
+    ]
+    valid_ref = headings == [
+        "subject_definitions", "summary", "retention_analysis",
+        "detailed_description", "overall_soundscape", "non_diegetic_music",
+    ]
+    if not (valid_base or valid_ref):
+        return [], {}
+    sections: dict[str, str] = {}
+    for index, match in enumerate(matches):
+        body_start = match.end()
+        body_end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        sections[match.group(1).lower()] = text[body_start:body_end].strip()
+    return headings, sections
+
+
 def _compose_prompt(
     *,
     global_prompt: str,
@@ -513,13 +548,45 @@ def _compose_prompt(
     audio_prompt: str,
     prompt_mapping: str,
 ) -> str:
-    sections: list[str] = []
+    """Compose queue-time H3 text while preserving structured section order.
+
+    Local Shotboard choreography is inserted inside the visual-description
+    section of an already structured Prompter prompt. Audio-local text is
+    inserted into overall_soundscape. This prevents LOCAL text from landing
+    after non_diegetic_music. Freeform legacy prompts retain concatenate
+    behavior for backward compatibility.
+    """
     mapping = _text(prompt_mapping).lower()
     if mapping == "per_shot":
         mapping = "global_plus_local"
-    if mapping != "local_only" and global_prompt:
+    use_global = mapping != "local_only" and bool(global_prompt)
+    use_local = mapping != "global_only" and bool(local_prompt)
+
+    headings, structured = _split_h3_structured_prompt(global_prompt if use_global else "")
+    if headings:
+        visual_key = (
+            "integrated_multimodal_description"
+            if headings[0] == "integrated_multimodal_description"
+            else "detailed_description"
+        )
+        visual_parts = [structured.get(visual_key, "").strip()]
+        if use_local:
+            visual_parts.append(_text(local_prompt))
+        structured[visual_key] = "\n\n".join(part for part in visual_parts if part).strip() or "N/A"
+
+        if audio_prompt:
+            sound_parts = [structured.get("overall_soundscape", "").strip(), _text(audio_prompt)]
+            structured["overall_soundscape"] = "\n\n".join(part for part in sound_parts if part).strip() or "N/A"
+
+        return "\n\n".join(
+            f"{heading}:\n{structured.get(heading, '').strip() or 'N/A'}"
+            for heading in headings
+        ).strip()
+
+    sections: list[str] = []
+    if use_global:
         sections.append(global_prompt)
-    if mapping != "global_only" and local_prompt:
+    if use_local:
         sections.append(local_prompt)
     if audio_prompt:
         sections.append(f"Audio: {audio_prompt}")
@@ -545,14 +612,14 @@ def _keyframe_alignment_prompt(
         # By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
         hard_cut_contract = (
             "This is a new independent shot after an editorial hard cut. "
-            "Do not reconstruct or continue the preceding shot's camera move, subject scale, composition, scenery or action. "
+            "The new shot begins from Picture 1 as its complete visual authority: camera move, subject scale, composition, scenery and action all start from this frame. "
             if hard_cut_start
             else ""
         )
         return hard_cut_contract + (
             "Picture 1 defines the complete target frame at 0.00 seconds. "
-            "Keep Picture 1's camera distance, framing, lens axis and composition locked for the full shot; "
-            "do not introduce a push-in, zoom, crop or reframe unless the creative prompt explicitly requests one."
+            "Picture 1's camera distance, framing, lens axis and composition remain stable for the full shot. "
+            "Any authored camera move in the creative prompt is the only camera change applied."
         )
     if task == "fl2va" and has_first and has_last:
         return (
@@ -579,15 +646,14 @@ def _audio_handoff_prompt(frame_count: int, *, is_first_chunk: bool, is_final_ch
     instructions = ["[AUDIO HANDOFF]"]
     if not is_first_chunk:
         instructions.append(
-            "During the first 1.00 second of this chunk, use no dialogue, words, cries or new vocalisation. "
-            "Continue only the sounds specified by the authored prompt before any new line starts."
+            "During the first 1.00 second of this chunk, continue only the authored ambience, room tone and contact sounds. "
+            "The next spoken or vocal event begins after this opening handoff interval."
         )
     if not is_final_chunk:
         instructions.append(
             f"Complete every spoken line and shout no later than {dialogue_deadline:.2f} seconds. "
-            "During the final 1.00 second of this chunk, use no dialogue, words, cries or new vocalisation. "
-            "Keep only the sounds specified by the authored prompt; "
-            "do not begin the next line before the following chunk."
+            "During the final 1.00 second of this chunk, continue only the authored ambience, room tone and contact sounds. "
+            "The next spoken line begins in the following chunk."
         )
     return " ".join(instructions)
 
@@ -797,7 +863,7 @@ def _lipsync_prompt(creative_prompt: str) -> str:
         "detailed_description:\n"
         f"{detail}\n"
         "Synchronize <Subject 1> (S1)'s mouth shapes, phonemes, silence, breaths and facial acting to <Audio 1>. "
-        "Every user-supplied spoken line or lyric must remain verbatim inside <d>[Language] ...</d>; never infer missing words.\n\n"
+        "Every user-supplied spoken line or lyric remains verbatim inside <d>[Language] ...</d>; the supplied text is the complete wording authority.\n\n"
         "overall_soundscape:\n"
         "<Audio 1> is reused as the authoritative synchronized performance track.\n\n"
         "non_diegetic_music:\n"
@@ -909,12 +975,12 @@ def _longvid_guide_plan(
         "[LONGVID REF2VID LIPSYNC]\n"
         "<Picture 1> is the persistent visual identity. AudioBoard clips are pinned at their exact local timeline positions and are the performance timing source. "
         "Synchronize mouth shapes, phonemes, breaths, silence and facial acting to those positioned audio guides. "
-        "Write every user-supplied spoken line or lyric verbatim as <d>[Language] ...</d>; never infer missing words."
+        "Every user-supplied spoken line or lyric remains verbatim as <d>[Language] ...</d>; the supplied text is the complete wording authority."
         if lipsync else (
             "[LONGVID GUIDED AUDIO DRIVE]\n"
             "Main-timeline image guides remain positional H3 guides. The visible subject speaks or sings the exact supplied AudioBoard performance with natural, precise lip synchronization. "
-            "The matching locked audio latent is the sole phonetic timing authority: synchronize mouth shapes, phonemes, breaths and facial acting to it, and keep the mouth closed during silence. "
-            "Write every user-supplied spoken line or lyric verbatim as <d>[Language] ...</d>; never infer missing words."
+            "The matching locked audio latent is the sole phonetic timing authority: synchronize mouth shapes, phonemes, breaths and facial acting to it; during silence the mouth rests closed or neutrally. "
+            "Every user-supplied spoken line or lyric remains verbatim as <d>[Language] ...</d>; the supplied text is the complete wording authority."
             if guided_audio_drive else
             ""
         )
@@ -1287,6 +1353,12 @@ def _longvid_guide_plan(
             and bool(generated_bridge_enabled)
             and chunk_index > 0
             and not authored_opening_guide
+            # Adaptive Guide Windows already pin the previous sampled AV tail
+            # at the head of the new latent. Adding the decoded last frame as
+            # an I2VA opening at the same time creates two competing continuity
+            # authorities, repeats the incoming action and moves every authored
+            # guide by one extra frame.
+            and not latent_tail_planner_enabled
             and terminal_endpoint_mode != "pianosequenza_hd"
         )
         effective_chunk_task = "i2va" if use_generated_bridge else chunk_task
@@ -1719,8 +1791,7 @@ def _masked_loop_guided_plan(base: dict[str, Any], *, duration_seconds: float,
     structural_prompt = (
         "[GUIDED AV LOOP · EXPERIMENTAL]\nGenerate one continuous evolving take. The Shotboard images are exact "
         "positioned visual guides on the same global timeline. Preserve motion direction and scene state "
-        "through every internal masked overlap; do not stage a cut, freeze, dissolve, reset or re-establish "
-        "the shot at a technical window boundary."
+        "through every internal masked overlap. Every technical window boundary remains visually continuous, with uninterrupted motion and persistent scene state."
     )
     # The dedicated conditioner maps local prompts to the technical window
     # that owns their guide.  Never concatenate future local directions into
@@ -2534,7 +2605,18 @@ def build_shotplan(
         # The compiled duration argument is already resolved from Shotboard or
         # connected Settings PRO. Never let a stale timeline mirror override it.
         slots = _normalise_flf_bridge_slots(timeline, slots, duration_seconds)
-    i2v_hard_cut_mode = bool(explicit_i2v_mode and len(image_slots) > 1)
+    # Explicit I2VA is an independent-take mode. A common Shotboard recipe has
+    # one authored opening image followed by several text-only shot boxes; all
+    # boxes must start from that same opening image and meet with hard cuts.
+    # Requiring every box to repeat the image path made chunk 2 become I2VA
+    # without an opening image and fail after chunk 1 had already rendered.
+    i2v_master_opening = next(
+        (_text(slot.get("image")) for slot in slots if _text(slot.get("image"))),
+        "",
+    )
+    i2v_hard_cut_mode = bool(
+        explicit_i2v_mode and len(slots) > 1 and i2v_master_opening
+    )
     # Ref2VA does not accept the previous chunk's final frame as temporal
     # conditioning. Multiple timeline slots are independent reference-guided
     # renders and therefore meet with a clean cut. A synthetic overlap would
@@ -2619,6 +2701,8 @@ def build_shotplan(
             if continuous_guided_requested and slot_index > 0
             else _text(slot.get("image"))
         )
+        if explicit_i2v_mode and not first_path and i2v_master_opening:
+            first_path = i2v_master_opening
         # Stable FL2VA is an N-keyframe / N-1-chunk contract:
         #
         #   chunk 1 = Picture A -> Picture B

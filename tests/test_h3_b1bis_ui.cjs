@@ -12,7 +12,6 @@ const context = {
   setShotboardAudio: (_, value) => { calls.push(value); values.audio_mode = value; },
   widget: (_, name) => ({value: values[name]}), setValue: (_, name, value) => { values[name] = value; },
   normalizeExtendedAvProductionContract: () => {}, importSettingsFromShotboard: () => {},
-  normalize2StageResolutionLink: () => {},
   document: {dispatchEvent: () => {}}, CustomEvent: class {},
 };
 vm.createContext(context);

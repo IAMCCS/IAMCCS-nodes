@@ -426,8 +426,8 @@ function mountPremiumUI(node) {
     let url="", plateUrl="", source=null, frame=0;
     const values=()=>Object.fromEntries(PRO_FIELDS.map((name)=>[name,readWidget(node,name,null)]));
     const mediaSource=()=>source==="video"&&video.readyState>=2?video:source==="image"&&image.complete?image:tonal;
-    function draw(canvas, overrideValues=null, forcedView=null) {
-        const ctx=canvas.getContext("2d",{alpha:false,willReadFrequently:true}),W=canvas.width,H=canvas.height,media=mediaSource();
+    function draw(canvas, overrideValues=null, forcedView=null, externalMedia=null) {
+        const ctx=canvas.getContext("2d",{alpha:false,willReadFrequently:true}),W=canvas.width,H=canvas.height,media=externalMedia||mediaSource();
         ctx.fillStyle="#050709";ctx.fillRect(0,0,W,H);
         const sw=media.videoWidth||media.naturalWidth||media.width,sh=media.videoHeight||media.naturalHeight||media.height,scale=Math.min(W/sw,H/sh),dw=sw*scale,dh=sh*scale;
         ctx.drawImage(media,(W-dw)/2,(H-dh)/2,dw,dh);
@@ -452,6 +452,10 @@ function mountPremiumUI(node) {
         ctx.putImageData(output,0,0);
         if(view==="split"){ctx.putImageData(original,0,0,0,0,Math.floor(W/2),H);ctx.fillStyle="#efc879";ctx.fillRect(Math.floor(W/2)-1,0,2,H);}else if(view==="original")ctx.putImageData(original,0,0);
     }
+    node._iamccsRenderProgramFrame=(media,canvas,frameIndex=0)=>{
+        frame=frameIndex;
+        draw(canvas,null,"grain",media);
+    };
     function renderAll() { if(q(".pro-hd").classList.contains("open"))draw(q(".pro-hd canvas")); else draw(q(".pro-screen canvas")); }
     let renderQueued=false,lastRenderAt=0,renderTimer=0;
     function scheduleRender(force=false){
@@ -565,6 +569,7 @@ function mountPremiumUI(node) {
     node.onRemoved=function(){
         previewRestoreVersion++;
         delete node._iamccsWriteProSnapshot;
+        delete node._iamccsRenderProgramFrame;
         resizeObserver?.disconnect();intersectionObserver?.disconnect();
         window.removeEventListener("pointerdown",handleGlobalPointerDown,true);
         window.removeEventListener("pointerup",handleGlobalPointerEnd,true);

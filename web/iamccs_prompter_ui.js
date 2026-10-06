@@ -9,6 +9,18 @@ import { createPrompterInspector } from "./iamccs_h3_prompter_inspector.js";
 const NODE_TYPE = "IAMCCS_Prompter";
 
 const MODE_META = {
+    reference_image: {
+        label: "IMG GENERATOR",
+        subtitle: "One reference image / combined reference sheet · H3 REF2VA still",
+        sections: [
+            ["subject_definitions", "subject_definitions", "Define each character and prop; cite the supplied Picture slots."],
+            ["summary", "summary", "Describe the single image or combined reference sheet requested."],
+            ["retention_analysis", "retention_analysis", "Specify which visible attributes to preserve from each source."],
+            ["detailed_description", "detailed_description", "One fixed composition; sheet panels occupy the same canvas, not separate shots."],
+            ["overall_soundscape", "overall_soundscape", "N/A for a still image."],
+            ["non_diegetic_music", "non_diegetic_music", "N/A for a still image."],
+        ],
+    },
     t2va: {
         label: "T2VA",
         subtitle: "Text → video + native audio",
@@ -21,7 +33,6 @@ const MODE_META = {
             ["camera", "Camera", "Framing, camera height, lens feeling and one coherent physical movement."],
             ["production_sound", "Production sound", "Chronological ambience, dialogue, contact sounds, effects and perspective."],
             ["non_diegetic_music", "Non-diegetic music", "Audience-only score. Keep it distinct from sound that exists inside the scene."],
-            ["negatives", "Continuity safeguards", "Concrete failures to avoid: identity drift, duplicate limbs, cuts, text, logos or unwanted redesign."],
         ],
     },
     i2va: {
@@ -38,7 +49,6 @@ const MODE_META = {
             ["camera", "Camera", "Animate from the source perspective with one physically plausible move."],
             ["production_sound", "Production sound", "Sound events tied to visible actions, space and camera distance."],
             ["non_diegetic_music", "Non-diegetic music", "Optional audience-only score and its entrance or exit."],
-            ["negatives", "Continuity safeguards", "Prevent source-frame redesign, face drift, unwanted cuts and synthetic artifacts."],
         ],
     },
     fl2va: {
@@ -56,7 +66,6 @@ const MODE_META = {
             ["camera", "Camera", "One continuous camera path connecting the start and final composition."],
             ["production_sound", "Production sound", "Chronological ambience, movement, effects and speech over the whole bridge."],
             ["non_diegetic_music", "Non-diegetic music", "Optional score, separated from the diegetic soundscape."],
-            ["negatives", "Continuity safeguards", "Prevent dissolves, morphs, teleports, identity drift, early arrival and unwanted edits."],
         ],
     },
     ref2va: {
@@ -80,7 +89,7 @@ const MODE_META = {
             ["v2va_replacement_retention", "Replacement / retention analysis", "Separate exactly what is replaced from the source subjects, environment, interactions, contacts and light response that remain."],
             ["v2va_interval_edits", "Interval edit instructions", "Use source-video time ranges only when different intervals need different visible changes."],
             ["v2va_sound_policy", "Sound policy", "Choose whether connected source audio is retained, replaced, muted or supplemented. Name <Audio 1> only when it is connected."],
-            ["v2va_exclusions", "Exclusions / continuity safeguards", "Prevent identity blending, duplicates, environment/camera drift and unrequested changes. Do not invent mask or ControlNet behavior."],
+            ["v2va_exclusions", "Continuity authority", "State the stable subject count, source environment, source camera, occlusion order and explicitly connected control signals in affirmative terms."],
         ],
     },
     audio_driven: {
@@ -89,12 +98,12 @@ const MODE_META = {
         sections: [
             ["audio_drive_contract", "Audio drive contract", "Declare that connected custom audio owns timing, pauses, breaths and spoken order."],
             ["audio_subject_map", "Subject / speaker map", "Map each visible <Subject N> to a stable speaker label such as (S1)."],
-            ["audio_scene_intent", "Scene intent", "Location, time, dramatic purpose and visible starting situation; do not invent a new story."],
+            ["audio_scene_intent", "Scene intent", "Location, time, dramatic purpose and the visible starting situation. Keep the authored story and connected audio as the narrative authority."],
             ["audio_timed_performance", "Timed performance", "Map phrases, pauses and breaths to chronological facial, gaze, gesture and body action."],
             ["audio_dialogue_map", "Dialogue map", "Use <Subject 1> (S1): <d>[Language] ...</d>; transcript wording must match the user's audio."],
             ["audio_visual_sync", "Visible sync cues", "Mouth articulation, breath, contact or musical actions that must visibly follow the soundtrack."],
             ["audio_camera_sync", "Camera", "Keep the speaker readable with one coherent shot design; avoid hiding the mouth during required sync."],
-            ["audio_environment", "Environment sound", "Only ambience or contact layers not already fixed by the custom audio."],
+            ["audio_environment", "Environment sound", "Describe ambience and contact layers that complement the custom-audio authority."],
             ["audio_continuity_locks", "Continuity safeguards", "Identity, wardrobe, anatomy, props, geography, eyeline and lip visibility that cannot drift."],
         ],
     },
@@ -386,6 +395,7 @@ function safeProject(raw) {
         schema_version: 7,
         project_name: cleanName,
         task_mode: canonicalMode(parsed.task_mode),
+        image_preset: parsed.image_preset === "reference_sheet" ? "reference_sheet" : "single_image",
         injection_target: ["global", "local_auto", "local_1", "local_2", "local_3"].includes(parsed.injection_target) ? parsed.injection_target : "global",
         writing_mode: ["manual", "guided", "assistant_fill"].includes(parsed.writing_mode) ? parsed.writing_mode : "guided",
         merge_policy: ["replace", "append"].includes(parsed.merge_policy) ? parsed.merge_policy : "replace",
@@ -778,7 +788,7 @@ function composePrompt(project) {
     if (!MODE_META[mode].sections.some(([key]) => value(key))) return "";
     const join = (keys) => keys.map(value).filter(Boolean).join("\n");
     const joinBasePositive = (keys) => uniquePromptParts(keys.map((key) => key === "dialogue" ? value(key) : positiveH3Text(value(key)))).join("\n");
-    if (mode === "ref2va") {
+    if (mode === "ref2va" || mode === "reference_image") {
         return MODE_META[mode].sections.map(([key, label]) => {
             let body = value(key) || "N/A";
             if (key === "summary" && body !== "N/A" && !/^\[[^\]\r\n]+\]/.test(body)) body = `[reference generation] ${body}`;
@@ -982,6 +992,7 @@ function mountPrompter(node) {
         .iamccs-pr-taghead{display:flex;align-items:center;gap:8px;margin-bottom:7px}.iamccs-pr-tagtitle{color:#f1d492;font:800 10px Georgia,serif;letter-spacing:.09em}.iamccs-pr-taghint{margin-left:auto;color:#93a1b1;font-size:9px}.iamccs-pr-tag-toggle{height:23px!important;padding:0 7px!important;font-size:9px!important}.iamccs-pr-tagdeck.is-collapsed{padding:6px 10px}.iamccs-pr-tagdeck.is-collapsed .iamccs-pr-taghead{margin-bottom:0}.iamccs-pr-tagdeck.is-collapsed .iamccs-pr-tagrows{display:none}.iamccs-pr-tagrows{display:grid;gap:5px}.iamccs-pr-tagrow{display:flex;align-items:center;gap:4px;flex-wrap:wrap}.iamccs-pr-taglabel{width:51px;color:#718297;font-size:8px;font-weight:900;letter-spacing:.08em;text-transform:uppercase}.iamccs-pr-tag{height:24px!important;padding:0 7px!important;border-color:#3d4a5b!important;background:#1c2632!important;color:#dce7f2!important;font:700 9px 'Courier New',monospace!important}.iamccs-pr-tag:hover{border-color:#d9ad58!important;color:#ffe5ab!important}.iamccs-pr-tag.syntax{background:#342a1c!important;border-color:#685536!important;color:#f5d38e!important}
         .iamccs-pr-zoom-wrap{position:relative;min-width:0;width:100%}.iamccs-pr-zoom-wrap textarea{width:100%;padding-right:38px!important}.iamccs-pr-zoom-btn{position:absolute;top:5px;right:5px;z-index:2;width:25px;height:25px;border:1px solid #8b7650;border-radius:5px;background:#262a31;color:#ffe0a0;cursor:pointer;font-size:15px;line-height:1}.iamccs-pr-zoom-overlay{position:fixed;inset:0;z-index:100000;display:grid;place-items:center;background:#05070bdc;padding:24px}.iamccs-pr-zoom-panel{display:flex;flex-direction:column;gap:10px;width:min(1100px,94vw);height:min(820px,90vh);padding:16px;border:1px solid #9c7842;border-radius:12px;background:#171c25;box-shadow:0 20px 80px #000c}.iamccs-pr-zoom-head{display:flex;align-items:center;gap:10px;color:#f3d99f;font-weight:800}.iamccs-pr-zoom-head .iamccs-pr-btn{margin-left:auto}.iamccs-pr-zoom-editor{flex:1;min-height:0;width:100%;resize:none;border:1px solid #71869b;border-radius:8px;background:#f8f5ed;color:#181a1d;padding:18px;font:24px/1.5 'Courier New',monospace;outline:none}
         .iamccs-pr-top{height:auto!important;min-height:58px;gap:10px!important;overflow:hidden}.iamccs-pr-mark{flex:0 0 34px}.iamccs-pr-brand{min-width:165px!important;flex:0 1 205px}.iamccs-pr-name{flex:1 1 210px!important;min-width:145px!important}.iamccs-pr-actions{min-width:0;flex:0 1 auto;justify-content:flex-end}.iamccs-pr-actions .iamccs-pr-btn{min-width:0;flex:0 1 auto;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding-left:9px;padding-right:9px}.iamccs-pr-zoom-wrap textarea{padding-right:54px!important}.iamccs-pr-ai .iamccs-pr-zoom-btn{right:19px!important;width:25px!important;min-width:25px!important;max-width:25px!important;height:25px!important;min-height:25px!important;max-height:25px!important;padding:0!important;font-size:18px!important;font-weight:900!important;line-height:23px!important;white-space:nowrap!important}
+        .iamccs-pr-zoom-wrap > .iamccs-pr-zoom-btn{right:26px!important}
     `;
     root.appendChild(aiStyle);
 
@@ -1220,9 +1231,14 @@ function mountPrompter(node) {
     aiTemperature.value = "0.35";
     const aiRow1 = el("div", "iamccs-pr-ai-row");
     const providerLabel = el("label", "", "Provider"); providerLabel.appendChild(aiProvider);
-    const modelLabel = el("label", "", "Model");
+    const modelLabel = el("label", "", "Prompt writer model");
+    const aiVisionModel = el("select");
+    const aiVisionList = aiVisionModel;
+    aiVisionList.setAttribute("aria-label", "Installed vision model (choose an image-capable model)");
+    const visionLabel = fieldLabel("Vision model · image reader", aiVisionModel,
+        "Reads references first; the prompt writer receives its observations. Choose an image-capable model. Blank uses the writer directly.");
     const modelRow = el("div", "iamccs-pr-ai-modelrow"); modelRow.append(aiModel, aiModelPicker, refreshModelsBtn); modelLabel.appendChild(modelRow);
-    aiRow1.append(providerLabel, modelLabel);
+    aiRow1.append(providerLabel, modelLabel, visionLabel);
     const aiRow2 = el("div", "iamccs-pr-ai-row");
     const urlLabel = el("label", "", "Base URL"); urlLabel.appendChild(aiBaseUrl);
     const tempLabel = el("label", "", "Creativity"); tempLabel.appendChild(aiTemperature);
@@ -1479,18 +1495,35 @@ function mountPrompter(node) {
         gemini: { baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-2.5-flash" },
         anthropic: { baseUrl: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5" },
     };
-    const savedAI = node.properties.iamccs_prompter_ai || {};
-    aiProvider.value = String(savedAI.provider || "ollama");
-    aiBaseUrl.value = String(savedAI.base_url || aiDefaults[aiProvider.value]?.baseUrl || "");
-    aiModel.value = String(savedAI.model || aiDefaults[aiProvider.value]?.model || "");
-    aiTemperature.value = String(savedAI.temperature ?? 0.35);
+    const AI_PREFS_KEY = "iamccs.h3_prompter.ai_models.v1";
+    const sessionAISettings = () => {
+        try {
+            const parsed = JSON.parse(globalThis.localStorage?.getItem(AI_PREFS_KEY) || "{}");
+            return parsed && typeof parsed === "object" ? parsed : {};
+        } catch { return {}; }
+    };
+    const restoreAISettings = () => {
+        const savedAI = {...sessionAISettings(), ...(node.properties.iamccs_prompter_ai || {})};
+        aiProvider.value = String(savedAI.provider || "ollama");
+        aiBaseUrl.value = String(savedAI.base_url || aiDefaults[aiProvider.value]?.baseUrl || "");
+        aiModel.value = String(savedAI.model || aiDefaults[aiProvider.value]?.model || "");
+        aiModelPicker.replaceChildren(new Option(aiModel.value || "Choose prompt writer model", aiModel.value));
+        const vision = String(savedAI.vision_model || "");
+        aiVisionList.replaceChildren(new Option("Use prompt writer for images", ""));
+        if (vision) aiVisionList.appendChild(new Option(vision, vision));
+        aiVisionModel.value = vision;
+        aiTemperature.value = String(savedAI.temperature ?? 0.35);
+    };
+    restoreAISettings();
     const persistAI = () => {
         node.properties.iamccs_prompter_ai = {
             provider: aiProvider.value,
             base_url: aiBaseUrl.value.trim(),
             model: aiModel.value.trim(),
+            vision_model: aiVisionModel.value.trim(),
             temperature: Number(aiTemperature.value || 0.35),
         };
+        try { globalThis.localStorage?.setItem(AI_PREFS_KEY, JSON.stringify(node.properties.iamccs_prompter_ai)); } catch {}
     };
     const renderAIProviderChrome = () => {
         const isOllama = aiProvider.value === "ollama";
@@ -1504,6 +1537,7 @@ function mountPrompter(node) {
         aiBaseUrl.placeholder = isOllama ? "http://127.0.0.1:11434" : "Provider API base URL";
         aiModel.hidden = isLocal;
         aiModelPicker.hidden = !isLocal;
+        aiVisionModel.hidden = false;
     };
     let aiVisualFiles = [];
     const restoreAIVisualFiles = () => {
@@ -1513,6 +1547,49 @@ function mountPrompter(node) {
         }));
     };
     restoreAIVisualFiles();
+    const generatedImages = el("select");
+    generatedImages.appendChild(new Option("Queue Reference Image Save to list generated PNGs", ""));
+    const reuseImageBtn = button("ADD GENERATED PNG AS REFERENCE");
+    reuseImageBtn.disabled = true;
+    aiPanel.insertBefore(generatedImages, relationshipLabel);
+    aiPanel.insertBefore(reuseImageBtn, relationshipLabel);
+    const onReferenceExecuted = (event) => {
+        const detail = event.detail || {};
+        const source = app.graph?.getNodeById(detail.display_node ?? detail.node);
+        if (source?.comfyClass !== "IAMCCS_H3ReferenceImageSaveR42" && source?.type !== "IAMCCS_H3ReferenceImageSaveR42") return;
+        for (const output of detail.output?.images || []) {
+            const value = JSON.stringify(output);
+            if (![...generatedImages.options].some(option => option.value === value))
+                generatedImages.appendChild(new Option(output.filename, value));
+            generatedImages.value = value;
+            reuseImageBtn.disabled = false;
+        }
+    };
+    api.addEventListener("executed", onReferenceExecuted);
+    const previousRemoved = node.onRemoved;
+    node.onRemoved = function() {
+        api.removeEventListener("executed", onReferenceExecuted);
+        return previousRemoved?.apply(this, arguments);
+    };
+    reuseImageBtn.onclick = async () => {
+        if (!generatedImages.value || aiVisualFiles.length >= 4) {
+            aiStatus.textContent = "Select a generated PNG and leave one free reference slot (maximum 4)."; return;
+        }
+        reuseImageBtn.disabled = true;
+        try {
+            const saved = JSON.parse(generatedImages.value);
+            const response = await api.fetchApi(`/view?${new URLSearchParams(saved)}`);
+            if (!response.ok) throw Error(`Generated PNG unavailable: HTTP ${response.status}`);
+            const file = new File([await response.blob()], saved.filename, {type:"image/png"});
+            const path = await uploadVisualFile(file);
+            aiVisualFiles.push({file, path, dataUrl:await readFileDataUrl(file)});
+            visualRolesForTarget()[String(aiVisualFiles.length)] = "reference";
+            project.visual_story_plan = {};
+            renderAIImages(); commit();
+            aiStatus.textContent = "Generated PNG copied to input and added as a reference. Review before injecting.";
+        } catch (error) { aiStatus.textContent = error.message; }
+        finally { reuseImageBtn.disabled = false; }
+    };
     const visualRolesForTarget = () => {
         project.ai_visual_roles = project.ai_visual_roles && typeof project.ai_visual_roles === "object" ? project.ai_visual_roles : {};
         const key = project.injection_target || "global";
@@ -1565,7 +1642,7 @@ function mountPrompter(node) {
                     composition:"COMPOSITION", style:"STYLE", reference:"GENERAL REFERENCE",
                 })[value]; role.appendChild(option);
             });
-            role.value = String(roles[slot] || (index === 0 ? "opening" : index === 1 ? "closing" : "reference"));
+            role.value = String(roles[slot] || (project.task_mode === "reference_image" ? "reference" : index === 0 ? "opening" : index === 1 ? "closing" : "reference"));
             role.onchange = () => { visualRolesForTarget()[slot] = role.value; commit(); };
             meta.appendChild(role);
             const remove = button("×", "iamccs-pr-ai-remove");
@@ -1599,14 +1676,16 @@ function mountPrompter(node) {
         return Promise.all(aiVisualFiles.map(async (item, index) => ({
             slot: index + 1,
             name: item.file.name,
-            role: String(roles[String(index + 1)] || (index === 0 ? "opening" : index === 1 ? "closing" : "reference")),
+            role: project.task_mode === "reference_image" ? "reference" : String(roles[String(index + 1)] || (index === 0 ? "opening" : index === 1 ? "closing" : "reference")),
             mime_type: item.file.type || "image/png",
             data: await ensureImageData(item),
             path: item.path || "",
         }))).then((items) => items.filter((item) => item.role !== "ignore"));
     };
+    let aiModelsRevision = 0;
     const loadOllamaModels = async ({ quiet = false } = {}) => {
         if (!["ollama", "lm_studio"].includes(aiProvider.value)) return [];
+        const revision = ++aiModelsRevision;
         const providerName = aiProvider.value === "lm_studio" ? "LM Studio" : "Ollama";
         refreshModelsBtn.disabled = true;
         connectOllamaBtn.disabled = true;
@@ -1616,11 +1695,19 @@ function mountPrompter(node) {
             const endpoint = aiProvider.value === "lm_studio" ? "lmstudio" : "ollama";
             const response = await api.fetchApi(`/iamccs/prompter/${endpoint}/models?base_url=${encodeURIComponent(aiBaseUrl.value.trim() || aiDefaults[aiProvider.value].baseUrl)}`);
             const data = await response.json();
+            if (revision !== aiModelsRevision) return [];
             if (!response.ok || !data?.ok) throw new Error(data?.error || `HTTP ${response.status}`);
             const names = [...new Set((data.models || []).map((item) => String(item.name || "").trim()).filter(Boolean))];
             const previousModel = aiModel.value.trim();
+            const previousVision = aiVisionModel.value;
             aiModelPicker.replaceChildren(...names.map((name) => new Option(name, name)));
-            const selectedModel = names.includes(previousModel) ? previousModel : (names[0] || "");
+            aiVisionList.replaceChildren(new Option("Choose vision model · blank uses writer", ""), ...names.map((name) => new Option(name, name)));
+            if (previousVision && !names.includes(previousVision))
+                aiVisionList.appendChild(new Option(`${previousVision} (saved; unavailable)`, previousVision));
+            aiVisionList.value = previousVision;
+            if (previousModel && !names.includes(previousModel))
+                aiModelPicker.appendChild(new Option(`${previousModel} (saved; unavailable)`, previousModel));
+            const selectedModel = previousModel || (names[0] || "");
             aiModelPicker.value = selectedModel;
             aiModel.value = selectedModel;
             persistAI();
@@ -1632,6 +1719,7 @@ function mountPrompter(node) {
             aiProviderChip.textContent = `${providerName.toUpperCase()} · READY`;
             return names;
         } catch (error) {
+            if (revision !== aiModelsRevision) return [];
             aiStatus.className = "iamccs-pr-ai-status error";
             aiStatus.textContent = `${providerName} unavailable: ${error?.message || error}`;
             connectOllamaBtn.textContent = `${providerName.toUpperCase()} ERROR · RETRY`;
@@ -1640,8 +1728,10 @@ function mountPrompter(node) {
             aiProviderChip.textContent = `${providerName.toUpperCase()} · ERROR`;
             return [];
         } finally {
-            refreshModelsBtn.disabled = false;
-            connectOllamaBtn.disabled = false;
+            if (revision === aiModelsRevision) {
+                refreshModelsBtn.disabled = false;
+                connectOllamaBtn.disabled = false;
+            }
         }
     };
     aiModelPicker.onchange = () => {
@@ -1650,16 +1740,23 @@ function mountPrompter(node) {
         aiStatus.className = "iamccs-pr-ai-status ok";
         aiStatus.textContent = `${aiProvider.value === "lm_studio" ? "LM Studio" : "Ollama"} model selected: ${aiModel.value}.`;
     };
+    aiVisionList.onchange = () => {
+        aiVisionModel.value = aiVisionList.value;
+        persistAI();
+        aiStatus.textContent = aiVisionModel.value ? `Vision: ${aiVisionModel.value} → prompt writer: ${aiModel.value}.` : "The prompt writer will also read images.";
+    };
     aiProvider.onchange = async () => {
+        ++aiModelsRevision;
         const selected = aiDefaults[aiProvider.value] || {};
         aiBaseUrl.value = selected.baseUrl || "";
         aiModel.value = selected.model || "";
+        aiVisionModel.value = "";
         aiApiKey.value = "";
         persistAI();
         renderAIProviderChrome();
         if (["ollama", "lm_studio"].includes(aiProvider.value)) await loadOllamaModels();
     };
-    [aiBaseUrl, aiModel, aiTemperature].forEach((control) => control.addEventListener("change", persistAI));
+    [aiBaseUrl, aiModel, aiVisionModel, aiTemperature].forEach((control) => control.addEventListener("change", persistAI));
     refreshModelsBtn.onclick = () => loadOllamaModels();
     connectOllamaBtn.onclick = () => loadOllamaModels();
     addAIImagesBtn.onclick = () => aiImageInput.click();
@@ -1812,7 +1909,8 @@ function mountPrompter(node) {
         activePromptArea = null;
         activePromptKey = null;
         center.appendChild(tagDeck);
-        center.appendChild(createModeHelper(project.task_mode));
+        const imageMode = project.task_mode === "reference_image";
+        if (!imageMode) center.appendChild(createModeHelper(project.task_mode));
         const requestCard = el("section", "iamccs-pr-section");
         requestCard.style.cssText = "border:2px solid #a077cf;background:#271c3c;padding:12px";
         const requestHead = el("div", "iamccs-pr-section-head");
@@ -1821,7 +1919,7 @@ function mountPrompter(node) {
         const extendedContinuous = project.task_mode === "fl2va" && project.extended_conditioning_policy === "continuous";
         const requestAI = button(extendedEvolving ? "✦ REQUEST AI + TIMED PROMPTS" : extendedContinuous ? "✦ REQUEST → CONTINUOUS GLOBAL" : "✦ REQUEST → GLOBAL", "iamccs-pr-field-ai");
         const requestStory = button("✦ REQUEST → GLOBAL + LOCALS", "iamccs-pr-field-ai");
-        requestStory.style.display = extendedEvolving || extendedContinuous ? "none" : "";
+        requestStory.style.display = imageMode || extendedEvolving || extendedContinuous ? "none" : "";
         requestStory.onclick = async () => {
             if (!project.request.trim()) { aiStatus.textContent = "Write the global idea and numbered local prompt directions first."; return; }
             try {
@@ -1854,7 +1952,26 @@ function mountPrompter(node) {
             finally { requestStory.disabled = false; }
         };
         const requestActions = el("div", "iamccs-pr-request-actions");
+        requestActions.style.cssText = "display:flex;flex-wrap:wrap;justify-content:flex-start;align-items:stretch;gap:6px;width:100%;min-width:0;max-width:100%;height:auto;margin-left:0;flex:1 1 100%";
         requestActions.append(requestAI, requestStory);
+        for (const action of [requestAI, requestStory]) {
+            action.style.setProperty("max-width", "100%", "important");
+            action.style.setProperty("white-space", "normal", "important");
+            action.style.setProperty("height", "auto", "important");
+            action.style.setProperty("max-height", "none", "important");
+            action.style.setProperty("line-height", "1.4", "important");
+            action.style.setProperty("padding", "6px 8px", "important");
+            action.style.setProperty("flex", "0 1 auto", "important");
+        }
+        if (imageMode) {
+            const preset = el("select");
+            preset.style.cssText = "flex:1 1 200px;min-width:0;max-width:100%;width:100%;height:auto;min-height:30px;font-size:11px";
+            preset.append(new Option("Single image", "single_image"), new Option("Reference sheet · all subjects + props", "reference_sheet"));
+            preset.value = project.image_preset || "single_image";
+            preset.onchange = () => { project.image_preset = preset.value; commit(); };
+            requestActions.appendChild(preset);
+            requestAI.textContent = "✦ REQUEST → H3 IMAGE PROMPT";
+        }
         requestHead.append(el("div","iamccs-pr-section-title","REQUEST · describe what you want"), requestActions);
         const requestBox = el("textarea", "iamccs-pr-text"); requestBox.value = project.request;
         requestBox.placeholder = extendedEvolving
@@ -1863,6 +1980,7 @@ function mountPrompter(node) {
                 ? "Describe the single action that must continue uninterrupted for the complete take. Do not divide it into times or phases."
                 : "Describe the global scene, then: Prompt 1: I want… Prompt 2: then… Prompt 3: finally… Choose GLOBAL + LOCALS to develop all numbered prompts and inject them together.";
         requestBox.oninput = () => { project.request = requestBox.value; commit(); };
+        if (imageMode) requestBox.placeholder = "Optional: describe one image or a reference sheet. Leave this empty to let the Vision model build the selected preset from the uploaded references while preserving their visual style.";
         requestBox.onfocus = () => { activePromptArea = requestBox; activePromptKey = "request"; };
         requestAI.onclick = () => {
             project.request = requestBox.value;
@@ -1876,7 +1994,9 @@ function mountPrompter(node) {
             narrativeRequest:requestBox.value,
             });
         };
-        requestCard.append(requestHead, requestBox, el("div","iamccs-pr-tip", extendedEvolving
+        requestCard.append(requestHead, requestBox, el("div","iamccs-pr-tip", imageMode
+            ? "1. Add references. REQUEST is optional: when blank, Vision identifies the actual subjects and builds the selected preset while preserving the reference style. 2. Press REQUEST → H3 IMAGE PROMPT. 3. Review FINAL PROMPT, then INJECT → SHOTBOARD."
+            : extendedEvolving
             ? "REQUEST AI + TIMED PROMPTS prepares the timed phases without changing the Shotboard. Press INJECT → SHOTBOARD to create the editable Extended Prompt blocks; this happens only while EXTENDED EVOLVING is active. The visible Shotboard blocks then remain Queue truth."
             : extendedContinuous
                 ? "REQUEST → CONTINUOUS GLOBAL rewrites only the single ACTION field. The same action is composed into GLOBAL for the whole take; no timed phases or local prompts are created."
@@ -1894,7 +2014,7 @@ function mountPrompter(node) {
         node._iamccsRequestStatusObserver.observe(aiStatus, {childList:true,characterData:true,subtree:true,attributes:true,attributeFilter:["class"]});
         requestCard.append(requestStatus);
         center.append(requestCard);
-        center.appendChild(renderCameraBuilder());
+        if (!imageMode) center.appendChild(renderCameraBuilder());
         const meta = MODE_META[project.task_mode];
         meta.sections.forEach(([key, label, tip], index) => {
             const card = el("section", "iamccs-pr-section");
@@ -1963,7 +2083,7 @@ function mountPrompter(node) {
         // Keep slot actions in their own production panel after the complete
         // GLOBAL document. This prevents LOCAL cards from splitting/reflowing
         // the global H3 section stack on narrower ComfyUI windows.
-        center.appendChild(renderLocalPrompts());
+        if (!imageMode) center.appendChild(renderLocalPrompts());
         modeButtons.forEach((item, key) => item.classList.toggle("active", key === project.task_mode));
         modeNote.textContent = meta.subtitle;
         modeNote.title = meta.subtitle;
@@ -2151,14 +2271,25 @@ function mountPrompter(node) {
         const isExtendedContinuousRequest = narrativeRequest !== null
             && requestMode === "fl2va"
             && project.extended_conditioning_policy === "continuous";
+        const isImageRequest = narrativeRequest !== null && requestMode === "reference_image";
+        const isEmptyImageRequest = isImageRequest && !String(narrativeRequest || "").trim();
         const direction = narrativeRequest !== null
-            ? (isExtendedEvolvingRequest
+            ? (isImageRequest
+                ? (isEmptyImageRequest
+                    ? "Build the selected H3 image preset autonomously from the supplied reference images and the Vision model observations. Identify and describe the actual visible subjects and props; do not assume a person, gender or object. Preserve the reference medium, photographic or illustrative style, lighting, palette, texture, lens character and finish unless the user explicitly requests a different style."
+                    : `Turn this REQUEST into one static H3 image prompt. Use the supplied references as visual authority. Preserve their medium, photographic or illustrative style, lighting, palette, texture, lens character and finish unless the REQUEST explicitly asks for a different style. REQUEST: ${String(narrativeRequest).trim()}`)
+                : isExtendedEvolvingRequest
                 ? `Turn this REQUEST into MiniMax H3 FL2VA Extended Evolving conditioning. Treat every timestamp supplied by the user as immutable. ACTION and SHOT_LIST must be IDENTICAL canonical timelines with EXACTLY ONE PHASE PER LINE. EVERY LINE MUST START WITH ITS TIMESTAMP OR RANGE; NEVER PLACE [ONSET ONCE], [RESOLVED STATE] OR [THEN SUSTAIN] BEFORE THE TIMESTAMP. If the REQUEST begins with untimed action before its first explicit timestamp T, encode that opening phase as “0-T seconds: ...”. Every later phase boundary must come only from timestamps explicitly supplied by the user. Use ONLY these exact tags: [ONSET ONCE], [RESOLVED STATE], [THEN SUSTAIN]. Never output [ONSET_once], [SUSTAIN], or tag aliases. For any transient event followed by continued behavior, put the transient event only in ONSET ONCE and the continuing positive state only in THEN SUSTAIN. Example grammar: “0-T seconds: [ONSET ONCE] <single event>; [THEN SUSTAIN] <ongoing observable state>”. RESOLVED STATE is optional and, when used, must state the immediate positive post-event state. RESOLVED STATE and THEN SUSTAIN must NEVER repeat, negate, or refer back to the completed onset event: never write phrases such as “after the scream has finished”, “without repeating the scream”, “do not repeat”, or “before N seconds”. Keep stable visual information only in BOUNDARY_FRAMES, REFERENCE_USE, IDENTITY_CONTINUITY_LOCKS, LIGHT_AND_IMAGE and CAMERA. Keep all actions, vocal events, performance changes and time-dependent sound only inside ACTION and SHOT_LIST. A breath, brief vocalization, glance, impact, gesture, stop, turn, opening/closing action, or performance start is an ONSET ONCE when it initiates a longer phase. Use positive observable H3 language. The only normal negative wording allowed is an explicit music absence such as “No score” in NON_DIEGETIC_MUSIC. REQUEST: ${String(narrativeRequest).trim()}`
                 : isExtendedContinuousRequest
                     ? `Turn this REQUEST into one MiniMax H3 FL2VA CONTINUOUS prompt. Preserve exactly the single action requested by the user and make that same action continue uninterrupted through the complete take. Do not create timestamps, phases, shot divisions, local prompts, additional actions or editorial cuts. Put the action in ACTION and keep identity, environment and camera continuity in their proper fields; the Prompter will compose all of it into GLOBAL only. Preserve supplied dialogue verbatim and do not invent a transcript. REQUEST: ${String(narrativeRequest).trim()}`
                     : `Turn this REQUEST into the selected MiniMax global fields. Preserve supplied dialogue verbatim; do not invent a transcript. REQUEST: ${String(narrativeRequest).trim()}`)
             : aiDirection.value.trim();
-        if (narrativeRequest !== null && !String(narrativeRequest).trim()) { aiStatus.textContent = "Write your narrative REQUEST first."; return; }
+        if (narrativeRequest !== null && !String(narrativeRequest).trim() && !isImageRequest) { aiStatus.textContent = "Write your narrative REQUEST first."; return; }
+        if (isEmptyImageRequest && !aiVisualFiles.length) {
+            aiStatus.className = "iamccs-pr-ai-status error";
+            aiStatus.textContent = "Add at least one AI reference image before using an empty image REQUEST.";
+            return;
+        }
         const hasRoughText = targetKeys.some((key) => String(allSections[key] || "").trim());
         if (!targetKeys.length) {
             aiStatus.className = "iamccs-pr-ai-status error";
@@ -2192,7 +2323,9 @@ function mountPrompter(node) {
                     task_mode: project.task_mode,
                     sections: allSections,
                     target_keys: targetKeys,
-                    user_direction: direction,
+                    user_direction: project.task_mode === "reference_image"
+                        ? `${project.image_preset === "reference_sheet" ? "REFERENCE SHEET: one combined canvas containing every requested character and prop." : "SINGLE STATIC IMAGE."}\n${direction}` : direction,
+                    vision_model: aiVisionModel.value.trim(),
                     images: imagePayload,
                     temperature: Number(aiTemperature.value || 0.35),
                     timeout: 180,
@@ -2260,6 +2393,7 @@ function mountPrompter(node) {
                 : isExtendedContinuousRequest
                     ? `Continuous action ready${visualCount ? ` with ${visualCount} visual reference(s)` : ""}. It will be injected in GLOBAL only, without timed or local divisions.`
                 : `Improved: ${(data.report?.rewritten_sections || Object.keys(data.sections || {})).join(", ")}${visualCount ? ` with ${visualCount} visual reference(s)` : ""}. Review, then inject.`;
+            return true;
         } catch (error) {
             aiStatus.className = "iamccs-pr-ai-status error";
             aiStatus.textContent = `Rewrite failed: ${error?.message || error}`;
@@ -2358,6 +2492,10 @@ function mountPrompter(node) {
             const previousMode = project.task_mode;
             if (previousMode !== key) snapshotProject(`mode change ${previousMode} → ${key}`);
             project.task_mode = key;
+            if (key === "reference_image") {
+                project.extended_conditioning_policy = "default";
+                project.injection_target = "global";
+            }
             project.final_prompt_override_enabled = false;
             project.final_prompt_override = "";
             project.final_local_prompt_override_enabled = false;
@@ -2374,10 +2512,35 @@ function mountPrompter(node) {
             commit();
         };
     });
-    injectBtn.onclick = () => {
+    injectBtn.onclick = async () => {
         const isFl2va = canonicalMode(project.task_mode) === "fl2va";
-        const continuousOnly = isFl2va && project.extended_conditioning_policy === "continuous";
+        const isI2va = canonicalMode(project.task_mode) === "i2va";
+        const imageOnly = project.task_mode === "reference_image";
+        const continuousOnly = imageOnly || (isFl2va && project.extended_conditioning_policy === "continuous");
         let finalGlobalPrompt = effectiveGlobalPrompt(project).trim();
+        if (imageOnly && !finalGlobalPrompt) {
+            if (node._iamccsPromptAiBusy) {
+                injectStatus.textContent = "AI is still preparing the image prompt. Wait for the result before injecting.";
+                return;
+            }
+            if (!String(project.request || "").trim() && !aiVisualFiles.length) {
+                injectStatus.className = "iamccs-pr-inject-status error";
+                injectStatus.textContent = "Add at least one AI reference image, or write an image description in REQUEST.";
+                return;
+            }
+            injectStatus.className = "iamccs-pr-inject-status";
+            injectStatus.textContent = "Preparing the H3 image prompt from your REQUEST and references…";
+            const prepared = await runAIRewrite({
+                directTargetKeys: MODE_META.reference_image.sections.map(([key]) => key),
+                triggerButton: injectBtn,
+                narrativeRequest: project.request,
+            });
+            injectStatus.className = `iamccs-pr-inject-status ${prepared ? "ok" : "error"}`;
+            injectStatus.textContent = prepared
+                ? "H3 image prompt ready in FINAL PROMPT. Review it, then press INJECT → SHOTBOARD again. Nothing queued."
+                : aiStatus.textContent;
+            return;
+        }
         let finalLocalPrompt = continuousOnly ? "" : effectiveLocalPrompt(project).trim();
         if (project.extended_conditioning_policy === "evolving" && isFl2va) {
             try {
@@ -2420,6 +2583,8 @@ function mountPrompter(node) {
         }
         const shotboard = targets[0];
         try {
+            if (imageOnly && widget(shotboard, "task_mode")?.value !== "reference_image")
+                throw new Error("Select IMAGE GENERATOR · REFERENCES in Settings Pro first (use the R42 reference image workflow with Reference Image Save).");
             if (typeof shotboard._iamccsMiniMaxInjectPrompt !== "function") {
                 throw new Error("Shotboard UI bridge is not ready; reload ComfyUI once");
             }
@@ -2441,7 +2606,36 @@ function mountPrompter(node) {
                 ...(project.visual_story_plan?.image_paths || []),
                 ...aiVisualFiles.map((item) => item.path),
             ].map((value) => String(value || "").trim()).filter(Boolean);
-            if (visualPaths.length) setWidget(shotboard, "image_paths", JSON.stringify([...new Set(visualPaths)]));
+            const uniqueVisualPaths = [...new Set(visualPaths)];
+            const orderedI2VPaths = [];
+            if (isI2va) {
+                const planPaths = Array.isArray(project.visual_story_plan?.image_paths)
+                    ? project.visual_story_plan.image_paths : [];
+                const uploadedPaths = aiVisualFiles.map(item => item.path);
+                const fallbackPaths = planPaths.length ? planPaths : uploadedPaths;
+                fallbackPaths.forEach((path, index) => {
+                    const clean = String(path || "").trim();
+                    if (clean) orderedI2VPaths[index] = clean;
+                });
+                (project.local_prompts || []).forEach(row => {
+                    const slotIndex = Math.max(0, Number(row?.slot || 1) - 1);
+                    const clean = String(row?.image_path || "").trim();
+                    if (clean) orderedI2VPaths[slotIndex] = clean;
+                });
+            }
+            const compactI2VPaths = orderedI2VPaths.map(path => String(path || "").trim()).filter(Boolean).slice(0, 4);
+            if (isI2va && compactI2VPaths.length) {
+                if (typeof shotboard._iamccsMiniMaxSetI2VHardCutSlots !== "function")
+                    throw Error("Reload ComfyUI to enable ordered I2VA image-slot injection.");
+                shotboard._iamccsMiniMaxSetI2VHardCutSlots({paths:compactI2VPaths});
+            } else if (uniqueVisualPaths.length) {
+                setWidget(shotboard, "image_paths", JSON.stringify(uniqueVisualPaths));
+            }
+            if (imageOnly) {
+                if (typeof shotboard._iamccsMiniMaxSetImageReferences !== "function")
+                    throw Error("Reload ComfyUI to enable the image reference injection bridge.");
+                shotboard._iamccsMiniMaxSetImageReferences(aiVisualFiles.map(item => item.path));
+            }
             const boardMode = String(widget(shotboard, "task_mode")?.value || "").toLowerCase();
             const evolvingExtended = isFl2va
                 && project.extended_conditioning_policy === "evolving"
@@ -2451,7 +2645,7 @@ function mountPrompter(node) {
             // EVOLVING keeps timed actions in its dedicated schedule.
             const queuePrompt = finalGlobalPrompt;
             const injectedResults = [];
-            if (isFl2va) {
+            if (isFl2va || imageOnly) {
                 if (queuePrompt) injectedResults.push(shotboard._iamccsMiniMaxInjectPrompt({
                     prompt:queuePrompt,target:"global",mergePolicy:project.merge_policy
                 }));
@@ -2467,7 +2661,10 @@ function mountPrompter(node) {
                 const localFallback = (localFallbackKeys[project.task_mode] || ["acting","camera"])
                     .map(key => String(project.sections?.[key] || "").trim()).filter(Boolean).join("\n");
                 const targetIsGlobal = project.injection_target === "global";
-                if (targetIsGlobal && queuePrompt) injectedResults.push(shotboard._iamccsMiniMaxInjectPrompt({prompt:queuePrompt,target:"global",mergePolicy:project.merge_policy}));
+                // REQUEST → GLOBAL + LOCALS is an atomic I2VA authoring action:
+                // every ordered image shot still shares the generated GLOBAL,
+                // even if the last manual target selection was a local box.
+                if ((targetIsGlobal || (isI2va && activeLocals.length)) && queuePrompt) injectedResults.push(shotboard._iamccsMiniMaxInjectPrompt({prompt:queuePrompt,target:"global",mergePolicy:project.merge_policy}));
                 else if (!activeLocals.length && (localFallback || queuePrompt)) injectedResults.push(shotboard._iamccsMiniMaxInjectPrompt({prompt:localFallback || queuePrompt,target:project.injection_target,createMissing:true,taskMode:project.task_mode,mergePolicy:project.merge_policy}));
             }
 
@@ -2503,7 +2700,10 @@ function mountPrompter(node) {
             }
             injectStatus.className = "iamccs-pr-inject-status ok";
             const injectedTargets = injectedResults.filter(Boolean).map(r => r.actualTarget);
-            injectStatus.textContent = `Injected into ${injectedTargets.join(", ") || "Extended timed blocks"}.${conditioningResult ? ` Extended AV ${conditioningResult.policy.toUpperCase()} · ${conditioningResult.eventCount} timed event(s).` : ""}${visualPaths.length ? ` ${visualPaths.length} visual path(s) synchronized to Shotboard.` : ""} The editable FINAL GLOBAL/LOCAL text and visible Shotboard boxes are now Queue truth; Queue was not started.`;
+            const visualStatus = isI2va && compactI2VPaths.length
+                ? ` ${compactI2VPaths.length} ordered I2VA image slot(s) synchronized as independent hard-cut shots.`
+                : (uniqueVisualPaths.length ? ` ${uniqueVisualPaths.length} visual path(s) synchronized to Shotboard.` : "");
+            injectStatus.textContent = `Injected into ${injectedTargets.join(", ") || "Extended timed blocks"}.${conditioningResult ? ` Extended AV ${conditioningResult.policy.toUpperCase()} · ${conditioningResult.eventCount} timed event(s).` : ""}${visualStatus} The editable FINAL GLOBAL/LOCAL text and visible Shotboard boxes are now Queue truth; Queue was not started.`;
             injectBtn.textContent = "INJECTED ✓";
             setTimeout(() => { injectBtn.textContent = "INJECT → SHOTBOARD"; }, 1200);
         } catch (error) {
@@ -2607,6 +2807,10 @@ function mountPrompter(node) {
         const result = originalConfigure?.call?.(this, info);
         // Restore synchronously: draft saving may run before the next timer.
         project = safeProject(widget(node, "project_data")?.value);
+        ++aiModelsRevision;
+        restoreAISettings();
+        renderAIProviderChrome();
+        if (["ollama", "lm_studio"].includes(aiProvider.value)) loadOllamaModels({quiet:true});
         renderControls();
         renderSections();
         // Saved workflows may retain an old oversized node rectangle. Keep the

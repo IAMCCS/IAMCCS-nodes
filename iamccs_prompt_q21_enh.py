@@ -7,30 +7,23 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
+from pathlib import Path
+
+import comfy.utils
 
 LOG = logging.getLogger("iamccs.prompt_q21_enh")
 _VISION_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
-_DEFAULT_MAX_TOKENS = {"t2i": 768, "edit": 1024}
-_MAX_TOKEN_LIMIT = 4096
-
-_SYSTEM_T2I = """You are a Qwen-Image 2.1 prompt enhancer. Rewrite the user's idea into one precise,
-visual, production-ready image prompt without changing their intent. Preserve named subjects, counts,
-actions, exact quoted text, style and explicit format constraints. Add useful composition, lighting,
-material and camera detail only when it helps. Return strict JSON only:
-{"rewritten_prompt":"...","wh_ratio":""}
-Use wh_ratio only when a ratio/format is explicit or unambiguous. 2K/4K/8K are quality descriptors, not ratios."""
-
-_SYSTEM_EDIT = """You are a Qwen-Image 2.1 image-edit prompt enhancer. The supplied images are references.
-Rewrite the request into one precise editing directive anchored on what the images actually show.
-Edit the requested attributes strongly enough to be visible and preserve unrelated content. Do not invent
-unsupported visual facts. Identity, personal accessories, product design and rendering medium remain invariant
-unless explicitly targeted. Prefer one concise preservation clause over redescribing the entire frame.
-For multiple images use <image1>, <image2>, ... exactly and state each image's role. Visible text is literal:
-quote exact output strings. If extending the canvas, explicitly call it outpainting.
-Return strict JSON only:
-{"rewritten_prompt":"...","wh_ratio":"","ratio_follow":"<image1>"}
-wh_ratio and ratio_follow are mutually exclusive. The canvas image should normally be ratio_follow."""
+_PROMPT_DIR = Path(__file__).resolve().parent / "prompts" / "qwen_image_2_1"
+_GENERATION_PROFILES = {
+    "official": {"t2i": 16256, "edit": 24000},
+    "balanced": {"t2i": 8192, "edit": 8192},
+    "fast": {"t2i": 4096, "edit": 4096},
+}
+_MAX_TOKEN_LIMIT = 32768
+_PE_IMAGE_MAX_PIXELS = 1024 * 1024
+_SYSTEM_PROMPT_CACHE = {}
 
 _POSE_TEXT_ONLY = """
 POSE EXTRACTION MODE — IMPORTANT:
@@ -66,6 +59,36 @@ hair, clothing, accessories, body appearance, background, camera, lighting and s
 only posture/joint geometry from <image2>. One subject only; no collage, split frame, hybrid or duplicate person.
 Set ratio_follow to <image1> unless an explicit target ratio is requested.
 """
+
+
+def _load_system_prompt(task):
+    cached = _SYSTEM_PROMPT_CACHE.get(task)
+    if cached is not None:
+        return cached
+    path = _PROMPT_DIR / f"system_prompt_{task}.txt"
+    try:
+        prompt = path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        raise RuntimeError(f"Unable to read Qwen-Image 2.1 {task} system prompt: {path}") from exc
+    if not prompt:
+        raise RuntimeError(f"Qwen-Image 2.1 {task} system prompt is empty: {path}")
+    _SYSTEM_PROMPT_CACHE[task] = prompt
+    return prompt
+
+
+def _prepare_pe_image(image):
+    """Match the official prompt-enhancer training cap without touching generator inputs."""
+    shape = getattr(image, "shape", None)
+    if shape is None or len(shape) != 4:
+        return image
+    height, width = int(shape[1]), int(shape[2])
+    if height * width <= _PE_IMAGE_MAX_PIXELS:
+        return image
+    scale = math.sqrt(_PE_IMAGE_MAX_PIXELS / float(height * width))
+    target_width = max(32, math.floor(width * scale / 32) * 32)
+    target_height = max(32, math.floor(height * scale / 32) * 32)
+    samples = image.movedim(-1, 1)
+    return comfy.utils.common_upscale(samples, target_width, target_height, "lanczos", "disabled").movedim(1, -1)
 
 
 def _chat(system, user):
@@ -193,15 +216,19 @@ class IAMCCS_PromptQ21Enh:
                 "top_k": ("INT", {"default": 20, "min": 1, "max": 200, "step": 1}),
                 "presence_penalty": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 5.0, "step": 0.1}),
                 "max_new_tokens": ("INT", {"default": 0, "min": 0, "max": 32768, "step": 128,
-                                    "tooltip": "0 = fast preset (768 T2I / 1024 edit). Runtime cap 4096; legacy values still load."}),
+                                    "tooltip": "0 = selected generation profile. Explicit values override the profile."}),
                 "rerun_each_queue": ("BOOLEAN", {"default": True}),
                 "seed": ("INT", {"default": 42, "min": 0, "max": 0xFFFFFFFF, "control_after_generate": True}),
+                "generation_profile": (["official", "balanced", "fast"], {
+                    "default": "official",
+                    "tooltip": "Official uses Qwen's 16256 T2I / 24000 Edit limits. Balanced uses 8192; Fast uses 4096."
+                }),
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "BOOLEAN", "IMAGE", "IMAGE", "STRING")
+    RETURN_TYPES = ("STRING", "STRING", "STRING", "STRING", "STRING", "BOOLEAN", "IMAGE", "IMAGE", "STRING", "IMAGE")
     RETURN_NAMES = ("positive_prompt", "negative_prompt", "wh_ratio", "ratio_follow", "thinking", "parse_ok",
-                    "generator_image_1", "generator_image_2", "routing_info")
+                    "generator_image_1", "generator_image_2", "routing_info", "generator_image_3")
     FUNCTION = "enhance"
     CATEGORY = "IAMCCS/Prompting"
     DESCRIPTION = "Qwen-Image 2.1 prompt enhancer with fast local generation and explicit multi-reference routing."
@@ -212,9 +239,9 @@ class IAMCCS_PromptQ21Enh:
 
     def enhance(self, clip, task, prompt, extra_instructions="", missing_image_policy="error", reference_mode="auto",
                 temperature=1.0, top_p=0.95, top_k=20, presence_penalty=-1.0,
-                max_new_tokens=0, rerun_each_queue=True, seed=42, **kwargs):
+                max_new_tokens=0, rerun_each_queue=True, seed=42, generation_profile="official", **kwargs):
         if not str(prompt).strip():
-            return "", "", "", "", "", True, None, None, "empty prompt"
+            return "", "", "", "", "", True, None, None, "empty prompt", None
         if task not in {"t2i", "edit"}:
             raise ValueError(f"Unknown IAMCCS PromptQ21Enh task: {task}")
         edit = task == "edit"
@@ -228,7 +255,7 @@ class IAMCCS_PromptQ21Enh:
 
         if edit and not slot_tensors:
             if missing_image_policy == "pass_through":
-                return str(prompt).strip(), "", "", "", "", False, None, None, "no edit image; pass-through"
+                return str(prompt).strip(), "", "", "", "", False, None, None, "no edit image; pass-through", None
             raise ValueError("Edit mode requires at least one connected image")
 
         mode = str(reference_mode or "auto").strip().lower()
@@ -249,13 +276,13 @@ class IAMCCS_PromptQ21Enh:
         images = []
         for slot in routed_slots:
             tensor = slot_tensors[slot]
-            images.extend(tensor[row:row+1] for row in range(len(tensor)))
+            images.extend(_prepare_pe_image(tensor[row:row+1]) for row in range(len(tensor)))
 
         if edit:
             normalized_prompt = _normalize_user_refs(prompt, slot_to_reference)
             references = " ".join(f"<image{i}> {_VISION_TOKEN}" for i in range(1, len(images) + 1))
             user = f"{references}\n{normalized_prompt}"
-            system = _SYSTEM_EDIT
+            system = _load_system_prompt("edit")
             if mode == "pose_text_only":
                 if len(routed_slots) < 2:
                     raise ValueError("pose_text_only requires at least image_1 and image_2")
@@ -266,12 +293,12 @@ class IAMCCS_PromptQ21Enh:
                 system += _POSE_MULTIREF
         else:
             user = str(prompt)
-            system = _SYSTEM_T2I
+            system = _load_system_prompt("t2i")
 
         if str(extra_instructions).strip():
             system += "\nAdditional constraints:\n" + str(extra_instructions).strip()
 
-        token_kwargs = {"skip_template": True, "min_length": 1, "thinking": False}
+        token_kwargs = {"skip_template": True, "min_length": 1, "thinking": True}
         if edit:
             token_kwargs["images"] = images
         tokens = clip.tokenize(_chat(system, user), **token_kwargs)
@@ -279,7 +306,10 @@ class IAMCCS_PromptQ21Enh:
             requested_tokens = int(max_new_tokens or 0)
         except (TypeError, ValueError):
             requested_tokens = 0
-        generation_limit = _DEFAULT_MAX_TOKENS[task] if requested_tokens <= 0 else min(max(requested_tokens, 64), _MAX_TOKEN_LIMIT)
+        profile = str(generation_profile or "official").strip().lower()
+        if profile not in _GENERATION_PROFILES:
+            raise ValueError(f"Unknown IAMCCS PromptQ21Enh generation profile: {generation_profile}")
+        generation_limit = _GENERATION_PROFILES[profile][task] if requested_tokens <= 0 else min(max(requested_tokens, 64), _MAX_TOKEN_LIMIT)
         if requested_tokens > _MAX_TOKEN_LIMIT:
             LOG.warning("PromptQ21Enh: max_new_tokens=%s clamped to %s", requested_tokens, generation_limit)
         generated = clip.generate(
@@ -297,11 +327,13 @@ class IAMCCS_PromptQ21Enh:
         # Route images for TextEncodeQwenImage21. Connect these outputs instead of the raw loaders.
         gen1 = slot_tensors.get(routed_slots[0]) if routed_slots else None
         gen2 = slot_tensors.get(routed_slots[1]) if len(routed_slots) > 1 else None
+        gen3 = slot_tensors.get(routed_slots[2]) if len(routed_slots) > 2 else None
         routing_info = "general"
         if mode == "pose_text_only":
             # Critical: donor image is PE-only, not sent to the image generator.
             gen1 = slot_tensors.get(1)
             gen2 = None
+            gen3 = None
             # Final prompt must not accidentally retain donor tags.
             positive = re.sub(r"<image2>|\bimage\s*2\b|\bsecond image\b|\breference image\b", "", positive, flags=re.IGNORECASE)
             positive = re.sub(r"\s{2,}", " ", positive).strip()
@@ -312,7 +344,7 @@ class IAMCCS_PromptQ21Enh:
         elif mode == "pose_multiref":
             routing_info = "POSE_MULTIREF: both full photos are sent downstream; blending/duplication remains possible"
 
-        return positive, "", ratio, follow, thinking, parsed, gen1, gen2, routing_info
+        return positive, "", ratio, follow, thinking, parsed, gen1, gen2, routing_info, gen3
 
 
 NODE_CLASS_MAPPINGS = {"IAMCCS_PromptQ21Enh": IAMCCS_PromptQ21Enh}

@@ -159,3 +159,4 @@ def test_canonical_evolving_timestamp_precedes_all_tags():
     raw = "[ONSET_once] 12-22 seconds: she shouts once [SUSTAIN] she keeps marching"
     canonical = prompter._validate_canonical_evolving_timeline(raw)
     assert canonical == "12-22 seconds: [ONSET ONCE] she shouts once; [THEN SUSTAIN] she keeps marching"
+

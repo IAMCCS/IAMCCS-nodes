@@ -24,6 +24,58 @@ class LMStudioTests(unittest.TestCase):
         self.assertEqual(value['scene'], 'Test rewritten scene')
         self.assertEqual(report['provider'], 'lm_studio')
 
+
+    def test_lmstudio_uses_json_schema_not_legacy_json_object(self):
+        answer = {'choices':[{'message':{'content':'{"scene":"Structured output works"}'}}]}
+        with patch.object(module, '_http_json', return_value=answer) as http:
+            value, _ = module.rewrite_sections_with_ai(
+                'lm_studio', '', 'local-model', '', 't2va', {'scene':'test'},
+                target_keys=['scene'],
+            )
+        payload = http.call_args.args[1]
+        self.assertEqual(payload['response_format']['type'], 'json_schema')
+        schema = payload['response_format']['json_schema']['schema']
+        self.assertIn('scene', schema['properties'])
+        self.assertEqual(schema['required'], ['scene'])
+        self.assertEqual(value['scene'], 'Structured output works')
+
+    def test_lmstudio_structured_output_retries_as_text_when_model_rejects_schema(self):
+        answer = {'choices':[{'message':{'content':'{"scene":"Text fallback works"}'}}]}
+        with patch.object(module, '_http_json', side_effect=[
+            RuntimeError('AI provider HTTP 400: {"error":"response_format json_schema unsupported by model"}'),
+            answer,
+        ]) as http:
+            value, report = module.rewrite_sections_with_ai(
+                'lm_studio', '', 'local-model', '', 't2va', {'scene':'test'},
+                target_keys=['scene'],
+            )
+        self.assertEqual(http.call_count, 2)
+        self.assertEqual(http.call_args_list[0].args[1]['response_format']['type'], 'json_schema')
+        self.assertEqual(http.call_args_list[1].args[1]['response_format']['type'], 'text')
+        self.assertEqual(report['transport_retry'], 'lm_studio_text_fallback')
+        self.assertEqual(value['scene'], 'Text fallback works')
+
+    def test_openai_compatible_keeps_json_object_contract(self):
+        answer = {'choices':[{'message':{'content':'{"scene":"OpenAI compatible"}'}}]}
+        with patch.object(module, '_http_json', return_value=answer) as http:
+            module.rewrite_sections_with_ai(
+                'openai_compatible', 'http://example.test/v1', 'model', 'key', 't2va',
+                {'scene':'test'}, target_keys=['scene'],
+            )
+        self.assertEqual(http.call_args.args[1]['response_format'], {'type': 'json_object'})
+
+    def test_lmstudio_nextframe_uses_prompt_schema(self):
+        answer = {'choices':[{'message':{'content':'{"prompt":"Next Scene: A woman turns toward the window."}'}}]}
+        with patch.object(module, '_http_json', return_value=answer) as http:
+            prompt, _ = module.rewrite_nextframe_prompt_with_ai(
+                'lm_studio', '', 'local-model', '', 'A woman turns toward the window.'
+            )
+        payload = http.call_args.args[1]
+        self.assertEqual(payload['response_format']['type'], 'json_schema')
+        schema = payload['response_format']['json_schema']['schema']
+        self.assertEqual(schema['required'], ['prompt'])
+        self.assertTrue(prompt.startswith('Next Scene:'))
+
     def test_host_only_url_gets_v1_once(self):
         answer = {'choices':[{'message':{'content':'{"scene":"Test"}'}}]}
         with patch.object(module, '_http_json', return_value=answer) as http:

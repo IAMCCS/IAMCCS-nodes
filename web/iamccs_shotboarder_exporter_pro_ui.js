@@ -3,8 +3,8 @@ import { api } from "../../scripts/api.js";
 
 const TYPE = "IAMCCS_shotboarder_aud+vid_exporter_PRO";
 const STYLE_ID = "iamccs-shotboarder-exporter-pro-style";
-const UI_VERSION = "20260830-profile-compatibility";
-const NODE_SIZE = [680, 940];
+const UI_VERSION = "20261006-r44.7-rtx-runtime-panel-layout";
+const NODE_SIZE = [720, 1030];
 const HIDDEN_FIELDS = [
   "filename_prefix",
   "audio_source_mode",
@@ -137,7 +137,7 @@ function installStyle() {
   const style = document.createElement("style");
   style.id = STYLE_ID;
   style.textContent = `
-    .iamccs-export-pro { width:100%; height:902px; box-sizing:border-box; padding:10px; display:grid; grid-template-rows:40px 28px minmax(270px,1fr) 174px 170px 24px; gap:8px; overflow:hidden; background:#111719; color:#e8eeee; border:1px solid #465255; font-family:Arial,sans-serif; }
+    .iamccs-export-pro { width:100%; height:992px; box-sizing:border-box; padding:10px; display:grid; grid-template-rows:40px 28px minmax(270px,1fr) 252px 170px 24px; gap:8px; overflow:hidden; background:#111719; color:#e8eeee; border:1px solid #465255; font-family:Arial,sans-serif; }
     .iamccs-export-pro * { box-sizing:border-box; min-width:0; border-radius:0 !important; letter-spacing:0; }
     .iamccs-export-pro .head { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:6px 9px; background:#1a2427; border:1px solid #3d4c50; }
     .iamccs-export-pro .brand { color:#f1d88e; font-size:13px; font-weight:900; line-height:15px; }
@@ -157,7 +157,7 @@ function installStyle() {
     .iamccs-export-pro .checkrow input { width:15px; height:15px; accent-color:#d0b366; }
     .iamccs-export-pro .meta { display:flex; align-items:center; gap:7px; color:#8fa5a3; font:700 9px Consolas,monospace; overflow:hidden; white-space:nowrap; }
     .iamccs-export-pro .meta strong { color:#e8d18a; font-weight:900; }
-    .iamccs-export-pro .rtx-panel { min-height:0; display:grid; grid-template-rows:24px minmax(0,1fr); gap:6px; padding:7px 8px; background:#111d1f; border:1px solid #6e5630; overflow:hidden; }
+    .iamccs-export-pro .rtx-panel { min-height:0; display:grid; grid-template-rows:24px 66px minmax(0,1fr); gap:6px; padding:7px 8px; background:#111d1f; border:1px solid #6e5630; overflow:hidden; }
     .iamccs-export-pro .rtx-head { display:flex; align-items:center; justify-content:space-between; gap:8px; color:#f1d88e; font:900 10px Consolas,monospace; }
     .iamccs-export-pro .rtx-toggle { display:flex; align-items:center; gap:6px; color:#d5e1dd; font:800 10px Arial,sans-serif; }
     .iamccs-export-pro .rtx-toggle input { width:15px; height:15px; accent-color:#d0b366; }
@@ -167,6 +167,16 @@ function installStyle() {
     .iamccs-export-pro .rtx-field label { color:#a8bcb7; font:900 8px Consolas,monospace; text-transform:uppercase; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
     .iamccs-export-pro .rtx-controls select, .iamccs-export-pro .rtx-controls input { height:25px; font-size:10px; padding:0 5px; }
     .iamccs-export-pro .rtx-controls input:disabled, .iamccs-export-pro .rtx-controls select:disabled { opacity:.45; cursor:not-allowed; }
+    .iamccs-export-pro .rtx-runtime-card { display:grid; grid-template-columns:92px minmax(0,1fr) auto; grid-template-rows:repeat(2,26px); gap:5px 7px; align-items:center; padding:5px 7px; border:1px solid #34484b; background:#0b1315; overflow:hidden; }
+    .iamccs-export-pro .rtx-runtime-badge { grid-row:1 / span 2; display:grid; place-items:center; align-self:stretch; border:1px solid #52656a; color:#b7c6c8; background:#162025; font:900 9px Consolas,monospace; text-align:center; padding:3px; }
+    .iamccs-export-pro .rtx-runtime-badge.ready { border-color:#4d8b65; color:#bdf2cb; background:#12271a; }
+    .iamccs-export-pro .rtx-runtime-badge.missing { border-color:#9b6840; color:#ffd09b; background:#2a1d12; }
+    .iamccs-export-pro .rtx-runtime-lines { min-width:0; display:grid; grid-template-columns:1fr 1fr; gap:2px 9px; color:#8da6a2; font:700 8px Consolas,monospace; overflow:hidden; }
+    .iamccs-export-pro .rtx-runtime-lines span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .iamccs-export-pro .rtx-runtime-lines b { color:#c8d7d5; font-weight:900; }
+    .iamccs-export-pro .rtx-runtime-actions { grid-row:1 / span 2; width:132px; display:flex; flex-direction:column; gap:4px; }
+    .iamccs-export-pro .rtx-runtime-actions button { min-height:25px; width:100%; padding:4px 7px; border:1px solid #6b704f; background:#1e2520; color:#ead69b; font:900 7px/1.15 Consolas,monospace; cursor:pointer; white-space:normal; overflow-wrap:anywhere; text-align:center; }
+    .iamccs-export-pro .rtx-runtime-actions button:hover { border-color:#d0b366; background:#2c2a1c; }
     .iamccs-export-pro .preview { position:relative; min-height:0; overflow:hidden; background:#050708; border:1px solid #354447; }
     .iamccs-export-pro .preview video { display:block; width:100%; height:100%; object-fit:contain; background:#000; }
     .iamccs-export-pro .preview .preview-label { position:absolute; left:8px; top:7px; padding:4px 6px; background:rgba(7,12,13,.82); border:1px solid #657477; color:#c9d7d4; font:900 9px Consolas,monospace; pointer-events:none; }
@@ -267,6 +277,16 @@ function install(node) {
     <div data-profile-compat style="display:none;margin-top:8px;padding:7px 9px;border:1px solid #d2a754;background:#3a2b13;color:#ffe5ad;font-size:10px;font-weight:800;line-height:1.35"></div>
     <div class="rtx-panel">
       <div class="rtx-head"><label class="rtx-toggle"><input data-field="rtx_enabled" type="checkbox"><span>ENABLE RTX VIDEO SUPER RESOLUTION</span></label><span class="rtx-note" data-rtx-status>native optional module / bypassed</span></div>
+      <div class="rtx-runtime-card">
+        <div class="rtx-runtime-badge" data-rtx-runtime-badge>CHECKING</div>
+        <div class="rtx-runtime-lines">
+          <span><b>SOURCE</b> <i data-rtx-runtime-source>checking…</i></span>
+          <span><b>VideoSuperRes</b> <i data-rtx-vsr>checking…</i></span>
+          <span title=""><b>PYTHON</b> <i data-rtx-python>checking…</i></span>
+          <span title=""><b>MODULE</b> <i data-rtx-module>checking…</i></span>
+        </div>
+        <div class="rtx-runtime-actions"><button type="button" data-rtx-check title="CHECK RTX INSTALLATION">CHECK RTX</button><button type="button" data-rtx-guide title="OPEN OFFICIAL INSTALL GUIDE">INSTALL GUIDE</button></div>
+      </div>
       <div class="rtx-controls">
         <div class="rtx-field"><label>Quality mode</label><select data-field="rtx_mode"></select></div>
         <div class="rtx-field"><label>Resize type</label><select data-field="rtx_resize_type"></select></div>
@@ -333,6 +353,7 @@ function install(node) {
     refresh();
   });
 
+  let rtxRuntimeState = { checked: false, available: false, reason: "RTX runtime not checked", runtime_source: "", python_executable: "", module_path: "", video_super_res: "NOT CHECKED", install_guide: "https://deno2026.github.io/comfyui-deno-custom-nodes/rtx-vfx-install/" };
   let compatibilityTimer = null;
   const showCompatibility = (message) => {
     const banner = root.querySelector("[data-profile-compat]");
@@ -387,9 +408,28 @@ function install(node) {
       field.disabled = !rtxEnabled;
     }
     const rtxStatus = root.querySelector("[data-rtx-status]");
-    if (rtxStatus) rtxStatus.textContent = rtxEnabled
-      ? `native RTX active / ${String(read(node, "rtx_mode", "VSR Medium"))}`
-      : "native optional module / bypassed";
+    if (rtxStatus) {
+      if (!rtxRuntimeState.checked) rtxStatus.textContent = "checking NVIDIA RTX VFX runtime...";
+      else if (!rtxRuntimeState.available) rtxStatus.textContent = rtxEnabled
+        ? "RTX requested · runtime missing · export will fall back to native frames"
+        : "RTX runtime missing · optional / bypassed";
+      else rtxStatus.textContent = rtxEnabled
+        ? `native RTX ready / ${String(read(node, "rtx_mode", "VSR Medium"))}`
+        : "native RTX runtime ready / bypassed";
+      rtxStatus.title = String(rtxRuntimeState.reason || "");
+    }
+    const runtimeBadge = root.querySelector("[data-rtx-runtime-badge]");
+    if (runtimeBadge) {
+      runtimeBadge.classList.toggle("ready", Boolean(rtxRuntimeState.checked && rtxRuntimeState.available));
+      runtimeBadge.classList.toggle("missing", Boolean(rtxRuntimeState.checked && !rtxRuntimeState.available));
+      runtimeBadge.textContent = !rtxRuntimeState.checked ? "CHECKING" : (rtxRuntimeState.available ? "RTX READY" : "NOT INSTALLED");
+      runtimeBadge.title = String(rtxRuntimeState.reason || "");
+    }
+    const setRuntimeLine = (selector, text, title = text) => { const el = root.querySelector(selector); if (el) { el.textContent = String(text || "—"); el.parentElement.title = String(title || text || ""); } };
+    setRuntimeLine("[data-rtx-runtime-source]", rtxRuntimeState.runtime_source || (rtxRuntimeState.checked ? "Not installed" : "checking…"), rtxRuntimeState.runtime_path || rtxRuntimeState.reason || "");
+    setRuntimeLine("[data-rtx-vsr]", rtxRuntimeState.video_super_res || (rtxRuntimeState.available ? "AVAILABLE" : "NOT AVAILABLE"));
+    setRuntimeLine("[data-rtx-python]", rtxRuntimeState.python_executable || "checking…");
+    setRuntimeLine("[data-rtx-module]", rtxRuntimeState.module_path || (rtxRuntimeState.available ? "nvvfx loaded" : "not found"));
     const losslessVideo = videoValue === "ffv1_mkv";
     const losslessAudio = ["pcm_s16le", "pcm_s24le", "pcm_s32le", "flac", "alac"].includes(audioValue);
     const meta = root.querySelector("[data-meta]");
@@ -398,11 +438,41 @@ function install(node) {
     if (status) status.textContent = `${optionLabel(VIDEO_OPTIONS, videoValue)} / ${optionLabel(AUDIO_OPTIONS, audioValue)}`;
   }
 
+  const checkRtxRuntime = async () => {
+    rtxRuntimeState = { ...rtxRuntimeState, checked: false, reason: "Checking NVIDIA RTX VFX runtime..." };
+    refresh();
+    try {
+      const response = await api.fetchApi("/api/iamccs/rtx_vfx/status");
+      const payload = await response?.json?.();
+      rtxRuntimeState = {
+        checked: true,
+        available: Boolean(payload?.available),
+        reason: String(payload?.reason || payload?.status || ""),
+        runtime_source: String(payload?.runtime_source || ""),
+        runtime_path: String(payload?.runtime_path || ""),
+        python_executable: String(payload?.python_executable || ""),
+        module_path: String(payload?.module_path || ""),
+        video_super_res: String(payload?.video_super_res || (payload?.available ? "AVAILABLE" : "NOT AVAILABLE")),
+        install_guide: String(payload?.install_guide || "https://deno2026.github.io/comfyui-deno-custom-nodes/rtx-vfx-install/"),
+      };
+    } catch (error) {
+      rtxRuntimeState = { ...rtxRuntimeState, checked: true, available: false, reason: String(error?.message || error || "RTX preflight failed"), runtime_source: "Probe failed", video_super_res: "NOT AVAILABLE" };
+    }
+    refresh();
+  };
+  root.querySelector("[data-rtx-check]")?.addEventListener("click", (event) => { event.preventDefault(); checkRtxRuntime(); });
+  root.querySelector("[data-rtx-guide]")?.addEventListener("click", (event) => {
+    event.preventDefault();
+    const url = String(rtxRuntimeState.install_guide || "https://deno2026.github.io/comfyui-deno-custom-nodes/rtx-vfx-install/");
+    window.open(url, "_blank", "noopener,noreferrer");
+  });
+  checkRtxRuntime();
+
   const previewVideo = root.querySelector("[data-preview-video]");
   const previewStatus = root.querySelector("[data-preview-status]");
   node.__iamccsExporterPreview = { video: previewVideo, status: previewStatus };
   const uiWidget = node.addDOMWidget("Shotboarder Pro Export", "iamccs_shotboarder_exporter_pro", root, { serialize: false });
-  uiWidget.computeSize = () => [NODE_SIZE[0] - 18, 902];
+  uiWidget.computeSize = () => [NODE_SIZE[0] - 18, 992];
   HIDDEN_FIELDS.forEach((name) => hideWidget(widget(node, name)));
   setNodeSize(node);
   refresh();

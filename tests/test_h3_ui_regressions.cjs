@@ -169,11 +169,32 @@ const insertionContext = vm.createContext({activePromptArea:null,center:{querySe
 vm.runInContext(insertionHelper+'result=insertIntoActiveField("<d>[English] line</d>", "", {area:cursorArea,start:7,end:7});',insertionContext);
 assert.equal(insertionContext.result,true);
 assert.equal(cursorArea.value,'before <d>[English] line</d> AFTER');
-const inject = prompter.slice(prompter.indexOf('    injectBtn.onclick = () => {'),prompter.indexOf('    writingButtons.forEach(',prompter.indexOf('    injectBtn.onclick = () => {')));
+const injectStart = prompter.indexOf('    injectBtn.onclick = async () => {');
+const inject = prompter.slice(injectStart,prompter.indexOf('    writingButtons.forEach(',injectStart));
 for (const target of ['global','local_1','local_auto']) {
   const calls=[]; const project={injection_target:target,task_mode:'t2va',sections:{scene:'scene only'},local_prompts:[],merge_policy:'replace'};
   const shotboard={_iamccsMiniMaxInjectPrompt:args=>{calls.push(args);return{actualTarget:args.target}}};
   vm.runInNewContext(inject+'injectBtn.onclick()',{injectBtn:{},injectStatus:{},project,commit(){},canonicalMode:value=>String(value||'').toLowerCase(),effectiveGlobalPrompt:()=> 'scene only',effectiveLocalPrompt:()=> '',composePrompt:()=> 'scene only',shotboardsForPrompter:()=>[shotboard],node:{},aiVisualFiles:[],widget:()=>({value:''}),setTimeout(){}});
   assert.equal(calls.length,1,target); assert.equal(calls[0].target,target); assert.equal(calls[0].prompt,'scene only');
 }
-console.log('UI regression tests OK: Settings PRO full-monitor editor, Prompter field mount and audio partial queue, AUTO Shotboard import, cache group scope, asset-family guard, 5 recipes, 4 Turbo step contracts, linked collision both directions, 3 injection targets');
+{
+  const calls=[]; let i2vPaths=[];
+  const project={
+    injection_target:'local_1',task_mode:'i2va',sections:{scene:'shared world'},merge_policy:'replace',extended_conditioning_policy:'default',
+    visual_story_plan:{image_paths:['one.png','two.png']},
+    local_prompts:[
+      {slot:1,enabled:true,prompt:'first action',image_path:'one.png'},
+      {slot:2,enabled:true,prompt:'second action',image_path:'two.png'},
+    ],
+  };
+  const shotboard={
+    _iamccsMiniMaxSetI2VHardCutSlots:({paths})=>{i2vPaths=Array.from(paths);return{slotCount:paths.length};},
+    _iamccsMiniMaxInjectPrompt:args=>{calls.push(args);return{actualTarget:args.target};},
+  };
+  const widget=(target,name)=>({value:name==='task_mode'?'i2va':name==='timeline_data'?JSON.stringify({segments:[]}):''});
+  vm.runInNewContext(inject+'injectBtn.onclick()',{injectBtn:{},injectStatus:{},project,commit(){},canonicalMode:value=>String(value||'').toLowerCase(),effectiveGlobalPrompt:()=> 'shared world',effectiveLocalPrompt:()=> '',composePrompt:()=> 'shared world',shotboardsForPrompter:()=>[shotboard],node:{},aiVisualFiles:[{path:'one.png'},{path:'two.png'}],widget,setWidget(){},setTimeout(){}});
+  assert.deepEqual(i2vPaths,['one.png','two.png']);
+  assert.deepEqual(calls.map(call=>call.target),['global','local_1','local_2']);
+  assert.deepEqual(calls.slice(1).map(call=>call.prompt),['first action','second action']);
+}
+console.log('UI regression tests OK: Settings PRO full-monitor editor, Prompter field mount and audio partial queue, AUTO Shotboard import, cache group scope, asset-family guard, 5 recipes, 4 Turbo step contracts, linked collision both directions, GLOBAL/LOCAL targets, ordered I2VA media injection');

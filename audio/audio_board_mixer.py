@@ -183,16 +183,29 @@ class IAMCCS_AudioBoardMixer:
         if not source_segments:
             source_segments = _segments(payload.get("audioSegments"))
 
-        # Connected AudioBoard/cine_linx is the truth. Mixer-local mirror data is
-        # only a fallback for a disconnected monitor and must never reapply stale mute/zero gain.
-        source_settings = _first_list(
-            audio_tracks.get("trackSettings"),
-            audio_tracks.get("track_settings"),
-            audio_tracks.get("all_track_settings"),
-            payload.get("trackSettings"),
-            mixer.get("trackSettings"),
-            mixer.get("mirrorTrackSettings"),
-        )
+        # R44.6 authority rule:
+        # - mixer_overrides_cine_linx: the Mixer surface is the editorial audio master.
+        #   Its local state must win even when the incoming cine_linx already carries
+        #   generation/AudioBoard defaults.
+        # - read_only_monitor: preserve upstream truth and only mirror it.
+        if str(sync_policy) == "mixer_overrides_cine_linx":
+            source_settings = _first_list(
+                mixer.get("trackSettings"),
+                mixer.get("mirrorTrackSettings"),
+                audio_tracks.get("trackSettings"),
+                audio_tracks.get("track_settings"),
+                audio_tracks.get("all_track_settings"),
+                payload.get("trackSettings"),
+            )
+        else:
+            source_settings = _first_list(
+                audio_tracks.get("trackSettings"),
+                audio_tracks.get("track_settings"),
+                audio_tracks.get("all_track_settings"),
+                payload.get("trackSettings"),
+                mixer.get("trackSettings"),
+                mixer.get("mirrorTrackSettings"),
+            )
         track_count = max(
             1,
             _safe_int(mixer.get("audioTrackCount"), 0),
@@ -203,7 +216,16 @@ class IAMCCS_AudioBoardMixer:
         track_settings = _default_track_settings(track_count, source_settings)
         master_bus = copy.deepcopy(audio_tracks.get("master_bus") if isinstance(audio_tracks.get("master_bus"), dict) else {})
         master_bus.update(copy.deepcopy(mixer.get("masterBus") if isinstance(mixer.get("masterBus"), dict) else {}))
-        upstream_master_gain = payload.get("masterAudioGain", audio_tracks.get("masterAudioGain", 1.0))
+        if str(sync_policy) == "mixer_overrides_cine_linx":
+            upstream_master_gain = mixer.get(
+                "masterAudioGain",
+                payload.get("masterAudioGain", audio_tracks.get("masterAudioGain", 1.0)),
+            )
+        else:
+            upstream_master_gain = payload.get(
+                "masterAudioGain",
+                audio_tracks.get("masterAudioGain", mixer.get("masterAudioGain", 1.0)),
+            )
         master_gain = max(0.01, min(2.0, _safe_float(upstream_master_gain, 1.0)))
 
         manifest = {
@@ -216,7 +238,7 @@ class IAMCCS_AudioBoardMixer:
             "masterBus": master_bus,
             "trackSettings": track_settings,
             "segments": source_segments,
-            "truth": "Mixer mirrors AudioBoard track volume/pan/inserts and writes them back into cine_linx metadata for downstream BusOut/save stages.",
+            "truth": "Mixer is the editorial audio master when mixer_overrides_cine_linx is selected; AudioBoard/Video Editor can act as synchronized slaves downstream.",
         }
 
         if sync_policy != "read_only_monitor":

@@ -54,9 +54,9 @@ const GROUPS = [
   { id: "direction", label: "6 · DIRECT", title: "Mode-specific contract", fields: ["reference_role_1", "reference_role_2", "reference_role_3", "reference_role_4", "reference_video_role", "v2v_guide_mode", "v2v_source_range_policy", "v2v_source_offset_seconds", "v2v_source_fit", "v2v_source_end_policy", "v2v_audio_pairing", "flf_join_mode", "flf_overlap_frames", "flf_continuity_mode", "flf_continuity_tail_frames", "flf_continuity_audio", "longvid_guide_window_policy", "keyframe_joint_latent_new", "longvid_terminal_endpoint_mode", "longvid_pianosequenza_2stage_enabled"] }, // IAMCCS_LONGVID_ENDPOINT_STRATEGIES_V1
   { id: "control", label: "CONTROLNET", title: "H3 Fun ControlNet", contextual: "control", fields: ["h3_controlnet_enabled", "h3_controlnet_name", "h3_controlnet_kind", "h3_controlnet_preprocess_resolution", "h3_controlnet_strength", "h3_controlnet_start_percent", "h3_controlnet_end_percent", "h3_controlnet_frame_scope", "h3_controlnet_end_policy", "h3_controlnet_use_video_audio", "h3_controlnet_dwpose_torch_gpu"] },
   { id: "face", label: "SAM3 SWAP", title: "SAM3 Subject Swap", contextual: "face", fields: ["h3_faceswap_generate_new_audio", "h3_faceswap_sam_model", "h3_faceswap_birefnet_model", "h3_faceswap_mask_prompt", "h3_faceswap_threshold", "h3_faceswap_objects", "h3_faceswap_cleanup_threshold", "h3_faceswap_cleanup_shrink", "h3_faceswap_cleanup_min_frames", "h3_faceswap_cleanup_edge_grow", "h3_faceswap_crop_scale", "h3_faceswap_crop_megapixels", "h3_faceswap_grow_spatial", "h3_faceswap_grow_temporal", "h3_faceswap_feather"] },
-  { id: "face_refine", label: "FACE REFINE", title: "Face Refinement", fields: ["face_detailer_enabled", "face_detailer_profile", "face_detailer_use_sam_mask"] },
+  { id: "face_refine", label: "FACE REFINE", title: "Face Refinement", fields: ["face_detailer_enabled", "face_detailer_profile", "face_detailer_mode", "face_detailer_max_faces", "face_detailer_min_coverage", "face_detailer_use_sam_mask", "face_detailer_canvas_width", "face_detailer_canvas_height", "face_detailer_crop_factor", "face_detailer_confidence", "face_detailer_steps", "face_detailer_denoise", "face_detailer_window_frames", "face_detailer_window_overlap", "face_detailer_strength_small_face", "face_detailer_strength_large_face", "face_detailer_blend", "face_detailer_paste_region", "face_detailer_feather"] },
   { id: "scout", label: "SCOUT", title: "Candidate seed scout", fields: ["h3_r40_seed_scout_enabled", "h3_r40_candidate_count", "h3_r40_seed_stride", "h3_r40_preview_max_frames", "h3_r40_sparse_enabled", "h3_r40_sparse_video_budget", "h3_r40_sparse_denser_edges"] },
-  { id: "finish", label: "7 · OUTPUT", title: "Delivery", fields: ["upscale_mode", "upscale_enabled", "upscale_width", "upscale_height", "h3_pixel_tiled_method", "h3_pixel_tiled_model_name", "h3_pixel_tiled_tile_size", "h3_pixel_tiled_overlap", "upscale_prompt", "upscale_sage", "upscale_seed_offset", "wan_upscale_denoise", "ltx_seam_safe", "ltx_detailer_enabled", "ltx_detailer_lora_name", "ltx_detailer_strength", "ltx_4k_enabled", "ltx_4k_quality", "ltx_looper_temporal_tile_size", "ltx_looper_temporal_overlap", "ltx_looper_guiding_strength", "ltx_looper_overlap_strength", "ltx_looper_cond_image_strength", "ltx_looper_horizontal_tiles", "ltx_looper_vertical_tiles", "ltx_looper_spatial_overlap", "h3_upres_model_name", "h3_upres_precision", "h3_upres_device", "h3_upres_keep_models_resident", "h3_fast_latent_temporal_chunk", "h3_fast_latent_stage2_window", "h3_fast_latent_stage2_overlap", "h3_upres_steps", "h3_upres_denoise", "h3_upres_sampler", "h3_upres_scheduler", "h3_upres_temporal_chunk", "h3_upres_temporal_overlap", "h3_upres_anchor_strength", "h3_upres_tile_width", "h3_upres_tile_height", "h3_upres_overlap_width", "h3_upres_overlap_height", "h3_upres_fade_width", "h3_upres_fade_height", "h3_upres_min_tile_size", "h3_upres_overlap_mode", "h3_upres_overlap_blend", "h3_upres_rtx_enabled", "h3_upres_rtx_quality", "h3_upres_pixel_groups", "h3_upres_window_frames", "h3_upres_window_overlap", "h3_upres_pixel_method"] },
+  { id: "finish", label: "7 · OUTPUT", title: "Delivery", fields: ["upscale_mode", "upscale_enabled", "upscale_width", "upscale_height", "h3_pixel_tiled_method", "h3_pixel_tiled_model_name", "h3_pixel_tiled_tile_size", "h3_pixel_tiled_overlap", "upscale_prompt", "upscale_sage", "upscale_seed_offset", "wan_upscale_denoise", "ltx_seam_safe", "ltx_detailer_enabled", "ltx_detailer_lora_name", "ltx_detailer_strength", "ltx_4k_enabled", "ltx_4k_quality", "ltx_looper_temporal_tile_size", "ltx_looper_temporal_overlap", "ltx_looper_guiding_strength", "ltx_looper_overlap_strength", "ltx_looper_cond_image_strength", "ltx_looper_horizontal_tiles", "ltx_looper_vertical_tiles", "ltx_looper_spatial_overlap", "h3_upres_model_name", "h3_upres_precision", "h3_upres_device", "h3_upres_keep_models_resident", "h3_fast_latent_temporal_chunk", "h3_fast_latent_stage2_window", "h3_fast_latent_stage2_overlap", "h3_fast_latent_stage2_guides", "h3_upres_steps", "h3_upres_denoise", "h3_upres_sampler", "h3_upres_scheduler", "h3_upres_temporal_chunk", "h3_upres_temporal_overlap", "h3_upres_anchor_strength", "h3_upres_tile_width", "h3_upres_tile_height", "h3_upres_overlap_width", "h3_upres_overlap_height", "h3_upres_fade_width", "h3_upres_fade_height", "h3_upres_min_tile_size", "h3_upres_overlap_mode", "h3_upres_overlap_blend", "h3_upres_rtx_enabled", "h3_upres_rtx_quality", "h3_upres_pixel_groups", "h3_upres_window_frames", "h3_upres_window_overlap", "h3_upres_pixel_method"] },
   { id: "advanced", label: "TECHNICAL", title: "Technical controls", dynamic: true, fields: [] },
 ];
 const ENGINE_IDS = Object.freeze(["ahead", "extension", "continuation", "refmod", "control", "face", "face_refine", "scout"]);
@@ -92,14 +92,16 @@ const FUNCTIONAL_LAYOUT = {
     ["EXACT ATTENTION & CLIPPROJ", ["h3_exact_profile", "h3_exact_chunk_rows", "h3_exact_precision_mode", "h3_exact_qkv_streaming", "h3_exact_attention_memory", "h3_clipproj_profile", "h3_clipproj_load_mode"]],
   ],
   face_refine: [
-    ["FACE REFINEMENT", ["face_detailer_enabled", "face_detailer_profile", "face_detailer_use_sam_mask"]],
+    ["FACE REFINEMENT", ["face_detailer_enabled", "face_detailer_profile", "face_detailer_mode", "face_detailer_max_faces", "face_detailer_min_coverage", "face_detailer_use_sam_mask"]],
+    ["FACE TRACKING", ["face_detailer_crop_factor", "face_detailer_confidence", "face_detailer_window_frames", "face_detailer_window_overlap", "face_detailer_paste_region", "face_detailer_feather"]],
+    ["FACE DETAIL", ["face_detailer_canvas_width", "face_detailer_canvas_height", "face_detailer_steps", "face_detailer_denoise", "face_detailer_strength_small_face", "face_detailer_strength_large_face", "face_detailer_blend"]],
   ],
   finish: [
     ["OUTPUT", ["rife_mode", "upscale_enabled", "upscale_mode", "upscale_width", "upscale_height", "upscale_prompt", "upscale_sage", "upscale_seed_offset", "wan_upscale_denoise"]],
     ["PIXEL SAFE · LOW VRAM", ["h3_pixel_tiled_method", "h3_pixel_tiled_model_name", "h3_pixel_tiled_tile_size", "h3_pixel_tiled_overlap"]],
     ["LTX DELIVERY", ["ltx_seam_safe", "ltx_detailer_enabled", "ltx_detailer_lora_name", "ltx_detailer_strength", "ltx_4k_enabled", "ltx_4k_quality", "ltx_looper_temporal_tile_size", "ltx_looper_temporal_overlap", "ltx_looper_guiding_strength", "ltx_looper_overlap_strength", "ltx_looper_cond_image_strength", "ltx_looper_horizontal_tiles", "ltx_looper_vertical_tiles", "ltx_looper_spatial_overlap"]],
     ["H3 2-PASS MODEL", ["h3_upres_model_name", "h3_upres_precision", "h3_upres_device", "h3_upres_keep_models_resident"]],
-    ["FAST LATENT GPU BUDGET", ["h3_fast_latent_temporal_chunk", "h3_fast_latent_stage2_window", "h3_fast_latent_stage2_overlap"]],
+    ["FAST LATENT GPU BUDGET", ["h3_fast_latent_temporal_chunk", "h3_fast_latent_stage2_window", "h3_fast_latent_stage2_overlap", "h3_fast_latent_stage2_guides"]],
     ["H3 2-PASS SAMPLING", ["h3_upres_steps", "h3_upres_denoise", "h3_upres_sampler", "h3_upres_scheduler", "h3_upres_anchor_strength"]],
     ["TEMPORAL WINDOWS", ["h3_upres_temporal_chunk", "h3_upres_temporal_overlap"]],
     ["SPATIAL TILES", ["h3_upres_tile_width", "h3_upres_tile_height", "h3_upres_overlap_width", "h3_upres_overlap_height", "h3_upres_fade_width", "h3_upres_fade_height", "h3_upres_min_tile_size", "h3_upres_overlap_mode", "h3_upres_overlap_blend"]],
@@ -108,6 +110,7 @@ const FUNCTIONAL_LAYOUT = {
   ],
 };
 const MODE_CHOICES = [
+  ["IMAGE GENERATOR · REFERENCES", "reference_image", "Create one exact 4K still through the R42 SatoDive branch. The reference can come from a Prompter REF2V visual followed by Inject, or from the direct image socket. Optional same-size Skin Detail is controlled by Settings PRO and is off by default."],
   ["9 · AUTO · READ CURRENT SHOTBOARD", "auto_from_shotboard", "Import the board's current generation settings once; Settings PRO then becomes the technical master, including duration, and syncs that duration back to Shotboard. Prompts, guides, media and audio remain Shotboard truth."],
   ["1 · T2VA · TEXT / HARD-CUT SHOTS", "t2va", "Text-only shots. Separate authored slots remain hard cuts."],
   ["2 · I2VA · OPENING IMAGE / HARD-CUT SHOTS", "i2va", "One image per shot. Multiple image boxes are independent shots separated by hard cuts."],
@@ -174,6 +177,7 @@ const FRIENDLY_VALUES = { // IAMCCS_LONGVID_PIANOSEQUENZA_V2_UPSTREAM_PARITY
 };
 
 const H3_NATIVE_RESOLUTION_PRESETS = Object.freeze([
+  ["H3 IMAGE · 4K UHD · 3840 × 2160", "3840x2160"],
   ["TEST · 416 × 288 · LOW-RES", "416x288"],
   ["H3 UP source · 640 × 384 · LIGHT", "640x384"],
   ["H3 UP source · 736 × 416 · FHD LIGHT", "736x416"],
@@ -440,6 +444,10 @@ function modeAvailability(node, mode) {
   const classes = node._iamccsSettingsProConnectedClasses || connectedNodes(node).map(nodeClass);
   const has = (pattern) => classes.some((value) => pattern.test(value));
   const value = String(mode || "").toLowerCase();
+  if (value === "reference_image") return {
+    available: has(/IAMCCS_R42ReferenceImagePromptBridge/) && has(/SatoDiveH3Image/),
+    reason: "Use the R42 Reference Image workflow with both the IAMCCS prompt/preset bridge and SatoDive exact-still branch.",
+  };
   if (["fl2va_extended_av", "t2va_continuous"].includes(value)) {
     const taskChoices = choices(widget(node, "task_mode")).map(String);
     const hasContract = Boolean(widget(node, "extended_av_profile"));
@@ -730,6 +738,14 @@ function setAssistantMode(node, key) {
   // `fl2va` task. Extended AV is a real independent backend mode.
   const actualMode = ["fl2va_stable", "fl2va_continuous"].includes(String(key)) ? "fl2va" : key;
   setShotboardMode(node, actualMode);
+  if (String(key) === "reference_image") {
+    // The still branch owns a genuine 4K canvas.  Apply it when the user
+    // selects the mode; later manual resolution choices remain authoritative.
+    for (const [name, value] of Object.entries({width:3840,height:2160,image_width:3840,image_height:2160})) {
+      setValue(node, name, value, false);
+      if (board) setValue(board, name, value, false);
+    }
+  }
   if (key === "keyframe_joint_native") {
     setValue(node, "keyframe_joint_latent_new", true, false);
     if (board) setValue(board, "keyframe_joint_latent_new", true, false);
@@ -769,7 +785,7 @@ function setAssistantMode(node, key) {
 function modeContext(mode) { const value = String(mode).toLowerCase(); return value.includes("controlnet") ? "control" : value.includes("face_swap") ? "face" : "core"; }
 function modeFamily(mode) {
   const value = String(mode).toLowerCase();
-  return value.includes("ref2") || ["v2va_object_swap", "v2va_face_swap"].includes(value) ? "ref2" : "fl2";
+  return value.includes("ref2") || ["reference_image", "v2va_object_swap", "v2va_face_swap"].includes(value) ? "ref2" : "fl2";
 }
 function h3AssetDescriptor(node, field, selectedName) {
   const name = String(selectedName || "");
@@ -901,6 +917,7 @@ function selectedMemory(node) {
 function selectedDelivery(node) {
   if (!widget(node, "upscale_enabled")?.value) return "native-delivery";
   const mode = String(widget(node, "upscale_mode")?.value || "off");
+  if (!deliveryBranchGate(node, mode).available) return "native-delivery";
   return ({
     h3_fast_latent_2pass: "upres",
     h3_pixel_refine: "h3-pixel",
@@ -911,9 +928,33 @@ function selectedDelivery(node) {
   })[mode] || "custom-delivery";
 }
 function selectedFaceRefine(node) { return !!widget(node, "face_detailer_enabled")?.value; }
+function selectedFaceMode(node) {
+  const explicit = String(widget(node, "face_detailer_mode")?.value || "auto_from_profile").trim().toLowerCase();
+  if (explicit === "single" || explicit === "multi_face") return explicit;
+  return String(widget(node, "face_detailer_profile")?.value || "balanced").trim().toLowerCase() === "multi_face" ? "multi_face" : "single";
+}
+function deliveryBranchGate(node, mode) {
+  const value = String(mode || "off").toLowerCase();
+  if (["", "off", "native"].includes(value)) return {available:true, reason:""};
+  if (value === "h3_fast_latent_2pass") return branchGate(node, "h3_upres_model_name");
+  if (value.startsWith("ltx23")) return branchGate(node, "ltx_seam_safe");
+  if (value.includes("wan")) return branchGate(node, "wan_upscale_denoise");
+  const classes = node._iamccsSettingsProConnectedClasses || connectedNodes(node).map(nodeClass);
+  const has = (pattern) => classes.some((item) => pattern.test(item));
+  if (value === "rtx_final") return {
+    available: has(/MiniMaxH3(?:RTX4KPost|UniversalRTXFinal)/i),
+    reason: "Connect the optional RTX final-delivery branch to enable this control.",
+  };
+  if (["pixel_tiled_low_vram", "h3_pixel_refine"].includes(value)) return {
+    available: has(/MiniMaxH3(?:UniversalNativeWindowed|UniversalFast|PixelRefine)/i),
+    reason: "Connect the optional H3 pixel-delivery branch to enable this control.",
+  };
+  return {available:true, reason:""};
+}
 function deliveryModeAvailable(node, mode) {
   const values = widget(node, "upscale_mode")?.options?.values;
-  return !Array.isArray(values) || values.includes(mode);
+  const declared = !Array.isArray(values) || values.includes(mode);
+  return declared && deliveryBranchGate(node, mode).available;
 }
 
 function applyRecipe(node, recipe) {
@@ -968,6 +1009,22 @@ function applyRecipe(node, recipe) {
     const enabled = !Boolean(widget(node, "face_detailer_enabled")?.value);
     set("face_detailer_enabled", enabled);
     if (enabled && !String(widget(node, "face_detailer_profile")?.value || "")) set("face_detailer_profile", "balanced");
+    if (enabled && !String(widget(node, "face_detailer_mode")?.value || "")) set("face_detailer_mode", "auto_from_profile");
+    if (enabled && !(Number(widget(node, "face_detailer_max_faces")?.value) >= 1)) set("face_detailer_max_faces", 4);
+    if (enabled && !Number.isFinite(Number(widget(node, "face_detailer_min_coverage")?.value))) set("face_detailer_min_coverage", 0.10);
+    if (enabled && !(Number(widget(node, "face_detailer_canvas_width")?.value) >= 256)) set("face_detailer_canvas_width", 512);
+    if (enabled && !(Number(widget(node, "face_detailer_canvas_height")?.value) >= 256)) set("face_detailer_canvas_height", 512);
+    if (enabled && !Number.isFinite(Number(widget(node, "face_detailer_crop_factor")?.value))) set("face_detailer_crop_factor", 2.5);
+    if (enabled && !Number.isFinite(Number(widget(node, "face_detailer_confidence")?.value))) set("face_detailer_confidence", 0.35);
+    if (enabled && !(Number(widget(node, "face_detailer_steps")?.value) >= 1)) set("face_detailer_steps", 4);
+    if (enabled && !Number.isFinite(Number(widget(node, "face_detailer_denoise")?.value))) set("face_detailer_denoise", 0.20);
+    if (enabled && !(Number(widget(node, "face_detailer_window_frames")?.value) >= 34)) set("face_detailer_window_frames", 73);
+    if (enabled && !Number.isFinite(Number(widget(node, "face_detailer_window_overlap")?.value))) set("face_detailer_window_overlap", 22);
+    if (enabled && !Number.isFinite(Number(widget(node, "face_detailer_strength_small_face")?.value))) set("face_detailer_strength_small_face", 1.0);
+    if (enabled && !Number.isFinite(Number(widget(node, "face_detailer_strength_large_face")?.value))) set("face_detailer_strength_large_face", 0.35);
+    if (enabled && !Number.isFinite(Number(widget(node, "face_detailer_blend")?.value))) set("face_detailer_blend", 0.70);
+    if (enabled && !String(widget(node, "face_detailer_paste_region")?.value || "")) set("face_detailer_paste_region", "face_only");
+    if (enabled && !Number.isFinite(Number(widget(node, "face_detailer_feather")?.value))) set("face_detailer_feather", 6);
   } else if (recipe === "native-delivery") {
     set("upscale_enabled", false); set("upscale_mode", "off"); set("rife_mode", "off");
   } else if (recipe === "upres") {
@@ -991,6 +1048,84 @@ function applyRecipe(node, recipe) {
     set("upscale_enabled", true); set("upscale_mode", "rtx_final");
   }
   document.dispatchEvent(new CustomEvent("iamccs:h3-settings-changed", { detail: { source_node_id: node.id, recipe } }));
+  node._iamccsSettingsProRefresh?.();
+  return true;
+}
+
+
+const FACE_REFINE_PRESET_HELP = Object.freeze({
+  faceq_safe: { label: "SAFE · 12 GB", info: "512×512 face canvas, 4 refine steps and a conservative temporal window. Lowest VRAM/time cost. Definition strength is controlled separately." },
+  faceq_balanced: { label: "BALANCED", info: "640×640 face canvas and 5 refine steps. Recommended production starting point for 12 GB GPUs. Definition strength is controlled separately." },
+  faceq_high: { label: "HIGH", info: "640×640 face canvas, 6 refine steps and a longer temporal window. More reconstruction work without changing the Definition preset." },
+  faceq_max: { label: "MAX", info: "768×768 face canvas, 7 refine steps and the heaviest temporal processing. Highest processing cost; Definition remains independently selectable." },
+  facesize_wide: { label: "WIDE CHARACTER", info: "For large/close faces. Uses a wider crop context and gentler large-face denoise. Does not change Single/Multi Face mode." },
+  facesize_medium: { label: "MEDIUM", info: "General-purpose face scale. Balanced crop, detector confidence and denoise scaling. Does not change Single/Multi Face mode." },
+  facesize_small: { label: "SMALL FACES", info: "For faces occupying a small part of the frame. Tighter crop and stronger detail recovery. Does not change Single/Multi Face mode." },
+  facesize_tiny: { label: "TINY FACES", info: "For very small/distant faces. Lowest detector threshold and strongest small-face recovery. Watch for false detections." },
+  facedef_soft: { label: "SOFT / PRESERVE", info: "Minimal regeneration. Best when identity preservation is more important than added sharpness." },
+  facedef_balanced: { label: "BALANCED", info: "Moderate denoise and blend. Natural default for most faces without over-sharpening." },
+  facedef_defined: { label: "DEFINED", info: "Stronger reconstruction and blend for visibly soft faces. Good detail gain with moderate identity risk." },
+  facedef_strong: { label: "STRONG", info: "Most aggressive definition preset. Use for badly degraded faces; can alter identity or skin texture if pushed too far." },
+});
+
+function applyFaceRefineTuning(node, recipe) {
+  const set = (name, value) => setValue(node, name, value, false);
+  const presets = {
+    // The three preset families are intentionally orthogonal. Selecting a
+    // Quality preset must not invalidate the selected Definition preset, etc.
+    "faceq_safe": { face_detailer_canvas_width: 512, face_detailer_canvas_height: 512, face_detailer_steps: 4, face_detailer_window_frames: 73, face_detailer_window_overlap: 22 },
+    "faceq_balanced": { face_detailer_canvas_width: 640, face_detailer_canvas_height: 640, face_detailer_steps: 5, face_detailer_window_frames: 73, face_detailer_window_overlap: 22 },
+    "faceq_high": { face_detailer_canvas_width: 640, face_detailer_canvas_height: 640, face_detailer_steps: 6, face_detailer_window_frames: 90, face_detailer_window_overlap: 22 },
+    "faceq_max": { face_detailer_canvas_width: 768, face_detailer_canvas_height: 768, face_detailer_steps: 7, face_detailer_window_frames: 90, face_detailer_window_overlap: 39 },
+    "facesize_wide": { face_detailer_crop_factor: 2.60, face_detailer_confidence: 0.25, face_detailer_strength_small_face: 0.95, face_detailer_strength_large_face: 0.20 },
+    "facesize_medium": { face_detailer_crop_factor: 2.40, face_detailer_confidence: 0.30, face_detailer_strength_small_face: 1.00, face_detailer_strength_large_face: 0.30 },
+    "facesize_small": { face_detailer_crop_factor: 2.20, face_detailer_confidence: 0.28, face_detailer_strength_small_face: 1.00, face_detailer_strength_large_face: 0.40 },
+    "facesize_tiny": { face_detailer_crop_factor: 2.00, face_detailer_confidence: 0.22, face_detailer_strength_small_face: 1.00, face_detailer_strength_large_face: 0.50 },
+    "facedef_soft": { face_detailer_denoise: 0.16, face_detailer_blend: 0.65, face_detailer_feather: 8 },
+    "facedef_balanced": { face_detailer_denoise: 0.22, face_detailer_blend: 0.72, face_detailer_feather: 6 },
+    "facedef_defined": { face_detailer_denoise: 0.26, face_detailer_blend: 0.80, face_detailer_feather: 6 },
+    "facedef_strong": { face_detailer_denoise: 0.30, face_detailer_blend: 0.86, face_detailer_feather: 5 },
+  };
+  const values = presets[String(recipe)] || null;
+  if (!values) return false;
+  set("face_detailer_enabled", true);
+  if (!String(widget(node, "face_detailer_mode")?.value || "")) set("face_detailer_mode", "auto_from_profile");
+  Object.entries(values).forEach(([name, value]) => set(name, value));
+  document.dispatchEvent(new CustomEvent("iamccs:h3-settings-changed", { detail: { source_node_id: node.id, recipe } }));
+  node._iamccsSettingsProRefresh?.();
+  return true;
+}
+
+function resetFaceRefinePresets(node) {
+  const set = (name, value) => setValue(node, name, value, false);
+  const defaults = {
+    face_detailer_canvas_width: 512,
+    face_detailer_canvas_height: 512,
+    face_detailer_crop_factor: 2.5,
+    face_detailer_confidence: 0.35,
+    face_detailer_steps: 4,
+    face_detailer_denoise: 0.20,
+    face_detailer_window_frames: 73,
+    face_detailer_window_overlap: 22,
+    face_detailer_strength_small_face: 1.00,
+    face_detailer_strength_large_face: 0.35,
+    face_detailer_blend: 0.70,
+    face_detailer_paste_region: "face_only",
+    face_detailer_feather: 6,
+  };
+  Object.entries(defaults).forEach(([name, value]) => set(name, value));
+  node.properties ||= {};
+  node.properties.iamccs_recipe_highlight ||= {};
+  delete node.properties.iamccs_recipe_highlight.face_refine_quality;
+  delete node.properties.iamccs_recipe_highlight.face_refine_size;
+  delete node.properties.iamccs_recipe_highlight.face_refine_definition;
+  // Clean the stale key written by R44.5/R44.6 when the face bars were
+  // accidentally classified as the generic memory recipe group.
+  if (/^(faceq_|facesize_|facedef_)/.test(String(node.properties.iamccs_recipe_highlight.memory || ""))) {
+    delete node.properties.iamccs_recipe_highlight.memory;
+  }
+  app.graph?.change?.();
+  document.dispatchEvent(new CustomEvent("iamccs:h3-settings-changed", { detail: { source_node_id: node.id, recipe: "face_refine_reset" } }));
   node._iamccsSettingsProRefresh?.();
   return true;
 }
@@ -1097,13 +1232,31 @@ function mount(node) {
       document.dispatchEvent(new CustomEvent("iamccs:h3-settings-changed", {detail:{source_node_id:node.id}}));
     };
   }
+  const deliveryToggle = widget(node, "upscale_enabled");
+  if (deliveryToggle && !deliveryToggle._iamccsOptionalBranchGuard) {
+    deliveryToggle._iamccsOptionalBranchGuard = true;
+    deliveryToggle.serializeValue = () => {
+      const selectedMode = String(widget(node, "upscale_mode")?.value || "off");
+      const gate = deliveryBranchGate(node, selectedMode);
+      if (Boolean(deliveryToggle.value) && !gate.available) {
+        deliveryToggle.value = false;
+        node.properties ||= {};
+        node.properties.iamccs_optional_delivery_muted = {
+          mode: selectedMode,
+          reason: gate.reason,
+          at: new Date().toISOString(),
+        };
+      }
+      return Boolean(deliveryToggle.value);
+    };
+  }
   if (node._iamccsSettingsProMounted) return; node._iamccsSettingsProMounted = true; (node.widgets || []).forEach(hideWidget);
   const root = document.createElement("div"); root.className = "iamccs-h3pro";
   root.innerHTML = `
   <style>
   .iamccs-h3pro .h3p-rail{background:linear-gradient(180deg,#17232f,#0b111a);gap:7px;overflow-y:auto}.iamccs-h3pro .h3p-tab{min-height:40px;flex-shrink:0;border:1px solid #334454;background:linear-gradient(135deg,#223140,#141d28);box-shadow:inset 0 1px #ffffff0b,0 2px 5px #0003;transition:border-color .15s,background .15s;padding:9px 12px;white-space:normal;line-height:1.25}.iamccs-h3pro .h3p-tab.active{border-color:#dec087;border-left:3px solid #f5cf8d;background:linear-gradient(100deg,#493922,#233444);box-shadow:0 0 12px #d8b26c18,inset 0 1px #fff1}.iamccs-h3pro .h3p-tab:hover{border-color:#88b6c6;color:#fff}.iamccs-h3pro .h3p-choice.active{border-left:3px solid #eac383;box-shadow:0 3px 12px #0004}.iamccs-h3pro .h3p-choice{min-height:68px;padding:12px}
   .iamccs-h3pro{height:100%;padding:12px;box-sizing:border-box;background:radial-gradient(circle at 85% 0,#273346 0,transparent 34%),linear-gradient(145deg,#090d13,#111923 62%,#0a0e14);border:1px solid #8b7046;border-radius:14px;color:#eaf0f5;font:11px Inter,Segoe UI,sans-serif;overflow:hidden}.iamccs-h3pro *{box-sizing:border-box}.h3p-head{height:48px;display:flex;align-items:center;gap:12px;border-bottom:1px solid #344253}.h3p-mark{padding:6px 10px;border:1px solid #d2a65c;border-radius:999px;background:#32281a;color:#f8d89c;font-size:9px;font-weight:900;letter-spacing:.08em}.h3p-title{font:700 17px Georgia,serif}.h3p-sub{color:#8291a0;font-size:9px}.h3p-mode{margin-left:auto;text-align:right}.h3p-mode b{display:block;color:#7ee2ad;font-size:10px}.h3p-layout{display:grid;grid-template-columns:155px minmax(500px,1fr) 260px;gap:10px;height:calc(100% - 58px);padding-top:10px}.h3p-rail,.h3p-main,.h3p-truth{min-height:0;border:1px solid #2e3a47;border-radius:10px;background:rgba(12,18,25,.88)}.h3p-rail{padding:7px;display:flex;flex-direction:column;gap:5px}.h3p-tab{height:38px;padding:0 10px;border:1px solid transparent;border-radius:7px;background:transparent;color:#94a2b0;text-align:left;font-size:9px;font-weight:850;letter-spacing:.05em;cursor:pointer}.h3p-tab:hover{background:#182330;color:#fff}.h3p-tab.active{border-color:#a98650;background:linear-gradient(90deg,#3c3020,#1c2530);color:#f3d69c}.h3p-mode-folder{height:38px;border-color:#8b5bc8;background:linear-gradient(90deg,#251638,#171d2a);color:#d9b7ff;font-weight:950;letter-spacing:.11em}.h3p-mode-folder.open,.h3p-mode-folder.context-active{border-color:#c48cff;color:#f0dcff;box-shadow:inset 4px 0 0 #bd7fff,0 0 12px #8e5ac52a}.h3p-mode-folder .h3p-folder-arrow{float:right;font-size:10px;color:#d6a6ff}.h3p-subtab{height:32px;margin-left:9px;width:calc(100% - 9px);border-left:2px solid #69438e;background:#121723;color:#b8a6c9;font-size:8px}.h3p-subtab.active{border-left-color:#c58aff;background:linear-gradient(90deg,#2d1c3f,#18222d);color:#efd7ff}.h3p-owner{margin-top:auto;padding:10px;border-radius:8px;background:#111b24;color:#8493a2;font-size:8px;line-height:1.45}.h3p-owner strong{display:block;color:#f0c97d;margin-bottom:4px}.h3p-main{padding:12px;overflow:auto}.h3p-section-title{font:700 16px Georgia,serif;color:#f0d39e}.h3p-section-note{margin:4px 0 12px;color:#8493a2;font-size:9px}.h3p-recipes{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:12px}.h3p-recipe,.h3p-choice{padding:8px 10px;border:1px solid #4c5c6d;border-radius:7px;background:#1a2530;color:#d9e2e9;font-size:8px;font-weight:850;cursor:pointer}.h3p-recipe:hover,.h3p-recipe.active,.h3p-choice:hover,.h3p-choice.active{border-color:#d0a45c;color:#f6d99d;background:#2b261d;box-shadow:0 0 0 1px rgba(240,190,99,.2),0 0 12px rgba(240,190,99,.16)}.h3p-recipe[disabled]{opacity:.35;cursor:not-allowed}.h3p-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.h3p-functional{grid-column:1/-1;padding:9px;border:1px solid #344353;border-radius:10px;background:linear-gradient(145deg,#111b25,#0c141c)}.h3p-functional-title{margin:0 0 8px;color:#e3bd78;font-size:8px;font-weight:900;letter-spacing:.09em}.h3p-functional-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.h3p-resolution{height:31px;min-width:220px;border:1px solid #9b7944;border-radius:7px;background:#171f27;color:#f1d49b;padding:0 8px;font-size:8px;font-weight:850}.h3p-field{min-height:58px;padding:7px;border:1px solid #2d3945;border-radius:8px;background:#101821}.h3p-field.muted{opacity:.48;border-style:dashed;background:#0b1218}.h3p-field.muted label::after{content:" · BRANCH OFF";color:#d0a45c;font-size:7px}.h3p-field.muted input,.h3p-field.muted select{cursor:not-allowed}.h3p-field label{display:block;margin-bottom:5px;color:#9ba8b5;font-size:8px;font-weight:800}.h3p-field input,.h3p-field select{width:100%;height:29px;border:1px solid #43515e;border-radius:6px;background:#0a1118;color:#edf2f6;padding:0 7px;font-size:9px}.h3p-field input[type=checkbox]{width:18px;height:18px;accent-color:#d3a758}.h3p-field small{display:block;margin-top:4px;color:#667786;font-size:7px}.h3p-truth{padding:12px;overflow:auto}.h3p-truth h3{margin:0 0 10px;color:#f0d39e;font:700 14px Georgia,serif}.h3p-truth-row{padding:8px 0;border-bottom:1px solid #26323d}.h3p-truth-row span{display:block;color:#718190;font-size:7px;font-weight:900}.h3p-truth-row b{display:block;margin-top:3px;color:#dce5eb;font:600 9px Consolas,monospace;overflow-wrap:anywhere}.h3p-health{margin-top:10px;padding:9px;border-left:3px solid #68d69a;border-radius:6px;background:#11231c;color:#a9e6c5;font-size:8px;line-height:1.45}.h3p-health.warn{border-color:#e7a14e;background:#2a2014;color:#ffd59a}.h3p-health.error{border-color:#e86767;background:#2d1619;color:#ffb0b0}.h3p-context{margin-bottom:10px;padding:9px;border:1px solid #405064;border-radius:8px;background:#14202c;color:#a9b7c5;font-size:9px}.h3p-context b{color:#f2cf8b}.h3p-question{margin:12px 0 6px;color:#f0cf91;font-size:9px;font-weight:900;letter-spacing:.05em}.h3p-choice-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}.h3p-choice{text-align:left}.h3p-choice span{display:block;margin-top:3px;color:#8493a2;font-weight:500;line-height:1.3}.h3p-choice[disabled]{opacity:.34;filter:saturate(.45);cursor:not-allowed;border-style:dashed}.h3p-choice[disabled] span::after{content:" · BRANCH MISSING";color:#e7a14e}.h3p-recipe.active{outline:1px solid #f2c97e;outline-offset:1px}.h3p-flow{padding:10px;border:1px solid #354455;border-radius:9px;background:#0d151e}
-  .h3p-recipe.active{border-color:#d0a45c;color:#f6d99d;background:#2b261d;box-shadow:inset 0 0 0 1px #6b5330}.h3p-recipe[disabled]::after{content:" · UNAVAILABLE";color:#e7a14e}.h3p-main[data-section="memory"] .h3p-recipes,.h3p-memory-recipes{padding:9px;border:1px solid #4d79a0;border-radius:9px;background:linear-gradient(135deg,#122838,#101c2a)}.h3p-main[data-section="memory"] .h3p-recipe,.h3p-memory-recipes .h3p-recipe{border-color:#4d83ad;color:#bfe4ff}.h3p-main[data-section="speed"] .h3p-recipes,.h3p-speed-recipes{padding:9px;border:1px solid #9a7140;border-radius:9px;background:linear-gradient(135deg,#302313,#201a14)}.h3p-main[data-section="speed"] .h3p-recipe,.h3p-speed-recipes .h3p-recipe{border-color:#b0844b;color:#ffe0a9}.h3p-delivery-recipes{padding:9px;border:1px solid #5b8a69;border-radius:9px;background:#12251a}
+  .h3p-recipe.active{border-color:#d0a45c;color:#f6d99d;background:#2b261d;box-shadow:inset 0 0 0 1px #6b5330}.h3p-recipe[disabled]::after{content:" · UNAVAILABLE";color:#e7a14e}.h3p-main[data-section="memory"] .h3p-recipes,.h3p-memory-recipes{padding:9px;border:1px solid #4d79a0;border-radius:9px;background:linear-gradient(135deg,#122838,#101c2a)}.h3p-main[data-section="memory"] .h3p-recipe,.h3p-memory-recipes .h3p-recipe{border-color:#4d83ad;color:#bfe4ff}.h3p-main[data-section="speed"] .h3p-recipes,.h3p-speed-recipes{padding:9px;border:1px solid #9a7140;border-radius:9px;background:linear-gradient(135deg,#302313,#201a14)}.h3p-main[data-section="speed"] .h3p-recipe,.h3p-speed-recipes .h3p-recipe{border-color:#b0844b;color:#ffe0a9}.h3p-delivery-recipes{padding:9px;border:1px solid #5b8a69;border-radius:9px;background:#12251a}.h3p-face-refine-presets-grid{width:100%;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;align-items:stretch}.h3p-face-refine-preset-group{min-width:0;display:flex;flex-direction:column;gap:7px;padding:10px;border:1px solid #4d79a0;border-radius:9px;background:linear-gradient(135deg,#122838,#101c2a)}.h3p-face-refine-preset-group .h3p-functional-title{margin:0;color:#e3bd78}.h3p-face-refine-preset-group .h3p-face-refine-group-note{min-height:32px;color:#8198a8;font-size:7px;line-height:1.35}.h3p-face-refine-preset-group .h3p-memory-recipes{padding:0;border:0;background:transparent;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:0}.h3p-face-refine-preset-group .h3p-recipe{min-height:38px;padding:6px 7px;white-space:normal;line-height:1.2}.h3p-face-refine-preset-group .h3p-face-refine-help{min-height:44px;padding:7px 8px;border-left:2px solid #d0a45c;background:#0c1720;color:#9eb0bc;font-size:7px;line-height:1.4}.h3p-face-refine-preset-group .h3p-face-refine-help b{color:#f0d39e}.h3p-main[data-section="face_refine"]>.h3p-recipes{display:flex;align-items:stretch}.h3p-main[data-section="face_refine"]>.h3p-recipes>.h3p-recipe{min-height:42px}.h3p-face-refine-stack{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid #354b5f;background:#0d1821;color:#9fb0bc;font-size:7px;line-height:1.35}.h3p-face-refine-stack b{color:#f0d39e}.h3p-face-refine-reset{flex:0 0 auto;padding:7px 10px;border:1px solid #7d6850;background:#1d2020;color:#f0d39e;font:900 7px Consolas,monospace;cursor:pointer}.h3p-face-refine-reset:hover{border-color:#d0a45c;background:#2b261d}@media(max-width:1100px){.h3p-face-refine-presets-grid{grid-template-columns:1fr}.h3p-face-refine-preset-group .h3p-face-refine-group-note,.h3p-face-refine-preset-group .h3p-face-refine-help{min-height:0}}
   .h3p-assets{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.h3p-library-title{grid-column:1/-1;margin-top:8px;padding:9px;border:1px solid #3d5062;border-radius:8px;background:#101a24;color:#e3bd78;font-size:8px;font-weight:900;letter-spacing:.09em}.h3p-library-title small{display:block;margin-top:4px;color:#8499a8;font-weight:500;letter-spacing:0}.h3p-asset{border:1px solid #43576a;border-radius:10px;background:#111d29;padding:8px;min-width:0}.h3p-asset img,.h3p-asset-placeholder{display:block;width:100%;height:145px;object-fit:contain;background:#080e15;border-radius:6px;color:#7e90a0;text-align:center;align-content:center}.h3p-cache-card .h3p-asset-placeholder{height:62px;color:#d7b879;font-weight:900;letter-spacing:.08em}.h3p-asset strong,.h3p-asset small{display:block;overflow-wrap:anywhere;margin:7px 0}.h3p-asset small{color:#8499a8}.h3p-asset-actions{display:flex;flex-wrap:wrap;gap:6px}.h3p-asset-actions button{padding:6px 9px;border:1px solid #a98754;border-radius:6px;background:#222b34;color:#f0d5a5;cursor:pointer}.h3p-asset-actions button.h3p-danger{border-color:#a85656;background:#34191d;color:#ffb5b5}.h3p-asset-actions button:disabled{opacity:.45;cursor:wait}.h3p-asset-status{grid-column:1/-1;color:#a5bac9}
   .h3p-open-editor{height:30px;padding:0 12px;border:1px solid #d0a45c;border-radius:7px;background:linear-gradient(135deg,#4a371d,#263543);color:#ffe2aa;font-size:8px;font-weight:900;letter-spacing:.06em;cursor:pointer;white-space:nowrap}.h3p-open-editor:hover{border-color:#f2ce88;background:linear-gradient(135deg,#6a4b21,#30485a);color:#fff3d5}.iamccs-h3pro:fullscreen,.iamccs-h3pro.h3p-monitor-open{width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;padding:16px!important;border:0!important;border-radius:0!important}.iamccs-h3pro:fullscreen .h3p-layout,.iamccs-h3pro.h3p-monitor-open .h3p-layout{height:calc(100vh - 66px)!important;grid-template-columns:190px minmax(0,1fr) 330px}.iamccs-h3pro:fullscreen .h3p-head,.iamccs-h3pro.h3p-monitor-open .h3p-head{height:50px}.iamccs-h3pro:fullscreen .h3p-main,.iamccs-h3pro.h3p-monitor-open .h3p-main{padding:16px}.iamccs-h3pro:fullscreen .h3p-grid,.iamccs-h3pro.h3p-monitor-open .h3p-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.iamccs-h3pro:fullscreen .h3p-functional-grid,.iamccs-h3pro.h3p-monitor-open .h3p-functional-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.h3p-monitor-host{position:fixed;inset:0;z-index:2147483640;background:#05080c;display:block;overflow:hidden}.h3p-monitor-host>.iamccs-h3pro{position:absolute;inset:0}.h3p-monitor-host .h3p-open-editor{border-color:#efbf6d;background:#6b4518}@media(max-width:1050px){.iamccs-h3pro:fullscreen .h3p-layout,.iamccs-h3pro.h3p-monitor-open .h3p-layout{grid-template-columns:145px minmax(0,1fr) 260px}.iamccs-h3pro:fullscreen .h3p-grid,.iamccs-h3pro.h3p-monitor-open .h3p-grid,.iamccs-h3pro:fullscreen .h3p-functional-grid,.iamccs-h3pro.h3p-monitor-open .h3p-functional-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
   </style>
@@ -1286,7 +1439,10 @@ function mount(node) {
     const label = document.createElement("label"); label.textContent = human(name); box.append(label);
     let control; const options = choices(item);
     if (options.length) {
-      control = document.createElement("select"); options.forEach((value) => control.add(new Option(friendly(value), String(value)))); control.value = String(item.value ?? "");
+      control = document.createElement("select"); options.forEach((value) => control.add(new Option(
+        name === "h3_fast_latent_stage2_guides"
+          ? (String(value) === "masked" ? "MASKED · pin image guide tokens" : "SOFT · guide conditioning")
+          : friendly(value), String(value)))); control.value = String(item.value ?? "");
     } else if (typeof item.value === "boolean") {
       control = document.createElement("input"); control.type = "checkbox"; control.checked = Boolean(item.value);
     } else {
@@ -1456,6 +1612,12 @@ function mount(node) {
     rail.append(owner);
   }
   function recipeGroup(parent) {
+    // Face Refinement preset bars also use h3p-memory-recipes for styling.
+    // Resolve the specific face group FIRST so Quality / Face Size / Definition
+    // keep independent active states instead of all collapsing into "memory".
+    if (parent?.classList?.contains("h3p-face-refine-quality-recipes")) return "face_refine_quality";
+    if (parent?.classList?.contains("h3p-face-refine-size-recipes")) return "face_refine_size";
+    if (parent?.classList?.contains("h3p-face-refine-definition-recipes")) return "face_refine_definition";
     if (parent?.classList?.contains("h3p-memory-recipes")) return "memory";
     if (parent?.classList?.contains("h3p-speed-recipes")) return "speed";
     if (parent?.classList?.contains("h3p-delivery-recipes")) return "delivery";
@@ -1489,7 +1651,7 @@ function mount(node) {
     const ask = (text) => { const el = document.createElement("div"); el.className = "h3p-question"; el.textContent = text; grid.append(el); };
     ask("1 · WHAT DO YOU WANT TO CREATE?"); const modes = document.createElement("div"); modes.className = "h3p-choice-grid";
     const selectedMode = assistantModeKey(node, mode);
-    const family=value=>['fl2va_extended_av','t2va_continuous'].includes(value)?'EXTENSION / LONG TAKE':value.startsWith('t2')?'TEXT / CREATE':value.startsWith('ref2')?'REFERENCES / IDENTITY':value.startsWith('v2')?'VIDEO / TRANSFORM':['i2va','fl2va_stable','fl2va_continuous'].includes(value)?'IMAGES / SHOTS':'TIMELINE / LONG FORM';
+    const family=value=>value==='reference_image'?'REFERENCES / IDENTITY':['fl2va_extended_av','t2va_continuous'].includes(value)?'EXTENSION / LONG TAKE':value.startsWith('t2')?'TEXT / CREATE':value.startsWith('ref2')?'REFERENCES / IDENTITY':value.startsWith('v2')?'VIDEO / TRANSFORM':['i2va','fl2va_stable','fl2va_continuous'].includes(value)?'IMAGES / SHOTS':'TIMELINE / LONG FORM';
     for(const category of ['TEXT / CREATE','IMAGES / SHOTS','EXTENSION / LONG TAKE','REFERENCES / IDENTITY','VIDEO / TRANSFORM','TIMELINE / LONG FORM']){
       const box=document.createElement('section');box.style.cssText='grid-column:1/-1;border:1px solid #426475;border-radius:10px;padding:12px;background:linear-gradient(135deg,#142632,#18202d)';
       const heading=document.createElement('h3');heading.textContent=category;heading.style.cssText='margin:0 0 10px;color:#9bdccc;font-size:12px;letter-spacing:1px';box.append(heading);
@@ -1783,6 +1945,45 @@ function mount(node) {
       [["SAFE · 8–12 GB", "safe_8_12gb"], ["BALANCED · 12–16 GB", "balanced_12_16gb"], ["QUALITY · 20–24 GB", "quality_20_24gb"], ["MAX · 32 GB+", "max_32gb_plus"], ["CUSTOM", "custom"]].forEach(([label,id]) => addRecipe(profileBar, label, `ext:${id}`, true, current === id, () => { setValue(node, "extended_av_profile", id); refresh(); }));
       recipes.append(profileBar);
     }
+    if (active === "face_refine") {
+      node.properties ||= {}; node.properties.iamccs_recipe_highlight ||= {};
+      if (/^(faceq_|facesize_|facedef_)/.test(String(node.properties.iamccs_recipe_highlight.memory || ""))) {
+        delete node.properties.iamccs_recipe_highlight.memory;
+      }
+      const presetGrid = document.createElement("div"); presetGrid.className = "h3p-face-refine-presets-grid";
+      const makeGroup = (label, cls, note, entries) => {
+        const groupCard = document.createElement("section"); groupCard.className = "h3p-face-refine-preset-group";
+        const cap = document.createElement("div"); cap.className = "h3p-functional-title"; cap.textContent = label;
+        const groupNote = document.createElement("div"); groupNote.className = "h3p-face-refine-group-note"; groupNote.textContent = note;
+        const wrap = document.createElement("div"); wrap.className = `h3p-memory-recipes ${cls}`;
+        const help = document.createElement("div"); help.className = "h3p-face-refine-help"; help.innerHTML = "<b>INFO</b> Choose a preset to see its production intent.";
+        entries.forEach(([text, id]) => {
+          const meta = FACE_REFINE_PRESET_HELP[id] || { label: text, info: "" };
+          addRecipe(wrap, text, id, true, false, () => { applyFaceRefineTuning(node, id); refresh(); });
+          const button = wrap.lastElementChild;
+          if (button) { button.title = meta.info; button.setAttribute("aria-label", `${meta.label}. ${meta.info}`); }
+        });
+        const rememberedId = rememberedRecipe(recipeGroup(wrap));
+        const rememberedMeta = FACE_REFINE_PRESET_HELP[rememberedId];
+        if (rememberedMeta) help.innerHTML = `<b>${rememberedMeta.label}</b> — ${rememberedMeta.info}`;
+        groupCard.append(cap, groupNote, wrap, help); presetGrid.append(groupCard);
+      };
+      makeGroup("QUALITY PRESETS", "h3p-face-refine-quality-recipes", "Controls face-canvas resolution, refine steps and temporal processing cost.", [["SAFE · 12 GB", "faceq_safe"], ["BALANCED", "faceq_balanced"], ["HIGH", "faceq_high"], ["MAX", "faceq_max"]]);
+      makeGroup("FACE SIZE PRESETS", "h3p-face-refine-size-recipes", "Adapts crop and detector/detail scaling to the apparent face size in the shot. Multi-face mode is preserved.", [["WIDE CHARACTER", "facesize_wide"], ["MEDIUM", "facesize_medium"], ["SMALL FACES", "facesize_small"], ["TINY FACES", "facesize_tiny"]]);
+      makeGroup("DEFINITION PRESETS", "h3p-face-refine-definition-recipes", "Controls how strongly detail is regenerated and blended back into the original face.", [["SOFT / PRESERVE", "facedef_soft"], ["BALANCED", "facedef_balanced"], ["DEFINED", "facedef_defined"], ["STRONG", "facedef_strong"]]);
+      const stack = document.createElement("div"); stack.className = "h3p-face-refine-stack";
+      const stackText = document.createElement("span");
+      const labelFor = (group, fallback = "NONE") => {
+        const id = rememberedRecipe(group);
+        return FACE_REFINE_PRESET_HELP[id]?.label || fallback;
+      };
+      stackText.innerHTML = `<b>ACTIVE PRESET STACK</b> · Quality: ${labelFor("face_refine_quality")} · Face size: ${labelFor("face_refine_size")} · Definition: ${labelFor("face_refine_definition")}`;
+      const reset = document.createElement("button"); reset.type = "button"; reset.className = "h3p-face-refine-reset"; reset.textContent = "RESET PRESETS · CURRENT DEFAULTS";
+      reset.title = "Clear all three Face Refinement preset selections and restore the current IAMCCS default tuning. Face Refinement enable/mode/max-faces settings are preserved.";
+      reset.onclick = () => resetFaceRefinePresets(node);
+      stack.append(stackText, reset);
+      recipes.append(presetGrid, stack);
+    }
     const recipeSet = active === "memory" ? [["≤ 8–12 GB · 124F / 2048 ROWS", "vram8"], ["12–16 GB · 209F / 4096 ROWS", "vram12"], ["16–24 GB · 294F / 8192 ROWS", "vram16"], ["24 GB+ · 362F / 16384 ROWS", "vram24"]] : active === "speed" ? [["NATIVE QUALITY · 20 STEP", "native"], ["PDD · 8 STEP", "pdd"], ["FASTH3 · 6 STEP", "fasth3"], ["SLA · 4 STEP", "sla"], ["FUSED FAST · T2VA ONLY", "fused"]] : active === "control" ? [["ENABLE + SELECT INSTALLED MODEL", "control"]] : active === "face" ? [["SAM3 SUBJECT SWAP · SAFE DEFAULTS", "face"]] : active === "face_refine" ? [["FACE REFINE · TOGGLE", "face-refine"]] : active === "finish" ? [["NATIVE DELIVERY", "native-delivery"], ["PIXEL SAFE · LOW VRAM", "pixel-safe"], ["H3 2-PASS UPRES", "upres"], ["H3 PIXEL REFINE", "h3-pixel"], ["LTX 2.3 MASTER", "ltx-master"], ["LTX 2.3 PER-SHOT", "ltx-per-shot"], ["RTX FINAL", "rtx-final"]] : [];
     recipeSet.forEach(([label, id]) => {
       const deliveryRecipe = ["native-delivery", "pixel-safe", "upres", "h3-pixel", "ltx-master", "ltx-per-shot", "rtx-final", "face-refine"].includes(id);
@@ -1807,7 +2008,9 @@ function mount(node) {
       format.onchange = () => { if (format.value === "custom") return; const [width,height] = format.value.split("x").map(Number); setValue(node,"width",width,false); setValue(node,"height",height,false); setValue(node,"image_width",width,false); setValue(node,"image_height",height,false); document.dispatchEvent(new CustomEvent("iamccs:h3-settings-changed", {detail:{source_node_id:node.id,recipe:"resolution"}})); refresh(); };
       recipes.prepend(format);
       node.properties ||= {};
-      const fastOn = Boolean(widget(node,"upscale_enabled")?.value) && String(widget(node,"upscale_mode")?.value) === "h3_fast_latent_2pass";
+      const fastOn = Boolean(widget(node,"upscale_enabled")?.value)
+        && String(widget(node,"upscale_mode")?.value) === "h3_fast_latent_2pass"
+        && deliveryModeAvailable(node,"h3_fast_latent_2pass");
       format.disabled = fastOn;
       format.title = fastOn ? "Choose the linked LOW→HIGH pair below, or switch off H3 2-PASS for a custom native canvas." : "Native H3 canvas";
       const stage = document.createElement("div"); stage.className = "h3p-functional";

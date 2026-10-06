@@ -1,3 +1,22 @@
+# R44.7 — Mixer realtime meters / smooth faders + Face preset stack + RTX UI polish (2026-10-06)
+
+- Video Editor audio slave now exposes realtime A1–A5 + master meter snapshots to IAMCCS AudioBoard Mixer.
+- Mixer fader/gain changes no longer force-seek preview audio; preview volume is smoothed to eliminate click/crackle while dragging controls.
+- Face Refinement Quality / Face Size / Definition preset groups now keep independent simultaneous active selections.
+- Face preset families are orthogonal: Quality no longer overwrites Definition tuning, and Definition no longer overwrites Face Size scaling.
+- Added `RESET PRESETS · CURRENT DEFAULTS` without changing Face Refine enable/mode/max-face policy.
+- Fixed Face preset contextual help leaking the same preset description into all three groups.
+- Compact RTX runtime action buttons prevent text overlap while retaining full English tooltips.
+
+# R44.6 — AudioBoard Mixer → Video Editor Audio Slave (2026-10-06)
+
+- Fixed `mixer_overrides_cine_linx`: authored Mixer track volume/gain/pan/mute/solo now wins over upstream generation defaults.
+- Added live Video Editor audio-slave API: A1–A5, master gain and master bus follow IAMCCS AudioBoard Mixer even without AudioBoard Arranger.
+- Mixer transport can audition the downstream Video Editor when no Arranger is connected.
+- Video Editor preview now includes track gain dB and Mixer master gain.
+- Final Video Editor render now bakes imported Mixer `masterAudioGain` in addition to track settings and master bus FX.
+- Deno remains untouched: IAMCCS controls its own editorial audio state only.
+
 # Phase B1 — Audio Boundary Polish + ENGINES + Automatic Same-Slot EXTEND (2026-09-27)
 
 - Added an audio-only EXTEND boundary polish after the proven hidden-child-context Soft-AV handover. The first visible child sample is matched to the completed parent/handover endpoint and the correction decays over a short configurable cosine-squared window; no samples are inserted/removed and video is untouched.

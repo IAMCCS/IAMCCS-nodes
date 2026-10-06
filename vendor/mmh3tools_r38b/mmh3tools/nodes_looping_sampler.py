@@ -94,6 +94,32 @@ def _strip_guide_keys(cond, label):
     return out
 
 
+def _window_encoded_guides(guides, first_frame, end_frame):
+    """Rebase explicit target-resolution guides; end_frame is exclusive."""
+    result = []
+    for guide in guides:
+        start = int(guide["resolved_frame_index"])
+        z = guide.get("latent")
+        if z is None:
+            if first_frame <= start < end_frame:
+                result.append(dict(guide, resolved_frame_index=start - first_frame))
+            continue
+        indices = [i for i in range(z.shape[2])
+                   if first_frame <= start + frame_at_latent(i) < end_frame]
+        if not indices:
+            continue
+        lo, hi = indices[0], indices[-1] + 1
+        local = dict(guide, resolved_frame_index=start + frame_at_latent(lo) - first_frame,
+                     latent=z[:, :, lo:hi])
+        audio = guide.get("audio_latent")
+        if audio is not None and (lo != 0 or hi != z.shape[2]):
+            a0 = _audio_index_at(lo, z.shape[2], audio.shape[-1])
+            a1 = _audio_index_at(hi, z.shape[2], audio.shape[-1])
+            local["audio_latent"] = audio[..., a0:a1]
+        result.append(local)
+    return result
+
+
 def _has_refs(cond):
     return any("minimax_refs" in d and d["minimax_refs"] for _t, d in cond)
 
@@ -839,6 +865,11 @@ class MMH3LoopingSampler(io.ComfyNode):
             chunk_cond = _strip_guide_keys(conds[min(i, len(conds) - 1)],
                                            "chunk %d prompt" % i)
             chunk_guides = list(guides_by_chunk.get(i, []))
+            # Fast Stage-2 supplies guides encoded for its delivery grid explicitly.
+            # Ordinary callers keep the existing stale-conditioning stripping policy.
+            chunk_guides.extend(_window_encoded_guides(
+                (cond_set or {}).get("encoded_keyframes", []),
+                frame_at_latent(v0), frame_at_latent(v1)))
 
             if carried and carry == "keyframe":
                 kf = {"resolved_frame_index": 0,

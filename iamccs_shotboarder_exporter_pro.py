@@ -20,6 +20,7 @@ from .iamccs_rtx_vfx import (
     RTX_RESIZE_METHODS,
     RTX_RESIZE_TYPES,
     apply_rtx_vfx,
+    rtx_vfx_runtime_probe,
 )
 
 
@@ -836,7 +837,22 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
                     direct_audio_edl,
                     fps,
                 )
-        rtx_active = bool(rtx_enabled)
+        rtx_requested = bool(rtx_enabled)
+        rtx_runtime = rtx_vfx_runtime_probe() if rtx_requested else {
+            "available": False,
+            "reason": "RTX not requested.",
+            "status": "bypassed",
+            "install_guide": "",
+        }
+        rtx_active = bool(rtx_requested and rtx_runtime.get("available"))
+        rtx_fallback_note = ""
+        if rtx_requested and not rtx_active:
+            rtx_fallback_note = (
+                "RTX was requested but the NVIDIA RTX VFX runtime is unavailable; "
+                "the exporter continued with the original frames instead of aborting. "
+                + str(rtx_runtime.get("reason") or "")
+            ).strip()
+            _log.warning("IAMCCS Exporter RTX fallback | %s", rtx_fallback_note)
         if rtx_active:
             export_images = apply_rtx_vfx(
                 source_images,
@@ -925,7 +941,12 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
             "master_audio_edl_windows": direct_audio_edl,
             "roll_visual_dedup_active": roll_visual_dedup_active,
             "roll_visual_dedup_status": roll_visual_dedup_status,
+            "rtx_requested": rtx_requested,
             "rtx_enabled": rtx_active,
+            "rtx_runtime_available": bool(rtx_runtime.get("available")),
+            "rtx_runtime_status": str(rtx_runtime.get("status") or ""),
+            "rtx_fallback_note": rtx_fallback_note,
+            "rtx_install_guide": str(rtx_runtime.get("install_guide") or ""),
             "rtx_mode": str(rtx_mode or "VSR Medium"),
             "rtx_resize_type": str(rtx_resize_type or "Keep Ratio"),
             "rtx_scale": float(rtx_scale or 2.0),
@@ -1087,6 +1108,10 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
             "audio_edl_status": direct_audio_edl_status,
             "visual_roll_dedup_active": roll_visual_dedup_active,
             "visual_roll_dedup_status": roll_visual_dedup_status,
+            "rtx_requested": rtx_requested,
+            "rtx_effective": rtx_active,
+            "rtx_runtime_available": bool(rtx_runtime.get("available")),
+            "rtx_fallback_note": rtx_fallback_note,
             "rtx_memory_mode": "automatic_chunk_8_cpu_float16" if rtx_active else "off",
             "codec_contract": f"{profile['video_args']} + {audio_config['args']}",
             "video_lossless": bool(profile.get("lossless")),

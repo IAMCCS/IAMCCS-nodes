@@ -4,7 +4,7 @@ import { api } from "../../scripts/api.js";
 const TYPE = "IAMCCS_ShotboardVideoEditorV1";
 const RENDER_TYPE = "IAMCCS_ShotboardVideoEditorRenderV1";
 const STYLE_ID = "iamccs-shotboard-video-editor-v1-style-monitor-compatible";
-const UI_VERSION = "20260918-server-media-import-v2";
+const UI_VERSION = "20261006-r44-7-mixer-meters-smooth-faders-v1";
 const NODE_SIZE = [1600, 1560];
 const CHROME_HEIGHT = 156;
 const WIDGET_HEIGHT = NODE_SIZE[1] - CHROME_HEIGHT;
@@ -142,6 +142,56 @@ const EDITOR_TRACKS = [
   { id: "AM", name: "MASTER AUDIO", kind: "master_audio" },
 ];
 
+function enforceH3GeneratedSequence(manifest) {
+  const data = manifest && typeof manifest === "object" ? manifest : {};
+  const clips = Array.isArray(data.clips) ? data.clips : [];
+  const videos = clips.filter((clip) => {
+    if (!clip || String(clip.type || "").toLowerCase() !== "video") return false;
+    const take = Math.max(0, Math.round(Number(clip.takeIndex || 0)));
+    const slot = Math.max(0, Math.round(Number(clip.clipIndex || 0)));
+    const id = String(clip.id || "");
+    const assetId = String(clip.assetId || "");
+    return take > 0 && slot > 0 && (id.startsWith("clip_T") || assetId.startsWith("take_T"));
+  });
+  const byTake = new Map();
+  for (const clip of videos) {
+    const take = Math.max(1, Math.round(Number(clip.takeIndex || 1)));
+    if (!byTake.has(take)) byTake.set(take, []);
+    byTake.get(take).push(clip);
+  }
+  for (const [take, group] of byTake.entries()) {
+    group.sort((a, b) => (Number(a.clipIndex || 0) - Number(b.clipIndex || 0))
+      || (Number(a.startTime || 0) - Number(b.startTime || 0))
+      || String(a.id || "").localeCompare(String(b.id || "")));
+    let cursor = group.length ? Math.max(0, Number(group[0].startTime || 0)) : 0;
+    for (const video of group) {
+      video.startTime = cursor;
+      video.editorCollisionPolicy = "ripple_no_overlap_touching_edges";
+      const slot = Math.max(0, Math.round(Number(video.clipIndex || 0)));
+      const audioMatches = clips.filter((clip) => clip
+        && String(clip.type || "").toLowerCase() === "audio"
+        && Math.max(0, Math.round(Number(clip.takeIndex || 0))) === take
+        && Math.max(0, Math.round(Number(clip.clipIndex || 0))) === slot
+        && !["AM", "MASTER"].includes(String(clip.trackId || "").trim().toUpperCase())
+        && String(clip.audioLane || "").trim().toUpperCase() !== "MASTER");
+      for (const audio of audioMatches) {
+        audio.startTime = cursor;
+        audio.editorCollisionPolicy = "follow_linked_video";
+        const vid = String(video.id || "");
+        const aid = String(audio.id || "");
+        if (vid && aid) {
+          video.linked = true;
+          audio.linked = true;
+          video.linkedClipIds = Array.from(new Set([...(video.linkedClipIds || []), aid]));
+          audio.linkedClipIds = Array.from(new Set([...(audio.linkedClipIds || []), vid]));
+        }
+      }
+      cursor += Math.max(0, Number(video.duration || 0));
+    }
+  }
+  return data;
+}
+
 function normalizeManifestTracks(manifest) {
   const data = manifest && typeof manifest === "object" ? manifest : {};
   const tracks = Array.isArray(data.tracks) ? data.tracks.filter((track) => track && typeof track === "object") : [];
@@ -158,6 +208,10 @@ function normalizeManifestTracks(manifest) {
     solo: Boolean(track?.solo ?? false),
     volume: Math.max(0, Math.min(2, Number.isFinite(Number(track?.volume)) ? Number(track.volume) : 1)),
   }));
+  data.ui_state = data.ui_state && typeof data.ui_state === "object" ? data.ui_state : {};
+  if (data.ui_state.link_enabled === undefined) data.ui_state.link_enabled = true;
+  if (data.ui_state.snap_enabled === undefined) data.ui_state.snap_enabled = false;
+  enforceH3GeneratedSequence(data);
   enforceAudioHardCuts(data);
   return data;
 }
@@ -196,7 +250,7 @@ function manifestFromNode(node) {
     tracks: EDITOR_TRACKS.map((track) => ({ ...track })),
     duration_seconds: 20,
     assembly_order: [],
-    ui_state: { playhead: 0, zoom_seconds: 20, link_enabled: false, snap_enabled: false },
+    ui_state: { playhead: 0, zoom_seconds: 20, link_enabled: true, snap_enabled: false },
   }));
 }
 
@@ -284,6 +338,10 @@ function mergeIncomingAppendManifest(current, incoming) {
     ...(Array.isArray(source.assembly_order) ? source.assembly_order : []),
   ]));
   out.ui_state = out.ui_state && typeof out.ui_state === "object" ? out.ui_state : {};
+  if (out.ui_state.link_enabled === undefined) out.ui_state.link_enabled = true;
+  enforceH3GeneratedSequence(out);
+  enforceAudioHardCuts(out);
+  out.duration_seconds = Math.max(Number(out.duration_seconds || 0), manifestEndSeconds(out));
   return out;
 }
 
@@ -865,35 +923,74 @@ function isMasterClip(clip) {
   return trackId === "AM" || trackId === "MASTER" || role === "master_audio" || role === "master_excerpt" || lane === "MASTER";
 }
 
+function audioHardCutLaneKey(clip) {
+  const track = String(clip?.trackId || "").trim().toUpperCase();
+  if (track) return `track:${track}`;
+  const lane = String(clip?.audioLane || "").trim().toUpperCase();
+  return lane ? `lane:${lane}` : "lane:UNASSIGNED";
+}
+
 function enforceAudioHardCuts(manifest) {
   const fps = Math.max(1, Number(manifest?.fps || 24));
   const clips = (Array.isArray(manifest?.clips) ? manifest.clips : [])
-    .filter((clip) => clip?.type === "audio" && !isMasterClip(clip))
-    .sort((a, b) => Number(a.startTime || 0) - Number(b.startTime || 0)
-      || Number(a.takeIndex || 0) - Number(b.takeIndex || 0)
-      || Number(a.clipIndex || 0) - Number(b.clipIndex || 0));
+    .filter((clip) => clip?.type === "audio" && !isMasterClip(clip));
   let changed = false;
-  for (let index = 0; index < clips.length; index++) {
-    const clip = clips[index];
-    const start = Math.max(0, Number(clip.startTime || 0));
-    const laterStarts = clips.slice(index + 1)
-      .map((other) => Number(other.startTime || 0))
-      .filter((value) => value > start + 1e-6);
-    if (!laterStarts.length) continue;
-    const hardOut = Math.min(...laterStarts);
-    if (start + Number(clip.duration || 0) <= hardOut + 1e-6) continue;
-    const duration = Math.max(1 / fps, hardOut - start);
+
+  // Heal clips truncated by the pre-R44.4 global hard-cut bug before applying
+  // the corrected same-lane collision rule. Only system-authored hard cuts are
+  // restored; normal user trims have no audioCollisionPolicy marker.
+  for (const clip of clips) {
+    if (String(clip.audioCollisionPolicy || "") !== "stop_at_next_audio_edit" || clip.audioHardCutAt == null) continue;
     const trimStart = Math.max(0, Number(clip.trimStart || 0));
     const sourceLimit = Math.max(
-      trimStart + duration,
+      trimStart + Number(clip.duration || 0),
       Number(clip.sourceDurationLimit || 0),
-      Number(clip.sourceDuration || 0)
+      Number(clip.sourceDuration || 0),
+      Number(clip.trimEnd || 0)
     );
-    clip.duration = duration;
-    clip.trimEnd = Math.min(sourceLimit, trimStart + duration);
-    clip.audioHardCutAt = hardOut;
-    clip.audioCollisionPolicy = "stop_at_next_audio_edit";
-    changed = true;
+    const restoredDuration = Math.max(1 / fps, sourceLimit - trimStart);
+    if (restoredDuration > Number(clip.duration || 0) + 1e-6) {
+      clip.duration = restoredDuration;
+      clip.trimEnd = trimStart + restoredDuration;
+      changed = true;
+    }
+    delete clip.audioHardCutAt;
+    delete clip.audioCollisionPolicy;
+  }
+
+  const byLane = new Map();
+  for (const clip of clips) {
+    const key = audioHardCutLaneKey(clip);
+    if (!byLane.has(key)) byLane.set(key, []);
+    byLane.get(key).push(clip);
+  }
+
+  for (const laneClips of byLane.values()) {
+    laneClips.sort((a, b) => Number(a.startTime || 0) - Number(b.startTime || 0)
+      || Number(a.takeIndex || 0) - Number(b.takeIndex || 0)
+      || Number(a.clipIndex || 0) - Number(b.clipIndex || 0));
+    for (let index = 0; index < laneClips.length; index++) {
+      const clip = laneClips[index];
+      const start = Math.max(0, Number(clip.startTime || 0));
+      const laterStarts = laneClips.slice(index + 1)
+        .map((other) => Number(other.startTime || 0))
+        .filter((value) => value > start + 1e-6);
+      if (!laterStarts.length) continue;
+      const hardOut = Math.min(...laterStarts);
+      if (start + Number(clip.duration || 0) <= hardOut + 1e-6) continue;
+      const duration = Math.max(1 / fps, hardOut - start);
+      const trimStart = Math.max(0, Number(clip.trimStart || 0));
+      const sourceLimit = Math.max(
+        trimStart + duration,
+        Number(clip.sourceDurationLimit || 0),
+        Number(clip.sourceDuration || 0)
+      );
+      clip.duration = duration;
+      clip.trimEnd = Math.min(sourceLimit, trimStart + duration);
+      clip.audioHardCutAt = hardOut;
+      clip.audioCollisionPolicy = "stop_at_next_audio_edit";
+      changed = true;
+    }
   }
   return changed;
 }
@@ -1460,16 +1557,28 @@ function installEditor(node, reason = "install") {
     return tracks.find((track) => String(track?.id || "") === trackId) || null;
   };
 
-  const audioClipGain = (clip) => {
+  const audioClipTrackGain = (clip) => {
     const track = audioTrackForClip(clip);
     const clipGain = Number.isFinite(Number(clip?.volume)) ? Number(clip.volume) : 1;
     const trackGain = Number.isFinite(Number(track?.volume)) ? Number(track.volume) : 1;
-    return Math.max(0, Math.min(1, clipGain * trackGain));
+    const trackGainDb = Number.isFinite(Number(track?.gainDb)) ? Number(track.gainDb) : 0;
+    const linearDb = Math.pow(10, Math.max(-24, Math.min(24, trackGainDb)) / 20);
+    return Math.max(0, clipGain * trackGain * linearDb);
+  };
+
+  const audioClipGain = (clip) => {
+    const masterGain = Number.isFinite(Number(manifest?.masterAudioGain)) ? Number(manifest.masterAudioGain) : 1;
+    return Math.max(0, Math.min(1, audioClipTrackGain(clip) * Math.max(0, Math.min(2, masterGain))));
   };
 
   const activeAudioClipsAtTime = (time = playhead) => {
+    const masterPolicy = editorRenderAudioPolicy(manifest) === "use_master_audio";
     const available = (manifest.clips || []).filter((clip) => {
       if (clip?.type !== "audio" || clip.muted || !audioUrlForClip(manifest, clip)) return false;
+      // Preview must follow the same authority as render. With MA active, audition
+      // only the master lane; otherwise audition take/manual audio and keep the
+      // parked master silent. This avoids both the former silent MA and doubled audio.
+      if (masterPolicy ? !isMasterClip(clip) : isMasterClip(clip)) return false;
       const track = audioTrackForClip(clip);
       return !Boolean(track?.muted ?? track?.mute ?? false);
     });
@@ -1500,28 +1609,83 @@ function installEditor(node, reason = "install") {
     return entry.element;
   };
 
+  const smoothAudioPreviewVolume = (entry, target) => {
+    if (!entry?.element) return;
+    entry.volumeTarget = Math.max(0, Math.min(1, Number(target ?? 1) || 0));
+    if (!playing) {
+      try { entry.element.volume = entry.volumeTarget; } catch {}
+      return;
+    }
+    if (entry.volumeRaf) return;
+    const step = () => {
+      entry.volumeRaf = 0;
+      if (!entry?.element) return;
+      const current = Math.max(0, Math.min(1, Number(entry.element.volume ?? 1) || 0));
+      const desired = Math.max(0, Math.min(1, Number(entry.volumeTarget ?? current) || 0));
+      const delta = desired - current;
+      if (Math.abs(delta) <= 0.002) {
+        try { entry.element.volume = desired; } catch {}
+        return;
+      }
+      // Small post-fader ramp avoids zipper/click artefacts while dragging a
+      // Mixer fader. The previous implementation jumped HTMLMediaElement.volume
+      // and also force-sought the preview on every pointer event.
+      const next = current + delta * 0.30;
+      try { entry.element.volume = Math.max(0, Math.min(1, next)); } catch {}
+      entry.volumeRaf = requestAnimationFrame(step);
+    };
+    entry.volumeRaf = requestAnimationFrame(step);
+  };
+
+  const audioClipRawMeterLevel = (clip, time = playhead) => {
+    const peaks = audioPeaksForClip(manifest, clip);
+    if (peaks.length) {
+      const local = Math.max(0, Number(time || 0) - Number(clip.startTime || 0) + Number(clip.trimStart || 0));
+      const sourceDuration = clipSourceDuration(manifest, clip);
+      const index = Math.max(0, Math.min(peaks.length - 1, Math.floor((local / Math.max(0.001, sourceDuration)) * peaks.length)));
+      return Math.max(Number(peaks[index]?.rms || 0), Number(peaks[index]?.max || 0) * 0.65);
+    }
+    return !audioPreviewElements.get(String(clip?.id || ""))?.element?.paused ? 0.28 : 0;
+  };
+
+  const editorAudioMeterSnapshot = () => {
+    const tracks = {};
+    for (let i = 0; i < 5; i += 1) tracks[String(i)] = { peak: 0, rms: 0 };
+    let masterEnergy = 0;
+    for (const clip of activeAudioClipsAtTime(playhead)) {
+      const raw = Math.max(0, Math.min(1, audioClipRawMeterLevel(clip, playhead)));
+      const postTrack = Math.max(0, Math.min(1, raw * audioClipTrackGain(clip)));
+      const trackId = String(trackIdForClip(clip) || "");
+      const match = /^A([1-5])$/i.exec(trackId);
+      if (match) {
+        const key = String(Number(match[1]) - 1);
+        const previous = Number(tracks[key]?.peak || 0);
+        const combined = Math.min(1, Math.sqrt((previous * previous) + (postTrack * postTrack)));
+        tracks[key] = { peak: combined, rms: combined * 0.78 };
+      }
+      masterEnergy += postTrack * postTrack;
+    }
+    const masterGain = Math.max(0, Math.min(2, Number(manifest?.masterAudioGain ?? 1) || 0));
+    const masterPeak = Math.max(0, Math.min(1, Math.sqrt(masterEnergy) * masterGain));
+    return { tracks, master: { peak: masterPeak, rms: masterPeak * 0.78 } };
+  };
+
   const updateAudioMeter = () => {
     const fill = root.querySelector(".audio-meter .meter-fill");
     const label = root.querySelector(".audio-meter .meter-label");
     if (!fill || !label) return;
-    const clips = activeAudioClipsAtTime(playhead);
-    let level = 0;
-    for (const clip of clips) {
-      const peaks = audioPeaksForClip(manifest, clip);
-      let clipLevel = 0;
-      if (peaks.length) {
-        const local = Math.max(0, playhead - Number(clip.startTime || 0) + Number(clip.trimStart || 0));
-        const sourceDuration = clipSourceDuration(manifest, clip);
-        const index = Math.max(0, Math.min(peaks.length - 1, Math.floor((local / Math.max(0.001, sourceDuration)) * peaks.length)));
-        clipLevel = Math.max(Number(peaks[index]?.rms || 0), Number(peaks[index]?.max || 0) * 0.65);
-      } else if (!audioPreviewElements.get(String(clip?.id || ""))?.element?.paused) {
-        clipLevel = 0.28;
-      }
-      level = Math.min(1, Math.sqrt((level * level) + ((clipLevel * audioClipGain(clip)) ** 2)));
-    }
-    level = Math.max(0, Math.min(1, level));
+    const meterState = editorAudioMeterSnapshot();
+    const level = Math.max(0, Math.min(1, Number(meterState.master?.peak || 0)));
     fill.style.width = `${Math.round(level * 100)}%`;
     label.textContent = level > 0.86 ? "RED" : level > 0.62 ? "YEL" : level > 0.02 ? "GRN" : "PK";
+  };
+
+  const refreshAudioPreviewGains = () => {
+    for (const clip of activeAudioClipsAtTime(playhead)) {
+      const id = String(clip?.id || clip?.assetId || "");
+      const entry = audioPreviewElements.get(id);
+      if (entry) smoothAudioPreviewVolume(entry, audioClipGain(clip));
+    }
   };
 
   const syncAudioPlayback = (force = false) => {
@@ -1534,7 +1698,7 @@ function installEditor(node, reason = "install") {
       if (!id || !element) continue;
       activeIds.add(id);
       const desiredTime = Math.max(0, Number(clip.trimStart || 0) + (playhead - Number(clip.startTime || 0)));
-      element.volume = audioClipGain(clip);
+      smoothAudioPreviewVolume(audioPreviewElements.get(id), audioClipGain(clip));
       if (force || Math.abs((element.currentTime || 0) - desiredTime) > 0.18) {
         try { element.currentTime = desiredTime; } catch {}
       }
@@ -1682,9 +1846,22 @@ function installEditor(node, reason = "install") {
   const trackIdForClip = (clip) => isMasterClip(clip) ? "AM" : String(clip?.trackId || "");
   const isLinkModeEnabled = () => Boolean(manifest?.ui_state?.link_enabled);
   const isSnapModeEnabled = () => Boolean(manifest?.ui_state?.snap_enabled);
+  const manualPairToken = (clip) => {
+    const explicit = String(clip?.manualPairId || clip?.manual_pair_id || clip?.linkPairId || "").trim();
+    if (explicit) return explicit;
+    const id = String(clip?.id || "");
+    const match = id.match(/^clip_manual_(?:video|audio)_(\d+)(?:_\d+)?$/i);
+    return match?.[1] || "";
+  };
   const clipPairKey = (clip) => {
     if (!clip || isMasterClip(clip)) return "";
+    if (clip.manual) {
+      const token = manualPairToken(clip);
+      return token ? `manual:${token}` : "";
+    }
     const take = Math.max(0, Math.round(Number(clip.takeIndex || 0)));
+    const slot = Math.max(0, Math.round(Number(clip.clipIndex || 0)));
+    if (take > 0 && slot > 0) return `take:${take}:clip:${slot}`;
     if (take > 0) return `take:${take}`;
     const timeline = String(clip.timelineId || "").trim().toUpperCase();
     if (timeline) return `timeline:${timeline}`;
@@ -2668,6 +2845,7 @@ function addManual(kind, button = null) {
         manifest.clips = Array.isArray(manifest.clips) ? manifest.clips : [];
         manifest.assets[assetId] = asset;
 
+        const manualPairId = isVideo ? `manual_av_${stamp}_${index}` : "";
         const clip = {
           id: clipId,
           assetId,
@@ -2688,6 +2866,7 @@ function addManual(kind, button = null) {
           volume: 1,
           linked: false,
           linkedClipIds: [],
+          ...(manualPairId ? { manualPairId } : {}),
         };
         manifest.clips.push(clip);
 
@@ -2761,6 +2940,7 @@ function addManual(kind, button = null) {
             volume: 1,
             linked: true,
             linkedClipIds: [clipId],
+            manualPairId,
           });
           clip.linked = true;
           clip.linkedClipIds = [companionAudioClipId];
@@ -2796,7 +2976,9 @@ function addManual(kind, button = null) {
       const response = await api.fetchApi("/api/iamccs/cine/video_editor/purge_parking", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_key: sessionKey, all_sessions: true }),
+        body: JSON.stringify({ session_key: sessionKey, manifests: [manifest,
+          ...(app.graph?._nodes || []).filter(n => n !== node && String(n.comfyClass || n.type) === "IAMCCS_ShotboardVideoEditorV1")
+            .map(n => manifestFromNode(n))] }),
       });
       const result = await response.json().catch(() => ({}));
       if (!response.ok || result?.error) {
@@ -2806,10 +2988,8 @@ function addManual(kind, button = null) {
       const files = Number(result.deleted_files || 0);
       const gb = Number(result.deleted_bytes || 0) / (1024 ** 3);
       const failed = Number(result.failed_files || 0);
-      const remaining = Number(result.remaining_files || 0);
-      if (status) status.textContent = failed || remaining
-        ? `Parking partially purged: ${files} deleted / ${failed} failed / ${remaining} remaining. Folder: ${result.folder || "parking"}.`
-        : `Parking purged: ${files} files / ${gb.toFixed(2)} GB. Folder: ${result.folder || "parking"}.`;
+      const remaining = Number(result.retained_files || 0);
+      if (status) status.textContent = `Unused parking cleaned: ${files} files / ${gb.toFixed(2)} GB freed; ${remaining} protected/recent; ${failed} failed.`;
     } catch (error) {
       if (status) status.textContent = `Parking purge failed: ${error?.message || error}`;
       console.warn("[IAMCCS ShotboardVideoEditorV1] parking purge failed", error);
@@ -2830,7 +3010,7 @@ function addManual(kind, button = null) {
     root._iamccsPurgeConfirm?.remove?.();
     const panel = document.createElement("div");
     panel.className = "iamccs-sve-purge-confirm";
-    panel.innerHTML = `<strong>Purge parked generations?</strong><span class="detail">All IAMCCS parking sessions will be deleted. Existing takes may stop previewing/rendering until regenerated.</span>`;
+    panel.innerHTML = `<strong>Clean unused parking?</strong><span class="detail">Only unreferenced files in this session are removed. Open projects, library assets, known saved projects and files from the last hour are protected. Projects saved outside the configured folders must be opened before cleanup.</span>`;
     const actions = document.createElement("div");
     actions.className = "actions";
     const cancel = document.createElement("button");
@@ -2984,8 +3164,18 @@ function addManual(kind, button = null) {
         : {};
       masterClip.rollWindowLinkedToVideo = false;
     }
-    if (activate) mergeMasterAudioToVideo();
-    else {
+    if (activate) {
+      setEditorRenderAudioPolicy(manifest, "use_master_audio");
+      if (masterClip) masterClip.muted = false;
+      const merged = mergeMasterAudioToVideo();
+      if (!merged) {
+        // AudioBoard may publish MA before the first video exists. It must still
+        // audition immediately on PLAY; later video injection will relink it.
+        saveManifest(node, manifest);
+        renderTimeline();
+        if (status) status.textContent = `Master audio active in AM. Physical duration ${fmtTime(masterAsset.duration_seconds || 0)}.`;
+      }
+    } else {
       saveManifest(node, manifest);
       renderTimeline();
       if (status) status.textContent = `Master audio parked in AM. Physical duration ${fmtTime(masterAsset.duration_seconds || 0)}.`;
@@ -3082,6 +3272,8 @@ function addManual(kind, button = null) {
     const previewEntry = audioPreviewElements.get(removedId);
     if (previewEntry) {
       try { previewEntry.element.pause(); } catch {}
+      if (previewEntry.volumeRaf) cancelAnimationFrame(previewEntry.volumeRaf);
+      previewEntry.volumeRaf = 0;
       try { previewEntry.element.remove(); } catch {}
       audioPreviewElements.delete(removedId);
     }
@@ -3695,7 +3887,7 @@ function addManual(kind, button = null) {
       }
       manifest = normalizeManifestTracks(parsed);
       manifest.ui_state = {
-        link_enabled: false,
+        link_enabled: true,
         snap_enabled: false,
         ...(manifest.ui_state && typeof manifest.ui_state === "object" ? manifest.ui_state : {}),
       };
@@ -4044,7 +4236,7 @@ function addManual(kind, button = null) {
       tracks: EDITOR_TRACKS.map((track) => ({ ...track })),
       duration_seconds: 20,
       assembly_order: [],
-      ui_state: { playhead: 0, link_enabled: false, snap_enabled: false },
+      ui_state: { playhead: 0, link_enabled: true, snap_enabled: false },
       cleared_at: Date.now() / 1000,
     });
     playhead = 0;
@@ -4247,6 +4439,10 @@ function addManual(kind, button = null) {
       node.properties.iamccs_video_editor_manifest = nextText;
       setWidget(node, "editor_manifest_json", nextText);
       manifest = manifestFromNode(node);
+      enforceH3GeneratedSequence(manifest);
+      if (manifestMasterAudioAsset(manifest) && editorRenderAudioPolicy(manifest) === "use_master_audio") {
+        mergeMasterAudioToVideo();
+      }
       playhead = Math.min(playhead, Number(manifest.duration_seconds || 0));
       selectedClipId = String(manifest.ui_state?.selected_clip_id || "");
       selectedTrackId = String(manifest.ui_state?.selected_track_id || "");
@@ -4257,14 +4453,171 @@ function addManual(kind, button = null) {
     }
   };
 
+  // R44.6: expose the Video Editor as a live audio slave for IAMCCS AudioBoard Mixer.
+  // The Mixer remains master; this API only mirrors editorial audio state into the
+  // editor manifest so preview and final render use the same A1-A5/master settings.
+  const editorMixerState = () => {
+    normalizeManifestTracks(manifest);
+    const tracks = Array.isArray(manifest.tracks) ? manifest.tracks : [];
+    const byId = new Map(tracks.map((track) => [String(track?.id || ""), track]));
+    const trackSettings = Array.from({ length: 5 }, (_, index) => {
+      const track = byId.get(`A${index + 1}`) || {};
+      return {
+        name: `A${index + 1}`,
+        mute: Boolean(track.muted ?? track.mute ?? false),
+        solo: Boolean(track.solo ?? false),
+        volume: Math.max(0, Math.min(2, Number(track.volume ?? 1) || 0)),
+        gainDb: Math.max(-24, Math.min(24, Number(track.gainDb ?? 0) || 0)),
+        pan: Math.max(-1, Math.min(1, Number(track.pan ?? 0) || 0)),
+        normalize: Boolean(track.normalize ?? false),
+        bypassEffects: Boolean(track.bypassEffects ?? false),
+        reverb: Boolean(track.reverb ?? false),
+        reverbSend: Math.max(0, Math.min(1, Number(track.reverbSend ?? 0) || 0)),
+        effectChain: Array.isArray(track.effectChain) ? JSON.parse(JSON.stringify(track.effectChain)) : [],
+      };
+    });
+    return {
+      schema: "iamccs.audio_board_mixer",
+      schema_version: 1,
+      audioTrackCount: 5,
+      trackSettings,
+      mirrorTrackSettings: JSON.parse(JSON.stringify(trackSettings)),
+      masterBus: manifest.audio_master_bus && typeof manifest.audio_master_bus === "object"
+        ? JSON.parse(JSON.stringify(manifest.audio_master_bus))
+        : {},
+      masterAudioGain: Math.max(0, Math.min(2, Number(manifest.masterAudioGain ?? 1) || 0)),
+      source: "IAMCCS_ShotboardVideoEditorV1.audio_slave",
+    };
+  };
+
+  const applyMixerStateToEditor = (data, reason = "mixer_sync", render = true) => {
+    if (!data || typeof data !== "object") return false;
+    normalizeManifestTracks(manifest);
+    const tracks = Array.isArray(manifest.tracks) ? manifest.tracks : [];
+    const byId = new Map(tracks.map((track) => [String(track?.id || ""), track]));
+    const settings = Array.isArray(data.trackSettings)
+      ? data.trackSettings
+      : (Array.isArray(data.mirrorTrackSettings) ? data.mirrorTrackSettings : []);
+    settings.slice(0, 5).forEach((state, index) => {
+      if (!state || typeof state !== "object") return;
+      const track = byId.get(`A${index + 1}`);
+      if (!track) return;
+      track.volume = Math.max(0, Math.min(2, Number(state.volume ?? track.volume ?? 1) || 0));
+      track.gainDb = Math.max(-24, Math.min(24, Number(state.gainDb ?? track.gainDb ?? 0) || 0));
+      track.pan = Math.max(-1, Math.min(1, Number(state.pan ?? track.pan ?? 0) || 0));
+      track.muted = Boolean(state.mute ?? state.muted ?? track.muted ?? false);
+      track.solo = Boolean(state.solo ?? track.solo ?? false);
+      track.normalize = Boolean(state.normalize ?? track.normalize ?? false);
+      track.bypassEffects = Boolean(state.bypassEffects ?? track.bypassEffects ?? false);
+      track.reverb = Boolean(state.reverb ?? track.reverb ?? false);
+      track.reverbSend = Math.max(0, Math.min(1, Number(state.reverbSend ?? track.reverbSend ?? 0) || 0));
+      if (Array.isArray(state.effectChain)) track.effectChain = JSON.parse(JSON.stringify(state.effectChain));
+    });
+    if (data.masterBus && typeof data.masterBus === "object") {
+      manifest.audio_master_bus = JSON.parse(JSON.stringify(data.masterBus));
+    }
+    if (data.masterAudioGain !== undefined) {
+      manifest.masterAudioGain = Math.max(0, Math.min(2, Number(data.masterAudioGain ?? 1) || 0));
+    }
+    manifest.editor_audio_mixer_sync = {
+      source: "IAMCCS_AudioBoardMixer.live_video_editor_slave",
+      live_slave: true,
+      reason: String(reason || "mixer_sync"),
+      track_count: Math.min(5, settings.length || 5),
+      fields: ["volume", "gainDb", "pan", "muted", "solo", "normalize", "bypassEffects", "reverb", "reverbSend", "effectChain"],
+      master_bus_imported: Boolean(data.masterBus && typeof data.masterBus === "object"),
+      master_gain_imported: data.masterAudioGain !== undefined,
+      truth: "IAMCCS AudioBoard Mixer is master; Shotboard Video Editor is the live audio slave.",
+    };
+    persist();
+    // Mixer/fader updates must never force-seek active HTML audio elements.
+    // Re-seeking on every pointer move was the source of the audible crack/click
+    // artefacts. Timeline/scrub operations still use force=true elsewhere.
+    const reasonText = String(reason || "");
+    const mixerOnlyUpdate = /(?:mixer|live_)/i.test(reasonText);
+    const faderOnlyUpdate = /(?:volume|gain|pan|master_gain)/i.test(reasonText);
+    if (mixerOnlyUpdate && faderOnlyUpdate) refreshAudioPreviewGains();
+    else syncAudioPlayback(!mixerOnlyUpdate);
+    updateAudioMeter();
+    if (render) renderTimeline();
+    if (status) status.textContent = `Mixer sync → Video Editor (${String(reason || "audio")}).`;
+    document.dispatchEvent(new CustomEvent("iamccs:video_editor_audio_slave_changed", {
+      detail: { node_id: node.id, reason: String(reason || "mixer_sync"), mixer: editorMixerState() },
+    }));
+    return true;
+  };
+
+  const setEditorMixerTrackValue = (trackIndex, key, value, render = false) => {
+    const state = editorMixerState();
+    const index = Math.max(0, Math.min(4, Number(trackIndex || 0) || 0));
+    const track = state.trackSettings[index] || (state.trackSettings[index] = { name: `A${index + 1}` });
+    if (key === "mute" || key === "muted") track.mute = Boolean(value);
+    else if (key === "solo" || key === "bypassEffects" || key === "reverb" || key === "normalize") track[key] = Boolean(value);
+    else track[key] = value;
+    return applyMixerStateToEditor(state, `live_${key}_A${index + 1}`, render);
+  };
+
+  node._iamccsVideoEditorAudioSlave = {
+    applyExternalState: (data, reason = "mixer_external") => applyMixerStateToEditor(data, reason, true),
+    getMixerState: () => editorMixerState(),
+    setTrackVolume: (track, value) => setEditorMixerTrackValue(track, "volume", value, false),
+    setTrackGainDb: (track, value) => setEditorMixerTrackValue(track, "gainDb", value, false),
+    setTrackPan: (track, value) => setEditorMixerTrackValue(track, "pan", value, false),
+    setTrackToggle: (track, key, value) => setEditorMixerTrackValue(track, key, value, true),
+    setMasterGain: (value) => {
+      const state = editorMixerState();
+      state.masterAudioGain = Math.max(0, Math.min(2, Number(value ?? 1) || 0));
+      return applyMixerStateToEditor(state, "live_master_gain", false);
+    },
+    rewind: () => {
+      playhead = 0;
+      persist();
+      syncAudioPlayback(true);
+      updateMonitor();
+      return true;
+    },
+    toggle: () => {
+      if (playing) stop(); else play();
+      return true;
+    },
+    stop: (rewind = false) => {
+      stop();
+      if (rewind) {
+        playhead = 0;
+        persist();
+        syncAudioPlayback(true);
+        updateMonitor();
+      }
+      return true;
+    },
+    snapshot: () => ({
+      playing: Boolean(playing),
+      playhead: Math.max(0, Number(playhead || 0) * Math.max(1, Number(manifest.fps || widget(node, "fps")?.value || 24))),
+      totalFrames: Math.max(1, Number(timelineDuration() || 0) * Math.max(1, Number(manifest.fps || widget(node, "fps")?.value || 24))),
+      fps: Math.max(1, Number(manifest.fps || widget(node, "fps")?.value || 24)),
+      meters: editorAudioMeterSnapshot(),
+      mixer: editorMixerState(),
+    }),
+  };
+
+  if (node._iamccsMixerSlaveEventHandler) {
+    document.removeEventListener("iamccs:audio_mixer_video_editor_slave", node._iamccsMixerSlaveEventHandler);
+  }
+  node._iamccsMixerSlaveEventHandler = (event) => {
+    const detail = event?.detail || {};
+    if (detail.node_id != null && String(detail.node_id) !== String(node.id)) return;
+    applyMixerStateToEditor(detail.data || {}, detail.reason || "mixer_event", true);
+  };
+  document.addEventListener("iamccs:audio_mixer_video_editor_slave", node._iamccsMixerSlaveEventHandler);
+
   if (node._iamccsMasterAudioReadyHandler) {
     document.removeEventListener("iamccs:audio_master_ready", node._iamccsMasterAudioReadyHandler);
   }
   node._iamccsMasterAudioReadyHandler = (event) => {
     const asset = event?.detail?.asset;
     if (!asset || typeof asset !== "object") return;
-    if (adoptPublishedMasterAudioAsset(asset, false)) {
-      if (status) status.textContent = "AudioBoard master parked in AM. Press MERGE MA to link it to the video timing.";
+    if (adoptPublishedMasterAudioAsset(asset, true)) {
+      if (status) status.textContent = "AudioBoard master active in AM and linked to programme timing.";
     }
   };
   document.addEventListener("iamccs:audio_master_ready", node._iamccsMasterAudioReadyHandler);

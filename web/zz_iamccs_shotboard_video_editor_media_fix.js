@@ -10,7 +10,7 @@ import { api } from "../../scripts/api.js";
 //    linked companion clip on the matching A lane.
 
 const TYPE = "IAMCCS_ShotboardVideoEditorV1";
-const FIX_VERSION = "20260917-manual-video-playback-embedded-audio-v1";
+const FIX_VERSION = "20261006-r44-4-legacy-media-compat-only";
 
 function nodeType(node) {
   return String(node?.comfyClass || node?.type || node?.constructor?.type || "");
@@ -389,6 +389,7 @@ async function importVideo(node, root, file) {
   };
   manifest.assets[videoAssetId] = videoAsset;
 
+  const manualPairId = `manual_av_${stamp}`;
   const videoClip = {
     id: videoClipId,
     assetId: videoAssetId,
@@ -409,6 +410,7 @@ async function importVideo(node, root, file) {
     volume: 1,
     linked: false,
     linkedClipIds: [],
+    manualPairId,
   };
   manifest.clips.push(videoClip);
 
@@ -469,6 +471,7 @@ async function importVideo(node, root, file) {
       volume: 1,
       linked: true,
       linkedClipIds: [videoClipId],
+      manualPairId,
     };
     videoClip.linked = true;
     videoClip.linkedClipIds = [audioClipId];
@@ -501,6 +504,12 @@ function installFixedAddVideo(node) {
     || (node.widgets || []).map((w) => w?.element).find((el) => el?.classList?.contains?.("iamccs-sve"));
   const root = widgetRoot;
   if (!root) return false;
+  // The integrated 2026-09-18+ editor already owns server-side media probing,
+  // source duration and embedded-audio extraction. The old repair used to
+  // replace Add Video after the newer UI mounted, bypassing that authoritative
+  // importer and reintroducing browser-only duration errors.
+  const integratedDate = Number(String(root.dataset.iamccsSveVersion || "").slice(0, 8));
+  if (Number.isFinite(integratedDate) && integratedDate >= 20260918) return true;
   const buttons = Array.from(root.querySelectorAll("button"));
   const old = buttons.find((button) => String(button.textContent || "").trim() === "Add Video");
   if (!old) return false;
