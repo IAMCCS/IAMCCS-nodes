@@ -3359,12 +3359,14 @@ function renderAudioBoardArranger(node) {
         try {
             const data = JSON.parse(String(widget?.value || "{}"));
             const lines = Array.isArray(data?.lines) ? data.lines : [];
-            const localPrompts = lines
-                .map((line) => String(line?.local_prompt || line?.shot_prompt || "").trim())
-                .filter(Boolean);
+            if (!source) return null;
+            const contract = data.settings?.minimax_truth_enabled !== false && typeof source._iamccsDialoguePromptContract === "function"
+                ? source._iamccsDialoguePromptContract() : null;
+            const localPrompts = contract?.local_truth || lines.map((line) => String(line?.local_prompt || line?.shot_prompt || "").trim());
             return {
                 source,
-                globalPrompt: String(data?.global_prompt || data?.prompt || "").trim(),
+                dialogue: data,
+                globalPrompt: String(contract?.global_truth || data?.global_prompt || data?.prompt || "").trim(),
                 localPrompts,
                 promptRelayEnabled: localPrompts.length > 0,
             };
@@ -3773,6 +3775,7 @@ function renderAudioBoardArranger(node) {
         const promptSource = dialoguePromptSyncSource();
         const publishRange = isManualPublishReason(reason) ? activePublishRange() : { enabled: false };
         for (const board of boards) {
+            promptSource?.source?._iamccsDialogueSyncShotboard?.(board);
             const widget = findWidget(board, "timeline_data");
             if (!widget) continue;
             let data = {};
@@ -3800,8 +3803,19 @@ function renderAudioBoardArranger(node) {
                         if (!nextPrompt) return;
                         seg.prompt = nextPrompt;
                         seg.local_prompt = nextPrompt;
+                        seg.relay_prompt = nextPrompt;
+                        seg.relay_manual_off = false;
+                        seg.promptrelay_manual_off = false;
                         seg.use_prompt = true;
                     });
+                    const visualRows = (Array.isArray(data.rows) ? data.rows : []).filter(row => row?.placeholder !== true && String(row?.type || "image") !== "audio");
+                    visualRows.forEach((row,index) => {
+                        const value = String(promptSource.localPrompts[index] || "").trim();
+                        if (value) Object.assign(row, {prompt:value, local_prompt:value, relay_prompt:value, use_prompt:true, relay_manual_off:false, promptrelay_manual_off:false});
+                    });
+                    data.globalPromptOnly = false;
+                    data.global_prompt_only = false;
+                    data.use_global_prompt_only = false;
                     const syncedPrompts = promptTargets
                         .map((seg) => String(seg?.prompt || seg?.local_prompt || "").trim())
                         .filter(Boolean);
@@ -3826,9 +3840,12 @@ function renderAudioBoardArranger(node) {
                 return Boolean(seg?.physicalChunk || seg?.audioPublishSchema === "iamccs.audio.publish.v2")
                     && (take > 0 || /^T\d+/i.test(timelineId));
             });
-            const pluriPublishEnabled = Boolean(state.multiGeneration?.pluriPublishEnabled)
-                || (isManualPublishReason(reason) && Boolean(state.multiGeneration?.enabled) && hasPhysicalMultiPublishSegments);
-            const shotboardOnlyFirst = !pluriPublishEnabled && (state.audioBusMode === "only_first" || state.onlyFirstTrack);
+            const dialogueLanePublish = publishSourceAudioSegments.some(seg => String(seg?.purpose || "") === "dialogue_tts_speaker_stem")
+                || new Set(publishSourceAudioSegments.map(seg => String(seg?.speaker || "")).filter(Boolean)).size > 1;
+            // Speaker stems share a timeline; they are not separate multigen takes.
+            const pluriPublishEnabled = !dialogueLanePublish && (Boolean(state.multiGeneration?.pluriPublishEnabled)
+                || (isManualPublishReason(reason) && Boolean(state.multiGeneration?.enabled) && hasPhysicalMultiPublishSegments));
+            const shotboardOnlyFirst = !dialogueLanePublish && !pluriPublishEnabled && (state.audioBusMode === "only_first" || state.onlyFirstTrack);
             const firstAvailableTrack = Math.min(...publishSourceAudioSegments.map((seg) => Math.max(0, Number(seg.track || 0))).filter((value) => Number.isFinite(value)));
             const onlyFirstTrackIndex = Number.isFinite(firstAvailableTrack) ? firstAvailableTrack : 0;
             let nextShotboardAudioSegments = shotboardOnlyFirst
@@ -4065,6 +4082,12 @@ function renderAudioBoardArranger(node) {
                     };
                 }
             }
+            if (dialogueLanePublish && data.multiGeneration?.enabled) {
+                const activeId = String(data.multiGeneration.activeTimelineId || "T01");
+                data.multiGeneration.audioByTimeline = {...(data.multiGeneration.audioByTimeline || {}), [activeId]: nextShotboardAudioSegments};
+                data.multiGeneration.audioSegmentsAll = nextShotboardAudioSegments;
+                data.multiGeneration.pluriPublishEnabled = false;
+            }
             data.audioSegments = nextShotboardAudioSegments;
 
             // Only publish tracks that have at least one clip — strip empty tracks.
@@ -4264,7 +4287,9 @@ function renderAudioBoardArranger(node) {
             } else {
                 delete board.properties.iamccs_audio_publish_warning;
             }
-            if (renderTarget) {
+            if (renderTarget && typeof board._iamccsCineShotboardV3ApplyExternalTimeline === "function") {
+                board._iamccsCineShotboardV3ApplyExternalTimeline(data);
+            } else if (renderTarget) {
                 board._iamccsCineShotboardV3Ready = false;
                 board._iamccsCineShotboardV3Version = "";
                 document.dispatchEvent(new CustomEvent("iamccs:planner_rows_updated", { detail: { node_id: board.id, source: "IAMCCS_AudioBoardArranger", reason, render: true } }));
@@ -4399,6 +4424,7 @@ function renderAudioBoardArranger(node) {
         transport.playing = false;
         transport.pendingLoopRestart = false;
         draw();
+        return true;
     };
     const pullFromShotboard = () => {
         const board = linkedShotboardNodes()[0];
@@ -6327,6 +6353,7 @@ function renderAudioBoardArranger(node) {
     };
     const exposeTransportApi = () => {
         node._iamccsAudioBoardTransport = {
+            publish: () => publishToShotboard(),
             play: () => playPlayback(),
             stop: (redraw = true) => stopPlayback(redraw),
             toggle: () => transport.playing ? stopPlayback(true) : playPlayback(),
@@ -9887,7 +9914,7 @@ function renderAudioBoardMixer(node) {
             if (!current || seen.has(current.id)) continue;
             seen.add(current.id);
             const type = String(current?.comfyClass || current?.type || current?.constructor?.type || "");
-            if (current !== node && type === "IAMCCS_ShotboardVideoEditorV1") return current;
+            if (current !== node && ["IAMCCS_ShotboardVideoEditorV1", "IAMCCS_ShotboardVideoEditorOptionalR49"].includes(type)) return current;
             for (const link of links()) {
                 const originId = link?.origin_id ?? link?.originId ?? (Array.isArray(link) ? link[1] : undefined);
                 const targetId = link?.target_id ?? link?.targetId ?? (Array.isArray(link) ? link[3] : undefined);

@@ -52,6 +52,21 @@ class ContinuousRouterTests(unittest.TestCase):
         self.assertEqual(result[0], "continuous-frames")
         self.assertEqual(result[6:], (0, 1, 0))
 
+    def test_true_long_pskf_uses_continuous_backend(self):
+        plan = {
+            "task_mode": "longvid_keyframe_continuous",
+            "requested_task_mode": "longvid_keyframe_continuous",
+            "longvid_engine": "pianosequenza_true_long",
+        }
+        kwargs = payload("continuous")
+        result = self.router.select(plan, **kwargs)
+        self.assertEqual(result[0], "continuous-frames")
+        self.assertEqual(result[6:], (0, 1, 0))
+        self.assertEqual(self.router.check_lazy_status(plan), [
+            "continuous_frames", "continuous_audio", "continuous_bridge",
+            "continuous_latent", "continuous_fps", "continuous_report",
+        ])
+
     def test_guided_loop_is_one_outer_master(self):
         kwargs = payload("guided")
         result = self.router.select({"task_mode": "guided_av_loop_experimental"}, **kwargs)

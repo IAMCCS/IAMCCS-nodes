@@ -45,6 +45,7 @@ from .iamccs_minimax_h3_pixel_refine_variant import (
 LOG = logging.getLogger("IAMCCS.MiniMaxH3.FastLatent2Pass")
 CATEGORY = "IAMCCS/MiniMax H3/Quality Latent 2-Pass"
 FAST_ROUTE = "h3_fast_latent_2pass"
+H3_CONTINUOUS_INDEX = "h3_continuous_index"
 
 
 def _result_item(value: Any, index: int = 0):
@@ -78,15 +79,10 @@ def _fast_stage_size(plan: dict[str, Any]) -> tuple[int, int]:
 
 
 def _load_upscaler_class():
-    import nodes
+    # IAMCCS owns this runtime; never resolve an external ComfyUI node.
+    from .vendor.minimax_h3_latent_upscaler_3d import MinimaxH3LatentUpscaler3D
 
-    klass = nodes.NODE_CLASS_MAPPINGS.get("MinimaxH3LatentUpscaler3D")
-    if klass is None:
-        raise RuntimeError(
-            "FAST LATENT 2-PASS requires Comfyui_Minimax_h3_latent_Upscaler and its "
-            "MinimaxH3LatentUpscaler3D node."
-        )
-    return klass
+    return MinimaxH3LatentUpscaler3D
 
 
 def _split_av(av_latent):
@@ -155,8 +151,8 @@ def _adaptive_temporal_chunks(width: int, height: int, device: str, requested: s
 def _temporary_upscaler_temporal_chunk(klass, chunk_size: int):
     """Temporarily override only the upstream model forward temporal stride.
 
-    This keeps IAMCCS self-contained: users do not need to patch the external
-    Comfyui_Minimax_h3_latent_Upscaler checkout.  The original method is always
+    This operates only on the upscaler implementation vendored inside IAMCCS.
+    No external ComfyUI node is resolved or called. The original method is always
     restored after the call, even when CUDA raises OOM.
     """
     module = importlib.import_module(klass.__module__)
@@ -265,6 +261,9 @@ def _release_upscaler_after_oom(klass) -> None:
 def _upscale_video_latent(video_latent, plan, width, height):
     upres = _upres_settings(plan)
     model_name = str(upres.get("model_name", "") or "").strip()
+    # Import first: the IAMCCS-local module owns registration of the model folder.
+    # This must work even when the external custom-node checkout was removed.
+    klass = _load_upscaler_class()
     if not model_name or not folder_paths.get_full_path("latent_upscale_models", model_name):
         raise ValueError(
             "FAST LATENT 2-PASS needs an installed minimax_h3_latent_upscaler_3d checkpoint "
@@ -273,7 +272,6 @@ def _upscale_video_latent(video_latent, plan, width, height):
     precision = str(upres.get("precision", "bf16") or "bf16").lower()
     device = str(upres.get("device", "cuda") or "cuda").lower()
     chunk_setting = str(upres.get("fast_latent_temporal_chunk", "AUTO") or "AUTO").strip().upper()
-    klass = _load_upscaler_class()
     dynamic_mode = {"mode": "target dimensions", "width": int(width), "height": int(height)}
     attempts = _adaptive_temporal_chunks(int(width), int(height), device, chunk_setting)
     last_oom = None
@@ -287,7 +285,7 @@ def _upscale_video_latent(video_latent, plan, width, height):
             with _temporary_upscaler_temporal_chunk(klass, temporal_chunk) as patched:
                 if not patched and temporal_chunk != 32:
                     LOG.warning(
-                        "FAST LATENT 2-PASS temporal override unavailable; falling back to the upstream temporal policy"
+                        "FAST LATENT 2-PASS temporal override unavailable; using the IAMCCS-local default temporal policy"
                     )
                 result = klass.execute(
                     latent=video_latent,
@@ -361,13 +359,105 @@ def _check_segment_parity(plan, index, total, native_frames, native_audio):
     return chunk
 
 
+def _stage2_endpoint_images(native_frames, first_frame_override=None, last_frame_override=None):
+    """Return complete per-segment FL2VA guides for the target-grid rebuild.
+
+    Continuation chunks often have no standalone ref_image_1/ref_image_2
+    sockets: their opening exists only in the generated native segment.  The
+    Stage-2 rebuild must therefore inherit that segment's actual first and last
+    visible frames instead of falling back to global workflow references.
+    """
+    if not torch.is_tensor(native_frames) or int(native_frames.shape[0]) < 1:
+        raise ValueError("FAST LATENT 2-PASS needs at least one native frame for Stage-2 endpoint guides")
+    first = first_frame_override if torch.is_tensor(first_frame_override) else native_frames[:1]
+    last = last_frame_override if torch.is_tensor(last_frame_override) else native_frames[-1:]
+    return first[:1], last[-1:]
+
+
+def _conditioning_geometry(conditioning):
+    frame_count = 0
+    guides = []
+    seen = set()
+    for _embedding, metadata in conditioning or []:
+        frame_count = max(frame_count, int(metadata.get("minimax_frame_count", 0) or 0))
+        for guide in metadata.get("minimax_keyframes", []) or []:
+            key = id(guide)
+            if key not in seen:
+                guides.append(guide)
+                seen.add(key)
+    return frame_count, guides
+
+
+def _prepare_true_long_stage2_plan(target_plan, segment_index, stage1_conditioning, sampled_latent=None):
+    """Make Atomic encode target-grid guides on the real technical timeline."""
+    technical, source_guides = _conditioning_geometry(stage1_conditioning)
+    timing = (
+        sampled_latent.get("iamccs_authored_interval")
+        if isinstance(sampled_latent, dict) else None
+    )
+    if isinstance(timing, dict):
+        latent_technical = int(timing.get("technical_frames", 0) or 0)
+        latent_endpoint = int(timing.get("endpoint_frame", -1) or -1)
+        if latent_technical >= 5 and 0 <= latent_endpoint < latent_technical:
+            # True Long continuations inherit their opening from the PSkf AV
+            # state, so only the destination is an explicit image guide. The
+            # root interval has both its opening and destination authored.
+            technical = latent_technical
+            source_guides = []
+            if int(segment_index) == 0:
+                source_guides.append({"resolved_frame_index": 0})
+            source_guides.append({"resolved_frame_index": latent_endpoint})
+    chunks = copy.deepcopy(target_plan.get("chunks") or [])
+    if technical < 5 or not source_guides or not 0 <= int(segment_index) < len(chunks):
+        raise ValueError("FAST LATENT 2-PASS True Long lost its Stage-1 technical keyframe geometry")
+    chunks[int(segment_index)]["frame_count"] = int(technical)
+    chunks[int(segment_index)]["requested_frame_count"] = int(technical)
+    target_plan["chunks"] = chunks
+    return technical, source_guides
+
+
+def _remap_true_long_stage2_conditioning(target_conditioning, technical_frames, source_guides):
+    """Keep target-grid latents on True Long's native terminal guide clock."""
+    _target_frames, target_guides = _conditioning_geometry(target_conditioning)
+    if not target_guides:
+        raise ValueError("FAST LATENT 2-PASS True Long target conditioning has no encoded guides")
+    # Root has opening+destination. Continuations intentionally have only the
+    # destination: their opening authority is the upscaled native AV motion.
+    if len(source_guides) == 1:
+        source_selected = [source_guides[-1]]
+        target_selected = [target_guides[-1]]
+    else:
+        source_selected = [source_guides[0], source_guides[-1]]
+        target_selected = [target_guides[0], target_guides[-1]]
+    remapped = []
+    for source, target in zip(source_selected, target_selected):
+        guide = dict(target)
+        # Atomic encoded the guide at the Stage-2 grid. Preserve that latent,
+        # but keep its standard H3 time coordinate. An interior marker at the
+        # visible boundary turns the destination into a hard wall and causes
+        # the final-image snap that the hidden approach runway must avoid.
+        guide.pop(H3_CONTINUOUS_INDEX, None)
+        guide["resolved_frame_index"] = int(source.get("resolved_frame_index", 0))
+        remapped.append(guide)
+    for _embedding, metadata in target_conditioning:
+        if metadata.get("minimax_keyframes"):
+            metadata["minimax_keyframes"] = [dict(guide) for guide in remapped]
+        metadata["minimax_frame_count"] = int(technical_frames)
+    return target_conditioning
+
+
 def _target_conditioning(model, clip, video_vae, audio_vae, cine_linx, segment_index,
-                         stage_width, stage_height, stage1_conditioning,
+                         stage_width, stage_height, stage1_conditioning, sampled_latent=None,
                          bridge_frame=None, first_frame_override=None, last_frame_override=None,
                          ref_image_1=None, ref_image_2=None, ref_image_3=None, ref_image_4=None,
                          ref_video=None, ref_video_audio=None, ref_audio=None,
                          motion_state=None, render_id=""):
     plan = _resolve_shotplan(cine_linx)
+    # Ref2VA references have their own spatial grid. The character-swap
+    # recipe shares cond+ between passes; enlarging its video reference to the
+    # delivery canvas multiplies frozen rows in every refinement tile.
+    if plan.get("task_mode") == "v2va_face_swap_lora" and stage1_conditioning is not None:
+        return model, stage1_conditioning, "character swap: shared Stage-1 Ref2VA conditioning; native reference resolution"
     # Conditioning tensors that contain image/guide latents are spatially
     # authored. Re-materialize them at the Stage-2 grid. Atomic deliberately
     # leaves R37 Motion Context positioned guides to its separate condition
@@ -375,6 +465,12 @@ def _target_conditioning(model, clip, video_vae, audio_vae, cine_linx, segment_i
     target_plan = dict(plan)
     target_plan["width"] = int(stage_width)
     target_plan["height"] = int(stage_height)
+    task_mode = str(plan.get("task_mode", "") or "").lower()
+    true_long_geometry = None
+    if task_mode == "longvid_keyframe_continuous":
+        true_long_geometry = _prepare_true_long_stage2_plan(
+            target_plan, segment_index, stage1_conditioning, sampled_latent,
+        )
     if (
         isinstance(motion_state, dict)
         and str(motion_state.get("method", "")) == "external_saved_av_continuation"
@@ -410,8 +506,11 @@ def _target_conditioning(model, clip, video_vae, audio_vae, cine_linx, segment_i
         ref_audio=ref_audio,
     )
     target_conditioning = result[1]
+    if true_long_geometry is not None:
+        target_conditioning = _remap_true_long_stage2_conditioning(
+            target_conditioning, true_long_geometry[0], true_long_geometry[1],
+        )
     guide_report = "none"
-    task_mode = str(plan.get("task_mode", "") or "").lower()
     if task_mode in {"longvid_motion_context", "longvid_continuous_guided"}:
         from .iamccs_minimax_h3_motion_context_variant import _apply_positioned_guides
 
@@ -479,6 +578,7 @@ def _stage2_window_policy(plan: dict[str, Any]) -> tuple[int | None, int, str]:
 
 def _sample_stage2(model, conditioning, latent, cine_linx, segment_index):
     from comfy_extras.nodes_custom_sampler import BasicGuider, SamplerCustomAdvanced
+    from .iamccs_minimax_h3_pixel_refine_variant import _provider
 
     active_model, noise, sampler, sigmas, sampling_report = (
         IAMCCS_MiniMaxH3LatentUpresSamplingR38().prepare(model, cine_linx, int(segment_index))[:5]
@@ -486,23 +586,40 @@ def _sample_stage2(model, conditioning, latent, cine_linx, segment_index):
     guider = _result_item(BasicGuider.execute(model=active_model, conditioning=conditioning), 0)
     plan = _resolve_shotplan(cine_linx)
     window_frames, overlap_frames, policy_source = _stage2_window_policy(plan)
-    from .iamccs_h3_stage2_guides import conditioning_guides, pin_still_guides
-    from .iamccs_minimax_h3_pixel_refine_variant import _provider
-    guides = conditioning_guides(conditioning)
+
+    # Preserve the Stage-2 guide contract before either full or windowed sampling.
+    # Masked still guides are pinned on the H3 temporal token while audio stays
+    # fully protected; soft guides remain conditioning-only.
+    common = _provider("common")
+    original_video, original_audio = common.unpack_av(
+        latent, "FAST LATENT Stage-2 source"
+    )
     guide_mode = str(_upres_settings(plan).get("fast_latent_stage2_guides", "soft")).lower()
     if guide_mode == "masked":
         from comfy.nested_tensor import NestedTensor
-        common = _provider("common")
-        loop = _provider("nodes_looping_sampler")
-        if not loop.per_row_mask_is_continuous():
-            raise RuntimeError("Stage-2 Masked guides require H3 per-row mask support")
-        video, audio = common.unpack_av(latent, "Stage-2 guides")
-        vm, am = loop._split_mask(latent)
-        video, vm, count = pin_still_guides(video, vm, guides)
-        am = torch.ones_like(audio) if am is None else am
-        latent = common.pack_av(latent, video, audio, noise_mask=NestedTensor([vm, am]))
-        LOG.info("FAST LATENT Stage-2 Masked: pinned %d image guides; audio mask preserved", count)
-    LOG.info("FAST LATENT Stage-2 guides=%d mode=%s", len(guides), guide_mode)
+        from .iamccs_h3_stage2_guides import conditioning_guides, pin_still_guides
+
+        guides = conditioning_guides(conditioning)
+        if guides:
+            looping_provider = _provider("nodes_looping_sampler")
+            video_mask, audio_mask = looping_provider._split_mask(latent)
+            pinned_video, pinned_video_mask, pinned_count = pin_still_guides(
+                original_video, video_mask, guides
+            )
+            if original_audio is not None:
+                if audio_mask is None:
+                    audio_mask = torch.zeros_like(original_audio)
+                joint_mask = NestedTensor([pinned_video_mask, audio_mask])
+            else:
+                joint_mask = pinned_video_mask
+            latent = common.pack_av(
+                latent, pinned_video, original_audio, noise_mask=joint_mask
+            )
+            original_video = pinned_video
+            LOG.info(
+                "FAST LATENT Stage-2 masked guides pinned | count=%d | audio=locked",
+                int(pinned_count),
+            )
 
     if window_frames is None:
         LOG.warning(
@@ -514,37 +631,75 @@ def _sample_stage2(model, conditioning, latent, cine_linx, segment_index):
         )
         return _result_item(sampled, 1), sampling_report + "; stage2=FULL"
 
-    from .iamccs_minimax_h3_pixel_refine_variant import _provider
-    loop = _provider("nodes_looping_sampler")
-    if not loop.per_row_mask_is_continuous():
-        raise RuntimeError(
-            "FAST LATENT Stage-2 windowed refine requires the current H3 continuous per-row mask contract. "
-            "Update ComfyUI rather than falling back to the OOM-prone full-window sampler."
-        )
-    common = _provider("common")
-    original_video, original_audio = common.unpack_av(latent, "FAST LATENT Stage-2 source")
+    # PSkf Stage 2 stays on one coherent denoise trajectory. IAMCCS evaluates
+    # H3-aligned windows at every sigma step and pyramid-blends the predictions
+    # before advancing the sampler. This is an internal provider: no external
+    # node registry lookup or external provider dependency. First-pass PSkf remains
+    # deliberately untouched.
+    windows_provider = _provider("nodes_windows")
     total_frames = common.latents_to_frames(int(original_video.shape[2]))
-    length, overlap, _, _, windows = _provider("nodes_windows")._plan(
-        total_frames, int(window_frames), int(overlap_frames), "standard_static"
+    length, overlap, _total_f, _total_t, windows = windows_provider._plan(
+        total_frames,
+        int(window_frames),
+        int(overlap_frames),
+        windows_provider.ContextSchedules.STATIC_STANDARD,
+    )
+    patched = windows_provider.MMH3ContextWindows.execute(
+        model=active_model,
+        context_length=int(length),
+        context_overlap=int(overlap),
+        fuse_method=windows_provider.ContextFuseMethods.PYRAMID,
+        context_schedule=windows_provider.ContextSchedules.STATIC_STANDARD,
+        context_stride=1,
+        freenoise=False,
+        split_conds_to_windows=False,
+        # Full-timeline accumulators on GPU leave too little activation headroom
+        # on 12 GB cards and trigger catastrophic WDDM paging. CPU accumulation
+        # preserves the same values and transfers only window-sized predictions.
+        accumulator_device="cpu",
+    )
+    joint_model = _result_item(patched, 0)
+    joint_label = _result_item(patched, 1)
+    joint_guider = _result_item(
+        BasicGuider.execute(model=joint_model, conditioning=conditioning), 0
     )
     LOG.info(
-        "FAST LATENT 2-PASS Stage-2 windowed refine | policy=%s | passes=%d | window=%df | overlap=%df | total=%df | %s",
-        policy_source, len(windows), common.latents_to_frames(length),
-        common.frame_at_latent(overlap) if overlap else 0, total_frames, sampling_report,
+        "FAST LATENT 2-PASS Stage-2 PSkf joint refine | provider=IAMCCS_INTERNAL | "
+        "policy=%s | passes=%d | window=%df/%dL | overlap=%df/%dL | total=%df | %s | %s",
+        policy_source,
+        len(windows),
+        common.latents_to_frames(int(length)),
+        int(length),
+        common.frame_at_latent(int(overlap)) if overlap else 0,
+        int(overlap),
+        int(total_frames),
+        joint_label,
+        sampling_report,
     )
-    sampled = loop.MMH3LoopingSampler.execute(
-        noise=noise, guider=guider, sampler=sampler, sigmas=sigmas,
-        cond_set={"conds": [conditioning], "encoded_keyframes": guides}, latent=latent,
-        chunk_frames=int(window_frames), overlap_frames=int(overlap_frames),
-        carry="mask", overlap_strength_video=1.0, overlap_strength_audio=1.0,
-        audio_denoise_mask=torch.zeros((1, 1, 1)),
-    )[0]
-    video, audio = common.unpack_av(sampled, "FAST LATENT Stage-2 refined")
+    sampled = _result_item(
+        SamplerCustomAdvanced.execute(
+            noise=noise,
+            guider=joint_guider,
+            sampler=sampler,
+            sigmas=sigmas,
+            latent_image=latent,
+        ),
+        1,
+    )
+    video, audio = common.unpack_av(sampled, "FAST LATENT Stage-2 joint refined")
     if tuple(video.shape) != tuple(original_video.shape):
-        raise RuntimeError("FAST LATENT Stage-2 windowing changed the video latent extent")
+        raise RuntimeError("FAST LATENT Stage-2 joint refine changed the video latent extent")
     if original_audio is not None and not torch.equal(original_audio.cpu(), audio.cpu()):
-        raise RuntimeError("FAST LATENT Stage-2 windowing changed the locked H3 audio latent")
-    return sampled, sampling_report + f"; stage2_window={common.latents_to_frames(length)}f/{len(windows)}pass"
+        raise RuntimeError(
+            "FAST LATENT Stage-2 joint refine changed the locked H3 audio latent; "
+            "refusing a desynchronised delivery"
+        )
+    return (
+        sampled,
+        sampling_report
+        + "; stage2=PSKF_JOINT_PER_STEP"
+        + f"; stage2_window={common.latents_to_frames(int(length))}f/{len(windows)}pass",
+    )
 
 
 class IAMCCS_MiniMaxH3FastLatent2PassR41:
@@ -703,12 +858,15 @@ class IAMCCS_MiniMaxH3FastLatent2PassR41:
             mm.unload_all_models()
             mm.soft_empty_cache()
 
+            stage2_first, stage2_last = _stage2_endpoint_images(
+                native_frames, first_frame_override, last_frame_override,
+            )
             target_model, target_conditioning, conditioning_report = _target_conditioning(
                 model, clip, video_vae, audio_vae, cine_linx, index,
-                stage_width, stage_height, stage1_conditioning,
+                stage_width, stage_height, stage1_conditioning, sampled_latent,
                 bridge_frame=bridge_frame,
-                first_frame_override=first_frame_override,
-                last_frame_override=last_frame_override,
+                first_frame_override=stage2_first,
+                last_frame_override=stage2_last,
                 ref_image_1=ref_image_1, ref_image_2=ref_image_2,
                 ref_image_3=ref_image_3, ref_image_4=ref_image_4,
                 ref_video=ref_video, ref_video_audio=ref_video_audio, ref_audio=ref_audio,
@@ -758,6 +916,7 @@ class IAMCCS_MiniMaxH3FastLatent2PassR41:
         _write_segment_metadata(output, frames, 24, "fast_latent_2pass_audio_locked",
                                 provenance=provenance, source_workflow=source_workflow)
         preview = output
+        preview_paths = [output]
         if index == total - 1:
             paths = [root / f"segment_{part + 1:04d}.mp4" for part in range(total)]
             preview = root / "final_film.mp4"
@@ -775,6 +934,8 @@ class IAMCCS_MiniMaxH3FastLatent2PassR41:
                             "segment_files": [path.name for path in paths], "shotplan": plan},
                 source_workflow=source_workflow,
             )
+            # Show the final upscaled checkpoint and the concatenated master.
+            preview_paths.append(preview)
 
         queued = False
         if bool(queue_next_segment) and index + 1 < total:
@@ -792,10 +953,10 @@ class IAMCCS_MiniMaxH3FastLatent2PassR41:
             "ui": {
                 "text": [report],
                 "images": [{
-                    "filename": preview.name,
-                    "subfolder": preview.parent.relative_to(Path(folder_paths.get_output_directory())).as_posix(),
+                    "filename": item.name,
+                    "subfolder": item.parent.relative_to(Path(folder_paths.get_output_directory())).as_posix(),
                     "type": "output",
-                }],
+                } for item in preview_paths],
                 "animated": (True,),
             },
             "result": (str(preview), report),

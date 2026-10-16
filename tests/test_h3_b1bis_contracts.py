@@ -72,6 +72,93 @@ class B1bisModes(unittest.TestCase):
 
 
 class B1bisAudio(unittest.TestCase):
+    def multishot_plan(self, audio_segments):
+        lengths = [81, 92, 106, 81]
+        starts = [0, 81, 173, 279]
+        rows = [
+            {'id': f'shot_{index}', 'type': 'image', 'imageFile': f'{index}.png',
+             'start': start, 'length': length, 'duration_frames': length,
+             'transition': 'start' if index == 0 else 'hard_cut'}
+            for index, (start, length) in enumerate(zip(starts, lengths))
+        ]
+        return CORE.build_shotplan(
+            timeline_data={'rows': rows, 'audioSegments': audio_segments, 'fps': 24, 'duration_seconds': 15},
+            global_prompt='Four independent camera angles.', duration_seconds=15,
+            task_mode='longvid_multishot_hardcut', audio_mode='h3_custom_audio_drive',
+            width=640, height=384,
+        )
+
+    def test_multishot_unlinked_master_follows_every_camera_angle(self):
+        segments = [
+            {'id': 'master', 'audio_input': 1, 'start_seconds': 0, 'duration_seconds': 15},
+        ]
+        result = self.multishot_plan(segments)
+        rate = 24000
+        audio = {'sample_rate': rate, 'waveform': torch.linspace(-0.5, 0.5, 15 * rate).view(1, 1, -1)}
+        linx = {'resources': {'iamccs_minimax_h3_shotplan': result,
+                              'cine_audio_timeline_json': {'fps': 24, 'audioSegments': segments}}}
+        _, master, selected, report = TIMELINE.mix_audio_timeline(
+            linx, 0, [audio], target_sample_rate=rate, headroom='none')
+        self.assertEqual(report['mapping_policy'], 'absolute_timeline')
+        self.assertEqual([c['timeline_start_frame'] for c in result['chunks']], [0])
+        self.assertEqual(master['waveform'].shape[-1], 15 * rate)
+        torch.testing.assert_close(master['waveform'], audio['waveform'], rtol=0, atol=0)
+        self.assertEqual(selected['waveform'][0, 0, 0], audio['waveform'][0, 0, 0])
+
+    def test_multishot_single_audio_socket_is_a_global_master(self):
+        result = self.multishot_plan([])
+        audio = {'sample_rate': 24000, 'waveform': torch.full((1, 1, 360000), 0.2)}
+        _, master, _, report = TIMELINE.mix_audio_timeline(
+            result, 0, [audio], target_sample_rate=24000, headroom='none')
+        torch.testing.assert_close(master['waveform'], audio['waveform'], rtol=0, atol=0)
+        self.assertTrue(report['fallback_one_input_per_chunk'])
+
+    def test_multishot_linked_dialogue_does_not_bleed_into_other_angles(self):
+        lengths = [81, 92, 106, 81]
+        starts = [0, 81, 173, 279]
+        segments = [
+            {'id': f'line_{index}', 'audio_input': 1 if index % 2 == 0 else 2,
+             'linkedVisualId': f'shot_{index}', 'start': start, 'length': length}
+            for index, (start, length) in enumerate(zip(starts, lengths))
+        ]
+        result = self.multishot_plan(segments)
+        rate = 24000
+        a = {'sample_rate': rate, 'waveform': torch.full((1, 1, 15 * rate), 0.25)}
+        b = {'sample_rate': rate, 'waveform': torch.full((1, 1, 15 * rate), -0.5)}
+        linx = {'resources': {'iamccs_minimax_h3_shotplan': result,
+                              'cine_audio_timeline_json': {'fps': 24, 'audioSegments': segments}}}
+        _, _, _, report = TIMELINE.mix_audio_timeline(
+            linx, 0, [a, b], target_sample_rate=rate, headroom='none')
+        by_chunk = {}
+        for assignment in report['mapped_assignments']:
+            by_chunk.setdefault(assignment['chunk_index'], []).append(assignment['segment_id'])
+        self.assertEqual(by_chunk, {0: ['line_0', 'line_1', 'line_2', 'line_3']})
+
+    def test_long_multishot_master_removes_hidden_audio_once(self):
+        rate = 24000
+        rows = [{'id': f'shot_{i}', 'type': 'image', 'imageFile': f'{i}.png',
+                 'start': i * 120, 'length': 120} for i in range(7)]
+        result = CORE.build_shotplan(
+            timeline_data={'rows': rows, 'fps': 24, 'duration_seconds': 35},
+            global_prompt='Dialogue across views.', duration_seconds=35,
+            task_mode='longvid_multishot_hardcut', audio_mode='h3_custom_audio_drive',
+            width=640, height=384,
+        )
+        source = {'sample_rate': rate, 'waveform': torch.linspace(-0.4, 0.4, 35 * rate).view(1, 1, -1)}
+        segments = [{'id': 'master', 'audio_input': 1, 'start_seconds': 0, 'duration_seconds': 35}]
+        linx = {'resources': {'iamccs_minimax_h3_shotplan': result,
+                              'cine_audio_timeline_json': {'fps': 24, 'audioSegments': segments}}}
+        _, master, selected, _ = TIMELINE.mix_audio_timeline(
+            linx, 1, [source], target_sample_rate=rate, headroom='none')
+        torch.testing.assert_close(master['waveform'], source['waveform'], rtol=0, atol=0)
+        chunk = result['chunks'][1]
+        delivered, _, _ = DRIVE.IAMCCS_MiniMaxH3AudioOutputPolicyR21().select(
+            h3_audio=None, video_frames=torch.zeros(chunk['visible_frame_count'], 1, 1, 3),
+            cine_linx=result, segment_index=1, locked_audio_slice=selected)
+        start = chunk['timeline_start_frame'] * 1000
+        end = start + chunk['visible_frame_count'] * 1000
+        torch.testing.assert_close(delivered['waveform'], source['waveform'][..., start:end], rtol=0, atol=0)
+
     def test_locked_flf_does_not_insert_silence_handles(self):
         rows = [{'id': str(i), 'type': 'image', 'imageFile': f'{i}.png',
                  'start': i * 120, 'length': 120} for i in range(3)]

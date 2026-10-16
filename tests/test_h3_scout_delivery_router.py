@@ -27,7 +27,7 @@ class ScoutDeliveryRouterTests(unittest.TestCase):
         self.assertIn("ref2vid_lipsync", reason)
 
     def test_joint_and_continuous_engines_preserve_original_branch(self):
-        for mode in ("keyframe_joint_native", "latent_go_ahead", "longvid_continuous_guided", "viggle_animation"):
+        for mode in ("longvid_multishot_hardcut", "keyframe_joint_native", "latent_go_ahead", "longvid_continuous_guided", "longvid_keyframe_continuous", "viggle_animation"):
             prefix, reason = self.selection(mode)
             self.assertEqual(prefix, "original")
             self.assertIn("latent history", reason)

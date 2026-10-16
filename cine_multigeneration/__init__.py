@@ -2321,9 +2321,14 @@ def _load_audio_waveform_file(path: str) -> Tuple[torch.Tensor, int]:
         return waveform.unsqueeze(0).contiguous(), int(sample_rate or 44100)
     except Exception as exc:
         torch_exc = exc
+    try:
+        from .audio_decode import decode_audio_with_ffmpeg
+        return decode_audio_with_ffmpeg(path)
+    except Exception as exc:
+        ffmpeg_exc = exc
     raise ValueError(
         f"IAMCCS Shotboard Video Editor: could not load audio file {path!r}; "
-        f"wav={wav_exc!r}; soundfile={sf_exc!r}; torchaudio={torch_exc!r}"
+        f"wav={wav_exc!r}; soundfile={sf_exc!r}; torchaudio={torch_exc!r}; ffmpeg={ffmpeg_exc!r}"
     )
 
 

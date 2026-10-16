@@ -8,10 +8,9 @@ const source = fs.readFileSync(
 
 for (const contract of [
   'const isEmptyImageRequest = isImageRequest && !String(narrativeRequest || "").trim();',
-  'if (narrativeRequest !== null && !String(narrativeRequest).trim() && !isImageRequest)',
+  'if (narrativeRequest !== null && !String(narrativeRequest).trim() && !isImageRequest && !isSwapCharRequest)',
   'Add at least one AI reference image before using an empty image REQUEST.',
-  'Preserve the reference medium, photographic or illustrative style',
-  'if (!String(project.request || "").trim() && !aiVisualFiles.length)',
+  'Preserve their medium, photographic or illustrative style',
 ]) {
   if (!source.includes(contract)) throw new Error(`Missing empty-image-request contract: ${contract}`);
 }

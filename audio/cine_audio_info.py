@@ -111,6 +111,10 @@ def _dialogue_speaker_stem_start_frames(dialogue: Dict[str, Any], fps: float) ->
     template = dialogue.get("audio_board_template") if isinstance(dialogue.get("audio_board_template"), dict) else {}
     if bool(settings.get("speaker_stems_zero_start") or template.get("speakerStemsZeroStart")):
         return {key: 0 for key in _speaker_order(dialogue)}
+    # Absolute-time SRTs already put the leading silence inside each WAV.
+    # Only locally rebased media needs a second, external timeline offset.
+    if not _speaker_stem_srt_local_zero(dialogue):
+        return {key: 0 for key in _speaker_order(dialogue)}
     explicit = dialogue.get("speaker_stem_start_frames") if isinstance(dialogue.get("speaker_stem_start_frames"), dict) else {}
     if explicit:
         out = {}

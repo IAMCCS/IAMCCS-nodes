@@ -232,7 +232,13 @@ class IAMCCS_MiniMaxH3FaceDeliveryR38B:
                canvas_height, crop_factor, confidence, steps, denoise, window_frames, window_overlap,
                strength_small_face, strength_large_face, blend, paste_region, feather, sam_model=None,
                face_mode="from_shotboard", max_faces=4, min_face_coverage=0.10):
-        face = _resolve_shotplan(cine_linx).get("face_detailer_settings", {})
+        shotplan = _resolve_shotplan(cine_linx)
+        face = shotplan.get("face_detailer_settings", {})
+        task_mode = str(shotplan.get("task_mode", "") or "").strip().lower()
+        programme_continuous = task_mode in {
+            "longvid_keyframe_continuous",
+            "longvid_masked_loop_guided", "masked_loop_guided", "long_masked_loop_guided",
+        }
         if not face.get("enabled", False):
             return sampled_latent, native_frames, "Face delivery OFF: native inputs untouched; no models loaded."
         if not native_saved_report:
@@ -290,20 +296,33 @@ class IAMCCS_MiniMaxH3FaceDeliveryR38B:
         source_v, source_a = common.unpack_av(sampled_latent, "face source")
         source_count = common.latents_to_frames(source_v.shape[2])
         trim, visible = int(context_trim_frames), len(native_frames)
-        if trim < 0 or trim + visible > source_count:
+        programme_frame_source = bool(
+            programme_continuous and (trim < 0 or trim + visible > source_count)
+        )
+        if not programme_frame_source and (trim < 0 or trim + visible > source_count):
             raise ValueError("Face delivery received an inconsistent native context trim.")
         LOG.info(
-            "R38B Face delivery | native context retained | %df | canvas=%dx%d | steps=%d | "
+            "R38B Face delivery | %s | latent=%df visible=%df | canvas=%dx%d | steps=%d | "
             "denoise=%.3f | mode=%s | max_faces=%d | min_coverage=%.2f",
-            source_count, canvas_width, canvas_height, steps, denoise, resolved_mode, requested_faces, min_face_coverage,
+            "programme native-frame master" if programme_frame_source else "native latent context retained",
+            source_count, visible, canvas_width, canvas_height, steps, denoise, resolved_mode, requested_faces, min_face_coverage,
         )
         mm.unload_all_models()
         mm.soft_empty_cache()
         try:
-            # R43 face isolation: decode native latent but never feed LongVid/Motion-Context
-            # technical head/padding into the second H3 FaceRefine pass.
-            source_full = nodes.VAEDecode().decode(vae=video_vae, samples=sampled_latent)[0]
-            source = source_full[trim:trim + visible].clone()
+            # R43 face isolation normally decodes the accepted native latent and
+            # removes only technical head/padding. R44.8 Continuous AV is different:
+            # the outer branch returns the COMPLETE joined programme as native_frames
+            # while sampled_latent intentionally remains only the last technical FL2VA
+            # interval. In that explicit long-form contract, track/refine the accepted
+            # programme frames once instead of decoding an unrelated short tail latent.
+            if programme_frame_source:
+                source_full = None
+                source = native_frames.clone()
+                trim = 0
+            else:
+                source_full = nodes.VAEDecode().decode(vae=video_vae, samples=sampled_latent)[0]
+                source = source_full[trim:trim + visible].clone()
             if len(source) != visible:
                 raise ValueError("Face delivery could not isolate the native visible frame range.")
 
@@ -483,7 +502,7 @@ class IAMCCS_MiniMaxH3FaceDeliveryR38B:
             # The upscaler must receive the stitched video, not the untouched native latent.
             # Restore only the refined VISIBLE pixels into the original full native extent.
             upscale = bool(face_plan.get("upscale_enabled")) and face_plan.get("upscale_mode", "off") != "off"
-            if upscale and accepted_indices:
+            if upscale and accepted_indices and not programme_frame_source:
                 stitched_full = source_full.clone()
                 stitched_full[trim:trim + visible] = stitched
                 delivery = inject_class().run(
@@ -491,9 +510,16 @@ class IAMCCS_MiniMaxH3FaceDeliveryR38B:
                 )[0]
                 del stitched_full
             else:
+                # Programme-level Continuous AV has no single latent whose temporal
+                # extent equals the joined master. Delivery routes that consume IMAGE
+                # (native / RTX / editor) therefore use delivery_frames; keep the last
+                # sampled latent unchanged as the continuity/checkpoint token. This is
+                # deliberately isolated from ordinary I2V/FLF behaviour.
                 delivery = dict(sampled_latent)
 
-            del stitched, composite_refine, source_refine, source, source_full
+            del stitched, composite_refine, source_refine, source
+            if source_full is not None:
+                del source_full
             out_v, out_a = common.unpack_av(delivery, "face delivery")
             if out_v.shape != source_v.shape or (
                 source_a is not None and not torch.equal(out_a, source_a)
@@ -503,6 +529,7 @@ class IAMCCS_MiniMaxH3FaceDeliveryR38B:
             delivery["iamccs_r38b_face_applied"] = True
             delivery["iamccs_face_mode"] = resolved_mode
             delivery["iamccs_face_subjects"] = len(accepted_indices)
+            delivery["iamccs_face_programme_frame_source"] = bool(programme_frame_source)
             accepted_desc = ",".join(str(v) for v in accepted_indices) if accepted_indices else "none"
             skipped_desc = "; ".join(skipped) if skipped else "none"
             return delivery, delivery_frames, (
@@ -511,8 +538,9 @@ class IAMCCS_MiniMaxH3FaceDeliveryR38B:
                 f"tracker ceiling={detector_ceiling}; "
                 f"{'single-face fallback; ' if resolved_mode == 'multi_face' and detector_ceiling == 1 else ''}"
                 f"skipped={skipped_desc}; "
-                f"H3 synthetic tail pad={face_pad}f; native LongVid context/padding excluded; "
-                "audio/context timing unchanged."
+                f"H3 synthetic tail pad={face_pad}f; "
+                f"source={'joined programme frames' if programme_frame_source else 'native latent visible range'}; "
+                "native LongVid context/padding excluded; audio/context timing unchanged."
             )
         finally:
             mm.unload_all_models()

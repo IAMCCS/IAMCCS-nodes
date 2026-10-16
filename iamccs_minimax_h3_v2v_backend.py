@@ -520,7 +520,7 @@ class IAMCCS_CineInfoH3V2V:
         return {
             "required": {
                 "cine_linx": (SUPERNODE_LINX_TYPE,),
-                "source_video": ("IMAGE",),
+                "source_video": ("IMAGE", {"lazy": True}),
                 "source_fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 0.001}),
                 "guide_mode": (GUIDE_MODE_OVERRIDES, {"default": "from_shotboard"}),
                 "source_range_policy": (SOURCE_RANGE_OVERRIDES, {"default": "from_shotboard"}),
@@ -535,13 +535,14 @@ class IAMCCS_CineInfoH3V2V:
                 "reference_role_4": (IMAGE_ROLES, {"default": "style"}),
             },
             "optional": {
-                "source_audio": ("AUDIO",),
-                "reference_image_1": ("IMAGE",),
-                "reference_image_2": ("IMAGE",),
-                "reference_image_3": ("IMAGE",),
-                "reference_image_4": ("IMAGE",),
-                "depth_guide": ("IMAGE", {"tooltip": "Preprocess upstream with Depth Anything V2 when the selected guide mode requires depth."}),
-                "pose_guide": ("IMAGE", {"tooltip": "Preprocess upstream with DWPose when the selected guide mode requires pose."}),
+                "active_mode_only": ("BOOLEAN", {"default": False}),
+                "source_audio": ("AUDIO", {"lazy": True}),
+                "reference_image_1": ("IMAGE", {"lazy": True}),
+                "reference_image_2": ("IMAGE", {"lazy": True}),
+                "reference_image_3": ("IMAGE", {"lazy": True}),
+                "reference_image_4": ("IMAGE", {"lazy": True}),
+                "depth_guide": ("IMAGE", {"lazy": True, "tooltip": "Preprocess upstream with Depth Anything V2 when the selected guide mode requires depth."}),
+                "pose_guide": ("IMAGE", {"lazy": True, "tooltip": "Preprocess upstream with DWPose when the selected guide mode requires pose."}),
             },
         }
 
@@ -549,6 +550,27 @@ class IAMCCS_CineInfoH3V2V:
     RETURN_NAMES = ("cine_linx",)
     FUNCTION = "attach"
     CATEGORY = CATEGORY
+
+    def check_lazy_status(self, cine_linx, active_mode_only=False, guide_mode="from_shotboard", **kwargs):
+        media = ["source_video", "source_audio", "reference_image_1", "reference_image_2",
+                 "reference_image_3", "reference_image_4", "depth_guide", "pose_guide"]
+        if active_mode_only:
+            plan = _resolve_shotplan(cine_linx)
+            if plan.get("task_mode") != "v2va_object_swap":
+                return []
+            config = _resolve_v2v_config(plan, {"guide_mode": guide_mode})
+            roles = plan.get("reference_roles", [])
+            media = ["source_video"]
+            if config["audio_behavior"] != AUDIO_BEHAVIOR_NATIVE:
+                media.append("source_audio")
+            media.extend(f"reference_image_{index+1}" for index in range(4)
+                         if index >= len(roles) or roles[index] != "disabled")
+            if config["guide_mode"] in {"raw_depth", "raw_depth_pose"}:
+                media.append("depth_guide")
+            if config["guide_mode"] in {"raw_pose", "raw_depth_pose"}:
+                media.append("pose_guide")
+        return [name for name in media
+                if name in kwargs and kwargs.get(name) is None]
 
     def attach(
         self,
@@ -573,9 +595,12 @@ class IAMCCS_CineInfoH3V2V:
         reference_image_4=None,
         depth_guide=None,
         pose_guide=None,
+        active_mode_only=False,
     ):
         if not isinstance(cine_linx, dict):
             raise ValueError("IAMCCS Cine Info H3 V2V requires a valid cine_linx input")
+        if active_mode_only and _resolve_shotplan(cine_linx).get("task_mode") != "v2va_object_swap":
+            return (cine_linx,)
         if not torch.is_tensor(source_video) or source_video.ndim != 4 or int(source_video.shape[0]) < 1:
             raise ValueError("IAMCCS Cine Info H3 V2V requires a non-empty source_video IMAGE batch")
         shotplan = _resolve_shotplan(cine_linx)
@@ -598,6 +623,10 @@ class IAMCCS_CineInfoH3V2V:
         _validate_guides(resolved, depth_guide, pose_guide)
         references = [reference_image_1, reference_image_2, reference_image_3, reference_image_4]
         roles = [reference_role_1, reference_role_2, reference_role_3, reference_role_4]
+        if active_mode_only:
+            configured_roles = shotplan.get("reference_roles", [])
+            roles = [configured_roles[index] if index < len(configured_roles) else role
+                     for index, role in enumerate(roles)]
         picture_items = []
         for source_slot, (image, role) in enumerate(zip(references, roles), start=1):
             resolved_role = str(role or "subject_identity").strip().lower()

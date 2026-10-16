@@ -8,7 +8,47 @@ import { createPrompterInspector } from "./iamccs_h3_prompter_inspector.js";
 
 const NODE_TYPE = "IAMCCS_Prompter";
 
+const EMPTY_CHARACTER_SHEET_CONTRACT = `GOAL: create one photorealistic character reference sheet from <Picture 1>.
+
+Use the vision observations to replace <CHARACTER> with a concise subject label grounded only in <Picture 1>; never assume a specific person, gender, costume or identity.
+
+subject_definitions:
+<CHARACTER> character from <Picture 1> META for composition.
+
+summary:
+[reference generation] static image of a highly realistic photorealistic character reference sheet. Keep the exact same character identity, facial features, hairstyle, body proportions, clothing, colors and overall visual characteristics of <Picture 1>. Transform only the presentation into a realistic photographic character sheet while preserving the character's exact appearance.
+
+retention_analysis:
+<CHARACTER>: fully_preserved.
+
+detailed_description:
+The target is one static, highly realistic photorealistic character reference sheet showing <CHARACTER> from multiple angles with detailed facial and material references. Every element is cleanly separated by generous white space and does not overlap.
+
+The character looks like a real human photographed in a professional studio: realistic skin pores and subtle imperfections, natural facial anatomy, individual hair strands, realistic eyes, lips and ears, physically accurate lighting, realistic fabric and authentic material textures. The exact identity from <Picture 1> remains consistent in every view, including facial structure, eye shape, nose, lips, jawline, hairstyle, skin tone and distinctive features.
+
+The face remains highly detailed and recognizable in full-body and distant views; it never becomes blurry, generic, simplified, distorted or featureless.
+
+[Shot 1] static image. <CHARACTER> on a clean pure-white studio background as one professional photorealistic character sheet:
+1. LEFT: one realistic head-and-chest portrait close-up with highly detailed face, pores, fine facial hair, eyelashes, eye reflections, eyebrows, lips, subtle imperfections and individual hair strands.
+2. CENTER: three clearly separated full-body photorealistic views side by side: straight front, straight side profile and straight back. Preserve realistic anatomy, natural proportions, clothing construction, fabric texture, stitching, folds and seams. Keep the face sharp and recognizable at full-body scale.
+3. RIGHT: six realistic circular macro details in a narrow 2x3 grid: one eye; mouth and lips; ear; hair color and strands; skin texture and natural color; outfit fabric, stitching and material.
+
+Overall quality: ultra-realistic studio photography, sharp focus, high micro-detail, consistent identity, accurate colors, physically accurate materials, clean white background and non-overlapping elements. Avoid cartoon or painterly styling, plastic skin, artificial smoothing and distorted facial features.`;
+
+const SWAPCHAR_REQUEST = "Replace the main person in Video 1 with the character in Picture 1, retaining performance, framing and original audio.";
+const SWAPCHAR_PROMPT = "r34l1sm\nReplace the main person in <Video 1> with the single character in <Picture 1>, preserving that character's face, hair, proportions, clothing and materials. Match the source person's position, scale, pose, gaze, expressions, mouth movements and motion. Preserve the source camera, environment and original audio. Render one continuous scene in the source framing.";
+const VFX_EDIT_PROMPT = "vfx_edit: Animate clearly visible translucent fog drifting from left to right between the forest trees behind the knight, while preserving the knight's identity, armor, expressions, performance, camera motion, framing and forest layout.";
+const isEditMode = mode => ["v2va_face_swap_lora","ref2va_vfx_edit"].includes(mode);
+const swapcharSignature = (project, files) => JSON.stringify([project.request||"",project.swapchar_variant||"identity",project.edit_video||null,project.edit_backend_video||null,project.edit_backend_images||[],project.edit_video_source||"auto",files.slice(0,2).map(f=>[f.path||"",f.file?.size||f.size||0,f.file?.lastModified||f.last_modified||0])]);
+
 const MODE_META = {
+    ref2va_vfx_edit: {label:"VFX Edit",subtitle:"Ref2VA · aligned source-video AddGuide · visual effects",
+        sections:[["vfx_prompt","VFX EDIT PROMPT","One concise English edit sentence beginning with vfx_edit:; preserve unrelated source elements."]]},
+    v2va_face_swap_lora: {
+        label: "SwapChar",
+        subtitle: "Character identity from Picture 1 · source Video 1 and original audio",
+        sections: [["swap_prompt", "CHARACTER SWAP PROMPT", "Reference identity replaces the source person; camera, performance and original audio stay with Video 1."]],
+    },
     reference_image: {
         label: "IMG GENERATOR",
         subtitle: "One reference image / combined reference sheet · H3 REF2VA still",
@@ -126,6 +166,7 @@ const MODE_META = {
 };
 
 const MODE_ALIASES = {
+    swapchar: "v2va_face_swap_lora",
     v2v_object_swap: "v2va_object_swap",
     v2va: "v2va_object_swap",
     object_swap: "v2va_object_swap",
@@ -320,7 +361,7 @@ Only the named speaker moves their lips for each line. Keep speaker IDs stable i
 ];
 
 function widget(node, name) {
-    return node.widgets?.find((item) => item.name === name);
+    return node?.widgets?.find((item) => item.name === name);
 }
 
 function setWidget(node, name, value) {
@@ -409,9 +450,14 @@ function safeProject(raw) {
             name: String(item?.name || ""), path: String(item?.path || ""), mime_type: String(item?.mime_type || "image/png"),
             size: Number(item?.size || 0), last_modified: Number(item?.last_modified || 0),
         })).filter((item) => item.name && item.path) : [],
+        swapchar_variant: parsed.task_mode === "ref2va_vfx_edit" ? "vfx" : (parsed.swapchar_variant === "environment" ? "environment" : "identity"),
+        edit_video: parsed.edit_video && typeof parsed.edit_video === "object" ? {...parsed.edit_video} : null,
+        edit_video_source: ["auto","prompter","backend"].includes(parsed.edit_video_source) ? parsed.edit_video_source : "auto",
+        edit_backend_video: parsed.edit_backend_video || null,
         visual_story_relationship: String(parsed.visual_story_relationship || ""),
         visual_story_plan: parsed.visual_story_plan && typeof parsed.visual_story_plan === "object" ? { ...parsed.visual_story_plan } : {},
-        request: cleanRequest,
+        request: canonicalMode(parsed.task_mode) === "v2va_face_swap_lora" ? (cleanRequest || SWAPCHAR_REQUEST) : cleanRequest,
+        swapchar_ai_signature: String(parsed.swapchar_ai_signature || ""),
         final_prompt_override_enabled: parsed.final_prompt_override_enabled === true,
         final_prompt_override: String(parsed.final_prompt_override || ""),
         final_local_prompt_override_enabled: parsed.final_local_prompt_override_enabled === true,
@@ -786,6 +832,8 @@ function composePrompt(project) {
     const mode = canonicalMode(project.task_mode);
     const value = (key) => String(project.sections?.[key] || "").trim();
     if (!MODE_META[mode].sections.some(([key]) => value(key))) return "";
+    if (mode === "v2va_face_swap_lora") return value("swap_prompt");
+    if (mode === "ref2va_vfx_edit") return value("vfx_prompt");
     const join = (keys) => keys.map(value).filter(Boolean).join("\n");
     const joinBasePositive = (keys) => uniquePromptParts(keys.map((key) => key === "dialogue" ? value(key) : positiveH3Text(value(key)))).join("\n");
     if (mode === "ref2va" || mode === "reference_image") {
@@ -965,7 +1013,12 @@ function mountPrompter(node) {
     project.injection_target = String(widget(node, "injection_target")?.value || project.injection_target);
     project.writing_mode = String(widget(node, "writing_mode")?.value || project.writing_mode);
     project.merge_policy = String(widget(node, "merge_policy")?.value || project.merge_policy);
+    if (project.task_mode === "v2va_face_swap_lora") {
+        project.request ||= SWAPCHAR_REQUEST;
+        project.sections.swap_prompt ||= SWAPCHAR_PROMPT;
+    }
 
+    if (project.task_mode === "ref2va_vfx_edit") project.sections.vfx_prompt ||= VFX_EDIT_PROMPT;
     const root = el("div", "iamccs-pr-root");
     root.innerHTML = `
         <style>
@@ -1067,7 +1120,7 @@ function mountPrompter(node) {
     const targetHint = el("div", "iamccs-pr-hint");
     left.appendChild(targetHint);
     const injectBtn = button("INJECT → SHOTBOARD", "iamccs-pr-inject");
-    injectBtn.title = "Write the composed prompt into the connected MiniMax Shotboard. A connected Prompter never overrides Shotboard during Queue; the visible Shotboard boxes are final truth.";
+    injectBtn.title = "Transfer the current GLOBAL and requested LOCAL prompts into the connected MiniMax Shotboard. Does not run AI analysis, rewrite prompts or start Queue. The visible Shotboard boxes are final truth.";
     const injectStatus = el("div", "iamccs-pr-inject-status", "Connect CineLinX to a MiniMax Shotboard, choose a target, then inject.");
     left.append(injectBtn, injectStatus);
     const audioPanel = el("section", "iamccs-pr-ai show");
@@ -1236,7 +1289,7 @@ function mountPrompter(node) {
     const aiVisionList = aiVisionModel;
     aiVisionList.setAttribute("aria-label", "Installed vision model (choose an image-capable model)");
     const visionLabel = fieldLabel("Vision model · image reader", aiVisionModel,
-        "Reads references first; the prompt writer receives its observations. Choose an image-capable model. Blank uses the writer directly.");
+        "Choose an image-capable model. Blank uses the writer for image reading too. SwapChar always reads Picture 1 before composing the swap prompt.");
     const modelRow = el("div", "iamccs-pr-ai-modelrow"); modelRow.append(aiModel, aiModelPicker, refreshModelsBtn); modelLabel.appendChild(modelRow);
     aiRow1.append(providerLabel, modelLabel, visionLabel);
     const aiRow2 = el("div", "iamccs-pr-ai-row");
@@ -1642,7 +1695,9 @@ function mountPrompter(node) {
                     composition:"COMPOSITION", style:"STYLE", reference:"GENERAL REFERENCE",
                 })[value]; role.appendChild(option);
             });
-            role.value = String(roles[slot] || (project.task_mode === "reference_image" ? "reference" : index === 0 ? "opening" : index === 1 ? "closing" : "reference"));
+            role.value = project.task_mode === "v2va_face_swap_lora" ? (index === 0 ? "identity" : "composition")
+                : String(roles[slot] || (project.task_mode === "reference_image" ? "reference" : index === 0 ? "opening" : index === 1 ? "closing" : "reference"));
+            role.disabled = project.task_mode === "v2va_face_swap_lora";
             role.onchange = () => { visualRolesForTarget()[slot] = role.value; commit(); };
             meta.appendChild(role);
             const remove = button("×", "iamccs-pr-ai-remove");
@@ -1673,10 +1728,11 @@ function mountPrompter(node) {
     };
     const buildAIImagePayload = async () => {
         const roles = visualRolesForTarget();
-        return Promise.all(aiVisualFiles.map(async (item, index) => ({
+        const files = project.task_mode === "ref2va_vfx_edit" ? [] : project.task_mode === "v2va_face_swap_lora" ? aiVisualFiles.slice(0, project.swapchar_variant === "environment" ? 2 : 1) : aiVisualFiles;
+        return Promise.all(files.map(async (item, index) => ({
             slot: index + 1,
             name: item.file.name,
-            role: project.task_mode === "reference_image" ? "reference" : String(roles[String(index + 1)] || (index === 0 ? "opening" : index === 1 ? "closing" : "reference")),
+            role: project.task_mode === "v2va_face_swap_lora" ? (index === 0 ? "identity" : "composition") : project.task_mode === "reference_image" ? "reference" : String(roles[String(index + 1)] || (index === 0 ? "opening" : index === 1 ? "closing" : "reference")),
             mime_type: item.file.type || "image/png",
             data: await ensureImageData(item),
             path: item.path || "",
@@ -1904,13 +1960,66 @@ function mountPrompter(node) {
         body.appendChild(apply); card.append(head, body, el("div", "iamccs-pr-tip", "This tool writes one editable sentence into the visible camera-related box. APPLY replaces only that box; Shotboard and Queue are untouched.")); return card;
     };
 
+    const editGraphNodes = () => {
+        const found=[]; const seen=new Set();
+        const walk=graph=>{if(!graph||seen.has(graph))return;seen.add(graph);for(const candidate of graph.nodes||graph._nodes||[]){found.push(candidate);walk(candidate.subgraph);}};
+        walk(app.graph);return found;
+    };
+    const editMediaConfig = () => {
+        const graphNodes=editGraphNodes();
+        const settings=graphNodes.find(n=>nodeType(n)==="IAMCCS_ShotboardH3SettingsPro");
+        const vfx=graphNodes.find(n=>nodeType(n)==="IAMCCS_H3VFXInput");
+        const loader=graphNodes.find(n=>["VHS_LoadVideoPath","VHS_LoadVideo"].includes(nodeType(n)));
+        const backend=project.task_mode==="ref2va_vfx_edit"
+            ? {path:String(widget(vfx,"video_path")?.value||""),start_seconds:Number(widget(vfx,"start_seconds")?.value||0),duration_seconds:Number(widget(vfx,"duration_seconds")?.value||widget(settings,"duration_seconds")?.value||0)}
+            : {path:String(widget(loader,"video")?.value||""),start_seconds:Number(widget(settings,"v2v_source_offset_seconds")?.value||0),duration_seconds:Number(widget(settings,"duration_seconds")?.value||0),skip_first_frames:Number(widget(loader,"skip_first_frames")?.value||0),force_rate:Number(widget(loader,"force_rate")?.value||0)};
+        const policy=String(widget(settings,"h3_edit_video_source")?.value||project.edit_video_source||"auto");
+        project.edit_video_source=policy;project.edit_backend_video=backend;
+        const imageNodes=graphNodes.filter(n=>nodeType(n)==="VHS_LoadImagePath");
+        const backendImages=[imageNodes.find(n=>/PICTURE 1|Knight reference/i.test(n.title||"")),imageNodes.find(n=>/PICTURE 2|Environment/i.test(n.title||""))].map(n=>String(widget(n,"image")?.value||""));
+        project.edit_backend_images=backendImages;
+        const renderDuration=Number(widget(settings,"duration_seconds")?.value||0);
+        const analyzedVideo=project.edit_video?{...project.edit_video,duration_seconds:Math.min(Number(project.edit_video.duration_seconds)||renderDuration||Infinity,renderDuration||Infinity)}:null;
+        return {variant:project.swapchar_variant||"identity",video:analyzedVideo,backend_video:backend,video_source:policy,backend_images:backendImages};
+    };
+    const renderEditMedia = () => {
+        const card=el("section","iamccs-pr-section");card.style.cssText="padding:12px;border:1px solid #8e6ab1";
+        card.appendChild(el("strong","","SWAPCHAR / ENVIRONMENT / VIDEO VFX"));
+        const variant=el("select");
+        for(const [value,label] of [["identity","Swap · Picture 1 identity"],["environment","Swap · Picture 1 identity + Picture 2 environment"],["vfx","VFX Edit · source video + user direction"]]) variant.appendChild(new Option(label,value));
+        variant.value=project.task_mode==="ref2va_vfx_edit"?"vfx":project.swapchar_variant||"identity";
+        variant.onchange=()=>{project.swapchar_variant=variant.value;project.task_mode=variant.value==="vfx"?"ref2va_vfx_edit":"v2va_face_swap_lora";
+            project.sections[variant.value==="vfx"?"vfx_prompt":"swap_prompt"] ||= variant.value==="vfx"?VFX_EDIT_PROMPT:SWAPCHAR_PROMPT;
+            project.final_prompt_override_enabled=false;commit();renderControls();renderSections();renderPreview();};
+        card.appendChild(variant);
+        const policy=el("select");for(const [value,label] of [["auto","AUTO · Prompter first, backend fallback"],["prompter","PROMPTER · selected clip only"],["backend","BACKEND · backend clip only"]])policy.appendChild(new Option(label,value));
+        policy.value=editMediaConfig().video_source;
+        policy.onchange=()=>{project.edit_video_source=policy.value;const settings=editGraphNodes().find(n=>nodeType(n)==="IAMCCS_ShotboardH3SettingsPro");const field=widget(settings,"h3_edit_video_source");if(field){field.value=policy.value;field.callback?.(field.value);}commit();renderSections();};card.appendChild(policy);
+        const input=el("input");input.type="file";input.accept="video/mp4,video/webm,video/quicktime,.mkv,.avi";input.hidden=true;
+        const add=button("ADD VIDEO REFERENCE");add.onclick=()=>input.click();
+        input.onchange=async()=>{try{const file=input.files?.[0];if(!file)return;const path=await uploadVisualFile(file);project.edit_video={path,name:file.name,start_seconds:0,duration_seconds:0};project.swapchar_ai_signature="";commit();renderSections();}catch(error){aiStatus.textContent=error.message;}};
+        const remove=button("REMOVE PROMPTER VIDEO");remove.onclick=()=>{project.edit_video=null;project.swapchar_ai_signature="";commit();renderSections();};
+        card.append(add,remove,input);
+        const config=editMediaConfig();const active=config.video_source==="backend"?config.backend_video:config.video_source==="prompter"?config.video:(config.video||config.backend_video);
+        card.appendChild(el("div","iamccs-pr-tip",`Active ${config.video_source.toUpperCase()} source: ${active?.path||"add a video in Prompter or backend"}. ${project.task_mode === "ref2va_vfx_edit" ? "The source clip supplies the aligned guide; image references are unused in this standard VFX mode." : "Picture 1 = identity; Picture 2 = environment."} Video frames are analysis evidence, not extra Picture references.`));
+        if(project.edit_video){
+            const trim=el("div");for(const [key,label] of [["start_seconds","Trim start (seconds)"],["duration_seconds","Trim duration (0 = remaining clip)"]]){const field=el("input");field.type="number";field.min="0";field.step="0.01";field.value=project.edit_video[key]||0;field.setAttribute("aria-label",label);field.onchange=()=>{project.edit_video[key]=Math.max(0,Number(field.value)||0);project.swapchar_ai_signature="";commit();};trim.appendChild(fieldLabel(label,field));}card.appendChild(trim);
+        }
+        if(active?.path){const video=el("video");video.controls=true;video.preload="metadata";video.src=`/iamccs/prompter/edit-video/view?path=${encodeURIComponent(active.path)}`;video.style.cssText="width:100%;max-height:210px;background:#05080d";card.appendChild(video);}
+        const filmstrip=el("div");filmstrip.style.cssText="display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:3px";
+        const inspect=button("READ 6 VIDEO FRAMES / FILMSTRIP");inspect.onclick=async()=>{inspect.disabled=true;try{const response=await api.fetchApi("/iamccs/prompter/edit-video/inspect",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(editMediaConfig())});const data=await response.json();if(!response.ok||!data.ok)throw Error(data.error||"Video read failed");filmstrip.replaceChildren();for(const item of data.images){const image=el("img");image.src=`data:${item.mime_type};base64,${item.data}`;image.title=item.name;image.style.width="100%";filmstrip.appendChild(image);}project.edit_video_info=data.video;commit();}catch(error){aiStatus.textContent=error.message;}finally{inspect.disabled=false;}};
+        card.append(inspect,filmstrip,el("div","iamccs-pr-tip","REQUEST describes the desired edit. Vision reads sampled frames; the render receives the complete selected video. Choose the matching mode in Settings PRO before INJECT. VFX means visual effects; audio follows its separate output policy."));
+        return card;
+    };
     const renderSections = () => {
         center.replaceChildren();
         activePromptArea = null;
         activePromptKey = null;
         center.appendChild(tagDeck);
+        if (isEditMode(project.task_mode)) center.appendChild(renderEditMedia());
         const imageMode = project.task_mode === "reference_image";
-        if (!imageMode) center.appendChild(createModeHelper(project.task_mode));
+        const swapChar = isEditMode(project.task_mode);
+        if (!imageMode && !swapChar) center.appendChild(createModeHelper(project.task_mode));
         const requestCard = el("section", "iamccs-pr-section");
         requestCard.style.cssText = "border:2px solid #a077cf;background:#271c3c;padding:12px";
         const requestHead = el("div", "iamccs-pr-section-head");
@@ -1919,7 +2028,8 @@ function mountPrompter(node) {
         const extendedContinuous = project.task_mode === "fl2va" && project.extended_conditioning_policy === "continuous";
         const requestAI = button(extendedEvolving ? "✦ REQUEST AI + TIMED PROMPTS" : extendedContinuous ? "✦ REQUEST → CONTINUOUS GLOBAL" : "✦ REQUEST → GLOBAL", "iamccs-pr-field-ai");
         const requestStory = button("✦ REQUEST → GLOBAL + LOCALS", "iamccs-pr-field-ai");
-        requestStory.style.display = imageMode || extendedEvolving || extendedContinuous ? "none" : "";
+        requestStory.style.display = imageMode || swapChar || extendedEvolving || extendedContinuous ? "none" : "";
+        if (swapChar) requestAI.textContent = project.task_mode === "ref2va_vfx_edit" ? "✦ REQUEST → VFX EDIT PROMPT" : "✦ REQUEST → SWAPCHAR PROMPT";
         requestStory.onclick = async () => {
             if (!project.request.trim()) { aiStatus.textContent = "Write the global idea and numbered local prompt directions first."; return; }
             try {
@@ -1974,7 +2084,8 @@ function mountPrompter(node) {
         }
         requestHead.append(el("div","iamccs-pr-section-title","REQUEST · describe what you want"), requestActions);
         const requestBox = el("textarea", "iamccs-pr-text"); requestBox.value = project.request;
-        requestBox.placeholder = extendedEvolving
+        if (swapChar) requestBox.title = project.task_mode === "ref2va_vfx_edit" ? "Describe the visual effect, its location and motion. Vision reads the selected source video." : "Optional edits to the swap contract. Blank REQUEST uses this same structure and the actual identity in Picture 1.";
+        requestBox.placeholder = project.task_mode === "ref2va_vfx_edit" ? "Example: animate drifting fog between the trees behind the character while retaining the performance and camera." : extendedEvolving
             ? "Describe the complete take in natural language and state the real action-change times you want. Example: she walks toward camera; at 12 seconds she changes action; at 22 seconds another action begins. Untimed opening action runs from 0 to the first explicit timestamp."
             : extendedContinuous
                 ? "Describe the single action that must continue uninterrupted for the complete take. Do not divide it into times or phases."
@@ -1994,7 +2105,9 @@ function mountPrompter(node) {
             narrativeRequest:requestBox.value,
             });
         };
-        requestCard.append(requestHead, requestBox, el("div","iamccs-pr-tip", imageMode
+        requestCard.append(requestHead, requestBox, el("div","iamccs-pr-tip", swapChar
+            ? project.task_mode === "ref2va_vfx_edit" ? "Add a source video in Prompter or the dedicated VFX backend branch. Describe the visual change in REQUEST, review the sampled frames, then INJECT the vfx_edit prompt. Select REF2VA VFX EDIT in Settings PRO." : "Add Picture 1 with ADD AI REFERENCE IMAGES. Use the explicit AI controls to analyze or rewrite, then review the result. INJECT transfers the current prompt to Shotboard without starting AI or Queue. The first image supplies identity, never a keyframe. Without a Prompter image, the backend reference is used. Select SUBJECT SWAP -LorA in Settings PRO."
+            : imageMode
             ? "1. Add references. REQUEST is optional: when blank, Vision identifies the actual subjects and builds the selected preset while preserving the reference style. 2. Press REQUEST → H3 IMAGE PROMPT. 3. Review FINAL PROMPT, then INJECT → SHOTBOARD."
             : extendedEvolving
             ? "REQUEST AI + TIMED PROMPTS prepares the timed phases without changing the Shotboard. Press INJECT → SHOTBOARD to create the editable Extended Prompt blocks; this happens only while EXTENDED EVOLVING is active. The visible Shotboard blocks then remain Queue truth."
@@ -2014,7 +2127,7 @@ function mountPrompter(node) {
         node._iamccsRequestStatusObserver.observe(aiStatus, {childList:true,characterData:true,subtree:true,attributes:true,attributeFilter:["class"]});
         requestCard.append(requestStatus);
         center.append(requestCard);
-        if (!imageMode) center.appendChild(renderCameraBuilder());
+        if (!imageMode && !swapChar) center.appendChild(renderCameraBuilder());
         const meta = MODE_META[project.task_mode];
         meta.sections.forEach(([key, label, tip], index) => {
             const card = el("section", "iamccs-pr-section");
@@ -2083,7 +2196,7 @@ function mountPrompter(node) {
         // Keep slot actions in their own production panel after the complete
         // GLOBAL document. This prevents LOCAL cards from splitting/reflowing
         // the global H3 section stack on narrower ComfyUI windows.
-        if (!imageMode) center.appendChild(renderLocalPrompts());
+        if (!imageMode && !swapChar) center.appendChild(renderLocalPrompts());
         modeButtons.forEach((item, key) => item.classList.toggle("active", key === project.task_mode));
         modeNote.textContent = meta.subtitle;
         modeNote.title = meta.subtitle;
@@ -2252,6 +2365,8 @@ function mountPrompter(node) {
         }
         if (node._iamccsPromptAiBusy) { aiStatus.textContent = "An AI rewrite is already running; wait for the spinner to finish."; return; }
         const requestMode = project.task_mode;
+        if (isEditMode(project.task_mode)) editMediaConfig();
+        const swapSignature = swapcharSignature(project, aiVisualFiles);
         const allSections = Object.fromEntries(
             MODE_META[project.task_mode].sections.map(([key]) => [key, String(project.sections?.[key] || "").trim()])
         );
@@ -2271,12 +2386,17 @@ function mountPrompter(node) {
         const isExtendedContinuousRequest = narrativeRequest !== null
             && requestMode === "fl2va"
             && project.extended_conditioning_policy === "continuous";
+        const isSwapCharRequest = narrativeRequest !== null && isEditMode(requestMode);
         const isImageRequest = narrativeRequest !== null && requestMode === "reference_image";
         const isEmptyImageRequest = isImageRequest && !String(narrativeRequest || "").trim();
+        const emptySheetDirection = isEmptyImageRequest && project.image_preset === "reference_sheet"
+            ? EMPTY_CHARACTER_SHEET_CONTRACT : "";
         const direction = narrativeRequest !== null
-            ? (isImageRequest
+            ? (isSwapCharRequest
+                ? String(narrativeRequest || (requestMode === "ref2va_vfx_edit" ? "Animate drifting fog behind the subject, preserving the performance and scene layout." : SWAPCHAR_REQUEST)).trim()
+                : isImageRequest
                 ? (isEmptyImageRequest
-                    ? "Build the selected H3 image preset autonomously from the supplied reference images and the Vision model observations. Identify and describe the actual visible subjects and props; do not assume a person, gender or object. Preserve the reference medium, photographic or illustrative style, lighting, palette, texture, lens character and finish unless the user explicitly requests a different style."
+                    ? (emptySheetDirection || "Build one static image autonomously from the supplied reference images and Vision observations. Identify only the actual visible subjects and props; do not assume a person, gender or object.")
                     : `Turn this REQUEST into one static H3 image prompt. Use the supplied references as visual authority. Preserve their medium, photographic or illustrative style, lighting, palette, texture, lens character and finish unless the REQUEST explicitly asks for a different style. REQUEST: ${String(narrativeRequest).trim()}`)
                 : isExtendedEvolvingRequest
                 ? `Turn this REQUEST into MiniMax H3 FL2VA Extended Evolving conditioning. Treat every timestamp supplied by the user as immutable. ACTION and SHOT_LIST must be IDENTICAL canonical timelines with EXACTLY ONE PHASE PER LINE. EVERY LINE MUST START WITH ITS TIMESTAMP OR RANGE; NEVER PLACE [ONSET ONCE], [RESOLVED STATE] OR [THEN SUSTAIN] BEFORE THE TIMESTAMP. If the REQUEST begins with untimed action before its first explicit timestamp T, encode that opening phase as “0-T seconds: ...”. Every later phase boundary must come only from timestamps explicitly supplied by the user. Use ONLY these exact tags: [ONSET ONCE], [RESOLVED STATE], [THEN SUSTAIN]. Never output [ONSET_once], [SUSTAIN], or tag aliases. For any transient event followed by continued behavior, put the transient event only in ONSET ONCE and the continuing positive state only in THEN SUSTAIN. Example grammar: “0-T seconds: [ONSET ONCE] <single event>; [THEN SUSTAIN] <ongoing observable state>”. RESOLVED STATE is optional and, when used, must state the immediate positive post-event state. RESOLVED STATE and THEN SUSTAIN must NEVER repeat, negate, or refer back to the completed onset event: never write phrases such as “after the scream has finished”, “without repeating the scream”, “do not repeat”, or “before N seconds”. Keep stable visual information only in BOUNDARY_FRAMES, REFERENCE_USE, IDENTITY_CONTINUITY_LOCKS, LIGHT_AND_IMAGE and CAMERA. Keep all actions, vocal events, performance changes and time-dependent sound only inside ACTION and SHOT_LIST. A breath, brief vocalization, glance, impact, gesture, stop, turn, opening/closing action, or performance start is an ONSET ONCE when it initiates a longer phase. Use positive observable H3 language. The only normal negative wording allowed is an explicit music absence such as “No score” in NON_DIEGETIC_MUSIC. REQUEST: ${String(narrativeRequest).trim()}`
@@ -2284,7 +2404,7 @@ function mountPrompter(node) {
                     ? `Turn this REQUEST into one MiniMax H3 FL2VA CONTINUOUS prompt. Preserve exactly the single action requested by the user and make that same action continue uninterrupted through the complete take. Do not create timestamps, phases, shot divisions, local prompts, additional actions or editorial cuts. Put the action in ACTION and keep identity, environment and camera continuity in their proper fields; the Prompter will compose all of it into GLOBAL only. Preserve supplied dialogue verbatim and do not invent a transcript. REQUEST: ${String(narrativeRequest).trim()}`
                     : `Turn this REQUEST into the selected MiniMax global fields. Preserve supplied dialogue verbatim; do not invent a transcript. REQUEST: ${String(narrativeRequest).trim()}`)
             : aiDirection.value.trim();
-        if (narrativeRequest !== null && !String(narrativeRequest).trim() && !isImageRequest) { aiStatus.textContent = "Write your narrative REQUEST first."; return; }
+        if (narrativeRequest !== null && !String(narrativeRequest).trim() && !isImageRequest && !isSwapCharRequest) { aiStatus.textContent = "Write your narrative REQUEST first."; return; }
         if (isEmptyImageRequest && !aiVisualFiles.length) {
             aiStatus.className = "iamccs-pr-ai-status error";
             aiStatus.textContent = "Add at least one AI reference image before using an empty image REQUEST.";
@@ -2312,6 +2432,12 @@ function mountPrompter(node) {
             aiStatus.className = "iamccs-pr-ai-status";
             aiStatus.textContent = `Sending ${targetKeys.join(", ")} to ${aiProvider.options[aiProvider.selectedIndex]?.text || aiProvider.value}.`;
             const imagePayload = await buildAIImagePayload();
+            // A new image request is authoritative. Never feed previous generated
+            // image fields back as rough text, otherwise local models tend to
+            // concatenate the old prompt with the new refinement.
+            const rewriteInputSections = isImageRequest || isSwapCharRequest
+                ? Object.fromEntries(Object.keys(allSections).map((key) => [key, ""]))
+                : allSections;
             const response = await api.fetchApi("/iamccs/prompter/rewrite", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -2321,12 +2447,13 @@ function mountPrompter(node) {
                     model: aiModel.value.trim(),
                     api_key: aiApiKey.value,
                     task_mode: project.task_mode,
-                    sections: allSections,
+                    sections: rewriteInputSections,
                     target_keys: targetKeys,
                     user_direction: project.task_mode === "reference_image"
                         ? `${project.image_preset === "reference_sheet" ? "REFERENCE SHEET: one combined canvas containing every requested character and prop." : "SINGLE STATIC IMAGE."}\n${direction}` : direction,
                     vision_model: aiVisionModel.value.trim(),
                     images: imagePayload,
+                    ...(isEditMode(requestMode) ? {edit_media:editMediaConfig()} : {}),
                     temperature: Number(aiTemperature.value || 0.35),
                     timeout: 180,
                 }),
@@ -2337,7 +2464,11 @@ function mountPrompter(node) {
                 throw new Error("The model returned no H3 prompt fields. Choose another model and retry.");
             if (project.task_mode !== requestMode || (narrativeRequest !== null && project.request !== narrativeRequest) || targetKeys.some(key => String(project.sections?.[key] || "").trim() !== allSections[key]))
                 throw new Error("The mode or target boxes changed while AI was working. Your edits were kept; request a new rewrite.");
-            const rewrittenSections = { ...project.sections };
+            if (isEditMode(requestMode) && swapcharSignature(project, aiVisualFiles) !== swapSignature)
+                throw new Error("The SwapChar reference changed during AI analysis. Request a new rewrite.");
+            const rewrittenSections = isImageRequest
+                ? { ...project.sections, ...Object.fromEntries(MODE_META.reference_image.sections.map(([key]) => [key, ""])) }
+                : { ...project.sections };
             Object.entries(data.sections || {}).forEach(([key, value]) => {
                 if (targetKeys.includes(key)) rewrittenSections[key] = String(value || "");
             });
@@ -2366,6 +2497,7 @@ function mountPrompter(node) {
             }
             snapshotProject(narrativeRequest !== null ? "AI request rewrite" : "AI field rewrite");
             project.sections = rewrittenSections;
+            if (isEditMode(requestMode)) project.swapchar_ai_signature = swapSignature;
             project.final_prompt_override_enabled = false;
             project.final_prompt_override = "";
             project.final_local_prompt_override_enabled = false;
@@ -2492,6 +2624,14 @@ function mountPrompter(node) {
             const previousMode = project.task_mode;
             if (previousMode !== key) snapshotProject(`mode change ${previousMode} → ${key}`);
             project.task_mode = key;
+            if (key === "v2va_face_swap_lora") {
+                project.request ||= SWAPCHAR_REQUEST;
+                project.sections.swap_prompt ||= SWAPCHAR_PROMPT;
+                project.local_prompts = [];
+                project.extended_conditioning_policy = "default";
+                project.injection_target = "global";
+            }
+            if (key === "ref2va_vfx_edit") {project.swapchar_variant="vfx";project.sections.vfx_prompt ||= VFX_EDIT_PROMPT;project.injection_target="global";project.local_prompts=[];}
             if (key === "reference_image") {
                 project.extended_conditioning_policy = "default";
                 project.injection_target = "global";
@@ -2512,35 +2652,13 @@ function mountPrompter(node) {
             commit();
         };
     });
-    injectBtn.onclick = async () => {
+    injectBtn.onclick = () => {
         const isFl2va = canonicalMode(project.task_mode) === "fl2va";
         const isI2va = canonicalMode(project.task_mode) === "i2va";
         const imageOnly = project.task_mode === "reference_image";
-        const continuousOnly = imageOnly || (isFl2va && project.extended_conditioning_policy === "continuous");
-        let finalGlobalPrompt = effectiveGlobalPrompt(project).trim();
-        if (imageOnly && !finalGlobalPrompt) {
-            if (node._iamccsPromptAiBusy) {
-                injectStatus.textContent = "AI is still preparing the image prompt. Wait for the result before injecting.";
-                return;
-            }
-            if (!String(project.request || "").trim() && !aiVisualFiles.length) {
-                injectStatus.className = "iamccs-pr-inject-status error";
-                injectStatus.textContent = "Add at least one AI reference image, or write an image description in REQUEST.";
-                return;
-            }
-            injectStatus.className = "iamccs-pr-inject-status";
-            injectStatus.textContent = "Preparing the H3 image prompt from your REQUEST and references…";
-            const prepared = await runAIRewrite({
-                directTargetKeys: MODE_META.reference_image.sections.map(([key]) => key),
-                triggerButton: injectBtn,
-                narrativeRequest: project.request,
-            });
-            injectStatus.className = `iamccs-pr-inject-status ${prepared ? "ok" : "error"}`;
-            injectStatus.textContent = prepared
-                ? "H3 image prompt ready in FINAL PROMPT. Review it, then press INJECT → SHOTBOARD again. Nothing queued."
-                : aiStatus.textContent;
-            return;
-        }
+        const swapChar = isEditMode(project.task_mode);
+        const continuousOnly = imageOnly || swapChar || (isFl2va && project.extended_conditioning_policy === "continuous");
+        const finalGlobalPrompt = effectiveGlobalPrompt(project).trim();
         let finalLocalPrompt = continuousOnly ? "" : effectiveLocalPrompt(project).trim();
         if (project.extended_conditioning_policy === "evolving" && isFl2va) {
             try {
@@ -2583,6 +2701,8 @@ function mountPrompter(node) {
         }
         const shotboard = targets[0];
         try {
+            if (swapChar && widget(shotboard, "task_mode")?.value !== project.task_mode)
+                throw new Error("Select the matching SUBJECT SWAP -LorA or REF2VA VFX EDIT mode in Settings PRO before INJECT.");
             if (imageOnly && widget(shotboard, "task_mode")?.value !== "reference_image")
                 throw new Error("Select IMAGE GENERATOR · REFERENCES in Settings Pro first (use the R42 reference image workflow with Reference Image Save).");
             if (typeof shotboard._iamccsMiniMaxInjectPrompt !== "function") {
@@ -2628,7 +2748,7 @@ function mountPrompter(node) {
                 if (typeof shotboard._iamccsMiniMaxSetI2VHardCutSlots !== "function")
                     throw Error("Reload ComfyUI to enable ordered I2VA image-slot injection.");
                 shotboard._iamccsMiniMaxSetI2VHardCutSlots({paths:compactI2VPaths});
-            } else if (uniqueVisualPaths.length) {
+            } else if (!swapChar && uniqueVisualPaths.length) {
                 setWidget(shotboard, "image_paths", JSON.stringify(uniqueVisualPaths));
             }
             if (imageOnly) {
@@ -2645,7 +2765,7 @@ function mountPrompter(node) {
             // EVOLVING keeps timed actions in its dedicated schedule.
             const queuePrompt = finalGlobalPrompt;
             const injectedResults = [];
-            if (isFl2va || imageOnly) {
+            if (isFl2va || imageOnly || swapChar) {
                 if (queuePrompt) injectedResults.push(shotboard._iamccsMiniMaxInjectPrompt({
                     prompt:queuePrompt,target:"global",mergePolicy:project.merge_policy
                 }));
@@ -2684,7 +2804,7 @@ function mountPrompter(node) {
             }
             if (!injectedResults.length && !evolvingExtended) throw new Error("No effective GLOBAL or LOCAL prompt is available for injection.");
             let conditioningResult = null;
-            if (project.extended_conditioning_policy === "default") {
+            if (!swapChar && project.extended_conditioning_policy === "default") {
                 conditioningResult = typeof shotboard._iamccsMiniMaxSetConditioningSchedule === "function"
                     ? shotboard._iamccsMiniMaxSetConditioningSchedule({policy:"default"}) : null;
             } else if (boardMode === "fl2va_extended_av") {
@@ -2700,7 +2820,9 @@ function mountPrompter(node) {
             }
             injectStatus.className = "iamccs-pr-inject-status ok";
             const injectedTargets = injectedResults.filter(Boolean).map(r => r.actualTarget);
-            const visualStatus = isI2va && compactI2VPaths.length
+            const visualStatus = swapChar
+                ? (aiVisualFiles.length ? " Picture 1 uses the Prompter identity reference." : " Picture 1 uses the backend reference.")
+                : isI2va && compactI2VPaths.length
                 ? ` ${compactI2VPaths.length} ordered I2VA image slot(s) synchronized as independent hard-cut shots.`
                 : (uniqueVisualPaths.length ? ` ${uniqueVisualPaths.length} visual path(s) synchronized to Shotboard.` : "");
             injectStatus.textContent = `Injected into ${injectedTargets.join(", ") || "Extended timed blocks"}.${conditioningResult ? ` Extended AV ${conditioningResult.policy.toUpperCase()} · ${conditioningResult.eventCount} timed event(s).` : ""}${visualStatus} The editable FINAL GLOBAL/LOCAL text and visible Shotboard boxes are now Queue truth; Queue was not started.`;
@@ -2797,7 +2919,7 @@ function mountPrompter(node) {
     const domWidget = node.addDOMWidget("IAMCCS Prompter", "iamccs_prompter", root, { serialize: false });
     const PROMPTER_NODE_SIZE = [980, 790];
     domWidget.computeSize = () => [960, 720];
-    node.size = PROMPTER_NODE_SIZE.slice();
+    node.setSize(PROMPTER_NODE_SIZE.slice());
     node.resizable = false;
 
     // Edits already commit on input. Do not flush UI state during serialization:
@@ -2816,7 +2938,7 @@ function mountPrompter(node) {
         // Saved workflows may retain an old oversized node rectangle. Keep the
         // DOM surface flush with the normal node frame instead of leaving a
         // large empty canvas-colored gutter around it.
-        this.size = PROMPTER_NODE_SIZE.slice();
+        this.setSize(PROMPTER_NODE_SIZE.slice());
         this.setDirtyCanvas?.(true, true);
         return result;
     };
@@ -2868,7 +2990,11 @@ app.registerExtension({
         const originalCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function() {
             const result = originalCreated?.apply?.(this, arguments);
-            try { mountPrompter(this); } catch (error) { console.error("[IAMCCS Prompter] UI mount failed", error); }
+            // Imported nodes receive their saved ID during configure. Register
+            // the DOM widget after that ID exists, as Settings PRO does.
+            window.setTimeout(() => {
+                try { mountPrompter(this); } catch (error) { console.error("[IAMCCS Prompter] UI mount failed", error); }
+            }, 0);
             return result;
         };
     },

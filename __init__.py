@@ -1333,8 +1333,12 @@ def setup_api_routes() -> None:
         from aiohttp import web
 
         from .iamccs_hw_probe import recommend_settings
+        from .iamccs_minimax_h3_ltx_tiled import upgrade_ltx_prompt
+        from .iamccs_h3_swap_video import upgrade_swap_video_prompt
 
         routes = PromptServer.instance.routes
+        PromptServer.instance.add_on_prompt_handler(upgrade_ltx_prompt)
+        PromptServer.instance.add_on_prompt_handler(upgrade_swap_video_prompt)
 
         @routes.get("/api/iamccs/cine/view_image")
         async def iamccs_cine_view_image(request):
@@ -3118,3 +3122,13 @@ try:
     NODE_DISPLAY_NAME_MAPPINGS.update(_H3_DISK_UPSCALE_NAMES)
 except Exception as _h3_disk_upscale_error:
     log.exception("[IAMCCS] H3 standalone disk-upscale registration failed: %s", _h3_disk_upscale_error)
+
+try:
+    from .iamccs_h3_pskf import (
+        NODE_CLASS_MAPPINGS as _H3_PSKF_CLASSES,
+        NODE_DISPLAY_NAME_MAPPINGS as _H3_PSKF_NAMES,
+    )
+    NODE_CLASS_MAPPINGS.update(_H3_PSKF_CLASSES)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_H3_PSKF_NAMES)
+except Exception as _h3_pskf_error:
+    log.exception("[IAMCCS] H3 PSkf registration failed: %s", _h3_pskf_error)

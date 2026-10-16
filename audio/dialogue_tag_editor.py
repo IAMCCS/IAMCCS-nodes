@@ -255,9 +255,15 @@ def _build_minimax_dialogue_contract(
         marker_suffix = f" {boundary_marker}" if boundary_marker else ""
         formatted = f"{subject_tag} {speaker_tag}: <d>[{language}] {spoken}{marker_suffix}</d>"
         dialogue_rows.append(formatted)
-        local_prompt = _clean_text(line.get("local_prompt") or line.get("shot_prompt"))
-        if local_prompt:
-            performance_rows.append(f"{subject_tag} {speaker_tag}: {local_prompt}")
+        local_prompt = str(line.get("local_prompt") or line.get("shot_prompt") or "").strip()
+        structured = _minimax_structured_local_prompt(local_prompt, formatted)
+        local_visual = structured or local_prompt
+        local_visual = re.split(r"^\s*(?:overall_soundscape|non_diegetic_music):", local_visual, maxsplit=1, flags=re.MULTILINE)[0]
+        local_visual = re.sub(r"^\s*integrated_multimodal_description:\s*", "", local_visual).strip()
+        if structured:
+            local_visual = re.sub(r"^\[Shot 1\]\s*", "", local_visual).replace(formatted, "", 1).strip()
+        if local_visual:
+            performance_rows.append(f"{subject_tag} {speaker_tag}: {local_visual}")
         line_contracts.append({
             "id": str(line.get("id") or f"line_{index + 1:03d}"),
             "speaker": str(speaker.get("id") or line.get("speaker") or ""),
@@ -288,6 +294,10 @@ def _build_minimax_dialogue_contract(
     )
     local_truth = []
     for item in line_contracts:
+        structured = _minimax_structured_local_prompt(item["local_prompt"], item["dialogue_tag"])
+        if structured:
+            local_truth.append(structured)
+            continue
         local_body = _minimax_join_prompt(item.get("local_prompt", ""), item.get("dialogue_tag", "")) or "N/A"
         local_truth.append(
             f"integrated_multimodal_description:\n[Shot 1] {local_body}\n\n"
@@ -318,6 +328,18 @@ def _build_minimax_dialogue_contract(
         "chunk_boundary_guidance": "For independently rendered chunks, keep speech out of the final handoff beat and the opening handoff beat of the next chunk.",
         "tts_isolation": "MiniMax prompt tags are metadata only and are never injected into TTS speech text.",
     }
+
+
+def _minimax_structured_local_prompt(local_prompt: str, dialogue_tag: str) -> str:
+    if not re.search(r"^\s*overall_soundscape:", local_prompt, re.MULTILINE) or not re.search(r"^\s*non_diegetic_music:", local_prompt, re.MULTILINE):
+        return ""
+    dialogue = r"<Subject\s+[1-9][0-9]*>\s*\(S[1-9][0-9]*\):\s*<d>[\s\S]*?</d>"
+    if not re.search(dialogue, local_prompt, re.IGNORECASE):
+        return ""
+    prompt = re.sub(dialogue, lambda _match: dialogue_tag, local_prompt, count=1, flags=re.IGNORECASE)
+    if re.search(r"^\s*integrated_multimodal_description:", prompt, re.MULTILINE):
+        return prompt
+    return f"integrated_multimodal_description:\n[Shot 1] {prompt}"
 
 
 def _minimax_join_prompt(*parts: Any) -> str:
@@ -953,7 +975,7 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
         "speakers": speakers,
         "lines": lines,
         "export_lines": export_lines,
-        "speaker_stem_start_frames": ({key: 0 for key in ordered_keys} if zero_start_stems else _speaker_stem_start_frames(export_lines, frame_rate)) if not single_track_mode else {},
+        "speaker_stem_start_frames": ({key: 0 for key in ordered_keys} if zero_start_stems or not stem_srt_local_zero else _speaker_stem_start_frames(export_lines, frame_rate)) if not single_track_mode else {},
         "export_profiles": {
             "single_master": {"output_mode": "flatten_for_single_track", "description": "One master dialogue track from frame 0."},
             "speaker_stems_zero_start": {"output_mode": "speaker_stems_for_overlap", "speaker_stems_zero_start": True, "description": "One stem per speaker, each stem starts at frame 0."},
@@ -975,7 +997,7 @@ def _build_dialogue_export(data: Dict[str, Any], frame_rate: float, speech_wpm: 
             "audioSyncMode": "timeline_audio",
             "duration_seconds": duration_seconds,
             "frame_rate": float(frame_rate),
-            "speakerStemStartFrames": ({key: 0 for key in ordered_keys} if zero_start_stems else _speaker_stem_start_frames(export_lines, frame_rate)) if not single_track_mode else {},
+            "speakerStemStartFrames": ({key: 0 for key in ordered_keys} if zero_start_stems or not stem_srt_local_zero else _speaker_stem_start_frames(export_lines, frame_rate)) if not single_track_mode else {},
             "speakerStemsZeroStart": zero_start_stems,
             "speakerStemSrtLocalZero": stem_srt_local_zero,
             "audioLaneMode": audio_lane_mode,

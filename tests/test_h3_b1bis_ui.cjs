@@ -8,23 +8,33 @@ const block = src.slice(src.indexOf('function setAssistantMode('), src.indexOf('
 const calls = [];
 const values = { audio_mode: 'h3_custom_audio_drive', extended_av_profile: 'balanced_12_16gb' };
 const context = {
+  restoreNamedValues: () => {},
+  shotboardMode: () => values.task_mode || "i2va",
   linkedShotboard: () => null, setShotboardMode: (_, mode) => { values.task_mode = mode; },
   setShotboardAudio: (_, value) => { calls.push(value); values.audio_mode = value; },
   widget: (_, name) => ({value: values[name]}), setValue: (_, name, value) => { values[name] = value; },
-  normalizeExtendedAvProductionContract: () => {}, importSettingsFromShotboard: () => {},
+  normalizeExtendedAvProductionContract: () => {}, normalize2StageResolutionLink: () => {}, importSettingsFromShotboard: () => {},
   document: {dispatchEvent: () => {}}, CustomEvent: class {},
 };
 vm.createContext(context);
 vm.runInContext(block, context);
-for (const mode of ['t2va', 'i2va', 't2va_continuous', 'fl2va_extended_av', 'fl2va_stable', 'fl2va_continuous', 'keyframe_joint_native', 'longvid_guides']) {
+for (const mode of ['t2va', 'i2va', 't2va_continuous', 'fl2va_extended_av', 'fl2va_stable', 'fl2va_continuous', 'keyframe_joint_native', 'longvid_multishot_hardcut', 'longvid_keyframe_continuous', 'longvid_guides']) {
   context.setAssistantMode({}, mode);
   assert.equal(values.audio_mode, 'h3_custom_audio_drive', `${mode} replaced custom audio`);
 }
-assert.equal(values.keyframe_joint_latent_new, true);
+assert.equal(values.keyframe_joint_latent_new, false);
 assert.deepEqual(calls, []);
 const registry = src.slice(src.indexOf('const MODE_CHOICES ='), src.indexOf('const FRIENDLY_VALUES ='));
 vm.runInContext(registry + '\nthis.publicModes = MODE_CHOICES.filter(([,v]) => !HIDDEN_MODES.has(v)).map(([,v]) => v);', context);
 assert(context.publicModes.includes('t2va_continuous'));
+assert(context.publicModes.includes('longvid_multishot_hardcut'));
+assert(context.publicModes.includes('longvid_keyframe_continuous'));
+assert(!context.publicModes.includes('pianosequenza_true_long'));
+const settingsBackend = fs.readFileSync(path.join(root, 'iamccs_minimax_h3_shotboard.py'), 'utf8');
+const taskModeInput = settingsBackend.slice(settingsBackend.indexOf('"task_mode": (['), settingsBackend.indexOf('"audio_mode": ('));
+assert.match(taskModeInput, /"longvid_keyframe_continuous"/);
+assert(context.publicModes.includes('keyframe_joint_native'));
+assert(!context.publicModes.includes('longvid_guides'));
 assert(!context.publicModes.includes('latent_go_ahead'));
 assert(!context.publicModes.includes('longvid_motion_context'));
 const autoCode = src.slice(src.indexOf('function importSettingsFromShotboard('), src.indexOf('function assistantModeKey('));
@@ -44,4 +54,4 @@ const canonical = board.slice(board.indexOf('function canonicalH3TaskMode('), bo
 vm.runInContext(canonical, context);
 assert.equal(context.canonicalH3TaskMode('t2va_continuous'), 't2va_continuous');
 assert.equal(context.canonicalH3TaskMode('fl2va_extended_av'), 'fl2va_extended_av');
-console.log('B1bis UI: audio authority, public modes, Latent New selection and task serialization PASS');
+console.log('B1bis UI: custom-audio authority, public LongVid modes, stable Keyframe Joint default and serialization PASS');

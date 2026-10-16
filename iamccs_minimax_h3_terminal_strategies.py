@@ -890,6 +890,21 @@ def prepare_pianosequenza_before_sample(*, mode: str, positive, target_latent, m
         return positive, target_latent, model, f"armed:{mode};waiting-final-chunk"
 
     target_video, target_audio = _streams(target_latent, "final target latent")
+    if not bool(target_latent.get("iamccs_longvid_latent_tail_ab", False)):
+        # Legacy workflow compatibility guard. Several historical R42/R43
+        # boards can serialize a Pianosequenza endpoint while their currently
+        # selected continuity profile no longer produces the latent-tail A/B
+        # handoff. Older code crashed only on the final chunk. Preserve the
+        # saved enum, but degrade this invalid combination to the ordinary
+        # hard-image/conditioned endpoint for this render instead of inventing
+        # latent history that does not exist. Valid latent-tail workflows are
+        # untouched and still enter the v3.3 path below.
+        report = (
+            f"compat-fallback:{mode}->hard_image | reason=missing iamccs_longvid_latent_tail_ab | "
+            "saved workflow remains load-compatible; select a latent-tail/continuous engine for Pianosequenza transport"
+        )
+        LOG.warning("MiniMax H3 %s", report)
+        return positive, target_latent, model, report
     previous_video, previous_audio, cache_key, source_alignment = _load_prior(shotplan, target_latent, target_video, target_audio)
 
     overlap = int(source_alignment["handoff_frames"])

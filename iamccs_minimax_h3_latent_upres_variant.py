@@ -189,8 +189,25 @@ class IAMCCS_MiniMaxH3LatentUpresSamplingR38:
         stride = int(sampling.get("seed_stride", 1) or 1)
         settings = plan.get("upscale_settings") if isinstance(plan.get("upscale_settings"), dict) else {}
         seed += int(segment_index) * stride + int(settings.get("seed_offset", 10000) or 0)
+        if plan.get("character_swap_lora", {}).get("enabled"):
+            seed = int(plan["character_swap_lora"].get("refine_seed", 777)) + int(segment_index) * stride
+        if int(upres.get("seed", -1)) >= 0:
+            seed = int(upres["seed"]) + int(segment_index) * stride
         seed &= 0xFFFFFFFFFFFFFFFF
-        steps = max(1, int(upres.get("steps", 1) or 1))
+        requested_steps = max(1, int(upres.get("steps", 1) or 1))
+        steps = requested_steps
+        # Fast 2-Pass runs every diffusion step across several temporal windows.
+        # Cap only this route on 16 GiB or smaller GPUs to avoid WDDM paging.
+        low_vram_fast_cap = False
+        if str(plan.get("upscale_mode", "") or "").lower() == "h3_fast_latent_2pass":
+            try:
+                if torch.cuda.is_available():
+                    total_vram = int(torch.cuda.get_device_properties(torch.cuda.current_device()).total_memory)
+                    low_vram_fast_cap = round(total_vram / (1024**3)) in tuple(range(1, 17))
+            except Exception:
+                low_vram_fast_cap = False
+        if low_vram_fast_cap:
+            steps = min(steps, 4)
         denoise = max(0.0, min(1.0, float(upres.get("denoise", 0.2) or 0.0)))
         sampler_name = str(upres.get("sampler", "sa_solver") or "sa_solver")
         scheduler = str(upres.get("scheduler", "simple") or "simple")
@@ -208,11 +225,17 @@ class IAMCCS_MiniMaxH3LatentUpresSamplingR38:
             acceleration_report = "ComfyKitchen per-model attention"
         else:
             active_model, acceleration_report = _accelerate(shifted, plan)
+        from .iamccs_h3_veda import apply_veda
+        chunks = plan.get("chunks") or []
+        task = str(chunks[int(segment_index)].get("task_mode", "t2va")) if chunks else "t2va"
+        active_model = apply_veda(active_model, plan, "ref2va" if task.startswith("ref2va") else task)
         noise = RandomNoise.execute(noise_seed=seed)[0]
         sampler = KSamplerSelect.execute(sampler_name=sampler_name)[0]
         sigmas = BasicScheduler.execute(model=active_model, scheduler=scheduler, steps=steps, denoise=denoise)[0]
         report = (
-            f"R38 refine sampling | seed={seed} | {steps} steps | {sampler_name}+{scheduler} | "
+            f"R38 refine sampling | seed={seed} | {steps} steps"
+            f"{' (requested=' + str(requested_steps) + ', low-VRAM Fast cap)' if steps != requested_steps else ''} | "
+            f"{sampler_name}+{scheduler} | "
             f"denoise={denoise:.3f} | turbo={turbo_report} | secondary_lora={secondary_lora_report} | "
             f"acceleration={acceleration_report}"
         )

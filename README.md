@@ -2,7 +2,9 @@
   <img src="icon.png" alt="IAMCCS" width="160" />
 </p>
 
-# IAMCCS Nodes
+# IAMCCS Nodes - H3 IAMCCS utilities
+
+**Version 1.5.8** · [H3 update and validation notes](docs/H3_IAMCCS_UTILITIES_1.5.8.md)
 
 **A production-oriented collection of ComfyUI nodes for image generation, AI video, audio, continuity and editorial workflows.**
 

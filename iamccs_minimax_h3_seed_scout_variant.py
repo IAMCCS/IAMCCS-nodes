@@ -424,9 +424,11 @@ class IAMCCS_MiniMaxH3ScoutDeliveryLazyRouterR43:
     """
 
     _TEMPORAL_ENGINE_MODES = {
+        "longvid_multishot_hardcut",
         "keyframe_joint_native",
         "latent_go_ahead",
         "longvid_continuous_guided",
+        "longvid_keyframe_continuous",
         "longvid_masked_loop_guided",
         "guided_av_loop_experimental",
         "longvid_guided_av_loop_experimental",

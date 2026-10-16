@@ -9,7 +9,7 @@ import { H3_DELIVERY_PAIRS, deliveryPairValues, h3ModeBaselines } from "./iamccs
 import { createH3MotionContextPanel, createH3WindowPanel } from "./iamccs_h3_window_presets.js";
 
 console.info("[IAMCCS MiniMax H3] Dedicated Shotboard V3-parity UI loaded.");
-const CINE_VERSION = "2026-08-23-minimax-h3-v20-lipsync-dual-edge-audio-magnet";
+const CINE_VERSION = "2026-10-16-minimax-h3-solo-layout-local-prompts";
 const MINIMAX_CINE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX";
 let h3SettingsNodeSpecs = {};
 const H3_AUDIO_MODE_ALIASES = Object.freeze({
@@ -116,6 +116,7 @@ function canonicalH3ContinuityMode(value) {
 function canonicalH3TaskMode(value) {
     if (["t2va_continuous", "fl2va_extended_av"].includes(String(value).toLowerCase())) return String(value).toLowerCase();
     const raw = String(value || "auto_from_timeline").trim().toLowerCase();
+    if (raw === "ref2va_vfx_edit") return raw;
     if (["auto", "auto_from_timeline"].includes(raw)) return "auto_from_timeline";
     if (["i2v", "i2va"].includes(raw)) return "i2va";
     if (["flf", "fflf", "fl2va"].includes(raw)) return "fl2va";
@@ -127,16 +128,18 @@ function canonicalH3TaskMode(value) {
     ].includes(raw)) return "longvid_guided_lipsync";
     if (["longvid_motion_context", "longvid_motion_context_auto_chain", "motion_context_auto_chain"].includes(raw)) return "longvid_motion_context";
     if (["longvid_continuous_guided", "long_continuous_guided"].includes(raw)) return "longvid_continuous_guided";
+    if (["longvid_multishot_hardcut", "long_hardcut_video", "longvid_hardcut_video"].includes(raw)) return "longvid_multishot_hardcut";
+    if (raw === "longvid_keyframe_continuous") return "longvid_keyframe_continuous";
     if (["longvid_masked_loop_guided", "masked_loop_guided", "long_masked_loop_guided"].includes(raw)) return "longvid_masked_loop_guided";
     if (["guided_av_loop_experimental", "longvid_guided_av_loop_experimental"].includes(raw)) return "guided_av_loop_experimental";
     if (["longvid", "long_video_guides", "longvid_guides"].includes(raw)) return "longvid_guides";
     if (raw === "keyframe_joint_native") return raw;
     if (raw === "latent_go_ahead" || raw === "reference_image") return raw;
     if (["v2va_controlnet", "controlnet_v2v", "h3_fun_controlnet"].includes(raw)) return "v2va_controlnet";
-    return ["v2va_object_swap", "v2va_face_swap"].includes(raw) ? raw : "t2va";
+    return ["v2va_object_swap", "v2va_face_swap", "v2va_face_swap_lora"].includes(raw) ? raw : "t2va";
 }
 function h3LipsyncTask(value) { return ["ref2vid_lipsync", "longvid_guided_lipsync"].includes(canonicalH3TaskMode(value)); }
-function h3TimelineAudioOwned(value) { return ["longvid_guides", "longvid_motion_context", "longvid_continuous_guided", "longvid_masked_loop_guided", "guided_av_loop_experimental", "ref2vid_lipsync", "longvid_guided_lipsync"].includes(canonicalH3TaskMode(value)); }
+function h3TimelineAudioOwned(value) { return ["longvid_multishot_hardcut", "longvid_keyframe_continuous", "longvid_guides", "longvid_motion_context", "longvid_continuous_guided", "longvid_masked_loop_guided", "guided_av_loop_experimental", "ref2vid_lipsync", "longvid_guided_lipsync"].includes(canonicalH3TaskMode(value)); }
 function h3RequiredAudioMode(value) {
     const task = canonicalH3TaskMode(value);
     return h3LipsyncTask(task) ? "h3_custom_audio_drive" : null;
@@ -162,9 +165,9 @@ function h3TaskUiCapabilities(value, audioValue = "h3_native_generated") {
         task,
         effectiveTask,
         flf: effectiveTask === "fl2va" || effectiveTask === "longvid_continuous_guided" || auto,
-        roles: ["reference_image", "ref2va", "ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap"].includes(effectiveTask),
-        v2va: ["v2va_controlnet", "v2va_object_swap", "v2va_face_swap"].includes(effectiveTask),
-        longvid: ["longvid_guides", "longvid_motion_context", "longvid_continuous_guided", "longvid_masked_loop_guided", "guided_av_loop_experimental", "longvid_guided_lipsync"].includes(effectiveTask),
+        roles: ["reference_image", "ref2va", "ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap", "v2va_face_swap_lora"].includes(effectiveTask),
+        v2va: ["v2va_controlnet", "v2va_object_swap", "v2va_face_swap", "v2va_face_swap_lora"].includes(effectiveTask),
+        longvid: ["longvid_multishot_hardcut", "longvid_keyframe_continuous", "longvid_guides", "longvid_motion_context", "longvid_continuous_guided", "longvid_masked_loop_guided", "guided_av_loop_experimental", "longvid_guided_lipsync"].includes(effectiveTask),
         lipsync: h3LipsyncTask(effectiveTask),
         flfHint: effectiveTask === "fl2va"
             ? "FL2VA uses authored adjacent keyframes; join and continuity controls are active."
@@ -174,8 +177,12 @@ function h3TaskUiCapabilities(value, audioValue = "h3_native_generated") {
                     ? "Long Multi-Shot carries the previous native AV tail only across technical H3 chunk boundaries. Authored image changes remain distinct shot guides; this profile does not promise a continuous morph between different images."
                 : effectiveTask === "longvid_continuous_guided"
                     ? "Long Continuous Guided compiles N images into N−1 FL2VA intervals. The previous sampled native AV latent owns each following opening while the next image remains the destination."
+                : effectiveTask === "longvid_multishot_hardcut"
+                    ? "Long Multi-Shot compiles every authored slot as an independent H3 shot. Boundaries are true hard cuts. Custom Audio can remain one continuous global performance/lip-sync master."
+                : effectiveTask === "longvid_keyframe_continuous"
+                    ? "Long Keyframe Continuous runs one native TimelineDirector H3 motion clock. Native sampled VIDEO+AUDIO latent tails, incoming-owned 22f overlap, one RGB bridge removed at delivery. Use H3 Native Audio and Native Delivery; Pianosequenza 1 is recommended."
                 : effectiveTask === "longvid_guides"
-                    ? "LongVid pins main-timeline image and audio slots at their real global positions. FLF joins and native AV continuity do not apply."
+                    ? "Legacy Positioned Guides mode: timeline anchors are AddGuide constraints, not a guaranteed continuous keyframe morph."
                     : effectiveTask === "longvid_guided_lipsync"
                         ? "LongVid Guided LipSync keeps the proven positioned T2VA/AddGuide image path and locks the AudioBoard chunk into the AV latent. It never creates REF2VA reference blocks."
                     : effectiveTask === "ref2vid_lipsync"
@@ -191,8 +198,11 @@ const H3_MODE_THEMES = Object.freeze({
     ref2va: { node: "#274968", bg: "#0E1824", box: "#7FB8ED", border: "#477DB5", panel: "rgba(24,55,91,.50)", text: "#B8DCFF", header: "rgba(127,184,237,.42)" },
     ref2vid_lipsync: { node: "#6B315B", bg: "#24111F", box: "#F093CE", border: "#B95497", panel: "rgba(90,29,73,.52)", text: "#FFC1E7", header: "rgba(240,147,206,.44)" },
     v2va_object_swap: { node: "#48386D", bg: "#171125", box: "#BBA1FF", border: "#765BB1", panel: "rgba(59,38,103,.52)", text: "#D6C5FF", header: "rgba(187,161,255,.42)" },
+    v2va_face_swap_lora: { node: "#61364E", bg: "#23131D", box: "#F2A4C6", border: "#A85D80", panel: "rgba(91,42,68,.52)", text: "#FFD0E3", header: "rgba(242,164,198,.42)" },
     v2va_face_swap: { node: "#61364E", bg: "#23131D", box: "#F2A4C6", border: "#A85D80", panel: "rgba(91,42,68,.52)", text: "#FFD0E3", header: "rgba(242,164,198,.42)" },
     longvid_guides: { node: "#57347C", bg: "#1B112A", box: "#C19AFF", border: "#B98AFF", panel: "rgba(54,31,85,.50)", text: "#DEC8FF", header: "rgba(196,151,255,.48)" },
+    longvid_multishot_hardcut: { node: "#5A3B28", bg: "#20150F", box: "#E7A56A", border: "#AF6E3C", panel: "rgba(86,50,27,.52)", text: "#FFD9B7", header: "rgba(231,165,106,.46)" },
+    longvid_keyframe_continuous: { node: "#31563E", bg: "#0F1E15", box: "#91DFAD", border: "#4E9A68", panel: "rgba(38,82,52,.54)", text: "#D3F8DF", header: "rgba(145,223,173,.46)" },
     longvid_motion_context: { node: "#4B2777", bg: "#150C24", box: "#C68BFF", border: "#9255D6", panel: "rgba(68,30,111,.56)", text: "#E6C9FF", header: "rgba(198,139,255,.52)" },
     longvid_continuous_guided: { node: "#244F62", bg: "#0D1B24", box: "#7ED7F3", border: "#438EA8", panel: "rgba(24,69,88,.56)", text: "#C8F2FF", header: "rgba(126,215,243,.48)" },
     longvid_masked_loop_guided: { node: "#37552F", bg: "#101C0D", box: "#A7EB85", border: "#65A94A", panel: "rgba(41,82,31,.58)", text: "#DDFBD0", header: "rgba(167,235,133,.48)" },
@@ -222,10 +232,15 @@ function canonicalH3Acceleration(value) {
 }
 const H3_NATIVE_RESOLUTION_PRESETS = Object.freeze([
     { width: 416, height: 288, label: "TEST · ≈1.44 · 416×288 · LOW-RES" },
-    { width: 640, height: 384, label: "H3 UP source · 640×384 · LIGHT" },
-    { width: 736, height: 416, label: "H3 UP source · 736×416 · FHD LIGHT" },
+    { width: 640, height: 384, label: "H · 5:3 · 640×384 · LIGHT" },
+    { width: 960, height: 576, label: "H · 5:3 · 960×576" },
+    { width: 1120, height: 672, label: "H · 5:3 · 1120×672" },
+    { width: 1280, height: 768, label: "H · 5:3 · 1280×768" },
+    { width: 1600, height: 960, label: "H · 5:3 · 1600×960" },
+    { width: 1920, height: 1152, label: "H · 5:3 · 1920×1152" },
+    { width: 736, height: 416, label: "H · ≈16:9 · 736×416 · FHD LIGHT" },
     { width: 768, height: 448, label: "H · ≈16:9 · 768×448 · Draft" },
-    { width: 864, height: 480, label: "H3 UP source · 864×480 · DETAIL" },
+    { width: 864, height: 480, label: "H · 1.80 · 864×480 · DETAIL" },
     { width: 960, height: 544, label: "H · ≈16:9 · 960×544 · Balanced" },
     { width: 1024, height: 576, label: "H · 16:9 · 1024×576" },
     { width: 1280, height: 736, label: "H · 720-source legal · 1280×736" },
@@ -240,11 +255,17 @@ const H3_NATIVE_RESOLUTION_PRESETS = Object.freeze([
     { width: 1216, height: 640, label: "H · DCI ≈1.90 · 1216×640" },
     { width: 1024, height: 512, label: "SCOPE · 2.00 · 1024×512" },
     { width: 1120, height: 512, label: "SCOPE · ≈2.20 · 1120×512" },
-    { width: 1152, height: 480, label: "SCOPE · ≈2.39 · 1152×480" },
-    { width: 1536, height: 640, label: "SCOPE · ≈2.39 · 1536×640 · Quality" },
+    { width: 1152, height: 480, label: "SCOPE · 2.40 · 1152×480" },
+    { width: 1536, height: 640, label: "SCOPE · 2.40 · 1536×640 · Quality" },
     { width: 1920, height: 800, label: "SCOPE · 2.40 · 1920×800 · H3 native high" },
     { width: 2048, height: 864, label: "SCOPE · ≈2.37 · 2048×864 · H3 legal 2K-class" },
     { width: 448, height: 768, label: "V · ≈9:16 · 448×768 · Draft" },
+    { width: 384, height: 640, label: "V · 3:5 · 384×640 · LIGHT" },
+    { width: 576, height: 960, label: "V · 3:5 · 576×960" },
+    { width: 672, height: 1120, label: "V · 3:5 · 672×1120" },
+    { width: 768, height: 1280, label: "V · 3:5 · 768×1280" },
+    { width: 960, height: 1600, label: "V · 3:5 · 960×1600" },
+    { width: 1152, height: 1920, label: "V · 3:5 · 1152×1920" },
     { width: 544, height: 960, label: "V · ≈9:16 · 544×960 · Balanced" },
     { width: 576, height: 1024, label: "V · 9:16 · 576×1024" },
     { width: 768, height: 1344, label: "V · ≈9:16 · 768×1344 · H3 quality" },
@@ -288,6 +309,7 @@ const H3_NATIVE_DELIVERY_DEFAULTS = Object.freeze({
     "544x960": [1080, 1920],
 });
 const SHOTBOARD_V3_RIGID_WIDTH = 2360;
+const SHOTBOARD_V3_SOLO_SIZE = [560, 360];
 const SHOTBOARD_V3_OPEN_HEIGHT = 760;
 const SHOTBOARD_V3_COLLAPSED_HEIGHT = 560;
 const SHOTBOARD_NODE_MIN_SIZE = [1500, 760];
@@ -706,6 +728,7 @@ const MINIMAX_H3_LEGACY_WIDGET_COUNT = 85;
 const MINIMAX_H3_PRE_FACE_WIDGET_COUNT = 84;
 const MINIMAX_H3_PRE_SECOND_LORA_WIDGET_COUNT = 87;
 const MINIMAX_H3_PRE_PDD_CONTROLNET_WIDGET_COUNT = 90;
+// Historical migrations stop at the original 100 fields; new fields append below.
 const MINIMAX_H3_CANONICAL_WIDGET_COUNT = 100;
 const MINIMAX_H3_LEGACY_SEED_CONTROL_INDEX = 44;
 const MINIMAX_H3_LEGACY_SEED_CONTROLS = new Set([
@@ -752,6 +775,10 @@ const MINIMAX_H3_CANONICAL_WIDGET_NAMES = [
     "secondary_lora_name", "secondary_lora_strength", "pdd_lora_name", "pdd_strength", "h3_controlnet_enabled",
     "h3_controlnet_name", "h3_controlnet_kind", "h3_controlnet_strength", "h3_controlnet_start_percent",
     "h3_controlnet_end_percent", "h3_controlnet_frame_scope", "h3_controlnet_end_policy",
+    "fused_turbo_model_name", "fused_turbo_sigma_preset", "extended_av_profile",
+    "extended_av_pin_mode", "extended_av_mask_profile", "extended_av_custom_window_frames",
+    "extended_av_custom_overlap_frames", "extended_av_handover_mode", "extended_av_level_lock_mode",
+    "extended_av_joint_refine_mode", "extended_av_joint_window_frames", "extended_av_joint_window_overlap",
 ];
 
 function applyMiniMaxH3CanonicalValues(node, serialized, values) {
@@ -854,8 +881,12 @@ function migrateMiniMaxH3WidgetSchema(node, serialized = null) {
         legacy.length === 67 || legacy.length === 68 || legacy.length === 73 ||
         (legacy.length >= 75 && legacy.length < MINIMAX_H3_CANONICAL_WIDGET_COUNT);
 
-    // A complete current workflow has 100 serialized backend widgets.  Do not
-    // rewrite it.  Shorter known layouts are migrated append-only; the
+    // Restore backend positions by name, bypassing auxiliary frontend widgets.
+    if (!hasLegacyInlineSeedControl && legacy.length >= MINIMAX_H3_CANONICAL_WIDGET_COUNT) {
+        if (serialized) applyMiniMaxH3CanonicalValues(node, serialized, legacy);
+        return false;
+    }
+    // Shorter known layouts are migrated append-only; the
     // retired seed-control STRING is removed only when it is actually present.
     if (!hasLegacyInlineSeedControl && !isKnownShortLayout) return false;
 
@@ -917,6 +948,14 @@ function repairMiniMaxH3WidgetState(node, serialized = null) {
     // per-widget repair assumed the old positions and was itself able to
     // serialize mismatched values back into a valid board.
     const migrated = migrateMiniMaxH3WidgetSchema(node, serialized);
+    if (serialized?.widgets_values_named && typeof serialized.widgets_values_named === "object") {
+        for (const name of MINIMAX_H3_CANONICAL_WIDGET_NAMES) {
+            const item = getWidget(node, name);
+            if (item && Object.prototype.hasOwnProperty.call(serialized.widgets_values_named, name)) {
+                item.value = serialized.widgets_values_named[name];
+            }
+        }
+    }
     if (migrated) {
         try { node.setDirtyCanvas?.(true, true); node.graph?.change?.(); } catch {}
     }
@@ -1048,6 +1087,8 @@ function repairMiniMaxH3WidgetState(node, serialized = null) {
         h3_controlnet_kind: "pose_dwpose",
         h3_controlnet_frame_scope: "timeline_segment",
         h3_controlnet_end_policy: "strict_match",
+        fused_turbo_model_name: "",
+        fused_turbo_sigma_preset: "4_step",
         face_detailer_profile: "balanced",
         reference_resize_policy: "off",
         reference_resize_filter: "area",
@@ -1205,7 +1246,7 @@ function serializedWidgetIndex(node, widget) {
 }
 
 function serializedWidgetValues(node) {
-    // The Shotboard backend contract is the fixed named 100-value schema.
+    // The Shotboard backend contract follows the append-only named schema.
     // Do not derive it from frontend widgets: Comfy can insert auxiliary UI
     // controls (for example seed control-after-generate) that are not Python
     // inputs and would shift every later value.
@@ -2720,7 +2761,12 @@ function parsedTimelineSourcesForBoard(board) {
     return sources;
 }
 
-const IAMCCS_IMAGE_TRUTH_KEYS = ["imageTruthPath", "image_truth_path", "imageFile", "image_file", "path"];
+const IAMCCS_IMAGE_TRUTH_KEYS = ["imageFile", "imageTruthPath", "image_truth_path", "image_file", "path"];
+
+function currentShotboardImagePath(segment) {
+    // A current replacement or deliberate deletion wins over imported mirrors.
+    return String(segment?.imageFile ?? segment?.imageTruthPath ?? segment?.image_truth_path ?? segment?.image_file ?? segment?.path ?? "").trim();
+}
 
 function iamccsPathLookup(pathMap, value) {
     const raw = String(value || "").trim();
@@ -2787,17 +2833,17 @@ function collectActivePackageImagePaths(board) {
             if (!seg || typeof seg !== "object") continue;
             const type = String(seg.type || "image");
             if (type === "text" || type === "audio" || seg.textPlaceholder || seg.placeholder) continue;
-            const segPath = seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path;
+            const segPath = currentShotboardImagePath(seg);
             add(segPath);
-            if (!segPath) addFromRef(seg.ref);
+            if (!segPath && seg.imageFile === undefined) addFromRef(seg.ref);
         }
         const rows = Array.isArray(data?.rows) ? data.rows : [];
         for (const row of rows) {
             if (!row || typeof row !== "object") continue;
             if (row.use_guide === false || Number(row.force ?? row.strength ?? row.guideStrength ?? 0) <= 0) continue;
-            const rowPath = row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path;
+            const rowPath = currentShotboardImagePath(row);
             add(rowPath);
-            if (!rowPath) addFromRef(row.ref);
+            if (!rowPath && row.imageFile === undefined) addFromRef(row.ref);
         }
     }
     if (boardIsMultiTimelinePackage(board)) {
@@ -2812,17 +2858,17 @@ function collectActivePackageImagePaths(board) {
                 if (!seg || typeof seg !== "object") continue;
                 const type = String(seg.type || "image");
                 if (type === "text" || type === "audio" || seg.textPlaceholder || seg.placeholder) continue;
-                const segPath = seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path;
+                const segPath = currentShotboardImagePath(seg);
                 add(segPath);
-                if (!segPath) addFromReferenceList(seg.ref, refs);
+                if (!segPath && seg.imageFile === undefined) addFromReferenceList(seg.ref, refs);
             }
             const rows = Array.isArray(data?.rows) ? data.rows : [];
             for (const row of rows) {
                 if (!row || typeof row !== "object") continue;
                 if (row.use_guide === false || Number(row.force ?? row.strength ?? row.guideStrength ?? 0) <= 0) continue;
-                const rowPath = row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path;
+                const rowPath = currentShotboardImagePath(row);
                 add(rowPath);
-                if (!rowPath) addFromReferenceList(row.ref, refs);
+                if (!rowPath && row.imageFile === undefined) addFromReferenceList(row.ref, refs);
             }
         };
         const addMulti = (multi) => {
@@ -2863,10 +2909,10 @@ function collectPackageImagePaths(board) {
     }
     for (const data of parsedTimelineSourcesForBoard(board)) {
         const segments = Array.isArray(data?.segments) ? data.segments : [];
-        for (const seg of segments) add(seg?.imageTruthPath || seg?.image_truth_path || seg?.imageFile || seg?.image_file || seg?.path);
+        for (const seg of segments) add(currentShotboardImagePath(seg));
     }
     if (Array.isArray(board?.segments)) {
-        for (const seg of board.segments) add(seg?.imageTruthPath || seg?.image_truth_path || seg?.imageFile || seg?.image_file || seg?.path);
+        for (const seg of board.segments) add(currentShotboardImagePath(seg));
     }
     return paths;
 }
@@ -2988,8 +3034,8 @@ function rewritePackagedSegments(segments, pathMap, refMap = {}, originalReferen
         if (!seg || typeof seg !== "object") continue;
         const type = String(seg.type || "image");
         if (type === "text" || type === "audio") continue;
-        const explicitSource = String(seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path || "").trim();
-        const refSource = sourcePathForRef(seg.ref, originalReferencePaths);
+        const explicitSource = currentShotboardImagePath(seg);
+        const refSource = (explicitSource || seg.imageFile !== undefined) ? "" : sourcePathForRef(seg.ref, originalReferencePaths);
         const mappedExplicit = iamccsPathLookup(pathMap, explicitSource);
         const mappedRef = iamccsPathLookup(pathMap, refSource);
         const nextRef = refMap[explicitSource] || refMap[refSource] || refMap[mappedExplicit] || refMap[mappedRef];
@@ -3036,8 +3082,8 @@ function rewritePackagedRows(rows, refMap = {}, originalReferencePaths = [], pat
     for (const row of rows) {
         if (!row || typeof row !== "object") continue;
         if (row.use_guide === false) continue;
-        const explicitSource = String(row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path || "").trim();
-        const refSource = sourcePathForRef(row.ref, originalReferencePaths);
+        const explicitSource = currentShotboardImagePath(row);
+        const refSource = (explicitSource || row.imageFile !== undefined) ? "" : sourcePathForRef(row.ref, originalReferencePaths);
         const nextRef = refMap[explicitSource] || refMap[refSource];
         const nextPath = iamccsPathLookup(pathMap, explicitSource) || iamccsPathLookup(pathMap, refSource);
         if (nextRef) row.ref = nextRef;
@@ -3696,7 +3742,13 @@ function syncSegmentImageFileForReference(segments, refIndex, imagePath) {
         if (Math.round(Number(seg.ref || 0)) !== refNumber) continue;
         seg.imageFile = cleanPath;
         seg.path = cleanPath;
+        seg.imageTruthPath = cleanPath;
+        seg.imageTruthRef = refNumber;
+        seg.imageTruthPinned = true;
+        seg.imageTruthName = iamccsPathBasename(cleanPath);
+        seg.imageName = seg.imageTruthName;
         delete seg.image_file;
+        delete seg.image_truth_path;
         changed = true;
     }
     return changed;
@@ -5085,7 +5137,8 @@ function installShotboardPromptMagnifiers(root) {
                 area.dataset.iamccsPromptZoom, area.dataset.iamccsV3Key,
                 area.name, area.parentElement?.previousElementSibling?.textContent]
                 .filter(Boolean).join(" ").toLowerCase();
-            if (!/prompt/.test(hint) || /private note|not sent to promptrelay/.test(hint)) continue;
+            const isLocalPrompt = area.dataset.iamccsV3Key === "prompt";
+            if (!isLocalPrompt && (!/prompt/.test(hint) || /private note|not sent to promptrelay/.test(hint))) continue;
             area.dataset.iamccsMagnifierReady = "1";
             const wrap = document.createElement("div");
             // Timeline prompt textareas are absolutely positioned inside a
@@ -5130,25 +5183,28 @@ function installShotboardPromptMagnifiers(root) {
             lens.title = "Ingrandisci questo prompt · editor 2×";
             lens.setAttribute("aria-label", "Ingrandisci il prompt");
             lens.setAttribute("aria-pressed", "false");
-            lens.style.cssText = "position:absolute;right:22px;top:5px;z-index:2;width:16px;max-width:calc(100% - 26px);height:16px;padding:0;border:1px solid #b98e55;border-radius:3px;background:#261d15;color:#f8d69c;cursor:pointer;font-size:13px;font-weight:700;line-height:13px;text-align:center;";
+            lens.style.cssText = "position:absolute;right:20px;top:5px;z-index:2;width:20px;max-width:calc(100% - 22px);height:20px;padding:0;border:1px solid #b98e55;border-radius:3px;background:#261d15;color:#f8d69c;cursor:pointer;font-size:15px;font-weight:700;line-height:17px;text-align:center;";
             lens.onpointerdown = (event) => event.stopPropagation();
+            lens.ondblclick = (event) => event.stopPropagation();
             lens.onclick = (event) => {
                 event.preventDefault(); event.stopPropagation();
                 lens.setAttribute("aria-pressed", "true");
                 lens.style.background = "#674522";
                 const overlay = document.createElement("div");
-                overlay.style.cssText = "position:fixed;inset:0;z-index:100000;background:rgba(3,5,9,.88);display:grid;place-items:center;";
+                overlay.style.cssText = "position:fixed;inset:0;z-index:100000;background:rgba(3,5,9,.88);display:grid;place-items:center;padding:12px;box-sizing:border-box;overflow:hidden;";
                 const panel = document.createElement("div");
-                panel.style.cssText = "width:min(90vw,1200px);height:82vh;padding:16px;border:1px solid #d5a85e;border-radius:10px;background:#101821;display:flex;flex-direction:column;gap:10px;";
+                panel.style.cssText = "width:min(100%,1200px);height:min(82vh,100%);max-height:100%;min-width:0;min-height:0;box-sizing:border-box;overflow:hidden;padding:16px;border:1px solid #d5a85e;border-radius:10px;background:#101821;display:flex;flex-direction:column;gap:10px;";
                 const done = document.createElement("button"); done.type = "button"; done.textContent = "DONE";
-                done.style.cssText = "align-self:flex-end;padding:7px 18px;background:#49351e;color:#ffe0a3;border:1px solid #d5a85e;border-radius:5px;cursor:pointer;";
+                done.style.cssText = "flex:0 0 auto;align-self:flex-end;padding:7px 18px;background:#49351e;color:#ffe0a3;border:1px solid #d5a85e;border-radius:5px;cursor:pointer;";
                 const editor = document.createElement("textarea"); editor.value = area.value; editor.placeholder = area.placeholder;
-                editor.style.cssText = "flex:1;width:100%;min-height:0;padding:16px;background:#080e15;color:#f2e9d9;border:1px solid #526271;border-radius:7px;resize:none;line-height:1.45;font-size:24px;";
+                editor.style.cssText = "flex:1;width:100%;min-width:0;min-height:0;box-sizing:border-box;overflow:auto;padding:16px;background:#080e15;color:#f2e9d9;border:1px solid #526271;border-radius:7px;resize:none;line-height:1.45;font-size:24px;";
+                overlay.onpointerdown = (e) => e.stopPropagation();
+                overlay.onwheel = (e) => e.stopPropagation();
                 editor.oninput = () => { area.value = editor.value; area.dispatchEvent(new Event("input", {bubbles:true})); };
-                const close = () => { editor.oninput(); overlay.remove(); lens.setAttribute("aria-pressed", "false"); lens.style.background = "#261d15"; area.focus(); area.setSelectionRange(editor.selectionStart, editor.selectionEnd); };
+                const close = () => { editor.oninput(); area.dispatchEvent(new Event("change", {bubbles:true})); overlay.remove(); lens.setAttribute("aria-pressed", "false"); lens.style.background = "#261d15"; area.focus({preventScroll:true}); area.setSelectionRange(editor.selectionStart, editor.selectionEnd); };
                 done.onclick = close;
                 overlay.onclick = (e) => { if (e.target === overlay) close(); };
-                overlay.onkeydown = (e) => { if (e.key === "Escape") { e.preventDefault(); close(); } };
+                overlay.onkeydown = (e) => { e.stopPropagation(); if (e.key === "Escape") { e.preventDefault(); close(); } };
                 panel.append(done, editor); overlay.append(panel); document.body.append(overlay);
                 editor.focus(); editor.setSelectionRange(area.selectionStart, area.selectionEnd);
             };
@@ -8247,6 +8303,7 @@ function renderShotboardV3(node) {
     clearV3BoardTransientState();
     if (defaultForceWidget) defaultForceWidget.value = Math.max(0, Math.min(1, Number(defaultForceWidget.value || 0)));
     let collapsed = Boolean(node.properties?.iamccs_v3_collapsed);
+    let solo = Boolean(node.properties?.iamccs_v3_solo);
     let promptTextScale = Math.max(0.85, Math.min(1.55, Number(node.properties?.iamccs_v3_prompt_text_scale || 1)));
     const promptFontSize = (base) => `${Math.max(8, Math.round(Number(base || 10) * promptTextScale * 10) / 10)}px`;
     let timelineViewMode = String(node.properties?.iamccs_v3_timeline_view_mode || "fit") === "manual" ? "manual" : "fit";
@@ -8574,6 +8631,9 @@ function renderShotboardV3(node) {
         timeline.onlyFirstTrack = false;
     };
     const repairInitialMultiAudioView = () => {
+        let current = {};
+        try { current = JSON.parse(String(timelineWidget?.value || "{}")); } catch {}
+        if (Array.isArray(current.audioSegments) && (current.truth_revision !== undefined || current._iamccs_v3_truth_revision !== undefined)) return;
         const multi = timeline?.multiGeneration && typeof timeline.multiGeneration === "object" ? timeline.multiGeneration : {};
         const byTimeline = multi.audioByTimeline && typeof multi.audioByTimeline === "object" ? multi.audioByTimeline : {};
         if (!Object.keys(byTimeline).length) return;
@@ -8643,6 +8703,8 @@ function renderShotboardV3(node) {
             seg.path = nextPath;
             seg.imageTruthPath = nextPath;
             seg.imageTruthRef = nextRef;
+            seg.imageTruthName = iamccsPathBasename(nextPath);
+            seg.imageName = seg.imageTruthName;
             seg.imageTruthPinned = options.pinned !== false;
             seg.imageTruthSource = options.truthSource || "set_segment_reference";
             delete seg.image_file;
@@ -8667,6 +8729,8 @@ function renderShotboardV3(node) {
             seg.path = cleanPath;
             seg.imageTruthPath = cleanPath;
             seg.imageTruthRef = Math.max(1, Math.round(Number(refNumber || seg.ref || 1)));
+            seg.imageTruthName = iamccsPathBasename(cleanPath);
+            seg.imageName = seg.imageTruthName;
             seg.imageTruthPinned = true;
             seg.imageTruthSource = options.truthSource || "timeline_panel_edit";
             seg.imageTruthUpdatedAt = new Date().toISOString();
@@ -8692,10 +8756,8 @@ function renderShotboardV3(node) {
     };
     // Fix 2 (auto-fill): removed Math.max(1,...) clamping — ref:0 (new empty slots) now correctly returns "" instead of the first board image — By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
     const segmentReferencePath = (seg) => {
-        const truthPath = String(seg?.imageTruthPath || seg?.image_truth_path || "").trim();
-        if (truthPath) return truthPath;
-        const explicitPath = String(seg?.imageFile || seg?.image_file || seg?.path || "").trim();
-        if (explicitPath) return explicitPath;
+        const explicitPath = currentShotboardImagePath(seg);
+        if (explicitPath || seg?.imageFile !== undefined) return explicitPath;
         const refNumber = Math.round(Number(seg?.ref || 0));
         return refNumber >= 1 ? String(refPaths()[refNumber - 1] || "") : "";
     };
@@ -8704,7 +8766,16 @@ function renderShotboardV3(node) {
         let changed = false;
         for (const seg of (timeline.segments || [])) {
             if (!isTimelineImageSegment(seg)) continue;
-            if (Object.prototype.hasOwnProperty.call(seg, "imageFile") && !String(seg.imageFile || "").trim()) continue;
+            if (Object.prototype.hasOwnProperty.call(seg, "imageFile") && !String(seg.imageFile || "").trim()) {
+                seg.path = "";
+                seg.imageTruthPath = "";
+                seg.imageTruthName = "";
+                seg.imageName = "";
+                seg.imageTruthPinned = false;
+                delete seg.image_file;
+                delete seg.image_truth_path;
+                continue;
+            }
             const explicitPath = String(seg.imageFile ?? seg.imageTruthPath ?? seg.image_truth_path ?? seg.image_file ?? seg.path ?? "").trim();
             if (explicitPath) {
                 const refFromPath = referenceIndexForPath(explicitPath, paths);
@@ -8722,6 +8793,10 @@ function renderShotboardV3(node) {
                     changed = true;
                 }
                 if (seg.imageFile !== explicitPath || seg.path !== explicitPath || seg.imageTruthPath !== explicitPath || !seg.imageTruthPinned) {
+                    if (seg.imageTruthPath !== explicitPath) {
+                        seg.imageTruthName = iamccsPathBasename(explicitPath);
+                        seg.imageName = seg.imageTruthName;
+                    }
                     seg.imageFile = explicitPath;
                     seg.path = explicitPath;
                     seg.imageTruthPath = explicitPath;
@@ -8758,6 +8833,7 @@ function renderShotboardV3(node) {
     const endOfMotionSegments = () => endOfSegments((timeline.motionSegments || []).filter((seg) => segmentHasMotionMedia(seg) && !seg.placeholder));
     const durationFloorFrames = () => Math.max(endOfVisualSegments(), endOfAudioSegments(), isShotboardV4 ? endOfMotionSegments() : 0);
     const durationFloorSeconds = () => {
+        if (String(getWidget(node, "task_mode")?.value) === "v2va_face_swap_lora") return 0;
         const frames = durationFloorFrames();
         return frames > 0 ? Number((frames / getFps()).toFixed(3)) : 0;
     };
@@ -8784,6 +8860,9 @@ function renderShotboardV3(node) {
         timeline.duration_seconds = next;
         timelineMeterSeconds = clampTimelineMeterSeconds(timelineMeterSeconds);
         durationValueControl?._iamccsSetValue?.(next);
+        if (["manual", "duration_control"].includes(reason) && String(getWidget(node, "task_mode")?.value) === "v2va_face_swap_lora") {
+            linkedH3SettingsNode()?._iamccsSwapDurationFromShotboard?.(next);
+        }
         if (next > requested + 0.0005) {
             showTimelineNotice(`Duration locked to ${next.toFixed(3)}s because timeline audio/slots reach that point. Shorten or remove content before reducing duration.`, "warn");
         }
@@ -9019,7 +9098,7 @@ function renderShotboardV3(node) {
         if (Array.isArray(cleanPayload.segments)) {
             for (const seg of cleanPayload.segments) {
                 if (!isTimelineImageSegment(seg)) continue;
-                const truth = String(seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path || "").trim();
+                const truth = currentShotboardImagePath(seg);
                 if (!truth) continue;
                 seg.imageFile = truth;
                 seg.path = truth;
@@ -9068,13 +9147,13 @@ function renderShotboardV3(node) {
             const segments = Array.isArray(payload?.segments) ? payload.segments : [];
             for (const seg of segments) {
                 if (!isTimelineImageSegment(seg)) continue;
-                addPath(seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path || pathForRef(seg.ref));
+                addPath(currentShotboardImagePath(seg) || (seg.imageFile === undefined ? pathForRef(seg.ref) : ""));
             }
             if (activePaths.length) continue;
             const rows = Array.isArray(payload?.rows) ? payload.rows : [];
             for (const row of rows) {
                 if (!row || row.use_guide === false || Number(row.force ?? row.strength ?? row.guideStrength ?? 0) <= 0) continue;
-                addPath(row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path || pathForRef(row.ref));
+                addPath(currentShotboardImagePath(row) || (row.imageFile === undefined ? pathForRef(row.ref) : ""));
             }
         }
         if (!activePaths.length) return compact;
@@ -9083,7 +9162,7 @@ function renderShotboardV3(node) {
             if (!Array.isArray(segments)) return;
             for (const seg of segments) {
                 if (!isTimelineImageSegment(seg)) continue;
-                const source = String(seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path || pathForRef(seg.ref) || "").trim();
+                const source = currentShotboardImagePath(seg) || (seg.imageFile === undefined ? pathForRef(seg.ref) : "");
                 const nextRef = refMap.get(source);
                 if (!nextRef) continue;
                 seg.ref = nextRef;
@@ -9102,7 +9181,7 @@ function renderShotboardV3(node) {
             if (!Array.isArray(rows)) return;
             for (const row of rows) {
                 if (!row || row.use_guide === false) continue;
-                const source = String(row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path || pathForRef(row.ref) || "").trim();
+                const source = currentShotboardImagePath(row) || (row.imageFile === undefined ? pathForRef(row.ref) : "");
                 const nextRef = refMap.get(source);
                 if (nextRef) row.ref = nextRef;
             }
@@ -9197,7 +9276,7 @@ function renderShotboardV3(node) {
         const startFrame = Math.max(0, Math.round(Number(seg.start || 0)));
         const lengthFrames = Math.max(1, Math.round(Number(seg.length || 1)));
         const endFrame = startFrame + lengthFrames;
-        const truthPath = isText ? "" : String(seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path || "").trim();
+        const truthPath = isText ? "" : currentShotboardImagePath(seg);
         const videoPath = isVideo ? videoPathForSegment(seg) : "";
         const singleStrength = isText ? 0 : Math.max(0, Math.min(1, Number(seg.guideStrength ?? seg.guide_strength ?? seg.force ?? seg.strength ?? defaultForceWidget?.value ?? 0.25)));
         return {
@@ -9539,6 +9618,11 @@ function renderShotboardV3(node) {
             : {};
         if (multiGeneration.activeTimelineId) {
             const activeTimelineId = String(multiGeneration.activeTimelineId || "T01");
+            multiGeneration.audioByTimeline ||= {};
+            multiGeneration.audioByTimeline[activeTimelineId] = JSON.parse(JSON.stringify(timeline.audioSegments || []))
+                .map((seg) => ({ ...seg, localStart: Number(seg.start || 0) }));
+            multiGeneration.durationByTimeline ||= {};
+            multiGeneration.durationByTimeline[activeTimelineId] = effectiveDurationSeconds;
             multiGeneration.visualTimelines = multiGeneration.visualTimelines && typeof multiGeneration.visualTimelines === "object"
                 ? multiGeneration.visualTimelines
                 : {};
@@ -9564,8 +9648,11 @@ function renderShotboardV3(node) {
                 local_prompts: effectiveDirectorPrompts.join(" | "),
                 segment_lengths: effectiveDirectorLengths.join(","),
                 guide_strength: guideStrength,
+                audioSegments: JSON.parse(JSON.stringify(timeline.audioSegments || [])),
+                audioTrackCount: timeline.audioTrackCount,
             };
         }
+        timeline.multiGeneration = multiGeneration;
         const promptBlocks = visual
             .filter((seg) => String(seg.prompt ?? seg.local_prompt ?? seg.relay_prompt ?? "").trim())
             .map((seg, index) => ({
@@ -9820,7 +9907,7 @@ function renderShotboardV3(node) {
                 ltx_detailer_strength: Number(getWidget(node, "ltx_detailer_strength")?.value ?? 0.6),
                 ltx_seam_safe: Boolean(getWidget(node, "ltx_seam_safe")?.value ?? true),
                 ltx_looper: {
-                    sampler: "LTXVLoopingSampler",
+                    sampler: "IAMCCS_MiniMaxH3LTXTiledSampler",
                     temporal_tile_size: Number(getWidget(node, "ltx_looper_temporal_tile_size")?.value || 80),
                     temporal_overlap: Number(getWidget(node, "ltx_looper_temporal_overlap")?.value || 24),
                     guiding_strength: Number(getWidget(node, "ltx_looper_guiding_strength")?.value ?? 1),
@@ -9884,6 +9971,7 @@ function renderShotboardV3(node) {
     let syncingExternalH3Settings = false;
     let syncExternalH3Settings = () => false;
     const shotboardLocksDuration = () => {
+        if (String(getWidget(linkedH3SettingsNode(), "task_mode")?.value) === "v2va_face_swap_lora") return false;
         const visualSlots = (timeline.segments || []).filter((seg) =>
             !seg?.placeholder && String(seg?.type || "image") !== "audio").length;
         const audioClips = (timeline.audioSegments || []).filter((seg) => !seg?.placeholder).length;
@@ -9914,6 +10002,8 @@ function renderShotboardV3(node) {
         };
         const changed = [];
         const copyValue = (name, value) => {
+            if (name === "duration_seconds" && String(getWidget(target, "task_mode")?.value) === "v2va_face_swap_lora"
+                && target.properties?.iamccs_swap_duration?.mode !== "custom") return;
             const targetWidget = getWidget(target, name);
             if (!targetWidget || sameH3SettingsValue(targetWidget.value, value)) return;
             targetWidget.value = value && typeof value === "object"
@@ -9974,6 +10064,12 @@ function renderShotboardV3(node) {
                 const name = String(sourceWidget?.name || "");
                 if (!name || MINIMAX_H3_SAVED_SETTINGS_EXCLUSIONS.has(name)) return;
                 if (name === "duration_seconds" && shotboardLocksDuration()) return;
+                if (name === "duration_seconds" && String(getWidget(source, "task_mode")?.value) === "v2va_face_swap_lora"
+                    && Number(timeline.duration_seconds) !== Number(sourceWidget.value)) {
+                    setDurationSecondsDirect(sourceWidget.value, `swap_duration:${reason}`);
+                    changed = true;
+                    return;
+                }
                 const targetWidget = getWidget(node, name);
                 if (!targetWidget && isExternalOnlyH3Setting(name)) {
                     node.properties[MINIMAX_H3_SAVED_SETTINGS_KEY] ||= {};
@@ -10393,6 +10489,15 @@ function renderShotboardV3(node) {
             verboseLog: source.verboseLog ?? source.verbose_log ?? timeline.verboseLog,
             multiGeneration: source.multiGeneration && typeof source.multiGeneration === "object" ? cloneForMultiTimeline(source.multiGeneration, {}) : (timeline.multiGeneration || {}),
         };
+        // draw() commits visible editors before rebuilding them. Update the
+        // current fields first so stale DOM text cannot undo external prompts.
+        (timeline.segments || []).forEach((segment) => {
+            const id = String(segment?.id || "");
+            if (!id) return;
+            const prompt = String(segment.prompt ?? segment.local_prompt ?? segment.relay_prompt ?? "");
+            syncSegmentTextPeers(id, "prompt", prompt, null);
+            syncSegmentRelayPeers(id, Boolean(segment.use_prompt), null);
+        });
         node._iamccsCineShotboardV3LastTimelineText = "";
         writeTimeline({ force: true, skipDomSync: true });
         syncTimingWidgetsFromTimelineTruth("external_apply_timeline_data");
@@ -10432,7 +10537,8 @@ function renderShotboardV3(node) {
         const tracks = Math.max(1, Math.round(Number(timeline.audioTrackCount || 1)));
         return Math.max(SHOTBOARD_V3_COLLAPSED_HEIGHT, 450 + tracks * 90 + (isShotboardV4 ? 118 : 0));
     };
-    const currentNodeHeight = () => collapsed ? collapsedNodeHeight() : SHOTBOARD_V3_OPEN_HEIGHT;
+    const currentNodeWidth = () => solo ? SHOTBOARD_V3_SOLO_SIZE[0] : SHOTBOARD_V3_RIGID_WIDTH;
+    const currentNodeHeight = () => solo ? SHOTBOARD_V3_SOLO_SIZE[1] : collapsed ? collapsedNodeHeight() : SHOTBOARD_V3_OPEN_HEIGHT;
 
     const head = document.createElement("div");
     head.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px;width:100%;min-width:0;overflow:hidden;box-sizing:border-box;";
@@ -10641,8 +10747,8 @@ function renderShotboardV3(node) {
         return output;
     };
     const imagePathSourceForSegment = (seg, referencePaths = refPaths()) => {
-        const explicit = String(seg?.imageTruthPath || seg?.image_truth_path || seg?.imageFile || seg?.image_file || seg?.path || "").trim();
-        if (explicit) return explicit;
+        const explicit = currentShotboardImagePath(seg);
+        if (explicit || seg?.imageFile !== undefined) return explicit;
         const index = Math.round(Number(seg?.ref || 0)) - 1;
         return index >= 0 && index < referencePaths.length ? String(referencePaths[index] || "").trim() : "";
     };
@@ -11262,6 +11368,9 @@ function renderShotboardV3(node) {
     const addAudioBtn = makeBtn("Add Audio", "olive");
     const addTrackBtn = makeBtn("Add Audio Track", "sand");
     const collapseBtn = makeBtn(collapsed ? "Show Boxes" : "Collapse Boxes", "slate");
+    const soloBtn = makeBtn("Solo", "slate");
+    soloBtn.className = "iamccs-h3-solo-toggle";
+    soloBtn.title = "Show only the global prompt. Press again to restore Shotboard; generation settings stay unchanged.";
     settingsBtn = makeBtn("⚙ SETTINGS", "gold");
     settingsBtn.title = "Open the MiniMax H3 settings panel without enlarging the timeline layout.";
     settingsBtn.style.height = "32px";
@@ -11299,7 +11408,7 @@ function renderShotboardV3(node) {
     if (addVideoBtn) topActions.append(addVideoBtn);
     topActions.append(addTextBtn);
     if (addIcLoraBtn) topActions.append(addIcLoraBtn);
-    topActions.append(addAudioBtn, addTrackBtn, collapseBtn, openEditorBtn, importBoardBtn, saveBtn, savePackageBtn, saveMultiPackageBtn, clearBtn);
+    topActions.append(addAudioBtn, addTrackBtn, collapseBtn, soloBtn, openEditorBtn, importBoardBtn, saveBtn, savePackageBtn, saveMultiPackageBtn, clearBtn);
     Array.from(topActions.children)
         .filter((control) => control?.tagName === "BUTTON")
         .forEach((control) => {
@@ -11361,6 +11470,18 @@ function renderShotboardV3(node) {
     promptArea.onblur = promptArea.oninput;
     promptHeader.append(promptLabel);
     promptWrap.append(promptHeader, promptArea);
+    head.classList.add("iamccs-h3-solo-keep");
+    promptWrap.classList.add("iamccs-h3-solo-keep");
+    topActions.classList.add("iamccs-h3-shotboard-actions");
+    const soloStyle = document.createElement("style");
+    soloStyle.textContent = `
+        .iamccs-h3-shotboard-solo > :not(.iamccs-h3-solo-keep) { display:none !important; }
+        .iamccs-h3-shotboard-solo .iamccs-h3-shotboard-actions > :not(.iamccs-h3-solo-toggle) { display:none !important; }
+        .iamccs-h3-shotboard-solo .iamccs-h3-shotboard-actions { justify-content:flex-end !important; }
+        .iamccs-h3-shotboard-solo .iamccs-h3-solo-toggle { flex:0 0 72px !important; }
+        .iamccs-h3-shotboard-solo textarea { min-height:180px !important; }
+    `;
+    root.appendChild(soloStyle);
 
     const settings = document.createElement("section");
     settings.className = "iamccs-h3-modal-settings";
@@ -11786,7 +11907,7 @@ function renderShotboardV3(node) {
         wrap.className = "iamccs-h3-settings-field";
         wrap.style.cssText = `grid-column:span 2;display:flex;flex-direction:column;gap:4px;color:${purple.muted};font-size:10px;font-weight:800;text-align:center;`;
         wrap.title = isNative
-            ? "H3 native canvases are aligned to a 32-pixel grid. H = horizontal, V = vertical, SCOPE = cinema-wide. Custom remains available."
+            ? "H3 native canvases are aligned to a 32-pixel grid. H = horizontal, V = vertical, SCOPE = cinema-wide. Keep the same aspect ratio to preserve the guide crop: 640×384, 960×576, 1120×672 and 1280×768 are all 5:3. Approximate 16:9 presets have different crops. Custom remains available."
             : "Exact delivery targets for the selected post-upscale route. H = horizontal, V = vertical, SCOPE = cinema-wide. Custom remains available.";
         const span = document.createElement("span");
         span.textContent = label;
@@ -12045,10 +12166,13 @@ function renderShotboardV3(node) {
         { value: "ref2va", label: "REF2VA" },
         { value: "ref2vid_lipsync", label: "REF2VID LIPSYNC / static image + AudioBoard" },
         { value: "v2va_object_swap", label: "V2VA / Object Swap" },
+        { value: "v2va_face_swap_lora", label: "SUBJECT SWAP -LorA" },
+        { value: "ref2va_vfx_edit", label: "REF2VA · VFX EDIT" },
         { value: "v2va_face_swap", label: "FACE SWAP v1 / lazy R42 identity branch" },
-        { value: "longvid_guides", label: "LongVid Guided / native audio" },
-        { value: "keyframe_joint_native", label: "11 · KEYFRAME JOINT LATENT NEW / experimental" },
-        { value: "longvid_guided_lipsync", label: "LongVid Guided + LipSync / SAFE locked AudioBoard" },
+        { value: "longvid_multishot_hardcut", label: "10 · LONG MULTI-SHOT / HARD CUT" },
+        { value: "longvid_keyframe_continuous", label: "11 · LONG KEYFRAME CONTINUOUS / native AV" },
+        { value: "keyframe_joint_native", label: "12 · KEYFRAME JOINT / native" },
+        { value: "longvid_guided_lipsync", label: "Legacy LongVid Guided + LipSync / compatibility" },
     ], () => {
         const task = canonicalH3TaskMode(getWidget(node, "task_mode")?.value);
         const requiredAudioMode = h3RequiredAudioMode(task);
@@ -12061,15 +12185,21 @@ function renderShotboardV3(node) {
                 "info",
             );
         }
-        // Continuous AV can carry H3-generated audio or leave audio for
-        // post. It cannot inherit a locked AudioBoard/REF2VA route from the
-        // previously active LipSync mode.
-        if (["longvid_masked_loop_guided", "guided_av_loop_experimental"].includes(task)) {
+        // R46 restored TimelineDirector uses native generated AV audio + AudioCon.
+        // Do not imply that a Custom Audio waveform join is native AudioCon.
+        if (task === "longvid_keyframe_continuous") {
+            const activeAudio = canonicalH3AudioMode(getWidget(node, "audio_mode")?.value);
+            if (activeAudio !== "h3_native_generated") {
+                setDeckValue("audio_mode", "h3_native_generated");
+                showTimelineNotice("LONG KEYFRAME uses native H3 audio + AV AudioCon continuity. Custom Audio is not supported in this restored engine.", "info");
+            }
+        }
+        if (task === "guided_av_loop_experimental") {
             const currentAudio = canonicalH3AudioMode(getWidget(node, "audio_mode")?.value);
             if (!["h3_native_generated", "external_audio_post"].includes(currentAudio)) {
                 setDeckValue("audio_mode", "h3_native_generated");
                 showTimelineNotice(
-                    "Continuous AV selected H3 Generated Audio. The complete native video+audio latent is handed to every continuation.",
+                    "Guided AV Loop Experimental selected H3 Generated Audio. Use LONG KEYFRAME CONTINUOUS for locked Custom Audio performance.",
                     "ok",
                 );
             }
@@ -12135,6 +12265,14 @@ function renderShotboardV3(node) {
             ? { status: h3LipsyncInfo(task), source: "v20 forced-audio path: positioned images use T2VA/AddGuide; audio is VAE-encoded, zero-masked and locked into the joint H3 latent without a second Audio AddGuide. Put verbatim user-supplied speech in <d>[Language] ...</d>." }
             : task === "ref2vid_lipsync"
                 ? { status: h3LipsyncInfo(task), source: "v20 REF2VA path: the same AudioBoard chunk enters ReferenceToVideo as <Audio 1> and VAEEncodeAudio as a zero-denoise latent lock. Put exact user-supplied dialogue/lyrics in <d>[Language] ...</d>; never invent missing words." }
+            : task === "longvid_multishot_hardcut"
+                ? mode === "h3_custom_audio_drive"
+                    ? { status: "LONG MULTI-SHOT · CUSTOM AUDIO PERFORMANCE", source: "Each independent hard-cut shot locks the exact global AudioBoard slice before H3 sampling. The final soundtrack remains one pristine continuous master across cuts." }
+                    : { status: "LONG MULTI-SHOT · H3 NATIVE AUDIO", source: "Each Shotboard slot is an independent H3 shot separated by a true hard cut. H3 generates each shot soundtrack independently." }
+            : task === "longvid_keyframe_continuous"
+                ? mode === "h3_custom_audio_drive"
+                    ? { status: "LONG KEYFRAME · CUSTOM AUDIO UNSUPPORTED", source: "Select H3 Native Audio for sampled native VIDEO+AUDIO latent transport. Waveform joining cannot replace AudioCon." }
+                    : { status: "LONG KEYFRAME · TIMELINEDIRECTOR AV", source: "One continuous authored timeline: exact sampled VIDEO+AUDIO tail at editorial endpoint, incoming-owned 22f overlap, 1f technical bridge removed, no FL2VA interval endpoints." }
             : task === "longvid_motion_context"
                 ? mode === "h3_custom_audio_drive"
                     ? { status: "LONG MULTI-SHOT · AUDIO DRIVE", source: "AudioBoard drives timing while Motion Context carries the native AV tail across technical H3 chunks. Different authored image guides remain separate shots." }
@@ -12431,8 +12569,8 @@ function renderShotboardV3(node) {
     settingsControls.set("flf_continuity_audio", continuityAudioSelect);
     refreshH3ContinuitySettings = () => {
         const task = canonicalH3TaskMode(getWidget(node, "task_mode")?.value);
-        const longvidMotionContext = ["longvid_motion_context", "longvid_continuous_guided", "longvid_masked_loop_guided", "guided_av_loop_experimental"].includes(task);
-        const longContinuousGuided = task === "longvid_continuous_guided";
+        const longvidMotionContext = ["longvid_motion_context", "longvid_continuous_guided", "longvid_keyframe_continuous", "longvid_masked_loop_guided", "guided_av_loop_experimental"].includes(task);
+        const longContinuousGuided = ["longvid_continuous_guided", "longvid_keyframe_continuous"].includes(task);
         const mode = canonicalH3ContinuityMode(getWidget(node, "flf_continuity_mode")?.value);
         const effectiveMode = longvidMotionContext ? "native_av_context" : mode;
         const info = H3_CONTINUITY_MODE_INFO[effectiveMode];
@@ -12456,17 +12594,19 @@ function renderShotboardV3(node) {
         continuityAudioSelect.disabled = !active;
         continuityFields.style.opacity = active ? "1" : ".48";
         continuityKicker.innerHTML = longvidMotionContext
-            ? `<div style="color:#87D9E5;font:900 8px/1.2 Arial;letter-spacing:.14em">${longContinuousGuided ? "LONG CONTINUOUS GUIDED" : "LONG MULTI-SHOT"}</div><div style="color:#F4F8F8;font:900 11px/1.3 Arial;margin-top:3px">${longContinuousGuided ? "Previous AV latent → next image destination" : "Native AV hand-off between technical chunks"}</div>`
+            ? `<div style="color:#87D9E5;font:900 8px/1.2 Arial;letter-spacing:.14em">${task === "longvid_keyframe_continuous" ? "LONG KEYFRAME CONTINUOUS" : (longContinuousGuided ? "LONG CONTINUOUS GUIDED" : "LONG MULTI-SHOT")}</div><div style="color:#F4F8F8;font:900 11px/1.3 Arial;margin-top:3px">${task === "longvid_keyframe_continuous" ? "TimelineDirector · native sampled VIDEO+AUDIO tail" : (longContinuousGuided ? "Previous AV latent → next image destination" : "Native AV hand-off between technical chunks")}</div>`
             : `<div style="color:#87D9E5;font:900 8px/1.2 Arial;letter-spacing:.14em">FL2VA MOTION CONTINUITY</div><div style="color:#F4F8F8;font:900 11px/1.3 Arial;margin-top:3px">Choose the shot handoff source</div>`;
         continuityBadge.textContent = longvidMotionContext ? "ACTIVE CONTRACT" : info.badge;
         continuityTitle.textContent = longvidMotionContext ? (longContinuousGuided ? "One evolving take across authored destinations" : "Carry real camera, subject and motion state") : info.title;
         continuityDetail.textContent = longvidMotionContext
-            ? (longContinuousGuided
+            ? (task === "longvid_keyframe_continuous"
+                ? "Native TimelineDirector advances a single authored film clock using sampled native AV latent tails (22f incoming-owned overlap). Guides remain positioned in the global timeline, never converted to FL2VA destination clips."
+                : longContinuousGuided
                 ? "N images become N−1 continuous FL2VA intervals. From interval two onward, the previous sampled AV tail replaces the repeated opening keyframe while the following Shotboard image remains the final destination."
                 : "Every continuation chunk receives the decoded native AV tail of the previous chunk. Shotboard slot positions remain guide truth; their draggable lengths are never replaced by the technical context window.")
             : info.detail;
         continuitySummary.textContent = active
-            ? `${tail} real preceding frames are pinned internally; delivery removes that prefix before the saved chunk. ${audioEnabled ? "Ambient AV timing is also carried." : "Video-only carry is selected."}`
+            ? (task === "longvid_keyframe_continuous" ? `R46: 22f native incoming overlap remains visible in each incoming segment; 1f RGB bridge is removed. Sampled VIDEO+AUDIO state is carried at editorial endpoint.` : `${tail} real preceding frames are pinned internally; delivery removes that prefix before the saved chunk. ${audioEnabled ? "Ambient AV timing is also carried." : "Video-only carry is selected."}`)
             : "No decoded output is fed forward. The Shotboard uses adjacent authored keyframes only.";
         continuityGuidance.style.borderColor = active ? "#5D9FA8" : "#4E8079";
     };
@@ -12477,7 +12617,7 @@ function renderShotboardV3(node) {
             getWidget(node, "audio_mode")?.value,
         );
         const task = canonicalH3TaskMode(getWidget(node, "task_mode")?.value);
-        const longvidMotionContext = ["longvid_motion_context", "longvid_continuous_guided", "longvid_masked_loop_guided", "guided_av_loop_experimental"].includes(task);
+        const longvidMotionContext = ["longvid_motion_context", "longvid_continuous_guided", "longvid_keyframe_continuous", "longvid_masked_loop_guided", "guided_av_loop_experimental"].includes(task);
         joinDeck.style.display = capabilities.flf ? "grid" : "none";
         joinDeck.setAttribute("aria-hidden", capabilities.flf ? "false" : "true");
         joinDeck.title = capabilities.flfHint;
@@ -12547,7 +12687,7 @@ function renderShotboardV3(node) {
         if (String(value) !== "pdd_native_8step") return;
         const pddValues = getWidget(node, "pdd_lora_name")?.options?.values;
         const task = canonicalH3TaskMode(getWidget(node, "task_mode")?.value);
-        const wantsRef = ["reference_image", "ref2va", "ref2vid_lipsync", "longvid_ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap"].includes(task);
+        const wantsRef = ["reference_image", "ref2va", "ref2vid_lipsync", "longvid_ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap", "v2va_face_swap_lora"].includes(task);
         const family = wantsRef ? "ref2va" : "fl2va";
         const selectedPdd = (Array.isArray(pddValues) ? pddValues : []).map(item => String(item || "")).find(item => item.toLowerCase().includes(family))
             || "";
@@ -12597,7 +12737,7 @@ function renderShotboardV3(node) {
             return;
         }
         const task = canonicalH3TaskMode(getWidget(node, "task_mode")?.value);
-        const wantsRef = ["reference_image", "ref2va", "ref2vid_lipsync", "longvid_ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap"].includes(task);
+        const wantsRef = ["reference_image", "ref2va", "ref2vid_lipsync", "longvid_ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap", "v2va_face_swap_lora"].includes(task);
         const choices = (getWidget(node, "turbo_lora_name")?.options?.values || []).map(item => String(item || "")).filter(Boolean);
         const compatible = choices.filter(item => {
             const text = item.toLowerCase();
@@ -12791,47 +12931,13 @@ function renderShotboardV3(node) {
     addSetting("Wan denoise", "wan_upscale_denoise", "0.01", "0");
     addWidgetTextSetting("Upscale prompt (optional)", "upscale_prompt", "Leave empty to reuse the selected H3 global/chunk prompt.");
     addWidgetBoolSetting("LTX seam-safe VAE", "ltx_seam_safe");
-    // LTXVLoopingSampler accepts video-only latents; this master is LTX AV.
-    // Keep the control panel explicit rather than exposing a path that fails
-    // only after both LTX model phases have been loaded.
-    const ltxLooperAvailable = false;
-    const looperStatus = addStaticH3Setting(
-        "LTX temporal looper",
-        "Disabled for LTX AV",
-        "LTXVLoopingSampler rejects audio-visual latents. IAMCCS uses the native AV-safe SamplerCustomAdvanced path and preserves the LTX audio stream.",
-    );
-    if (!ltxLooperAvailable) {
-        looperStatus.style.color = "#ffb4a7";
-        looperStatus.style.borderColor = "#a94b3d";
-        looperStatus.style.background = "#351b17";
-    }
-    addSetting("Looper temporal tile", "ltx_looper_temporal_tile_size", "8", "24");
-    addSetting("Looper temporal overlap", "ltx_looper_temporal_overlap", "8", "16");
-    addSetting("Looper continuity strength", "ltx_looper_overlap_strength", "0.01", "0");
-    addSetting("Looper guide strength", "ltx_looper_guiding_strength", "0.01", "0");
-    addSetting("Looper cond image strength", "ltx_looper_cond_image_strength", "0.01", "0");
-    addSetting("Looper horizontal tiles", "ltx_looper_horizontal_tiles", "1", "1");
-    addSetting("Looper vertical tiles", "ltx_looper_vertical_tiles", "1", "1");
-    addSetting("Looper spatial overlap", "ltx_looper_spatial_overlap", "1", "1");
-    if (!ltxLooperAvailable) {
-        [
-            "ltx_looper_temporal_tile_size",
-            "ltx_looper_temporal_overlap",
-            "ltx_looper_guiding_strength",
-            "ltx_looper_overlap_strength",
-            "ltx_looper_cond_image_strength",
-            "ltx_looper_horizontal_tiles",
-            "ltx_looper_vertical_tiles",
-            "ltx_looper_spatial_overlap",
-        ].forEach((name) => {
-            const control = settingsControls.get(name);
-            if (control) {
-                control.disabled = true;
-                control.title = "LTXVLoopingSampler cannot sample LTX audio-visual latents. The standard AV-safe sampler remains active.";
-                control.style.opacity = "0.45";
-            }
-        });
-    }
+    addStaticH3Setting("LTX refinement", "Tiled AV sampler",
+        "Temporal windows and automatic spatial subdivision bound sampler memory. Overlaps blend estimates of the same frame; the native H3 audio is preserved. The backend may subdivide requested tiles further.");
+    addSetting("LTX window frames", "ltx_looper_temporal_tile_size", "8", "24");
+    addSetting("LTX overlap frames", "ltx_looper_temporal_overlap", "8", "16");
+    addSetting("LTX horizontal tiles (minimum)", "ltx_looper_horizontal_tiles", "1", "1");
+    addSetting("LTX vertical tiles (minimum)", "ltx_looper_vertical_tiles", "1", "1");
+    addSetting("LTX spatial overlap", "ltx_looper_spatial_overlap", "1", "1");
     addWidgetBoolSetting("LTX finishing LoRA", "ltx_detailer_enabled");
     const ltxDetailerValues = getWidget(node, "ltx_detailer_lora_name")?.options?.values;
     addSelectSetting("LTX LoRA — Crisp preset / click to change", "ltx_detailer_lora_name", Array.isArray(ltxDetailerValues) && ltxDetailerValues.length ? ltxDetailerValues : [""]);
@@ -14312,6 +14418,35 @@ function renderShotboardV3(node) {
             .sort((a, b) => a.distance - b.distance || a.priority - b.priority)[0] || null;
     }
 
+    function audioSnapTargetForTrim(audio, edge, thresholdFrames = 6) {
+        if (!audio) return null;
+        const start = Math.max(0, Math.round(Number(audio.start || 0)));
+        const length = Math.max(1, Math.round(Number(audio.length || 1)));
+        const end = start + length;
+        const trim = Math.max(0, Math.round(Number(audio.trimStart || 0)));
+        const sourceLength = Math.max(1, Math.round(Number(audio.audioDurationFrames || length)));
+        const isEnd = edge === "right";
+        const frame = isEnd ? end : start;
+        const min = isEnd ? start + 1 : Math.max(0, start - trim);
+        const max = isEnd ? Math.min(getTotalFrames(), start + sourceLength - trim) : end - 1;
+        const candidates = (timeline.segments || [])
+            .filter((item) => item.id && String(item.type || "image") !== "audio" && !item.placeholder)
+            .map((item) => ({
+                id: String(item.id),
+                frame: Math.round(Number(item.start || 0) + (isEnd ? Math.max(1, Number(item.length || 1)) : 0)),
+                audioEdge: isEnd ? "end" : "start",
+                visualEdge: isEnd ? "end" : "start",
+            }))
+            .filter((item) => item.frame >= min && item.frame <= max && Math.abs(item.frame - frame) <= thresholdFrames);
+        return candidates.sort((a, b) => Math.abs(a.frame - frame) - Math.abs(b.frame - frame))[0] || null;
+    }
+
+    function audioSnapColors(visualEdge) {
+        return visualEdge === "end"
+            ? { color: "#FFAA45", rgb: "255,170,69", bg: "#492B12" }
+            : { color: "#88E6A0", rgb: "136,230,160", bg: "#163D27" };
+    }
+
     function motionDragPreview(initItems, targetId, dragDelta, edge, durationFrames) {
         const items = cloneSegments(initItems).sort((a, b) => Number(a.start || 0) - Number(b.start || 0));
         const target = items.find((item) => item.id === targetId);
@@ -14383,6 +14518,11 @@ function renderShotboardV3(node) {
             let next;
             if (isAudio) {
                 next = audioDragPreview(dragState.initial, dragState.targetId, deltaFrames, edge, getTotalFrames());
+                delete dragState.audioSnapFrame;
+                delete dragState.audioSnapTargetId;
+                delete dragState.audioSnapAudioEdge;
+                delete dragState.audioSnapVisualEdge;
+                delete dragState.audioSnapKind;
                 if (edge === "center") {
                     const targetAudio = next.find((item) => item.id === dragState.targetId);
                     const laneRect = audioTracks?.getBoundingClientRect?.();
@@ -14422,11 +14562,33 @@ function renderShotboardV3(node) {
                         targetAudio.anchor_mode = "absolute_timeline";
                         targetAudio.relativeStartFrames = 0;
                         targetAudio.relative_start_frames = 0;
-                        delete dragState.audioSnapFrame;
-                        delete dragState.audioSnapTargetId;
-                        delete dragState.audioSnapAudioEdge;
-                        delete dragState.audioSnapVisualEdge;
-                        delete dragState.audioSnapKind;
+                    }
+                } else {
+                    let targetAudio = next.find((item) => item.id === dragState.targetId);
+                    const snap = audioSnapTargetForTrim(targetAudio, edge, 6);
+                    if (snap) {
+                        const original = dragState.initial.find((item) => item.id === dragState.targetId);
+                        const originalEdge = Number(original.start || 0) + (edge === "right" ? Number(original.length || 1) : 0);
+                        next = audioDragPreview(dragState.initial, dragState.targetId, snap.frame - originalEdge, edge, getTotalFrames());
+                        targetAudio = next.find((item) => item.id === dragState.targetId);
+                        dragState.audioSnapFrame = snap.frame;
+                        dragState.audioSnapTargetId = snap.id;
+                        dragState.audioSnapAudioEdge = snap.audioEdge;
+                        dragState.audioSnapVisualEdge = snap.visualEdge;
+                        dragState.audioSnapKind = `${snap.audioEdge}_to_${snap.visualEdge}`;
+                    }
+                    if (targetAudio && edge === "left") {
+                        if (snap) {
+                            targetAudio.linkedVisualId = snap.id;
+                            targetAudio.linked_visual_id = snap.id;
+                        }
+                        const linked = (timeline.segments || []).find((item) => String(item.id) === String(targetAudio.linkedVisualId || targetAudio.linked_visual_id || ""));
+                        if (linked) {
+                            targetAudio.relativeStartFrames = Number(targetAudio.start) - Number(linked.start || 0);
+                            targetAudio.relative_start_frames = targetAudio.relativeStartFrames;
+                            targetAudio.anchorMode = "visual_start";
+                            targetAudio.anchor_mode = "visual_start";
+                        }
                     }
                 }
             } else if (isMotion) {
@@ -15125,6 +15287,17 @@ function renderShotboardV3(node) {
         return Math.max(Math.ceil(viewportWidth), Math.min(12000, Math.ceil(meterWidth)));
     }
 
+    function resizeTimelineCanvas() {
+        if (solo || !timelineViewport.clientWidth) return;
+        const canvasWidth = computeTimelineCanvasWidth();
+        const viewportWidth = timelineViewportWidth();
+        const actualZoom = Math.max(1, canvasWidth / viewportWidth);
+        timelineMeterReadout.textContent = timelineViewMode === "fit" ? "FIT" : `${Math.round(actualZoom * 100)}%`;
+        // FIT follows the DOM widget while ComfyUI restores its width after Solo.
+        timelineCanvas.style.width = timelineViewMode === "fit" ? "100%" : `${canvasWidth}px`;
+        timelineViewport.scrollLeft = Math.min(Number(timelineViewport.scrollLeft || 0), Math.max(0, canvasWidth - viewportWidth));
+    }
+
     const isTimelineVideoSegment = (seg) => String(seg?.type || "") === "video" && !seg?.placeholder;
     const videoPathForSegment = (seg) => String(seg?.videoFile || seg?.video_file || seg?.imageFile || seg?.image_file || seg?.path || "").trim();
     const videoUrlForSegment = (seg) => {
@@ -15545,6 +15718,7 @@ function renderShotboardV3(node) {
             && dragState?.isAudio
             && String(dragState.audioSnapTargetId || "") === String(seg.id || ""),
         );
+        const snapColors = audioSnapColors(dragState?.audioSnapVisualEdge);
         const showDragStripes = Boolean(dragState && !isAudio && dragState.targetId === seg.id && dragState.kind !== "center");
         const isVideoBlock = isTimelineVideoSegment(seg);
         const color = isAudio
@@ -15563,7 +15737,7 @@ function renderShotboardV3(node) {
             (selected
                 ? "border:2px solid #F9C859"
                 : isAudioSnapVisualTarget
-                    ? "border:2px solid #E0A8FF"
+                    ? `border:2px solid ${snapColors.color}`
                     : `border:1px solid ${isVideoBlock ? "#3F739A" : purple.borderSoft}`),
             "border-radius:4px",
             "box-sizing:border-box",
@@ -15572,7 +15746,7 @@ function renderShotboardV3(node) {
             (selected
                 ? "box-shadow:0 0 0 2px rgba(249,200,89,.35),0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(145,203,255,.13)"
                 : isAudioSnapVisualTarget
-                    ? "box-shadow:0 0 0 3px rgba(224,168,255,.28),0 0 22px rgba(218,157,255,.72),inset 0 0 18px rgba(136,66,178,.18)"
+                    ? `box-shadow:0 0 0 3px rgba(${snapColors.rgb},.28),0 0 22px rgba(${snapColors.rgb},.72),inset 0 0 18px rgba(${snapColors.rgb},.18)`
                     : (isVideoBlock ? "box-shadow:0 6px 16px rgba(0,0,0,.42),inset 0 1px 0 rgba(145,203,255,.14)" : "box-shadow:0 6px 16px rgba(0,0,0,.38),inset 0 1px 0 rgba(255,190,120,.08)")),
             "user-select:none",
             `z-index:${isAudio ? 14 : (isAudioSnapVisualTarget ? 20 : (selected || (dragState && dragState.targetId === seg.id) ? 18 : 4))}`,
@@ -15581,10 +15755,10 @@ function renderShotboardV3(node) {
             const edge = dragState.audioSnapVisualEdge === "end" ? "right" : "left";
             const snapEdge = document.createElement("div");
             snapEdge.className = "iamccs-v3-audio-snap-slot-edge";
-            snapEdge.style.cssText = `position:absolute;${edge}:-3px;top:-2px;bottom:-2px;width:5px;border-radius:4px;z-index:55;background:#F0C2FF;box-shadow:0 0 0 1px rgba(75,28,105,.88),0 0 18px rgba(224,168,255,1);pointer-events:none;`;
+            snapEdge.style.cssText = `position:absolute;${edge}:-3px;top:-2px;bottom:-2px;width:5px;border-radius:4px;z-index:55;background:${snapColors.color};box-shadow:0 0 0 1px ${snapColors.bg},0 0 18px rgba(${snapColors.rgb},1);pointer-events:none;`;
             const snapBadge = document.createElement("div");
             snapBadge.textContent = `MAGNET · ${String(dragState.audioSnapAudioEdge || "start").toUpperCase()} → SLOT ${String(dragState.audioSnapVisualEdge || "start").toUpperCase()}`;
-            snapBadge.style.cssText = `position:absolute;${edge === "left" ? "left:7px" : "right:7px"};top:4px;max-width:170px;padding:3px 6px;border:1px solid rgba(224,168,255,.84);border-radius:999px;background:rgba(46,19,62,.94);color:#F7DFFF;font:900 8px/1 Arial;letter-spacing:.045em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 3px 12px rgba(0,0,0,.42);pointer-events:none;`;
+            snapBadge.style.cssText = `position:absolute;${edge === "left" ? "left:7px" : "right:7px"};top:4px;max-width:170px;padding:3px 6px;border:1px solid rgba(${snapColors.rgb},.84);border-radius:999px;background:${snapColors.bg};color:${snapColors.color};font:900 8px/1 Arial;letter-spacing:.045em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;box-shadow:0 3px 12px rgba(0,0,0,.42);pointer-events:none;`;
             snapEdge.appendChild(snapBadge);
             block.appendChild(snapEdge);
         }
@@ -15929,7 +16103,7 @@ function renderShotboardV3(node) {
         label.textContent = `${frameLabel(seg.start)} - ${frameLabel(Number(seg.start || 0) + Number(seg.length || 0))}`;
         block.appendChild(label);
         if (!isAudio && isTimelineImageSegment(seg) && String(seg.type || "image") !== "text") {
-            const truthPath = String(seg.imageTruthPath || seg.image_truth_path || seg.imageFile || seg.image_file || seg.path || "").trim();
+            const truthPath = currentShotboardImagePath(seg);
             if (truthPath) {
                 const truthBadge = document.createElement("div");
                 const truthName = String(seg.imageTruthName || seg.imageName || "").trim() || truthPath.split(/[\\/]/).pop() || truthPath;
@@ -17984,8 +18158,17 @@ function renderShotboardV3(node) {
         });
     }
 
-    function draw() {
-        if (!dragState) writeTimeline();
+    function draw(options = {}) {
+        root.classList.toggle("iamccs-h3-shotboard-solo", solo);
+        soloBtn.setAttribute("aria-pressed", String(solo));
+        if (solo) {
+            promptArea.style.fontSize = promptFontSize(12);
+            root.style.maxHeight = `${currentNodeHeight()}px`;
+            resizeShotboardForView();
+            return;
+        }
+        if (Number(node.size?.[0]) !== currentNodeWidth()) resizeShotboardForView();
+        if (!dragState && options.persist !== false) writeTimeline();
         drawFrameRuler();
         drawRuler();
         updatePlayUI();
@@ -18004,16 +18187,10 @@ function renderShotboardV3(node) {
         const trackHasRealAudio = (trackIndex) => audioSegmentsForDraw.some((seg) =>
             Number(seg?.track || 0) === Number(trackIndex || 0) && audioSegmentHasMedia(seg) && !seg.placeholder
         );
-        const canvasWidth = computeTimelineCanvasWidth(visualSegments);
-        const viewportWidth = timelineViewportWidth();
-        const actualZoom = Math.max(1, canvasWidth / Math.max(1, viewportWidth));
-        timelineMeterReadout.textContent = timelineViewMode === "fit" ? "FIT" : `${Math.round(actualZoom * 100)}%`;
-        const previousScrollLeft = Number(timelineViewport.scrollLeft || 0);
-        timelineCanvas.style.width = `${canvasWidth}px`;
+        resizeTimelineCanvas();
         frameRuler.style.width = "100%";
         ruler.style.width = "100%";
         timelineBox.style.width = "100%";
-        timelineViewport.scrollLeft = Math.min(previousScrollLeft, Math.max(0, canvasWidth - Number(timelineViewport.clientWidth || 0)));
         // Read user timeline-height resize value, update all related heights
         // By Carmine Cristallo Scalzi AI research (IAMCCS) - patreon.com/IAMCCS - carminecristalloscalzi.com
         timelineExtraH = Math.max(0, Math.min(600, Math.round(Number(node.properties?.iamccs_v3_timeline_extra_height || 0))));
@@ -18097,7 +18274,8 @@ function renderShotboardV3(node) {
             const snapGuide = document.createElement("div");
             snapGuide.className = "iamccs-v3-audio-snap-guide";
             const left = (Number(dragState.audioSnapFrame) / Math.max(1, getTotalFrames())) * 100;
-            snapGuide.style.cssText = `position:absolute;left:${left}%;top:0;bottom:0;width:2px;z-index:96;background:#E0A8FF;box-shadow:0 0 0 1px rgba(97,42,139,.65),0 0 14px rgba(218,157,255,.95);pointer-events:none;`;
+            const snapColors = audioSnapColors(dragState.audioSnapVisualEdge);
+            snapGuide.style.cssText = `position:absolute;left:${left}%;top:0;bottom:0;width:2px;z-index:96;background:${snapColors.color};box-shadow:0 0 0 1px rgba(${snapColors.rgb},.65),0 0 14px rgba(${snapColors.rgb},.95);pointer-events:none;`;
             timelineBox.appendChild(snapGuide);
         }
         timelineBox.querySelectorAll(".iamccs-v3-playhead").forEach((item) => item.remove());
@@ -18123,12 +18301,17 @@ function renderShotboardV3(node) {
         boxList.style.maxHeight = collapsed ? "0" : "none";
         boxList.style.overflow = collapsed ? "hidden" : "visible";
         if (!collapsed && !dragState) drawBoxes();
-        const desiredHeight = currentNodeHeight() + timelineExtraH;
-        node._iamccsCineMinSize = [SHOTBOARD_V3_RIGID_WIDTH, desiredHeight];
+        resizeShotboardForView();
+    }
+
+    function resizeShotboardForView() {
+        const desiredWidth = currentNodeWidth();
+        const desiredHeight = currentNodeHeight() + (solo ? 0 : timelineExtraH);
+        node._iamccsCineMinSize = [desiredWidth, desiredHeight];
         if (!root._iamccsFullscreenState) {
-            if (Math.abs(Number(node.size?.[1] || 0) - desiredHeight) > 18) {
-                if (typeof node.setSize === "function") node.setSize([SHOTBOARD_V3_RIGID_WIDTH, desiredHeight]);
-                else node.size = [SHOTBOARD_V3_RIGID_WIDTH, desiredHeight];
+            if (Number(node.size?.[0]) !== desiredWidth || Math.abs(Number(node.size?.[1] || 0) - desiredHeight) > 18) {
+                if (typeof node.setSize === "function") node.setSize([desiredWidth, desiredHeight]);
+                else node.size = [desiredWidth, desiredHeight];
             }
         }
         try { node.setDirtyCanvas?.(true, true); app.graph?.setDirtyCanvas?.(true, true); } catch {}
@@ -18745,12 +18928,12 @@ function renderShotboardV3(node) {
                     : Number.isFinite(explicitEnd) && explicitEnd > start
                         ? Math.round(explicitEnd)
                         : next ? next.frame : getTotalFrames();
-            const prompt = String(row.relay_prompt ?? row.local_prompt ?? row.prompt ?? "").trim();
+            const prompt = String(row.prompt ?? row.local_prompt ?? row.relay_prompt ?? "").trim();
             const rowType = String(row.type || "").toLowerCase();
             const isVideo = rowType === "video" || Boolean(row.videoFile || row.video_file);
             const isText = !isVideo && (rowType === "text" || Number(row.ref ?? row.image_ref ?? row.reference_index ?? 1) <= 0);
             const rowVideoPath = isVideo ? String(row.videoFile || row.video_file || row.path || "").trim() : "";
-            const rowTruthPath = isText || isVideo ? "" : String(row.imageTruthPath || row.image_truth_path || row.imageFile || row.image_file || row.path || "").trim();
+            const rowTruthPath = isText || isVideo ? "" : currentShotboardImagePath(row);
             const rowTruthName = isText ? "" : (String(row.imageTruthName || row.imageName || row.name || row.filename || "").trim() || rowTruthPath.split(/[\\/]/).pop() || "");
             const defaultForceValue = Math.max(0, Math.min(1, Number(defaultForceWidget?.value ?? 0.25)));
             const rowForceValue = Math.max(0, Math.min(1, Number(row.motion_force ?? row.force ?? row.strength ?? defaultForceValue)));
@@ -19186,6 +19369,15 @@ function renderShotboardV3(node) {
             return;
         }
     }, { capture: true });
+    soloBtn.onclick = () => {
+        stopPlayback();
+        setSettingsPanelOpen(false);
+        restoreFullscreenEditor(root, node);
+        solo = !solo;
+        node.properties = node.properties || {};
+        node.properties.iamccs_v3_solo = solo;
+        draw({ persist: false });
+    };
     collapseBtn.onclick = () => {
         collapsed = !collapsed;
         node.properties = node.properties || {};
@@ -19324,18 +19516,25 @@ function renderShotboardV3(node) {
     const shotboardWidgetLabel = "MiniMax H3 Shotboard";
     const widget = node.addDOMWidget(shotboardWidgetLabel, "iamccs_cine_shotboard_v3", root, { serialize: false });
     installShotboardPromptMagnifiers(root);
+    // Resizing the canvas alone preserves focused prompt fields and authored data.
+    const timelineResizeObserver = new ResizeObserver(resizeTimelineCanvas);
+    timelineResizeObserver.observe(timelineViewport);
+    const originalOnRemoved = node.onRemoved;
+    node.onRemoved = function () {
+        timelineResizeObserver.disconnect();
+        return originalOnRemoved?.apply(this, arguments);
+    };
     node._iamccsCineShotboardV3Widget = widget;
-    const v3RigidWidth = SHOTBOARD_V3_RIGID_WIDTH;
     widget.computeSize = (width) => {
         return [
-            Math.max(v3RigidWidth, Number(width || v3RigidWidth)),
+            Math.max(currentNodeWidth(), Number(width || currentNodeWidth())),
             currentNodeHeight(),
         ];
     };
-    lockNodeMinimumSize(node, [v3RigidWidth, currentNodeHeight()], {
+    lockNodeMinimumSize(node, [currentNodeWidth(), currentNodeHeight()], {
         lockResize: false,
         lockWidth: true,
-        preferredSize: [v3RigidWidth, currentNodeHeight()],
+        preferredSize: [currentNodeWidth(), currentNodeHeight()],
     });
     if (!node._iamccsCineShotboardV3SerializeWrapped) {
         node._iamccsCineShotboardV3SerializeWrapped = true;
@@ -21593,6 +21792,8 @@ function renderShotboardH3Settings(node) {
             auto_from_timeline: "auto",
             t2va: "t2va",
             i2va: "i2va",
+            longvid_multishot_hardcut: "longvid_multishot_hardcut",
+            longvid_keyframe_continuous: "longvid_keyframe_continuous",
             longvid_guides: "longvid",
             longvid_motion_context: String(getWidget(node, "audio_mode")?.value || "h3_native_generated") === "h3_custom_audio_drive"
                 ? "longvid_motion_context"
@@ -21688,14 +21889,14 @@ function renderShotboardH3Settings(node) {
             const disabledForTimelineAudio = entry.category === "audio" && (
                 lockedAudioMode
                     ? entry.id !== "audio_driven"
-                    : ["longvid_guides", "longvid_motion_context", "longvid_continuous_guided"].includes(activeTask) && !["native", "audio_driven"].includes(entry.id)
+                    : ["longvid_multishot_hardcut", "longvid_keyframe_continuous", "longvid_guides", "longvid_motion_context", "longvid_continuous_guided"].includes(activeTask) && !["native", "audio_driven"].includes(entry.id)
             );
             entry.button.disabled = disabledForTimelineAudio;
             entry.button.style.cursor = disabledForTimelineAudio ? "not-allowed" : "pointer";
             entry.button.style.opacity = disabledForTimelineAudio ? ".42" : "1";
-            if (entry.category === "audio" && ["longvid_guides", "longvid_motion_context", "longvid_continuous_guided"].includes(activeTask) && entry.id === "native") {
+            if (entry.category === "audio" && ["longvid_multishot_hardcut", "longvid_keyframe_continuous", "longvid_guides", "longvid_motion_context", "longvid_continuous_guided"].includes(activeTask) && entry.id === "native") {
                 entry.button.title = "LongVid Native: AudioBoard clips remain positioned guides while H3 samples its native soundtrack; exact lip motion is not guaranteed.";
-            } else if (entry.category === "audio" && ["longvid_guides", "longvid_motion_context", "longvid_continuous_guided"].includes(activeTask) && entry.id === "audio_driven") {
+            } else if (entry.category === "audio" && ["longvid_multishot_hardcut", "longvid_keyframe_continuous", "longvid_guides", "longvid_motion_context", "longvid_continuous_guided"].includes(activeTask) && entry.id === "audio_driven") {
                 entry.button.title = "LongVid Safe LipSync: lock each rebased AudioBoard chunk in the joint AV latent while keeping the existing positioned image-guide path.";
             } else if (disabledForTimelineAudio) {
                 entry.button.title = activeTask === "ref2vid_lipsync"
@@ -21759,7 +21960,7 @@ function renderShotboardH3Settings(node) {
         const choices = (getWidget(node, "pdd_lora_name")?.options?.values || [])
             .map(value => String(value || "")).filter(Boolean);
         const task = canonicalH3TaskMode(taskValue);
-        const wantsRef = ["reference_image", "ref2va", "ref2vid_lipsync", "longvid_ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap"].includes(task);
+        const wantsRef = ["reference_image", "ref2va", "ref2vid_lipsync", "longvid_ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap", "v2va_face_swap_lora"].includes(task);
         const familyToken = wantsRef ? "ref2va" : "fl2va";
         return selectH3SpeedAsset(getWidget(node, "turbo_lora_name")?.options?.iamccs_h3_assets || [], task, "pdd");
     };
@@ -22068,6 +22269,15 @@ function renderShotboardH3Settings(node) {
         shift_video: 12, shift_audio: 3, reference_audio_role: "rhythm_timing", flf_continuity_mode: "stable_keyframes",
         face_detailer_enabled: false,
     }));
+    addOperatingPreset(modePresetButtons, "mode", "longvid_multishot_hardcut", "LONG MULTI-SHOT", "TRUE HARD CUTS", "Every Shotboard slot becomes one independent H3 shot. No latent carry or decoded dissolve is implied. Custom Audio remains available as one continuous performance/lip-sync master across all cuts.", () => ({
+        task_mode: "longvid_multishot_hardcut", audio_mode: canonicalH3AudioMode(getWidget(node,"audio_mode")?.value),
+        flf_join_mode: "h3_keyframe_cut", flf_overlap_frames: 0, keyframe_joint_latent_new: false,
+    }));
+    addOperatingPreset(modePresetButtons, "mode", "longvid_keyframe_continuous", "LONG KEYFRAME", "NATIVE TIMELINEDIRECTOR", "Continuous authored timeline uses native sampled H3 video+audio latent tails, 22f incoming overlap ownership and a 1f technical RGB bridge removed at delivery. Pianosequenza 1 is default; 2 and 3 are experimental.", () => ({
+        task_mode: "longvid_keyframe_continuous", audio_mode: canonicalH3AudioMode(getWidget(node,"audio_mode")?.value), performance_profile: "low_vram_balanced",
+        flf_continuity_mode: "stable_keyframes", flf_continuity_tail_frames: (["5","22","39"].includes(String(getWidget(node,"flf_continuity_tail_frames")?.value || "22")) ? String(getWidget(node,"flf_continuity_tail_frames")?.value || "22") : "22"), flf_continuity_audio: true,
+        flf_join_mode: "h3_keyframe_cut", flf_overlap_frames: 0, keyframe_joint_latent_new: false,
+    }));
     addOperatingPreset(modePresetButtons, "mode", "longvid_guided_lipsync", "LONGVID + LIPSYNC", "POSITIONED GUIDES", "Positioned T2VA/AddGuide images plus a locked rebased AudioBoard chunk. This is the compatibility-first contract closest to the earlier working workflow: no REF2VA hybrid and no duplicated reference image.", () => ({
         task_mode: "longvid_guided_lipsync", audio_mode: "h3_custom_audio_drive", performance_profile: "h3_turbo_quality",
         width: 768, height: 448, image_width: 768, image_height: 448, steps: 8,
@@ -22100,7 +22310,7 @@ function renderShotboardH3Settings(node) {
         motion_context_window_frames: 362, flf_join_mode: "h3_keyframe_cut", flf_overlap_frames: 9,
         sampler_name: "res_multistep", scheduler: "simple", shift_video: 12, shift_audio: 3,
     }));
-    addOperatingPreset(modePresetButtons, "mode", "masked_loop_guided", "FL2VA CONTINUOUS AV", "PHASE-ALIGNED LATENT HANDOVER", "Stable IAMCCS FL2VA route: every image is the next destination and the complete sampled AV latent is passed forward while authored intermediate keyframes remain protected.", () => ({
+    addOperatingPreset(modePresetButtons, "mode", "masked_loop_guided", "LEGACY CONTINUOUS AV", "COMPATIBILITY ID · PHASE-ALIGNED", "Stable IAMCCS FL2VA route: every image is the next destination and the complete sampled AV latent is passed forward while authored intermediate keyframes remain protected.", () => ({
         task_mode: "longvid_masked_loop_guided", audio_mode: "h3_native_generated", performance_profile: "low_vram_balanced",
         width: 736, height: 416, image_width: 736, image_height: 416, steps: 16,
         acceleration: "low_vram_auto", turbo_mode: "off", flf_continuity_mode: "stable_keyframes",
@@ -22336,6 +22546,8 @@ function renderShotboardH3Settings(node) {
         auto_from_timeline: ["auto"],
         t2va: ["t2va"],
         i2va: ["i2va"],
+        longvid_multishot_hardcut: ["longvid_multishot_hardcut"],
+        longvid_keyframe_continuous: ["longvid_keyframe_continuous"],
         longvid_guides: ["longvid"],
         longvid_motion_context: ["longvid_continuous"],
         longvid_continuous_guided: ["long_continuous_guided"],
@@ -22710,7 +22922,9 @@ function renderShotboardH3Settings(node) {
                     ref2va: "REF2VA · semantic image/audio references",
                     v2va_controlnet: "CONTROLNET V2V · pose / depth / edges",
                     ref2vid_lipsync: "REF2VID LIPSYNC · static reference + AudioBoard",
-                    longvid_guides: "LONGVID · positioned timeline guides",
+                    longvid_multishot_hardcut: "LONG MULTI-SHOT · true hard cuts",
+                    longvid_keyframe_continuous: "LONG KEYFRAME · native TimelineDirector / AudioCon",
+                    longvid_guides: "LONGVID LEGACY · positioned timeline guides",
                     longvid_motion_context: "LONG MULTI-SHOT · guided shots + AV hand-off",
                     longvid_continuous_guided: "LONG CONTINUOUS GUIDED · one evolving take",
                     longvid_guided_lipsync: "LONGVID + LIPSYNC · guides + locked audio",
@@ -22981,7 +23195,9 @@ function renderShotboardH3Settings(node) {
                 fl2va: "Use at least two authored keyframes. Step 4 selects Stable Keyframes or Native AV Context; do not use LongVid windows here.",
                 ref2va: "Connect references through Cine H3 Input and assign their semantic roles in Step 4. They are not timeline keyframes.",
                 ref2vid_lipsync: "Connect the reference picture and place its matching speech in AudioBoard. The speech is both the Ref2VA audio block and the locked AV latent.",
-                longvid_guides: "Author images/audio directly on the global Shotboard clock. This is positioned guidance, not exact lip-sync; choose Audio Drive only if required.",
+                longvid_multishot_hardcut: "Author independent shots on one global timeline. Every slot cuts cleanly; choose Custom Audio to drive performance/lip-sync continuously across cuts.",
+                longvid_keyframe_continuous: "Author chronological image guides in one continuous timeline. The native TimelineDirector AV tail advances motion across technical windows; choose Pianosequenza 1 and H3 Native Audio. Use Native Delivery; perform upscale after the master.",
+                longvid_guides: "Legacy Positioned Guides compatibility mode. Anchors are AddGuide constraints, not guaranteed keyframe-to-keyframe continuity.",
                 longvid_motion_context: "Each image slot defines a separate guided shot. Motion Context carries native AV state only across technical chunks inside that shot; use the future Long Continuous Guided contract for one evolving take through successive image destinations.",
                 longvid_continuous_guided: "Place at least two chronological image guides. Each image is the next destination: N images compile to N−1 uninterrupted FL2VA intervals with native AV hand-off.",
                 longvid_guided_lipsync: "Place positioned image guides and aligned AudioBoard clips. The safe locked-audio route is enforced automatically.",
@@ -23228,8 +23444,8 @@ function renderShotboardH3Settings(node) {
                 h3_ultimate_tiled: ["H3 ULTIMATE LATENT · UNIVERSAL", "Learned latent upres plus tiled H3 resampling. Temporal and spatial tile sizes bound peak VRAM."],
                 h3_fast_latent_2pass: ["FULL LATENT 2-PASS · HIGH VRAM", "R41 full-canvas second H3 sampling. Keep it for 16–24 GB and above; use Ultimate Tiled on 12 GB."],
                 h3_pixel_refine: ["SAFE WINDOWED · SHORT H3 REFINE", "Pixel upscale plus overlapping temporal H3 windows. More bounded than a full second pass, but it still performs additional H3 denoising."],
-                ltx23: ["LTX DELIVERY · STANDARD AV SAMPLER", "Builds a completed native master, then runs the wired LTX delivery stage with SamplerCustomAdvanced. The incompatible legacy video-only looper is not used."],
-                ltx23_per_chunk: ["LTX PER-SHOT · STANDARD AV SAMPLER", "Runs SamplerCustomAdvanced independently for each native AV chunk, preserves that chunk's audio, saves its roll, publishes it to the editor, then queues the next chunk."],
+                ltx23: ["LTX DELIVERY · TILED AV SAMPLER", "Builds a completed native master, then refines overlapping temporal/spatial pieces with bounded sampler memory and preserves the native H3 audio."],
+                ltx23_per_chunk: ["LTX PER-SHOT · TILED AV SAMPLER", "Refines each native AV chunk in temporal/spatial tiles, preserves its audio, saves its roll, publishes it to the editor, then queues the next chunk."],
             })[deliveryRoute] || ["OPTIONAL FINISHING · MODE IS UNCHANGED", "Only routes physically wired in this workflow can execute. Select a preset, then edit the visible boxes if needed."];
             addGuideCard(deliveryHelp[0], deliveryHelp[1], "#9DDCBF", "#537063");
         }
@@ -23329,7 +23545,8 @@ function renderForNode(node) {
         }
         if (isShotboardV3Class(klass) && !isShotboardV5Class(klass)) {
             const collapsed = Boolean(node.properties?.iamccs_v3_collapsed);
-            lockNodeMinimumSize(node, [SHOTBOARD_V3_RIGID_WIDTH, collapsed ? SHOTBOARD_V3_COLLAPSED_HEIGHT : SHOTBOARD_V3_OPEN_HEIGHT], { lockResize: false, lockWidth: true });
+            const solo = Boolean(node.properties?.iamccs_v3_solo);
+            lockNodeMinimumSize(node, solo ? SHOTBOARD_V3_SOLO_SIZE : [SHOTBOARD_V3_RIGID_WIDTH, collapsed ? SHOTBOARD_V3_COLLAPSED_HEIGHT : SHOTBOARD_V3_OPEN_HEIGHT], { lockResize: false, lockWidth: true });
         }
         if (klass === "IAMCCS_CineShotboardTimelinePro" || klass === "IAMCCS_CineShotboardPlannerPro" || klass === "IAMCCS_CineShotboardPlannerProV2" || klass === "IAMCCS_CineShotboardPlannerProLegacy") {
             lockNodeMinimumSize(node, SHOTBOARD_NODE_MIN_SIZE, { lockResize: true });
@@ -23656,7 +23873,7 @@ document.addEventListener("iamccs:h3-settings-changed", (event) => {
                     try { timeline = JSON.parse(String(getWidget(shotboard, "timeline_data")?.value || "{}")); } catch {}
                     const visual = (timeline.segments || []).some((seg) => !seg?.placeholder && String(seg?.type || "image") !== "audio");
                     const audio = (timeline.audioSegments || []).some((seg) => !seg?.placeholder);
-                    if (visual || audio) return;
+                    if ((visual || audio) && String(getWidget(linked, "task_mode")?.value) !== "v2va_face_swap_lora") return;
                 }
                 const target = getWidget(shotboard, name);
                 if (target) setWidgetValue(shotboard, name, sourceWidget.value);
@@ -23699,18 +23916,24 @@ function applyR40ShotLabPhase(controller, phaseValue) {
     controller.properties = controller.properties || {};
     controller.properties.iamccs_r40_phase = phase;
     const graphNodes = Array.isArray(controller.graph?._nodes) ? controller.graph._nodes : [];
+    const settingsNode = graphNodes.find((candidate) => ["IAMCCS_ShotboardH3SettingsPro", "IAMCCS_ShotboardH3Settings"].includes(nodeClassName(candidate)));
+    const scoutEnabled = settingsNode ? Boolean(getWidget(settingsNode, "h3_r40_seed_scout_enabled")?.value) : true;
     const never = window?.LiteGraph?.NEVER ?? 2;
     for (const target of graphNodes) {
         const role = String(target?.properties?.iamccs_r40_phase_role || "");
         if (!role) continue;
-        const active = role === "preview" ? phase === "scout" : phase === "deliver";
+        const active = scoutEnabled
+            ? (role === "preview" ? phase === "scout" : phase === "deliver")
+            : role !== "preview";
         target.mode = active ? 0 : never;
     }
     const ui = controller._iamccsR40PhaseUi;
     if (ui) {
-        ui.status.textContent = phase === "scout"
-            ? "SCOUT ACTIVE · Queue renders candidate previews only"
-            : "DELIVER ACTIVE · Queue renders the selected cached take";
+        ui.status.textContent = !scoutEnabled
+            ? "SCOUT OFF · normal production route active"
+            : phase === "scout"
+              ? "SCOUT ACTIVE · Queue renders candidate previews only"
+              : "DELIVER ACTIVE · Queue renders the selected cached take";
         ui.status.style.color = phase === "scout" ? "#F2C879" : "#8FE3B8";
         ui.scout.style.background = phase === "scout" ? "#8B632B" : "#20292B";
         ui.deliver.style.background = phase === "deliver" ? "#287657" : "#20292B";

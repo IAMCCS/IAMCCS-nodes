@@ -1,9 +1,10 @@
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { beginAiBusy, createModeHelper } from "./iamccs_h3_authoring_helpers.js";
+import { createModeHelper } from "./iamccs_h3_authoring_helpers.js";
 
 const STYLE_ID = "iamccs-dialogue-tag-editor-style";
 const TYPE = "IAMCCS_DialogueTagEditor";
+const dialogueAudioRequests = new WeakSet();
 const EMOTIONS = ["calm", "tense", "fearful", "serious", "sad", "angry", "excited", "surprised", "empathy", "coldness", "admiration", "relief"];
 const STYLES = ["low", "whisper", "serious", "warm", "dry", "comfort", "authority", "chat", "story", "gentle", "murmur", "shout"];
 const PARAS = ["Breathing", "Laughter", "Sigh", "Uhm", "Surprise-oh", "Question-ei", "Confirmation-en", "pause:0.3"];
@@ -167,16 +168,37 @@ function applyMultiShotLipSyncDemo(data) {
   next.settings.prompt_profile = "minimax_h3";
   next.settings.minimax_mode = "multi_shot_lipsync";
   next.settings.dialogue_template = "dialogue_abab";
-  next.global_prompt = "A tense cinematic field-and-reverse-field exchange in one coherent abandoned observatory. Each Shotboard image starts a distinct editorial shot; preserve identity, wardrobe, screen direction and eyelines while the connected AudioBoard dialogue remains continuous across the hard cuts.";
+  next.global_prompt = "Four-shot cinematic field/reverse-field dialogue with true hard cuts: A, B, A, B. Every shot is a locked-off tripod shot based only on its assigned opening image. Preserve the exact crop, focal length, camera axis, horizon, subject scale and background for the complete shot. No zoom, dolly, pan, tilt, orbit, reframing, push-in, pull-back or transition inside a shot. Only the named speaker moves their lips and performs the connected custom-audio line; the other character stays silent.";
   next.speakers = [
     { id: "A", name: "Mara", voice: "speaker_a_low_tense", reference_text: "We cannot stay here.", language: "en", subject_tag: "<Subject 1>", speaker_tag: "(S1)", voice_design: { gender: "female", age: "adult", pitch: "low", style: "tense", accent: "", dialect: "", instruct: "female, adult, low pitch, tense" } },
     { id: "B", name: "Elias", voice: "speaker_b_controlled", reference_text: "Then stop looking back.", language: "en", subject_tag: "<Subject 2>", speaker_tag: "(S2)", voice_design: { gender: "male", age: "adult", pitch: "medium", style: "controlled", accent: "", dialect: "", instruct: "male, adult, medium pitch, controlled" } },
   ];
   next.lines = [
-    { id: "line_001", speaker: "A", text: "We cannot stay here.", spoken_text: "We cannot stay here.", emotion: "tense", style: "low", paralinguistic: "Breathing", overlap_after: 0.08, ref: 1, track: 0, minimax_boundary_mode: "normal", local_prompt: "Hard cut to <Picture 1>. <Subject 1> dominates a tight close-up, speaks with clearly visible mouth articulation, and holds a fixed eyeline toward <Subject 2>; <Subject 2> listens silently off camera." },
-    { id: "line_002", speaker: "B", text: "Then stop looking back.", spoken_text: "Then stop looking back.", emotion: "serious", style: "authority", paralinguistic: "none", overlap_after: 0.08, ref: 2, track: 1, minimax_boundary_mode: "normal", local_prompt: "Hard cut to <Picture 2>. <Subject 2> answers in a controlled close-up with readable lips and stable reverse eyeline; <Subject 1> remains silent off camera." },
-    { id: "line_003", speaker: "A", text: "I heard it move behind the glass.", spoken_text: "I heard it move behind the glass.", emotion: "fearful", style: "whisper", paralinguistic: "Breathing", overlap_after: 0, ref: 3, track: 0, minimax_boundary_mode: "normal", local_prompt: "Hard cut to <Picture 3>. <Subject 1> returns in a tighter reaction shot, whispers with precise visible articulation, then holds still through the final breath. Preserve the same room, wardrobe and screen direction; do not morph from the previous guide." },
-  ];
+    ["A", "Do you think we become sad because we understand life, or because we never will?"],
+    ["B", "Perhaps sadness is the only proof that we were ever here."],
+    ["A", "Then why does everything I love eventually disappear?"],
+    ["B", "Because even the universe doesn't know how to say goodbye."],
+  ].map(([speaker, text], index) => {
+    const subject = speaker === "A" ? 1 : 2;
+    const listener = speaker === "A" ? 2 : 1;
+    const shot = speaker === "A" ? "FIELD SHOT A" : "REVERSE-FIELD SHOT B";
+    return {
+      id: `line_${String(index + 1).padStart(3, "0")}`, speaker, text, spoken_text: text,
+      emotion: "none", style: "none", paralinguistic: "none", overlap_after: 0,
+      ref: subject, track: subject - 1, minimax_boundary_mode: "normal",
+      local_prompt: `${shot}. Locked-off tripod camera for the entire shot. Preserve the exact input framing, crop, focal length, camera axis, horizon, face size and background. No zoom, dolly, pan, tilt, orbit, push-in, pull-back or reframing.
+
+<Subject ${subject}> (S${subject}): <d>[English] ${text}${index === 0 ? " " : ""}</d>
+
+Only <Subject ${subject}> (S${subject}) speaks and moves their lips, driven by the connected custom audio. <Subject ${listener}> (S${listener}) remains silent with no speaking mouth motion. Natural facial and subtle body performance only; the camera does not move.
+
+overall_soundscape:
+Use the connected custom audio as exact lip-sync and performance timing authority; do not invent, remove, overlap or reorder speech.
+
+non_diegetic_music:
+N/A`,
+    };
+  });
   return ensureDialogueDefaults(next);
 }
 function minimaxBoundaryMode(value) {
@@ -196,6 +218,13 @@ function joinMiniMaxPrompt(...parts) {
     seen.add(key);
     return true;
   }).join("\n\n");
+}
+function structuredMiniMaxLocalPrompt(localPrompt, dialogueTag) {
+  if (!/^\s*overall_soundscape:/m.test(localPrompt) || !/^\s*non_diegetic_music:/m.test(localPrompt)) return "";
+  const dialogue = /<Subject\s+[1-9][0-9]*>\s*\(S[1-9][0-9]*\):\s*<d>[\s\S]*?<\/d>/i;
+  if (!dialogue.test(localPrompt)) return "";
+  const prompt = localPrompt.replace(dialogue, () => dialogueTag);
+  return /^\s*integrated_multimodal_description:/m.test(prompt) ? prompt : `integrated_multimodal_description:\n[Shot 1] ${prompt}`;
 }
 function buildMinimaxDialogueContract(data) {
   const speakers = Array.isArray(data?.speakers) ? data.speakers : [];
@@ -223,9 +252,12 @@ function buildMinimaxDialogueContract(data) {
     const boundaryMode = minimaxBoundaryMode(line?.minimax_boundary_mode || line?.dialogue_boundary_mode || line?.boundary_mode);
     const boundaryMarker = minimaxBoundaryMarker(boundaryMode);
     const dialogueTag = `${subjectTag} ${speakerTag}: <d>[${language}] ${spoken}${boundaryMarker ? ` ${boundaryMarker}` : ""}</d>`;
-    const localPrompt = String(line?.local_prompt || line?.shot_prompt || "").replace(/\s+/g, " ").trim();
+    const localPrompt = String(line?.local_prompt || line?.shot_prompt || "").trim();
     dialogueRows.push(dialogueTag);
-    if (localPrompt) performanceRows.push(`${subjectTag} ${speakerTag}: ${localPrompt}`);
+    const structured = structuredMiniMaxLocalPrompt(localPrompt, dialogueTag);
+    let localVisual = (structured || localPrompt).split(/^\s*(?:overall_soundscape|non_diegetic_music):/m)[0].replace(/^\s*integrated_multimodal_description:\s*/, "").trim();
+    if (structured) localVisual = localVisual.replace(/^\[Shot 1\]\s*/, "").replace(dialogueTag, "").trim();
+    if (localVisual) performanceRows.push(`${subjectTag} ${speakerTag}: ${localVisual}`);
     lineContracts.push({ id: String(line?.id || `line_${String(index + 1).padStart(3, "0")}`), subject_tag: subjectTag, speaker_tag: speakerTag, language, dialogue_tag: dialogueTag, local_prompt: localPrompt, boundary_mode: boundaryMode, boundary_marker: boundaryMarker });
   });
   const sections = [];
@@ -237,6 +269,8 @@ function buildMinimaxDialogueContract(data) {
   const integratedBody = sections.join("\n\n").trim() || "N/A";
   const globalTruth = `integrated_multimodal_description:\n[Shot 1] ${integratedBody}\n\noverall_soundscape:\nTreat the connected AudioBoard dialogue as immutable timing authority across every guided shot. Preserve exact words, order, pauses and breaths; maintain coherent room tone beneath intentional hard editorial cuts.\n\nnon_diegetic_music:\nN/A`;
   const localTruth = lineContracts.map((line) => {
+    const structured = structuredMiniMaxLocalPrompt(line.local_prompt, line.dialogue_tag);
+    if (structured) return structured;
     const localBody = joinMiniMaxPrompt(line.local_prompt, line.dialogue_tag) || "N/A";
     return `integrated_multimodal_description:\n[Shot 1] ${localBody}\n\noverall_soundscape:\nUse the connected custom audio as exact lip-sync timing authority for this shot; do not invent, remove or reorder speech.\n\nnon_diegetic_music:\nN/A`;
   });
@@ -460,7 +494,7 @@ function liteGraphRegistry() {
 }
 function isLikelyTTSNodeType(type) {
   const name = String(type || "");
-  if (!/(qwen3tts|qwenemotion|indextts|longcat|chatterbox|vibevoice|higgsaudio|cosyvoice|f5tts|echotts|mosstts)/i.test(name)) return false;
+  if (!/(omnivoice|qwen3tts|qwenemotion|indextts|longcat|chatterbox|vibevoice|higgsaudio|cosyvoice|f5tts|echotts|mosstts)/i.test(name)) return false;
   return !/(unified|emotion|options|vectors|voiceinstruct|voicedesigner|voiceclone|whisper|asr|stt|analyzer|capture|loader|loadvoice|voiceslibrary|image|vl|wan|latent|batch|dataset|training|mouth|viseme|rvc|vocal|voicefixer|mergeaudio|refresh)/i.test(name);
 }
 function ttsNodeLabel(type) {
@@ -610,6 +644,22 @@ function createGraphNode(lite, graph, type, pos, title = "") {
 function configureRigTTSNode(node, type, speakerIndex = 0, data = null) {
   const lower = String(type || "").toLowerCase();
   const routing = emotionRoutingValue(data || {});
+  if (lower.includes("omnivoice")) {
+    const design = data?.speakers?.[speakerIndex]?.voice_design || {};
+    const ages = { young: "young adult", adult: "middle-aged", elderly: "elderly", child: "child", teenager: "teenager", "young adult": "young adult", "middle-aged": "middle-aged" };
+    const pitches = { low: "low pitch", medium: "moderate pitch", high: "high pitch" };
+    const accents = new Set(["american", "british", "australian", "canadian", "indian", "chinese", "korean", "japanese", "portuguese", "russian"]);
+    const items = [
+      ["male", "female"].includes(design.gender) ? design.gender : "",
+      ages[design.age] || "",
+      pitches[design.pitch] || (/^(very low|low|moderate|high|very high) pitch$/.test(design.pitch || "") ? design.pitch : ""),
+      design.style === "whisper" ? "whisper" : "",
+      accents.has(design.accent) ? `${design.accent} accent` : "",
+    ].filter(Boolean);
+    const allowed = new Set(["male", "female", ...Object.values(ages), "very low pitch", "low pitch", "moderate pitch", "high pitch", "very high pitch", "whisper", ...Array.from(accents, (accent) => `${accent} accent`)]);
+    const explicit = String(design.instruct || "").split(",").map((item) => item.trim().toLowerCase()).filter(Boolean);
+    setNodeWidgetValue(node, ["instruct"], explicit.length && explicit.every((item) => allowed.has(item)) ? explicit.join(", ") : items.join(", "));
+  }
   if (lower.includes("chatterbox")) {
     setNodeWidgetValue(node, ["language"], "English");
     setNodeWidgetValue(node, ["device"], "auto");
@@ -752,6 +802,17 @@ function repairExistingDialogueRigLinks(editorNode, reason = "repair") {
   const data = parseData(editorNode);
   let fixed = connectRigInjectToAudioBoard(editorNode, rigNodes.injectInfo);
   nodes.forEach((targetNode) => {
+    if (nodeType(targetNode) === "OmniVoiceEngineNode" && /^direct tts\b/i.test(String(targetNode.title || ""))) {
+      const instruct = String(widgetValue(targetNode, ["instruct"]) || "");
+      const containsDialogue = (data.lines || []).some((line) => {
+        const text = minimaxDialogueText(line.spoken_text || line.text);
+        return text && instruct.includes(text);
+      });
+      if (containsDialogue) {
+        configureRigTTSNode(targetNode, "OmniVoiceEngineNode", /\bb\b/i.test(targetNode.title) ? 1 : 0, data);
+        fixed += 1;
+      }
+    }
     if (nodeType(targetNode) !== "UnifiedTTSSRTNode") return;
     const title = String(targetNode?.title || "").toLowerCase();
     if (!title.includes("direct tts")) return;
@@ -854,9 +915,13 @@ function createCineAudioRig(editorNode, data, statusTarget, selectedType) {
   const rigNodes = findExistingCineAudioRigNodes(editorNode);
   const reusableExport = rigNodes.exportInfo || null;
   const reusableInject = rigNodes.injectInfo || null;
-  const bottom = existing.reduce((maxY, item) => Math.max(maxY, Number(item?.pos?.[1] || 0) + Number(item?.size?.[1] || 160)), 0);
-  const baseX = Number(reusableExport?.pos?.[0] ?? editorNode?.pos?.[0] ?? 80);
-  const baseY = Number(reusableExport?.pos?.[1] ?? bottom + 140);
+  const board = downstream(editorNode, candidate => nodeType(candidate) === "IAMCCS_AudioBoardArranger")[0];
+  const baseX = Number(editorNode.pos?.[0] || 0) + Number(editorNode.size?.[0] || 1360) + 80;
+  const baseY = Number(editorNode.pos?.[1] || 0);
+  if (board && Number(board.pos[0]) < baseX + 1450) board.pos[0] = baseX + 1450;
+  if (reusableExport) reusableExport.pos = [baseX, baseY];
+  if (reusableInject) reusableInject.pos = [baseX + 980, baseY];
+  if (rigNodes.bridge) rigNodes.bridge.pos = [baseX, baseY + 245];
   const speakerIds = Array.from(new Set((data.lines || []).map((line) => String(line.speaker || "A").toUpperCase()))).filter(Boolean);
   const isMono = modeFromData(data) === "tts_master_unico" || speakerIds.length <= 1;
   const created = [];
@@ -899,7 +964,7 @@ function createCineAudioRig(editorNode, data, statusTarget, selectedType) {
     configureRigTTSNode(node, selectedType, index, data);
     const mode = String(data.settings?.tts_export_mode || "qwen");
     setNodeWidgetValue(node, ["text", "dialogue", "prompt", "target_text", "srt_content"], isMono ? ttsExportText(data, mode) : speakerPlainText(data, index));
-    setNodeWidgetValue(node, ["instruct", "custom_instruct", "instruction", "system_prompt"], isMono ? ttsExportText(data, "qwen") : speakerPlainText(data, index));
+    if (!/omnivoice/i.test(selectedType)) setNodeWidgetValue(node, ["instruct", "custom_instruct", "instruction", "system_prompt"], isMono ? ttsExportText(data, "qwen") : speakerPlainText(data, index));
     return node;
   };
   const sourceFor = (speakerIndex) => {
@@ -917,11 +982,10 @@ function createCineAudioRig(editorNode, data, statusTarget, selectedType) {
   created.push(probe);
   configureRigTTSNode(probe, selectedType, 0, data);
   setNodeWidgetValue(probe, ["text", "dialogue", "prompt", "target_text", "srt_content"], isMono ? ttsExportText(data, String(data.settings?.tts_export_mode || "qwen")) : speakerPlainText(data, 0));
-  setNodeWidgetValue(probe, ["instruct", "custom_instruct", "instruction", "system_prompt"], isMono ? ttsExportText(data, "qwen") : speakerPlainText(data, 0));
+  if (!/omnivoice/i.test(selectedType)) setNodeWidgetValue(probe, ["instruct", "custom_instruct", "instruction", "system_prompt"], isMono ? ttsExportText(data, "qwen") : speakerPlainText(data, 0));
   const selectedIsEngine = nodeHasOutputType(probe, "TTS_ENGINE");
   const selectedIsAudio = nodeHasOutputType(probe, "AUDIO");
   if (selectedIsEngine && registry.UnifiedTTSSRTNode) {
-    setNodeWidgetValue(probe, ["instruct", "custom_instruct", "instruction", "system_prompt"], isMono ? ttsExportText(data, "qwen") : speakerPlainText(data, 0));
     const engineNodes = [probe];
     if (!isMono) {
       const secondEngine = makeSelected(1, "B");
@@ -1378,9 +1442,12 @@ function ensureStyle() {
   .iamccs-tag-table{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin-bottom:16px}.iamccs-tag-table button{width:100%;height:30px;padding:0 7px;font-size:10px;text-align:center}.iamccs-tag-table button:nth-child(3n+1){border-color:rgba(126,90,145,.65);color:#ead9f3}.iamccs-tag-table button:nth-child(3n+2){border-color:rgba(81,111,143,.65);color:#dbeaff}.iamccs-tag-table button:nth-child(3n){border-color:rgba(94,125,114,.65);color:#ddf4ea}
   .iamccs-dte-foot{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:#24231d;border-top:1px solid rgba(214,182,111,.22);color:#cabd9f;font-size:10px}.iamccs-dte-foot.iamccs-inject-status{background:#2a2517;color:#f7ecc9;border-top-color:rgba(214,182,111,.34)}.iamccs-dte-foot.iamccs-inject-status-success{background:#1f2b1c;color:#e5f6d7;border-top-color:rgba(132,184,107,.36)}.iamccs-field-wrap{display:flex;flex-direction:column;align-items:stretch;gap:8px;min-height:0;overflow:hidden}.iamccs-field-wrap .iamccs-dte-label{margin-bottom:0;padding:7px 9px}
   /* The writer works in line cards. Technical export controls stay available, but out of the way. */
+  .iamccs-dte{grid-template-rows:58px minmax(0,1fr) 34px}
   .iamccs-dte-main{grid-template-columns:258px minmax(0,1fr) 278px}
-  .iamccs-dte-center{grid-template-rows:auto auto minmax(300px,1fr) auto auto}
-  .iamccs-dte-grid{grid-template-columns:1fr;gap:10px;padding-right:0}
+  .iamccs-dte-center{display:flex;flex-direction:column;overflow-y:auto;overscroll-behavior:contain}
+  .iamccs-dte-center > *{flex:0 0 auto}
+  .iamccs-dte-center > .iamccs-dte-section.fill{display:block;overflow:visible}
+  .iamccs-dte-grid{grid-template-columns:1fr;gap:10px;padding-right:0;overflow:visible}
   .iamccs-dte-card{gap:9px;padding:13px 14px}
   .iamccs-line-top{display:grid;grid-template-columns:minmax(160px,.9fr) minmax(100px,.45fr);gap:9px}
   .iamccs-line-tags{display:grid;gap:6px;padding:9px 10px;background:rgba(109,141,183,.08);border:1px solid rgba(109,141,183,.26);border-radius:6px}
@@ -1530,12 +1597,30 @@ function mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps = 24, min
     : (data.lines || []).map((line) => String(line.local_prompt || "").trim());
   const visualSegments = Array.isArray(merged.segments) ? merged.segments.filter(isVisualShotboardSegment) : [];
   const visualRows = Array.isArray(merged.rows) ? merged.rows.filter(isVisualShotboardRow) : [];
+  merged.segments ||= [];
+  merged.rows ||= [];
+  for (let index = visualSegments.length; index < promptEntries.length; index++) {
+    const line = data.lines[index] || {};
+    const previous = visualSegments[index - 1];
+    const segment = {id: "dialogue_shot_" + (line.id || index), type: "image", placeholder: false,
+      start: previous ? Number(previous.start || 0) + Number(previous.length || 0) : 0,
+      length: Math.round(Math.max(4, Number(line.duration || 4)) * fps), ref: Number(line.ref || index + 1),
+      track: Number(line.timeline ?? line.video_track ?? 0), transition: "hard_cut", use_prompt: true};
+    merged.segments.push(segment);
+    visualSegments.push(segment);
+    const row = {...segment, frame: segment.start, length_frames: segment.length};
+    merged.rows.push(row);
+    visualRows.push(row);
+  }
   const targetCount = Math.max(visualSegments.length, visualRows.length);
   const appliedPromptIndexes = new Set();
 
   merged.schema = merged.schema || "iamccs.cine.filmmaker_timeline";
   merged.schema_version = Math.max(2, Number(merged.schema_version || 2));
   const globalTruth = minimaxH3 ? minimaxContract.global_truth : String(data.global_prompt || "");
+  merged.globalPromptOnly = false;
+  merged.global_prompt_only = false;
+  merged.use_global_prompt_only = false;
   merged.global_prompt = globalTruth;
   merged.prompt = globalTruth;
   merged.frame_rate = Math.max(1, Number(merged.frame_rate || fps || 24));
@@ -1557,8 +1642,11 @@ function mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps = 24, min
   visualRows.forEach((row, index) => {
     const prompt = promptEntries[index];
     if (!prompt) return;
+    row.prompt = prompt;
     row.relay_prompt = prompt;
     row.local_prompt = prompt;
+    row.relay_manual_off = false;
+    row.promptrelay_manual_off = false;
     row.use_prompt = true;
     appliedPromptIndexes.add(index);
   });
@@ -1748,11 +1836,15 @@ function install(node, reason = "install") {
   ["dialogue_data", "frame_rate", "speech_wpm", "min_line_seconds", "default_gap_seconds", "output_mode", "inline_edit_mode"].forEach((name) => hideWidget(widget(node, name)));
   let data = parseData(node);
   setTimeout(() => repairExistingDialogueRigLinks(node, reason), 0);
+  node._iamccsDialoguePromptContract = () => buildMinimaxDialogueContract(parseData(node));
+  node._iamccsDialogueSyncShotboard = (shotboard) => syncPromptsToShotboard(node, parseData(node), Number(widget(node, "frame_rate")?.value || 24), shotboard);
   let scriptText = linesToText(data);
   let zoom = Number(data.settings?.font_zoom || 1);
   let light = String(data.settings?.text_theme || "light_boxes") === "light_boxes";
   const root = document.createElement("div");
   root.className = "iamccs-dte";
+  root.style.height = "1040px";
+  root.addEventListener("wheel", (event) => event.stopPropagation(), { passive: true });
   let lastMiniMaxTarget = null;
   let refreshMinimaxPreview = () => {};
   root.addEventListener("focusin", (event) => {
@@ -1772,11 +1864,13 @@ function install(node, reason = "install") {
     const head = document.createElement("div");
     head.className = "iamccs-dte-head";
     const title = document.createElement("div");
-    title.innerHTML = '<div class="iamccs-dte-title">Dialogue Studio</div><div class="iamccs-dte-sub">scrivi le battute, definisci gli shot prompt, invia alla pipeline</div>';
+    title.innerHTML = '<div class="iamccs-dte-title">Dialogue Studio</div>';
     const actions = document.createElement("div");
     actions.className = "iamccs-dte-actions";
     const addA = button("Add line", "gold");
     const addB = button("Add reply", "");
+    const renderBtn = button("Render", "gold iamccs-render-audio-btn");
+    renderBtn.title = "Render the connected TTS rig, inject real audio into AudioBoard and publish it to Shotboard. Video is queued separately.";
     const injectBtn = button("Inject All", "gold iamccs-inject-btn");
     injectBtn.title = "Invia la timeline provvisoria all'AudioBoard e aggiorna i prompt dello Shotboard";
     const shotboardBtn = button("Inject Shotboard", "iamccs-shotboard-btn");
@@ -1791,7 +1885,20 @@ function install(node, reason = "install") {
     const lightBtn = button(light ? "Dark" : "Light", light ? "" : "active");
     const zOut = button("A-", "");
     const zIn = button("A+", "");
-    actions.append(multiShotModeBtn, minimaxModeBtn, addA, addB, boldBtn, injectBtn, shotboardBtn, lightBtn, zOut, zIn);
+    const fullEditor = button("FULL EDITOR", "gold");
+    fullEditor.onclick = async () => {
+      try {
+        if (document.fullscreenElement === root) await document.exitFullscreen();
+        else await root.requestFullscreen();
+      } catch (error) { console.error("Dialogue fullscreen", error); }
+    };
+    if (!document.getElementById("iamccs-dte-fullscreen-style")) {
+      const style = document.createElement("style");
+      style.id = "iamccs-dte-fullscreen-style";
+      style.textContent = ".iamccs-dte:fullscreen{width:100vw!important;height:100vh!important;max-height:none!important;overflow:auto!important;background:#16191e;padding:16px;box-sizing:border-box}";
+      document.head.append(style);
+    }
+    actions.append(fullEditor, multiShotModeBtn, minimaxModeBtn, addA, addB, boldBtn, renderBtn, injectBtn, shotboardBtn, lightBtn, zOut, zIn);
     head.append(title, actions);
 
     const main = document.createElement("div");
@@ -1837,6 +1944,7 @@ function install(node, reason = "install") {
       ["speaker_stems_zero_start", "Character tracks start at 0"],
       ["single_master", "One mixed track"],
     ], audioLaneMode(data));
+    laneSelect.title = "One track per character preserves dialogue timing: full-timeline WAVs are placed at 0, with silence inside the file. Character tracks start at 0 also rebases each character's first spoken line; use it only when that timing change is intended.";
     laneSelect.onchange = () => {
       data.settings ||= {};
       data.settings.audio_lane_mode = laneSelect.value;
@@ -1957,7 +2065,8 @@ function install(node, reason = "install") {
     });
     refreshTtsFormatStatus();
     const ttsNodeOptions = discoverTTSNodeOptions();
-    const ttsNodeSelect = select(ttsNodeOptions.length ? ttsNodeOptions : [["", "No registered ready TTS nodes found"]], ttsNodeOptions[0]?.[0] || "");
+    const preferredEngine = /^(tts_)?omnivoice$/.test(data.settings?.engine_profile || "") ? "OmniVoiceEngineNode" : "";
+    const ttsNodeSelect = select(ttsNodeOptions.length ? ttsNodeOptions : [["", "No registered ready TTS nodes found"]], ttsNodeOptions.some(([type]) => type === preferredEngine) ? preferredEngine : ttsNodeOptions[0]?.[0] || "");
     ttsNodeSelect.classList.add("iamccs-tts-node-select");
     ttsNodeSelect.disabled = !ttsNodeOptions.length;
     ttsNodeSelect.title = "Select a registered TTS model node with a usable model/voice selection. Add Rig wires it through CineAudioInfo like the reference workflow.";
@@ -1970,8 +2079,18 @@ function install(node, reason = "install") {
     const addRig = button("Add Rig", "gold");
     addRig.title = "Create CineAudioInfo export, selected TTS generator(s), Unified SRT when needed, and CineAudioInfo inject";
     addRig.onclick = () => {
-      const selectedType = ttsNodeSelect.value;
-      createCineAudioRig(node, data, conversionStatus, selectedType);
+      const omni = /^(tts_)?omnivoice$/.test(data.settings?.engine_profile || "");
+      const selectedType = omni ? "OmniVoiceEngineNode" : ttsNodeSelect.value;
+      if (omni && !liteGraphRegistry()[selectedType]) {
+        conversionStatus.textContent = "OmniVoice Engine is not registered. Check TTS Audio Suite startup and restart ComfyUI.";
+        return;
+      }
+      try {
+        createCineAudioRig(node, data, conversionStatus, selectedType);
+      } catch (error) {
+        console.error("[IAMCCS DialogueTagEditor] Add Rig failed", error);
+        conversionStatus.textContent = "Add Rig failed: " + (error?.message || error);
+      }
     };
     const nodeActions = document.createElement("div");
     nodeActions.className = "iamccs-node-actions";
@@ -1985,146 +2104,6 @@ function install(node, reason = "install") {
     const minimaxHead = document.createElement("div");
     minimaxHead.className = "iamccs-minimax-contract-head";
     minimaxHead.innerHTML = "<strong>MINIMAX H3 DIALOGUE</strong><span>Prompter-compatible contract</span>";
-    const aiDefaults = {
-      ollama: { base_url: "http://127.0.0.1:11434", model: "" },
-      openai_compatible: { base_url: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
-      gemini: { base_url: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-2.5-flash" },
-      anthropic: { base_url: "https://api.anthropic.com/v1", model: "claude-sonnet-4-5" },
-    };
-    node.properties ||= {};
-    const savedAI = node.properties.iamccs_prompter_ai || {};
-    const aiPanel = document.createElement("div");
-    aiPanel.className = "iamccs-minimax-ai";
-    const aiGrid = document.createElement("div");
-    aiGrid.className = "iamccs-minimax-ai-grid";
-    const aiProvider = select([
-      ["ollama", "Ollama / local"],
-      ["openai_compatible", "OpenAI-compatible"],
-      ["gemini", "Google Gemini"],
-      ["anthropic", "Anthropic"],
-    ], String(savedAI.provider || "ollama"));
-    const aiBaseUrl = input(String(savedAI.base_url || aiDefaults[aiProvider.value].base_url), "Provider URL");
-    const aiModel = input(String(savedAI.model || aiDefaults[aiProvider.value].model), "Model name");
-    const aiApiKey = input("", "API key (session only)");
-    aiApiKey.type = "password";
-    const aiTemperature = input(String(savedAI.temperature ?? 0.35));
-    aiTemperature.type = "number"; aiTemperature.min = "0"; aiTemperature.max = "2"; aiTemperature.step = "0.05";
-    const aiModelList = document.createElement("datalist");
-    aiModelList.id = `iamccs-dte-ai-models-${node.id || Math.random().toString(16).slice(2)}`;
-    aiModel.setAttribute("list", aiModelList.id);
-    const aiRefresh = button("↻", "");
-    aiRefresh.title = "Connect to Ollama and list installed models";
-    const aiModelRow = document.createElement("div");
-    aiModelRow.className = "iamccs-minimax-ai-modelrow";
-    aiModelRow.append(aiModel, aiRefresh, aiModelList);
-    const aiStatus = document.createElement("div");
-    aiStatus.className = "iamccs-minimax-ai-status";
-    aiStatus.textContent = "AI edits only the selected prompt box and never starts the ComfyUI queue.";
-    const aiLabel = (text, control) => { const label = document.createElement("label"); label.textContent = text; label.append(control); return label; };
-    aiGrid.append(aiLabel("Provider", aiProvider), aiLabel("Model", aiModelRow), aiLabel("Base URL", aiBaseUrl), aiLabel("Temperature", aiTemperature), aiLabel("API key", aiApiKey));
-    aiPanel.append(aiGrid, aiStatus);
-    const persistAI = () => {
-      node.properties.iamccs_prompter_ai = {
-        provider: aiProvider.value,
-        base_url: aiBaseUrl.value.trim(),
-        model: aiModel.value.trim(),
-        temperature: Number(aiTemperature.value || 0.35),
-      };
-      node.setDirtyCanvas?.(true, true);
-      app.graph?.setDirtyCanvas?.(true, true);
-    };
-    const loadOllamaModels = async () => {
-      if (aiProvider.value !== "ollama") {
-        aiStatus.className = "iamccs-minimax-ai-status";
-        aiStatus.textContent = "Enter the external provider model name and API key.";
-        return;
-      }
-      aiRefresh.disabled = true;
-      aiStatus.className = "iamccs-minimax-ai-status";
-      aiStatus.textContent = "Reading installed Ollama models…";
-      try {
-        const response = await api.fetchApi(`/iamccs/prompter/ollama/models?base_url=${encodeURIComponent(aiBaseUrl.value.trim() || "http://127.0.0.1:11434")}`);
-        const payload = await response.json();
-        if (!response.ok || !payload?.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
-        const names = (payload.models || []).map((item) => String(item.name || "")).filter(Boolean);
-        aiModelList.replaceChildren(...names.map((name) => { const option = document.createElement("option"); option.value = name; return option; }));
-        if (!aiModel.value && names.length) aiModel.value = names[0];
-        persistAI();
-        aiStatus.className = "iamccs-minimax-ai-status ok";
-        aiStatus.textContent = names.length ? `${names.length} Ollama model(s) found. Selected: ${aiModel.value}.` : "Ollama is reachable but no model is installed.";
-      } catch (error) {
-        aiStatus.className = "iamccs-minimax-ai-status error";
-        aiStatus.textContent = `Ollama connection failed: ${error?.message || error}`;
-      } finally {
-        aiRefresh.disabled = false;
-      }
-    };
-    aiProvider.onchange = () => {
-      const defaults = aiDefaults[aiProvider.value] || aiDefaults.ollama;
-      aiBaseUrl.value = defaults.base_url;
-      aiModel.value = defaults.model;
-      persistAI();
-      aiStatus.className = "iamccs-minimax-ai-status";
-      aiStatus.textContent = aiProvider.value === "ollama" ? "Press ↻ to connect and list local models." : "Enter the provider model name and API key.";
-    };
-    [aiBaseUrl, aiModel, aiTemperature].forEach((control) => control.onchange = persistAI);
-    aiRefresh.onclick = loadOllamaModels;
-    const runMiniMaxAIRewrite = async ({ key, text, context = "", apply, trigger, readCurrent = null }) => {
-      if (node._iamccsPromptAiBusy) { aiStatus.textContent = "An AI rewrite is already running. Wait for the spinner."; return; }
-      const rough = String(text || "").trim();
-      if (!rough) {
-        aiStatus.className = "iamccs-minimax-ai-status error";
-        aiStatus.textContent = "Write a rough idea in this prompt box before pressing ✦ AI.";
-        return;
-      }
-      if (!aiModel.value.trim()) {
-        aiStatus.className = "iamccs-minimax-ai-status error";
-        aiStatus.textContent = "Select an AI model first.";
-        return;
-      }
-      persistAI();
-      const authoringMode = data.settings?.minimax_assist_mode || "multi_shot_lipsync";
-      const taskMode = authoringMode === "longvid_guides" ? "t2va" : authoringMode;
-      const local = key !== "multishot_global_direction";
-      const targetKey = taskMode === "multi_shot_lipsync" ? key : ({ref2va:local?"detailed_description":"summary",v2va_object_swap:local?"v2va_interval_edits":"v2va_replacement_retention",audio_driven:local?"audio_timed_performance":"audio_scene_intent"})[taskMode] || (local?"acting":"scene");
-      node._iamccsPromptAiBusy = true;
-      const finishBusy = beginAiBusy(trigger);
-      aiStatus.className = "iamccs-minimax-ai-status";
-      aiStatus.textContent = `Rewriting ${key} with ${aiProvider.options[aiProvider.selectedIndex]?.text || aiProvider.value}…`;
-      try {
-        const response = await api.fetchApi("/iamccs/prompter/rewrite", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            provider: aiProvider.value,
-            base_url: aiBaseUrl.value.trim(),
-            model: aiModel.value.trim(),
-            api_key: aiApiKey.value,
-            task_mode: taskMode,
-            sections: { [targetKey]: rough },
-            target_keys: [targetKey],
-            user_direction: `Authoring mode: ${authoringMode}. ${String(context || "")}`,
-            temperature: Number(aiTemperature.value || 0.35),
-            timeout: 180,
-          }),
-        });
-        const payload = await response.json();
-        if (!response.ok || !payload?.ok) throw new Error(payload?.error || `HTTP ${response.status}`);
-        const rewritten = String(payload.sections?.[targetKey] || "").trim();
-        if (!rewritten) throw new Error("The model returned no usable text for this field");
-        if ((data.settings?.minimax_assist_mode || "multi_shot_lipsync") !== authoringMode || (readCurrent && String(readCurrent()).trim() !== rough)) throw new Error("The mode or box changed while AI was working; your edit was kept.");
-        apply(rewritten);
-        aiStatus.className = "iamccs-minimax-ai-status ok";
-        aiStatus.textContent = `Improved ${key}. Review the editable box before Inject Shotboard.`;
-      } catch (error) {
-        aiStatus.className = "iamccs-minimax-ai-status error";
-        aiStatus.textContent = `AI rewrite failed: ${error?.message || error}`;
-      } finally {
-        aiApiKey.value = "";
-        node._iamccsPromptAiBusy = false;
-        finishBusy();
-      }
-    };
     const minimaxTagGrid = document.createElement("div");
     minimaxTagGrid.className = "iamccs-minimax-tag-grid";
     [
@@ -2188,16 +2167,7 @@ function install(node, reason = "install") {
     const helperHost = document.createElement("div");
     helperHost.append(createModeHelper(assistMode.value));
     assistMode.onchange = () => { data.settings.minimax_assist_mode = assistMode.value; save(); helperHost.replaceChildren(createModeHelper(assistMode.value)); };
-    const requestPanel = document.createElement("section");
-    requestPanel.style.cssText = "border:2px solid #a077cf;background:#271c3c;padding:12px;margin:10px 0;display:grid;gap:8px;min-width:0";
-    const requestBox = textarea(data.settings.minimax_request || "", "REQUEST: describe your scene naturally. Who speaks, what happens, camera and mood. Supplied dialogue is never invented or replaced.");
-    requestBox.oninput = () => { data.settings.minimax_request = requestBox.value; save(); };
-    const requestAI = button("✦ REQUEST → GLOBAL", "iamccs-minimax-field-ai");
-    requestAI.onclick = () => { const previousGlobal = global.value; return runMiniMaxAIRewrite({key:"multishot_global_direction",text:requestBox.value,readCurrent:()=>requestBox.value,
-      context:"Turn this narrative REQUEST into the shared MiniMax global direction. Do not rewrite existing speech lines or invent dialogue. The compiled MiniMax Truth adds the existing speaker/dialogue contract.",trigger:requestAI,
-      apply:value=>{if(global.value !== previousGlobal) throw new Error("Global was edited while AI was working; your edit was kept.");global.value=value;data.global_prompt=value;save();refreshMinimaxPreview();}}); };
-    requestPanel.append(fieldLabel("REQUEST · narrative brief", "AI writes the Global box; review before injecting"), requestBox, requestAI);
-    minimaxPanel.append(minimaxHead, fieldLabel("AI WRITING MODE", "Does not change the Shotboard generation mode"), assistMode, helperHost, requestPanel, aiPanel, minimaxTagGrid, minimaxPreview, minimaxActions, minimaxCopyStatus);
+    minimaxPanel.append(minimaxHead, assistMode, helperHost, minimaxTagGrid, minimaxPreview, minimaxActions, minimaxCopyStatus);
     refreshMinimaxPreview();
     generation.append(disclosure("MiniMax H3 prompt", minimaxPanel, true, "subject + dialogue tags"));
 
@@ -2215,17 +2185,7 @@ function install(node, reason = "install") {
     global.classList.add("iamccs-global");
     const globalHead = document.createElement("div");
     globalHead.className = "iamccs-minimax-field-head";
-    const globalAI = button("✦ AI", "iamccs-minimax-field-ai");
-    globalAI.title = "Rewrite only the global direction using the MiniMax H3 Long Multi-Shot schema. No Queue.";
-    globalAI.onclick = () => runMiniMaxAIRewrite({
-      key: "multishot_global_direction",
-      text: global.value,
-      readCurrent: () => global.value,
-      context: "Preserve the user's story, subject identities and requested continuity or cut intent. This is the global direction shared by all Shotboard slots.",
-      trigger: globalAI,
-      apply: (value) => { global.value = value; data.global_prompt = value; save(); refreshMinimaxPreview(); },
-    });
-    globalHead.append(fieldLabel("Global shot prompt", "MiniMax H3 / Shotboard"), globalAI);
+    globalHead.append(fieldLabel("Global shot prompt", "MiniMax H3 / Shotboard"));
     globalSection.append(globalHead, global);
     const scriptSection = document.createElement("div");
     scriptSection.className = "iamccs-dte-section";
@@ -2374,6 +2334,19 @@ function install(node, reason = "install") {
     };
     injectBtn.onclick = () => injectVisibleWidgets(node, data, status, injectBtn, foot);
     shotboardBtn.onclick = () => injectShotboardPrompts(node, data, status, shotboardBtn, foot);
+    node._iamccsDialogueAudioStatus = (text, busy = false) => {
+      renderBtn.disabled = busy;
+      renderBtn.textContent = busy ? "Rendering…" : "Render";
+      status.textContent = text;
+      foot.textContent = text;
+    };
+    if (node.properties?.iamccs_dialogue_audio_render?.stage === "rendering") {
+      node._iamccsDialogueAudioStatus("Audio rig is rendering. Video will not start automatically.", true);
+    }
+    renderBtn.onclick = async () => {
+      save();
+      await renderDialogueAudio(node);
+    };
 
     function renderCards(container) {
       container.replaceChildren();
@@ -2503,21 +2476,7 @@ function install(node, reason = "install") {
         localPromptWrap.className = "iamccs-field-wrap";
         const localPromptHead = document.createElement("div");
         localPromptHead.className = "iamccs-minimax-field-head";
-        const localAI = button("✦ AI", "iamccs-minimax-field-ai");
-        localAI.title = "Rewrite only this local shot direction using MiniMax H3 Long Multi-Shot prompting. No Queue.";
-        localAI.onclick = () => {
-          const speakerIndex = Math.max(0, speakerOptions.findIndex(([id]) => id === (speakerSel.value || line.speaker || "A")));
-          const speaker = (data.speakers || [])[speakerIndex] || {};
-          runMiniMaxAIRewrite({
-            key: "multishot_shot_plan",
-            text: promptBox.value,
-            readCurrent: () => promptBox.value,
-            context: `This is local Shotboard slot ${index + 1}. Preserve the exact spoken line and speaker mapping: ${minimaxSubjectTag(speaker.subject_tag, speakerIndex)} ${minimaxSpeakerTag(speaker.speaker_tag, speakerIndex)} says ${JSON.stringify(minimaxDialogueText(textBox.value))}. Keep the active mouth visible. Follow the selected mode's cut or continuity semantics.`,
-            trigger: localAI,
-            apply: (value) => { promptBox.value = value; line.local_prompt = value; save(); refreshMinimaxPreview(); },
-          });
-        };
-        localPromptHead.append(fieldLabel("Local shot prompt", "MiniMax H3"), localAI);
+        localPromptHead.append(fieldLabel("Local shot prompt", "MiniMax H3"));
         localPromptWrap.append(localPromptHead, promptBox);
 
         const lineTags = document.createElement("div");
@@ -2567,6 +2526,18 @@ function install(node, reason = "install") {
   dom.computeSize = (width) => [Math.max(1280, width), 1040];
   node.size = [1360, 1140];
   node.setDirtyCanvas?.(true, true);
+  const pendingAudio = node.properties?.iamccs_dialogue_audio_render;
+  if (pendingAudio?.stage === "rendering") {
+    api.fetchApi(`/history/${encodeURIComponent(pendingAudio.prompt_id)}`).then((response) => response.json()).then((history) => {
+      const entry = history[pendingAudio.prompt_id];
+      if (entry?.status?.status_str === "success") finishDialogueAudio(node);
+      else if (entry?.status?.status_str === "error") {
+        pendingAudio.stage = pendingAudio.return_stage || "authoring";
+        delete pendingAudio.return_stage;
+        node._iamccsDialogueAudioStatus?.("The previous audio render failed. Check the ComfyUI log and press Render to retry.");
+      }
+    }).catch((error) => node._iamccsDialogueAudioStatus?.(`Audio Render status: ${error.message}`, true));
+  }
   console.info("[IAMCCS DialogueTagEditor] installed", { nodeId: node.id, reason });
 }
 function button(text, cls) {
@@ -2655,11 +2626,11 @@ function shotboardPlannersFor(node) {
   const all = (Array.isArray(app.graph?._nodes) ? app.graph._nodes : []).filter(isPlanner);
   return all.length === 1 ? { planners: all, source: "single_workflow_planner" } : { planners: [], source: all.length ? "ambiguous" : "missing" };
 }
-function syncPromptsToShotboard(node, data, fps) {
+function syncPromptsToShotboard(node, data, fps, requestedShotboard = null) {
   let shotboardCount = 0;
   let appliedPromptCount = 0;
   let availableVisualShots = 0;
-  const target = shotboardPlannersFor(node);
+  const target = requestedShotboard ? {planners: [requestedShotboard], source: "requested"} : shotboardPlannersFor(node);
   target.planners.forEach((shotboard) => {
     const minimaxH3 = nodeType(shotboard) === "IAMCCS_MiniMaxH3ShotPlanner" && data.settings?.minimax_truth_enabled !== false;
     const contract = minimaxH3 ? buildMinimaxDialogueContract(data) : null;
@@ -2669,6 +2640,8 @@ function syncPromptsToShotboard(node, data, fps) {
     if (td) {
       const existingTimeline = safeJsonParse(td.value, {});
       const merged = mergeDialoguePromptsIntoShotboard(existingTimeline, data, fps, minimaxH3);
+      merged.timeline.truth_revision = Math.max(Number(existingTimeline.truth_revision || 0), Number(shotboard.properties?.iamccs_v3_timeline_revision || 0)) + 1;
+      merged.timeline.truth_updated_at = new Date().toISOString();
       appliedPromptCount += merged.appliedPromptCount;
       availableVisualShots += merged.preservedVisualSegments;
       if (typeof shotboard._iamccsCineShotboardV3ApplyExternalTimeline === "function") {
@@ -2677,6 +2650,14 @@ function syncPromptsToShotboard(node, data, fps) {
         td.value = JSON.stringify(merged.timeline, null, 2);
         try { td.callback?.(td.value); } catch {}
       }
+    }
+    shotboard.properties ||= {};
+    shotboard.properties.iamccs_v3_timeline_data_backup = td?.value || "";
+    const persisted = safeJsonParse(td?.value, {});
+    shotboard.properties.iamccs_v3_timeline_revision = Number(persisted.truth_revision || 0);
+    shotboard.properties.iamccs_v3_timeline_updated_at = persisted.truth_updated_at;
+    if (typeof shotboard._iamccsCineShotboardV3ApplyExternalTimeline !== "function") {
+      document.dispatchEvent(new CustomEvent("iamccs:planner_rows_updated", {detail:{node_id:shotboard.id, source:TYPE, render:true}}));
     }
     shotboard.setDirtyCanvas?.(true, true);
     shotboardCount++;
@@ -2723,7 +2704,13 @@ function injectVisibleWidgets(node, data, status, injectBtn, foot) {
   const shotboardResult = syncPromptsToShotboard(node, data, fps);
   downstream(node, (candidate) => nodeType(candidate) === "IAMCCS_AudioBoardArranger").forEach((board) => {
     const aw = widget(board, "arranger_data");
-    if (aw) { aw.value = JSON.stringify(audioBoard, null, 2); try { aw.callback?.(aw.value); } catch {} }
+    if (aw) {
+      const existing = safeJsonParse(aw.value, {});
+      const realSegments = (Array.isArray(existing.audioSegments) ? existing.audioSegments : []).filter(segment => !segment.pendingTTS && Boolean(segment.audioFile || segment.audioB64 || segment.path || segment.fileName));
+      const next = realSegments.length ? {...existing, audioSegments: realSegments} : audioBoard;
+      aw.value = JSON.stringify(next, null, 2);
+      try { aw.callback?.(aw.value); } catch {}
+    }
     board.setDirtyCanvas?.(true, true);
     audioBoardCount++;
   });
@@ -2748,9 +2735,162 @@ function injectVisibleWidgets(node, data, status, injectBtn, foot) {
   }
   app.graph?.setDirtyCanvas?.(true, true);
 }
+function dialogueAudioPrompt(output, targetIds) {
+  const selected = {};
+  const visit = (id) => {
+    id = String(id);
+    if (selected[id]) return;
+    const item = output[id];
+    if (!item) throw new Error(`Audio rig node ${id} is missing from the prompt.`);
+    if (item.class_type === "IAMCCS_MiniMaxH3ShotPlanner") throw new Error("The audio rig depends on Shotboard generation. Remove that connection before rendering audio.");
+    selected[id] = item;
+    for (const value of Object.values(item.inputs || {})) {
+      if (Array.isArray(value) && value.length === 2 && typeof value[0] === "string" && typeof value[1] === "number" && output[value[0]]) visit(value[0]);
+    }
+  };
+  targetIds.forEach(visit);
+  return selected;
+}
+function shotboardEditorialSignature(board) {
+  const timeline = safeJsonParse(widget(board, "timeline_data")?.value, {});
+  const text = JSON.stringify({
+    audio: timeline.audioSegments, slots: timeline.segments,
+    duration: widget(board, "duration_seconds")?.value,
+    prompt: widget(board, "global_prompt")?.value,
+  }, (key, value) => ["waveformPeaks", "waveformCache", "decodedWaveform"].includes(key) ? undefined : value);
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 16777619);
+  return `${text.length}:${hash >>> 0}`;
+}
+async function renderDialogueAudio(node) {
+  node._iamccsDialogueAudioStatus?.("Preparing the audio rig…", true);
+  try {
+    if (node.properties?.iamccs_dialogue_audio_render?.stage === "rendering") throw new Error("This audio rig is already rendering.");
+    repairExistingDialogueRigLinks(node, "render_audio");
+    const boards = downstream(node, (item) => nodeType(item) === "IAMCCS_AudioBoardArranger");
+    if (!boards.length) throw new Error("Connect the TTS rig to AudioBoard before pressing Render.");
+    const full = await app.graphToPrompt();
+    const shotboards = downstream(node, (item) => nodeType(item) === "IAMCCS_MiniMaxH3ShotPlanner");
+    const signatures = Object.fromEntries(shotboards.map((board) => [String(board.id), shotboardEditorialSignature(board)]));
+    const request = { output: dialogueAudioPrompt(full.output, boards.map((board) => board.id)), workflow: full.workflow };
+    if (!Object.values(request.output).some((item) => item.class_type === "IAMCCS_CineAudioInfo" && (item.inputs.generated_audio || item.inputs.generated_audio_b))) {
+      throw new Error("Press Add Rig and connect generated audio to CineAudioInfo before rendering.");
+    }
+    dialogueAudioRequests.add(request);
+    const result = await api.queuePrompt(0, request);
+    if (!result?.prompt_id) throw new Error("ComfyUI did not accept the audio render.");
+    node.properties ||= {};
+    const previous = node.properties.iamccs_dialogue_audio_render;
+    node.properties.iamccs_dialogue_audio_render = {
+      stage: "rendering", prompt_id: result.prompt_id,
+      board_ids: boards.map((board) => String(board.id)),
+      shotboard_signatures: signatures,
+      return_stage: previous?.stage === "shotboard" ? "shotboard" : "authoring",
+    };
+    node._iamccsDialogueAudioStatus?.("Rendering the TTS rig and AudioBoard only. Video will not start automatically.", true);
+    app.graph?.change?.();
+  } catch (error) {
+    node._iamccsDialogueAudioStatus?.(`Audio Render: ${error.message}`);
+  }
+}
+async function finishDialogueAudio(node, attempt = 0) {
+  if (!(app.graph?._nodes || []).includes(node)) return;
+  const pending = node.properties?.iamccs_dialogue_audio_render;
+  if (pending?.stage !== "rendering" || node._iamccsDialogueAudioFinishing) return;
+  node._iamccsDialogueAudioFinishing = true;
+  try {
+    const response = await api.fetchApi(`/history/${encodeURIComponent(pending.prompt_id)}`);
+    if (!response.ok) throw new Error("Could not read the completed audio render.");
+    const entry = (await response.json())[pending.prompt_id];
+    if (pending.stage !== "rendering") return;
+    if (!entry && attempt < 3) {
+      window.setTimeout(() => finishDialogueAudio(node, attempt + 1), 200);
+      return;
+    }
+    if (!entry?.outputs) throw new Error("Audio render history is unavailable; check the ComfyUI log.");
+    const changedShotboard = Object.entries(pending.shotboard_signatures || {}).some(([id, signature]) => {
+      const board = (app.graph?._nodes || []).find((item) => String(item.id) === id);
+      board?._iamccsCineShotboardV3WriteTimeline?.({ force: true });
+      return !board || shotboardEditorialSignature(board) !== signature;
+    });
+    for (const id of pending.board_ids) {
+      const board = app.graph?.getNodeById?.(id) || (app.graph?._nodes || []).find((item) => String(item.id) === id);
+      const raw = entry.outputs[id]?.iamccs_audio_board?.[0];
+      if (!board || !raw) throw new Error(`AudioBoard ${id} did not return rendered audio.`);
+      const audio = safeJsonParse(raw, {});
+      if (!(audio.audioSegments || []).some((seg) => seg.audioFile || seg.audioB64)) throw new Error("The rig returned no real audio. Shotboard was not replaced.");
+      if (typeof board._iamccsAudioBoardApplyRuntimeTimeline !== "function" || typeof board._iamccsAudioBoardTransport?.publish !== "function") throw new Error("AudioBoard UI is not ready. Reload ComfyUI before rendering.");
+      board._iamccsAudioBoardApplyRuntimeTimeline(raw, "tag_editor_audio_render");
+      if (!changedShotboard) {
+        const published = await board._iamccsAudioBoardTransport.publish();
+        if (!published) throw new Error("Audio is ready in AudioBoard. Connect Shotboard and press Publish to complete the handoff.");
+      }
+    }
+    pending.stage = "shotboard";
+    delete pending.return_stage;
+    node._iamccsDialogueAudioStatus?.(changedShotboard
+      ? "Audio rendered in AudioBoard. Shotboard changed during rendering and was preserved; press Publish to import the new audio."
+      : "Audio rendered and injected. Queue now uses Shotboard; use Render again to regenerate the dialogue.");
+    app.graph?.change?.();
+  } catch (error) {
+    pending.stage = pending.return_stage || "authoring";
+    delete pending.return_stage;
+    node._iamccsDialogueAudioStatus?.(`Audio Render: ${error.message}`);
+    app.graph?.change?.();
+  } finally {
+    node._iamccsDialogueAudioFinishing = false;
+  }
+}
+function installDialogueAudioQueue() {
+  if (api._iamccsDialogueAudioQueue) return;
+  api._iamccsDialogueAudioQueue = true;
+  const queue = api.queuePrompt;
+  api.queuePrompt = function(number, request, ...rest) {
+    if (!dialogueAudioRequests.has(request) && request?.output) {
+      const output = { ...request.output };
+      for (const editor of (app.graph?._nodes || []).filter(isEditor)) {
+        const state = editor.properties?.iamccs_dialogue_audio_render;
+        for (const id of state?.board_ids || []) {
+          if (!output[id]) continue;
+          if (state.stage === "rendering") throw new Error("Wait for the Dialogue audio Render to finish before queueing video.");
+          if (state.stage !== "shotboard") continue;
+          const inputs = { ...output[id].inputs };
+          delete inputs.cine_linx;
+          output[id] = { ...output[id], inputs };
+        }
+      }
+      request = { ...request, output };
+    }
+    return queue.call(this, number, request, ...rest);
+  };
+  api.addEventListener("execution_success", (event) => {
+    const id = event.detail?.prompt_id;
+    for (const node of (app.graph?._nodes || []).filter(isEditor)) {
+      const pending = node.properties?.iamccs_dialogue_audio_render;
+      if (pending?.stage === "rendering" && pending.prompt_id === id) window.setTimeout(() => finishDialogueAudio(node), 100);
+    }
+  });
+  api.addEventListener("status", (event) => {
+    if (Number(event.detail?.exec_info?.queue_remaining ?? -1) !== 0) return;
+    for (const node of (app.graph?._nodes || []).filter(isEditor)) {
+      if (node.properties?.iamccs_dialogue_audio_render?.stage === "rendering") window.setTimeout(() => finishDialogueAudio(node), 100);
+    }
+  });
+  for (const name of ["execution_error", "execution_interrupted"]) api.addEventListener(name, (event) => {
+    for (const node of (app.graph?._nodes || []).filter(isEditor)) {
+      const pending = node.properties?.iamccs_dialogue_audio_render;
+      if (pending?.stage !== "rendering" || pending.prompt_id !== event.detail?.prompt_id) continue;
+      pending.stage = pending.return_stage || "authoring";
+      delete pending.return_stage;
+      node._iamccsDialogueAudioStatus?.(`Audio Render ${name === "execution_error" ? "failed" : "stopped"}: ${event.detail?.exception_message || "see ComfyUI log"}`);
+      app.graph?.change?.();
+    }
+  });
+}
 app.registerExtension({
   name: "IAMCCS.DialogueTagEditor",
   setup() {
+    installDialogueAudioQueue();
     [300, 1200, 2500].forEach((delay) => setTimeout(() => {
       const nodes = Array.isArray(app?.graph?._nodes) ? app.graph._nodes : [];
       nodes.forEach((node) => {

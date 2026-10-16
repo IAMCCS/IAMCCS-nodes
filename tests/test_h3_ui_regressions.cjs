@@ -18,18 +18,21 @@ assert.equal(migratedPro.widgets[0].value,64);
 assert.equal(migratedPro.widgets[1].value,'22');
 const proSerialize = settings.slice(settings.indexOf('function serializeNamedValues('), settings.indexOf('function normalizePianosequenzaStageControls('));
 const savedPro = {};
-vm.runInNewContext(proSerialize + 'serializeNamedValues(node, info, nodeData)', {
+vm.runInNewContext(proRestore + proSerialize + 'serializeNamedValues(node, info, nodeData)', {
   node:migratedPro, info:savedPro,
   nodeData:{input:{required:{h3_pixel_tiled_overlap:['INT',{default:64,min:0}],h3_continuation_context_frames:[['5','22','39'],{default:'22'}]}}},
   widget:(owner,name)=>owner.widgets.find(item=>item.name===name),
 });
 assert.deepEqual(Array.from(savedPro.widgets_values),[64,'22']);
 assert.equal(savedPro.widgets_values_named.h3_pixel_tiled_overlap,64);
-assert.match(settings, /document\.createTextNode\('2 STAGE'\)/);
-assert.match(settings, /setValue\(node,'longvid_pianosequenza_2stage_enabled',stageInput\.checked\)/);
-assert.match(settings, /DIRECT controls the endpoint\/profile; NATIVE controls the linked LOW\/HIGH resolution pair/);
+assert.match(settings, /6 · DIRECT · LEGACY/);
+assert.match(settings, /longvid_pianosequenza_2stage_enabled/);
+assert.match(settings, /ENGINE ▸/);
+assert.match(settings, /longvid_multishot_hardcut/);
+assert.match(settings, /longvid_keyframe_continuous/);
 assert.match(settings, /if \(\["upscale_link_to_native", "upscale_link_factor"\]\.includes\(name\)/);
-const stageLinkCode = settings.slice(settings.indexOf('const IAMCCS_2STAGE_RESOLUTION_PAIRS'), settings.indexOf('function downstreamNodes('));
+const stagePairsCode = settings.slice(settings.indexOf('const H3_FAST_2PASS_PAIRS'), settings.indexOf('const H3_DELIVERY_MODES'));
+const stageLinkCode = stagePairsCode + settings.slice(settings.indexOf('const IAMCCS_2STAGE_RESOLUTION_PAIRS'), settings.indexOf('function downstreamNodes('));
 for (const [activeMode, expectedWidth, expectedHeight] of [['i2va',640,384],['longvid_guides',1280,768]]) {
   const values = {upscale_link_to_native:true,upscale_link_factor:'640x384 -> 1280x768',width:640,height:384};
   vm.runInNewContext(stageLinkCode + `normalize2StageResolutionLink(node, '${activeMode}')`, {
@@ -70,8 +73,8 @@ const autoBoardValues = {
 const autoNode = {id:1,properties:{},widgets:Object.keys(autoNodeValues).map(name=>({name,get value(){return autoNodeValues[name]},set value(value){autoNodeValues[name]=value}})),setDirtyCanvas(){}};
 const autoBoard = {id:2,widgets:Object.keys(autoBoardValues).map(name=>({name,get value(){return autoBoardValues[name]},set value(value){autoBoardValues[name]=value}}))};
 const autoContext = vm.createContext({
-  node:autoNode,AUTO_IMPORT_BLOCKED:new Set(['global_prompt','timeline_data','image_paths','audio_mode']),INTERNAL:new Set(),COMPATIBILITY_ONLY:new Set(),
-  linkedShotboard:()=>autoBoard,widget:(owner,key)=>(owner.widgets||[]).find(item=>item.name===key),
+  restoreNamedValues:()=>{},node:autoNode,AUTO_IMPORT_BLOCKED:new Set(['global_prompt','timeline_data','image_paths','audio_mode']),INTERNAL:new Set(),COMPATIBILITY_ONLY:new Set(),
+  linkedShotboard:()=>autoBoard, setShotboardMode:(_,mode)=>{autoNodeValues.task_mode=mode; autoBoardValues.task_mode=mode;}, widget:(owner,key)=>(owner.widgets||[]).find(item=>item.name===key),
   setValue:(owner,key,value)=>{const item=(owner.widgets||[]).find(entry=>entry.name===key);if(item)item.value=value;},
   shotboardMode:()=> 'longvid_guides',document:{dispatchEvent(){}},CustomEvent:class{},app:{graph:{change(){}}},alert:message=>{throw Error(message)},Date
 });
@@ -81,7 +84,7 @@ assert.equal(autoNodeValues.width,1344);
 assert.equal(autoNodeValues.steps,8);
 assert.equal(autoNodeValues.global_prompt,'keep local truth');
 assert.equal(autoNodeValues.audio_mode,'h3_native');
-assert.equal(autoNodeValues.task_mode,'longvid_guides');
+assert.equal(autoNodeValues.task_mode,'auto_from_timeline');
 assert.equal(autoNode.properties.iamccs_settings_master,true);
 const compatCode = settings.slice(settings.indexOf('function modeFamily('), settings.indexOf('function firstChoice('));
 const compatValues = {
@@ -107,7 +110,7 @@ assert.equal(vm.runInContext("selectedH3AssetCompatibility(node, 'longvid_guides
 const recipe = settings.slice(settings.indexOf('function applyRecipe('), settings.indexOf('function applyAccelerationChoice('));
 for (const [name, steps, sampler] of [['native',20,'res_multistep'],['pdd',8,'euler'],['fasth3',6,'euler'],['sla',4,'euler'],['fused',4,'res_multistep']]) {
   const values = {turbo_mode:'old', pdd_lora_name:'old', fused_turbo_model_name:'minimax_fused_convrot.safetensors', shift_video:5, steps:99};
-  const context = vm.createContext({node:{}, widget:(_, key)=>({value:values[key]}), setValue:(_,key,value)=>{values[key]=value;}, shotboardMode:()=> 'i2va', modeFamily:()=> 'fl2va', firstChoice:()=> 'asset', isPddLoRA:()=>true,isFastH3LoRA:()=>true,resetAcceleration:set=>{set('turbo_mode','off');set('turbo_lora_name','');set('pdd_lora_name','');set('fused_turbo_model_name','');}, document:{dispatchEvent(){}}, CustomEvent:class{}, alert:message=>{throw Error(message)}});
+  const context = vm.createContext({node:{}, rememberAttentionChoice:()=>{}, widget:(_, key)=>({value:values[key]}), setValue:(_,key,value)=>{values[key]=value;}, shotboardMode:()=> 'i2va', modeFamily:()=> 'fl2va', fastH3Asset:()=> 'fasth3_dense_6step_comfy.safetensors', firstChoice:()=> 'asset', isPddLoRA:()=>true,isFastH3LoRA:()=>true,resetAcceleration:set=>{set('turbo_mode','off');set('turbo_lora_name','');set('pdd_lora_name','');set('fused_turbo_model_name','');}, document:{dispatchEvent(){}}, CustomEvent:class{}, alert:message=>{throw Error(message)}});
   vm.runInContext(recipe + `applyRecipe(node, '${name}')`, context);
   assert.equal(values.steps, steps, name); assert.equal(values.sampler_name, sampler, name);
   assert.equal(values.denoise, 1, name); assert.equal(values.shift_audio,3,name);
@@ -116,7 +119,7 @@ for (const [name, steps, sampler] of [['native',20,'res_multistep'],['pdd',8,'eu
 const declared = settings.slice(settings.indexOf('function applyDeclaredTurboContract('), settings.indexOf('function resetAcceleration('));
 for (const steps of [3,4,6,8]) {
   let result;
-  vm.runInNewContext(declared + 'applyDeclaredTurboContract({})', {widget:(_,key)=>({value:key==='turbo_mode'?'early_8_10':'native'}),declaredTurboSteps:()=>steps,setValue:(_,key,value)=>{result=value;}});
+  vm.runInNewContext(declared + 'applyDeclaredTurboContract({})', {shotboardMode:()=> 'i2va',widget:(_,key)=>({value:key==='turbo_mode'?'early_8_10':'native'}),declaredTurboSteps:()=>steps,setValue:(_,key,value)=>{result=value;}});
   assert.equal(result,steps);
 }
 
@@ -169,12 +172,12 @@ const insertionContext = vm.createContext({activePromptArea:null,center:{querySe
 vm.runInContext(insertionHelper+'result=insertIntoActiveField("<d>[English] line</d>", "", {area:cursorArea,start:7,end:7});',insertionContext);
 assert.equal(insertionContext.result,true);
 assert.equal(cursorArea.value,'before <d>[English] line</d> AFTER');
-const injectStart = prompter.indexOf('    injectBtn.onclick = async () => {');
+const injectStart = prompter.indexOf('    injectBtn.onclick = () => {');
 const inject = prompter.slice(injectStart,prompter.indexOf('    writingButtons.forEach(',injectStart));
 for (const target of ['global','local_1','local_auto']) {
   const calls=[]; const project={injection_target:target,task_mode:'t2va',sections:{scene:'scene only'},local_prompts:[],merge_policy:'replace'};
   const shotboard={_iamccsMiniMaxInjectPrompt:args=>{calls.push(args);return{actualTarget:args.target}}};
-  vm.runInNewContext(inject+'injectBtn.onclick()',{injectBtn:{},injectStatus:{},project,commit(){},canonicalMode:value=>String(value||'').toLowerCase(),effectiveGlobalPrompt:()=> 'scene only',effectiveLocalPrompt:()=> '',composePrompt:()=> 'scene only',shotboardsForPrompter:()=>[shotboard],node:{},aiVisualFiles:[],widget:()=>({value:''}),setTimeout(){}});
+  vm.runInNewContext(inject+'injectBtn.onclick()',{isEditMode:()=>false,injectBtn:{},injectStatus:{},project,commit(){},canonicalMode:value=>String(value||'').toLowerCase(),effectiveGlobalPrompt:()=> 'scene only',effectiveLocalPrompt:()=> '',composePrompt:()=> 'scene only',shotboardsForPrompter:()=>[shotboard],node:{},aiVisualFiles:[],widget:()=>({value:''}),setTimeout(){}});
   assert.equal(calls.length,1,target); assert.equal(calls[0].target,target); assert.equal(calls[0].prompt,'scene only');
 }
 {
@@ -192,7 +195,7 @@ for (const target of ['global','local_1','local_auto']) {
     _iamccsMiniMaxInjectPrompt:args=>{calls.push(args);return{actualTarget:args.target};},
   };
   const widget=(target,name)=>({value:name==='task_mode'?'i2va':name==='timeline_data'?JSON.stringify({segments:[]}):''});
-  vm.runInNewContext(inject+'injectBtn.onclick()',{injectBtn:{},injectStatus:{},project,commit(){},canonicalMode:value=>String(value||'').toLowerCase(),effectiveGlobalPrompt:()=> 'shared world',effectiveLocalPrompt:()=> '',composePrompt:()=> 'shared world',shotboardsForPrompter:()=>[shotboard],node:{},aiVisualFiles:[{path:'one.png'},{path:'two.png'}],widget,setWidget(){},setTimeout(){}});
+  vm.runInNewContext(inject+'injectBtn.onclick()',{isEditMode:()=>false,injectBtn:{},injectStatus:{},project,commit(){},canonicalMode:value=>String(value||'').toLowerCase(),effectiveGlobalPrompt:()=> 'shared world',effectiveLocalPrompt:()=> '',composePrompt:()=> 'shared world',shotboardsForPrompter:()=>[shotboard],node:{},aiVisualFiles:[{path:'one.png'},{path:'two.png'}],widget,setWidget(){},setTimeout(){}});
   assert.deepEqual(i2vPaths,['one.png','two.png']);
   assert.deepEqual(calls.map(call=>call.target),['global','local_1','local_2']);
   assert.deepEqual(calls.slice(1).map(call=>call.prompt),['first action','second action']);

@@ -717,6 +717,9 @@ class IAMCCS_MiniMaxH3AudioOutputPolicyR21:
             if str(shotplan.get("task_mode", "")) == "fl2va_extended_av":
                 planned_trim = max(0, int(chunk.get("extended_av_trim_head_frames", 0) or 0))
                 trim_enabled = True
+            elif str(shotplan.get("task_mode", "")) == "longvid_multishot_hardcut":
+                planned_trim = max(0, int(chunk.get("latent_tail_context_prefix_frames", 0) or 0))
+                trim_enabled = True
             else:
                 trim_enabled = isinstance(motion_contract, dict) and bool(motion_contract.get("enabled"))
             if trim_enabled and planned_trim:

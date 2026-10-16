@@ -24,6 +24,7 @@ from .motion_analysis import analyze_freeze_tail, phase_aware_safety_from_confid
 from .release_utils import (
     duration_to_requested_frames, normalize_alignment_mode, normalize_safety_mode,
     resolve_freeze_settings, stitch_trim_plan, apply_no_lock_fallback,
+    authored_interval_timing, authored_interval_prompt,
 )
 from .seamless_stitch import (
     LUMINANCE_ANALYSIS_FRAMES, context_aligned_video_join, context_aligned_audio_join,
@@ -129,9 +130,14 @@ class H3ContinuousStart:
     DESCRIPTION = "Clip 1: native FL2VA first/last anchors. Optional <Picture 1> is Qwen-only (no persistent ref latent), matching the working production behavior."
 
     def build(self, clip, vae, prompt, width, height, length, first_frame, last_frame,
-              ref_image_size="match", reference_image=None):
+              ref_image_size="match", reference_image=None, authored_visible_frames=None):
         # IMPORTANT: Clip 1 intentionally stays on the native FL2VA endpoint
         # path. No continuation/runtime-patch metadata is attached here.
+        timing = None
+        if authored_visible_frames is not None:
+            _require_patches()
+            timing = authored_interval_timing(authored_visible_frames)
+            length = timing["technical_frames"]
         latent, frame_count = _empty_av_latent(width, height, length)
 
         first = _resize(first_frame[:1], width, height, "disabled")
@@ -140,11 +146,17 @@ class H3ContinuousStart:
             {"resolved_frame_index": 0, "latent": vae.encode(first)},
             {"resolved_frame_index": frame_count - 1, "latent": vae.encode(last)},
         ]
+        if timing is not None:
+            latent["iamccs_authored_interval"] = timing
+            prompt = authored_interval_prompt(prompt, timing, True, reference_image is not None)
 
         # Match the previously working production behavior:
         # <Picture 1> is Qwen-only. It is NOT inserted into minimax_refs and
         # therefore cannot act as a persistent DiT reference latent mid-clip.
-        if reference_image is not None:
+        if reference_image is not None and authored_visible_frames is not None:
+            ref = _prepare_qwen_reference_image(reference_image, width, height, ref_image_size)
+            tokens = clip.tokenize(prompt, images=[ref, first, last])
+        elif reference_image is not None:
             ref = _prepare_qwen_reference_image(reference_image, width, height, ref_image_size)
             tokens = clip.tokenize(prompt, minimax_ref_items=[{"type": "image", "data": ref}])
         else:
@@ -197,7 +209,7 @@ class H3ContinuousContinue:
     def build(self, clip, vae, previous_latent, prompt, width, height, length,
               context_frames="22", handover_mode="auto", alignment_mode="phase_aligned_extended",
               manual_landing_tail_frames=34, ref_image_size="match", handover=None,
-              last_frame=None, reference_image=None):
+              last_frame=None, reference_image=None, authored_visible_frames=None, opening_image=None):
         _require_patches()
         context_frames = int(context_frames)
         manual_landing_tail_frames = int(manual_landing_tail_frames)
@@ -225,6 +237,7 @@ class H3ContinuousContinue:
                     if handover.get("detector_mode") not in (
                         "final_frame_lock", "final_frame_lock_robust",
                         "stable_tail_consensus", "iamccs_visible_terminal",
+                        "iamccs_authored_editorial_boundary",
                     ):
                         _LOG.warning(
                             "h3_continuous: loaded handover metadata predates final-frame-lock detection; "
@@ -305,6 +318,13 @@ class H3ContinuousContinue:
                 )
             sl = context_slice(prev_video.shape[2], context_frames, landing_tail_frames)
 
+        timing = None
+        if authored_visible_frames is not None:
+            timing = authored_interval_timing(
+                authored_visible_frames, sl, handover.get("visible_end_frame") if handover else None
+            )
+            length = timing["technical_frames"]
+            prompt = authored_interval_prompt(prompt, timing, False, reference_image is not None, opening_image is not None)
         target_latent, frame_count = _empty_av_latent(width, height, length)
         target_video, _ = _streams_from_latent(target_latent)
         if tuple(prev_video.shape[-2:]) != tuple(target_video.shape[-2:]):
@@ -322,7 +342,7 @@ class H3ContinuousContinue:
         # The retained phase_aware fallback can still use non-canonical source-relative
         # offsets for A/B comparison with v0.4.1.
         keyframes = []
-        for k, pixel_offset in enumerate(sl["offsets"]):
+        for k, pixel_offset in enumerate(sl["offsets"] if timing is None else []):
             keyframes.append({
                 "resolved_frame_index": 0,
                 HC_INDEX: int(pixel_offset),
@@ -330,15 +350,22 @@ class H3ContinuousContinue:
             })
 
         keyframe_images = []
+        if timing is not None and opening_image is not None:
+            # The inherited masked AV prefix is the temporal authority. Keep
+            # the outgoing picture Qwen-visible, but do not VAE-pin it again at
+            # the first new frame: that duplicate anchor creates a stop/restart
+            # at every join instead of one continuous prediction.
+            opening = _resize(opening_image[:1], width, height, "center")
+            keyframe_images.append(opening)
         if last_frame is not None:
             last = _resize(last_frame[:1], width, height, "center")
             keyframe_images.append(last)
             keyframes.append({
-                # Mark the continuation endpoint too. This lets the v1.1.4
-                # layout wrapper touch only this suite's own keyframes and
-                # leave unrelated stock FL2VA/Ref2VA graphs unchanged.
-                "resolved_frame_index": 0,
-                HC_INDEX: frame_count - 1,
+                # Use H3's native trained-in last-frame anchor. In authored
+                # mode the delivered edit ends before this hidden technical
+                # destination, so the visible take keeps moving toward the
+                # guide instead of meeting a hard interior conditioning row.
+                "resolved_frame_index": frame_count - 1,
                 "latent": vae.encode(last),
             })
 
@@ -356,12 +383,30 @@ class H3ContinuousContinue:
             HC_AUDIO_END_FRAME: audio_end_frame,
         }]
 
+        if timing is not None:
+            # Same native per-stream masked-prefix contract as Extended AV.
+            # Conditioning alone allows H3 to redraw its own inherited motion.
+            video, audio = _streams_from_latent(target_latent)
+            video[:, :, :source.shape[2]] = source.to(video)
+            audio[..., :ref_audio_t] = audio_context.to(audio)
+            video_mask = torch.ones((1, 1) + tuple(video.shape[2:]), device=video.device)
+            audio_mask = torch.ones((1, 1) + tuple(audio.shape[2:]), device=audio.device)
+            video_mask[:, :, :source.shape[2]] = 0.0
+            audio_mask[..., :ref_audio_t] = 0.0
+            target_latent["noise_mask"] = comfy.nested_tensor.NestedTensor((video_mask, audio_mask))
+            target_latent["iamccs_authored_interval"] = timing
+            # The masked target already owns AV history. Do not also present
+            # the same audio as a reference, especially with Custom Audio Drive.
+            refs = []
+
         ref_items = []
         if reference_image is not None:
             resized = _prepare_qwen_reference_image(reference_image, width, height, ref_image_size)
             ref_items.append({"type": "image", "data": resized})
 
-        if ref_items:
+        if timing is not None and ref_items:
+            tokens = clip.tokenize(prompt, images=[ref_items[0]["data"]] + keyframe_images)
+        elif ref_items:
             tokens = clip.tokenize(prompt, minimax_ref_items=ref_items)
         elif keyframe_images:
             tokens = clip.tokenize(prompt, images=keyframe_images)
@@ -417,8 +462,15 @@ class H3ContinuousContinue:
             f"ignored previous tail {ignored_tail} frames (latent handover only)" +
             phase_note + freeze_note
         )
+        if timing is not None:
+            info += (
+                f" | masked native AV prefix | authored new {timing['authored_visible_frames']} frames"
+                f" | technical {timing['technical_frames']} | hidden head {timing['head_trim_frames']}"
+                f" | endpoint {timing['endpoint_frame']} | hidden runway {timing['boundary_runway_frames']}"
+                f" | grid padding {timing['grid_padding_frames']}"
+            )
         _LOG.info("h3_continuous: %s", info)
-        return (cond, target_latent, actual_context_frames, ignored_tail, info)
+        return (cond, target_latent, timing["head_trim_frames"] if timing else actual_context_frames, ignored_tail, info)
 
 
 class H3ContinuousSaveLatent:
@@ -897,7 +949,7 @@ class H3ContinuousStartV1(H3ContinuousStart):
     DESCRIPTION = "v1.0 Clip 1: native FL2VA first/last anchors with user-facing duration in seconds. Optional <Picture 1> remains Qwen-only."
 
     def build(self, clip, vae, prompt, width, height, duration, first_frame, last_frame,
-              ref_image_size="match", reference_image=None):
+              ref_image_size="match", reference_image=None, authored_visible_frames=None):
         requested_frames = duration_to_requested_frames(duration)
         frame_count, _, _ = temporal_shape(requested_frames)
         _LOG.info(
@@ -907,6 +959,7 @@ class H3ContinuousStartV1(H3ContinuousStart):
         return super().build(
             clip, vae, prompt, width, height, requested_frames, first_frame, last_frame,
             ref_image_size=ref_image_size, reference_image=reference_image,
+            authored_visible_frames=authored_visible_frames,
         )
 
 
@@ -941,7 +994,7 @@ class H3ContinuousContinueV1(H3ContinuousContinue):
     def build(self, clip, vae, previous_latent, prompt, width, height, duration,
               context_frames="22", handover_mode="auto", alignment_mode="phase_aligned_extended",
               manual_landing_tail_frames=34, ref_image_size="match", handover=None,
-              last_frame=None, reference_image=None):
+              last_frame=None, reference_image=None, authored_visible_frames=None, opening_image=None):
         requested_frames = duration_to_requested_frames(duration)
         frame_count, _, _ = temporal_shape(requested_frames)
         internal_alignment = normalize_alignment_mode(alignment_mode)
@@ -956,6 +1009,8 @@ class H3ContinuousContinueV1(H3ContinuousContinue):
             manual_landing_tail_frames=manual_landing_tail_frames,
             ref_image_size=ref_image_size, handover=handover,
             last_frame=last_frame, reference_image=reference_image,
+            authored_visible_frames=authored_visible_frames,
+            opening_image=opening_image,
         )
 
 

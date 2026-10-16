@@ -15,7 +15,7 @@ def task_family(task):
     if task in {"v2va_controlnet", "controlnet_v2v", "h3_fun_controlnet"}:
         return "fl2va"
     return "ref2va" if task.startswith("ref2va") or task in {
-        "reference_image", "ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap"
+        "reference_image", "ref2vid_lipsync", "v2va_object_swap", "v2va_face_swap", "v2va_face_swap_lora"
     } else "fl2va"
 
 
@@ -72,6 +72,14 @@ def describe_asset(name, path):
             if 1 <= declared_steps <= 100:
                 result["declared_steps"] = declared_steps
     declared = named_family(meta.get("base_model", meta.get("ss_base_model_version", "")))
+    # Comfy-Org's verified Ref2V v0.1 release carries stale FL2VA base metadata.
+    # Exception is restricted to the official name, header fingerprint and size;
+    # the downloaded full-file SHA256 is 5b9ab5ade15d0775676d01a907268a69a1468dc6033b3b0d3ded5502f3ebb84c.
+    if (Path(str(name)).name == "minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors"
+            and result.get("header_sha256") == "e21c56a66485e59fa7ae57ae287a14ad0612d973f73f8a947cc741aa6d0256ba"
+            and result.get("bytes") == 1956193000):
+        declared = "ref2va"
+        result["metadata_family_correction"] = "Comfy-Org Ref2V v0.1 verified release"
     result["conflict"] = bool(declared and result["family"] and declared != result["family"])
     result["family"] = declared or result["family"]
     lower = name.lower()

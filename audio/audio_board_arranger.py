@@ -498,7 +498,8 @@ class IAMCCS_AudioBoardArranger:
         # Split T Lanes intentionally leaves the UI in Only First for normal
         # Shotboard publication. The runtime still needs every physical lane so
         # the bridge can route T01/A1, T02/A2, and later takes.
-        only_first = bool(only_first_requested and not multi_lane_publish)
+        dialogue_lane_publish = any(str(seg.get("purpose") or "") == "dialogue_tts_speaker_stem" for seg in source_segments) or len({str(seg.get("speaker")) for seg in source_segments if seg.get("speaker")}) > 1
+        only_first = bool(only_first_requested and not multi_lane_publish and not dialogue_lane_publish)
         bus_mode = "all_tracks"
         shotboard_mode = "multigeneration_lanes" if multi_lane_publish else ("only_first" if only_first else "all_tracks")
         segments = source_segments

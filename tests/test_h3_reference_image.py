@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -48,7 +49,10 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(advisor.task_family('reference_image'), 'ref2va')
         self.assertEqual(advisor.task_family('i2va'), 'fl2va')
         import json
-        path = Path('X:/1_UNIVERSAL_42_43/R42_REFERENCE_IMAGE_GENERATOR_API.json')
+        fixture = os.environ.get('IAMCCS_TEST_REFERENCE_IMAGE_API', '')
+        if not fixture:
+            self.skipTest('Set IAMCCS_TEST_REFERENCE_IMAGE_API to test an external workflow')
+        path = Path(fixture)
         prompt = json.loads(path.read_text(encoding='utf-8'))['prompt']
         self.assertEqual(prompt['811']['inputs']['task_mode'], 'reference_image')
         self.assertEqual(prompt['9']['inputs']['model'], ['8',0])
@@ -64,7 +68,11 @@ class ReferenceTests(unittest.TestCase):
             root = Path(directory)
             for name, color in (("character.png", (40, 80, 120)), ("prop.png", (120, 80, 40))):
                 Image.new("RGB", (32, 24), color).save(root / name)
-            project = {"ai_visual_files": [{"path": "character.png"}, {"path": "prop.png"}]}
+            project = {
+                "image_preset": "single_image",
+                "request": "Create one studio portrait from Picture 1.",
+                "ai_visual_files": [{"path": "character.png"}, {"path": "prop.png"}],
+            }
             linx = {"iamccs_minimax_h3_settings": {"settings": {
                 "task_mode": "reference_image", "h3_reference_image_source": "auto_prompter_then_direct",
                 "width": 3840, "height": 2160,
@@ -78,6 +86,37 @@ class ReferenceTests(unittest.TestCase):
             self.assertEqual(tuple(result[8].shape), (1, 24, 32, 3))
             self.assertIsNone(result[9])
             self.assertIn("prompter_ref2v+inject", result[7])
+
+    def test_empty_character_sheet_request_is_valid_with_picture_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            Image.new("RGB", (32, 24), (40, 80, 120)).save(root / "character.png")
+            project = {
+                "image_preset": "reference_sheet",
+                "request": "",
+                "ai_visual_files": [{"path": "character.png"}],
+            }
+            linx = {"iamccs_minimax_h3_settings": {"settings": {
+                "task_mode": "reference_image", "h3_reference_image_source": "prompter_ref2v",
+                "h3_reference_image_preset": "character_sheet", "width": 3840, "height": 2160,
+            }}}
+            prompt = "<Picture 1> character sheet generated from visual evidence."
+            bridge = reference.IAMCCS_R42ReferenceImagePromptBridge()
+            with patch.object(reference.folder_paths, "get_input_directory", return_value=directory), \
+                 patch.object(reference.folder_paths, "get_annotated_filepath", side_effect=lambda name: str(root / name)):
+                result = bridge.adapt(prompt, json.dumps(project), linx)
+            self.assertIsNotNone(result[3])
+            self.assertIn("preset=character_sheet", result[7])
+
+    def test_conflicting_sheet_and_single_image_presets_are_rejected(self):
+        project = {"image_preset": "reference_sheet", "request": "", "ai_visual_files": []}
+        linx = {"iamccs_minimax_h3_settings": {"settings": {
+            "task_mode": "reference_image", "h3_reference_image_preset": "single_image",
+        }}}
+        with self.assertRaisesRegex(ValueError, "conflicting image presets"):
+            reference.IAMCCS_R42ReferenceImagePromptBridge().adapt(
+                "old cached prompt", json.dumps(project), linx,
+            )
 
 
 if __name__ == '__main__':

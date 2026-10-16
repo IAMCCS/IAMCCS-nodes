@@ -901,10 +901,21 @@ class IAMCCS_ShotboarderAudVidExporterPRO:
                 # preserve per-slot audio without requiring a master track.
                 audio = getattr(components, "audio", None)
             if audio is None:
-                raise ValueError(
-                    f"{NODE_ID}: audio_input selected but neither an AUDIO input nor embedded VIDEO audio is available."
-                )
-            waveform, sample_rate = _as_audio_waveform(audio)
+                # An authored EDITA timeline may intentionally contain only stills,
+                # silent clips or muted audio. Keep the strict input contract for
+                # other workflows; an explicit editor manifest permits silence.
+                try:
+                    editor_document = json.loads(editor_audio_edl_json or "{}")
+                except (TypeError, ValueError):
+                    editor_document = {}
+                if editor_document.get("schema") != "iamccs.shotboard_video_editor.v1":
+                    raise ValueError(
+                        f"{NODE_ID}: audio_input selected but neither an AUDIO input nor embedded VIDEO audio is available."
+                    )
+                sample_rate = 48000
+                waveform = torch.zeros((2, max(1, round(frame_count / fps * sample_rate))), dtype=torch.float32)
+            else:
+                waveform, sample_rate = _as_audio_waveform(audio)
             waveform = _align_audio(waveform, sample_rate, frame_count, fps, str(audio_sync or "trim_to_video"))
         audio_channels = int(waveform.shape[0]) if waveform is not None else int(direct_asset.get("channels") or direct_asset.get("channel_count") or 0)
         audio_samples = int(waveform.shape[1]) if waveform is not None else 0

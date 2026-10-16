@@ -364,16 +364,18 @@ class IAMCCS_CineInfoH3:
                 ),
             },
             "optional": {
-                "reference_image_1": ("IMAGE",),
-                "reference_image_2": ("IMAGE",),
-                "reference_image_3": ("IMAGE",),
-                "reference_image_4": ("IMAGE",),
-                "reference_video": ("IMAGE",),
-                "reference_video_audio": ("AUDIO",),
-                "reference_audio": ("AUDIO",),
+                "active_mode_only": ("BOOLEAN", {"default": False}),
+                "reference_image_1": ("IMAGE", {"lazy": True}),
+                "reference_image_2": ("IMAGE", {"lazy": True}),
+                "reference_image_3": ("IMAGE", {"lazy": True}),
+                "reference_image_4": ("IMAGE", {"lazy": True}),
+                "reference_video": ("IMAGE", {"lazy": True}),
+                "reference_video_audio": ("AUDIO", {"lazy": True}),
+                "reference_audio": ("AUDIO", {"lazy": True}),
                 "custom_audio": (
                     "AUDIO",
                     {
+                        "lazy": True,
                         "tooltip": (
                             "R21 custom audio drive. This is distinct from REF2VA reference audio: "
                             "an atomic backend may encode it into the AV latent before sampling."
@@ -387,6 +389,35 @@ class IAMCCS_CineInfoH3:
     RETURN_NAMES = ("cine_linx",)
     FUNCTION = "attach"
     CATEGORY = CATEGORY
+
+    @staticmethod
+    def _media_inputs(cine_linx, active_mode_only):
+        media = ["reference_image_1", "reference_image_2", "reference_image_3", "reference_image_4",
+                 "reference_video", "reference_video_audio", "reference_audio", "custom_audio"]
+        if active_mode_only:
+            plan = _h3_plan(cine_linx)
+            mode = plan.get("task_mode")
+            selected = []
+            if mode == "v2va_face_swap_lora":
+                selected.extend(media[1:4])
+            if mode in {"ref2va", "ref2vid_lipsync"}:
+                roles = plan.get("reference_roles", [])
+                selected.extend(name for index, name in enumerate(media[:4])
+                                if index >= len(roles) or roles[index] != "disabled")
+                if plan.get("reference_video_role", "off") != "off":
+                    selected.extend(["reference_video", "reference_video_audio"])
+                if plan.get("reference_audio_role", "off") != "off":
+                    selected.append("reference_audio")
+            if mode not in {"v2va_face_swap", "v2va_face_swap_lora"} and _normalise_audio_mode(plan.get("audio_mode")) == "h3_custom_audio_drive":
+                selected.append("custom_audio")
+            media = selected
+        return media
+
+    def check_lazy_status(self, cine_linx, active_mode_only=False, **kwargs):
+        environment = cine_linx.get("resources", {}).get("iamccs_h3_edit_environment") if isinstance(cine_linx, dict) else None
+        return [name for name in self._media_inputs(cine_linx, active_mode_only)
+                if not (name == "reference_image_2" and environment)
+                if name in kwargs and kwargs[name] is None]
 
     def attach(
         self,
@@ -410,6 +441,7 @@ class IAMCCS_CineInfoH3:
         reference_video_audio=None,
         reference_audio=None,
         custom_audio=None,
+        active_mode_only=False,
     ):
         if not isinstance(cine_linx, dict):
             raise ValueError("IAMCCS Cine Info H3 requires a valid cine_linx input")
@@ -422,6 +454,35 @@ class IAMCCS_CineInfoH3:
 
         shotplan = _h3_plan(cine_linx)
         selected_audio_mode = _normalise_audio_mode(shotplan.get("audio_mode"))
+        if shotplan.get("task_mode") == "v2va_face_swap_lora":
+            resources = cine_linx.get("resources", {})
+            environment = resources.get("iamccs_h3_edit_environment")
+            if resources.get("iamccs_h3_edit_variant") == "environment":
+                reference_role_2 = "composition"
+            if environment:
+                from .iamccs_h3_reference_image import _decode_visual, _load_visual_path
+                reference_image_2 = _decode_visual(environment)
+                if reference_image_2 is None:
+                    reference_image_2 = _load_visual_path(environment)
+                if reference_image_2 is None:
+                    raise ValueError("Prompter environment image is unavailable; replace or remove it.")
+        if active_mode_only:
+            if shotplan.get("task_mode") in {"ref2va", "ref2vid_lipsync"}:
+                roles = shotplan.get("reference_roles", [])
+                reference_role_1, reference_role_2, reference_role_3, reference_role_4 = [
+                    roles[index] if index < len(roles) else value
+                    for index, value in enumerate((reference_role_1, reference_role_2, reference_role_3, reference_role_4))
+                ]
+            active = set(self._media_inputs(cine_linx, True))
+            reference_image_1, reference_image_2, reference_image_3, reference_image_4 = [
+                value if f"reference_image_{index}" in active else None
+                for index,value in enumerate([reference_image_1, reference_image_2, reference_image_3, reference_image_4],1)]
+            reference_video = reference_video if "reference_video" in active else None
+            reference_video_audio = reference_video_audio if "reference_video_audio" in active else None
+            reference_audio = reference_audio if "reference_audio" in active else None
+            custom_audio = custom_audio if "custom_audio" in active else None
+            reference_video_role = shotplan.get("reference_video_role", reference_video_role)
+            reference_audio_role = shotplan.get("reference_audio_role", reference_audio_role)
         images = [reference_image_1, reference_image_2, reference_image_3, reference_image_4]
         roles = [reference_role_1, reference_role_2, reference_role_3, reference_role_4]
         image_items = []

@@ -13,6 +13,7 @@ from __future__ import annotations
 import functools
 import hashlib
 from .iamccs_h3_seed_policy import chunk_seed
+from .iamccs_h3_veda import apply_veda
 import gc
 import json
 import logging
@@ -479,6 +480,8 @@ def _apply_h3_refmod(positive, shotplan: dict[str, Any]):
 
 
 def _effective_task(cine_linx: Any, chunk: dict[str, Any]) -> str:
+    if chunk.get("multishot_joint_window", False):
+        return "t2va"
     if chunk.get("reference_still"):
         return "ref2va"
     config, _ = _cine_info_h3(cine_linx)
@@ -1371,7 +1374,7 @@ def _apply_turbo_lora(model, shotplan: dict[str, Any]):
     # pairs and is designed for ComfyUI's native model-only loader. Larry's
     # original/full LoRA uses the custom loader, which can also re-inject the
     # full-width time-conditioning update on pruned bases.
-    if "pruned" in lower_name or "drbaph" in lower_name:
+    if "pruned" in lower_name or "drbaph" in lower_name or lower_name.endswith("minimax_h3_ref2v_turbo_4step_v0.1_comfyui_bf16.safetensors"):
         import nodes as comfy_nodes
 
         patched = comfy_nodes.LoraLoaderModelOnly().load_lora_model_only(
@@ -1421,13 +1424,18 @@ def _secondary_lora_settings(shotplan: dict[str, Any]) -> dict[str, Any]:
     return settings if isinstance(settings, dict) else {"enabled": False}
 
 
-def _apply_secondary_lora(model, shotplan: dict[str, Any]):
+def _apply_secondary_lora(model, shotplan: dict[str, Any], include_vfx=False):
     """Apply an independent model-only H3 LoRA without changing sampling.
 
     The second slot is deliberately separate from Turbo. It never selects a
     sampler, changes steps, or alters H3 audio/video shifts. Older plans have
     no secondary_lora block and therefore remain byte-for-byte on the old path.
     """
+    from .iamccs_h3_character_swap_lora import apply_loras
+    model = apply_loras(model, shotplan)
+    if include_vfx and shotplan.get("task_mode") == "ref2va_vfx_edit":
+        from .iamccs_h3_vfx_edit import apply_lora
+        model = apply_lora(model, shotplan)
     settings = _secondary_lora_settings(shotplan)
     if not bool(settings.get("enabled", False)):
         if bool(settings.get("duplicate_of_turbo", False)):
@@ -1477,8 +1485,25 @@ def _turbo_sampler(shotplan: dict[str, Any]):
     return sampler, "MiniMaxH3TurboSampler(audio-fixed AV schedules)"
 
 
-def _accelerate(model, shotplan: dict[str, Any]):
+def _attention_mode(shotplan: dict[str, Any]) -> str:
     mode = str(shotplan.get("acceleration", "native") or "native").lower()
+    selected = str(shotplan.get("attention_backend", "from_acceleration") or "from_acceleration")
+    if selected not in {"from_acceleration", "auto_3060", "h3_sage", "h3_exact", "sol_low_vram", "native"}:
+        raise ValueError(f"Unknown H3 attention backend: {selected}")
+    integrated = mode in {
+        "fasth3_dense_6step", "h3_sla", "matlowai_fused_turbo_manual_sigma",
+        "iamccs_progressive_2stage", "iamccs_progressive_3stage", "iamccs_progressive_pdd_2stage",
+    } or (mode == "pdd_native_8step" and bool(shotplan.get("pianosequenza_2stage_enabled", False)))
+    return mode if selected == "from_acceleration" or integrated else selected
+
+
+def _accelerate(model, shotplan: dict[str, Any]):
+    mode = _attention_mode(shotplan)
+    if (shotplan.get("veda") or {}).get("enabled") and mode in {
+        "sage_sol", "sol_low_vram", "sol_adaptive_safe", "sol_adaptive_balanced",
+        "h3_sla", "matlowai_fused_turbo_manual_sigma",
+    }:
+        raise ValueError("VEDA cannot be combined with Sol, SLA or Fused attention. Disable VEDA or select Sage / Auto Low VRAM.")
     if mode == "matlowai_fused_turbo_manual_sigma":
         # Kijai's loader already applies the released model's Sage policy.
         # Do not stack IAMCCS attention patches, cache approximations or LoRAs.
@@ -1838,6 +1863,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 # shared A->B / B->C timeline-keyframe contract.
                 "motion_context": ("IAMCCS_H3_MOTION_CONTEXT",),
             },
+            "hidden": {"execution_prompt": "PROMPT"},
         }
 
     RETURN_TYPES = (
@@ -1873,6 +1899,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
         ref_audio=None,
         prompt_override="",
         motion_context=None,
+        execution_prompt=None,
     ):
         from comfy_extras.nodes_minimax_h3 import (
             MiniMaxH3AddGuide,
@@ -1881,9 +1908,30 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
         )
 
         shotplan = _effective_shotplan(cine_linx, _resolve_shotplan(cine_linx))
+        if shotplan.get("task_mode") == "longvid_multishot_hardcut" and len(shotplan.get("chunks", [])) > 1 and isinstance(execution_prompt, dict):
+            for checkpoint in execution_prompt.values():
+                if checkpoint.get("class_type") != "IAMCCS_MiniMaxH3NativeCheckpointSave":
+                    continue
+                checkpoint_inputs = checkpoint.get("inputs", {})
+                if not checkpoint_inputs.get("queue_next_segment", True):
+                    continue
+                if not isinstance(checkpoint_inputs.get("sampled_latent"), list):
+                    raise ValueError(
+                        "Long Multi-Shot requires sampled_latent -> Native Checkpoint for multi-window AV continuation. "
+                        "Connect Generation Backend's sampled_latent output before sampling."
+                    )
+        if shotplan.get("task_mode") == "ref2va_vfx_edit":
+            from .iamccs_h3_vfx_edit import prepare
+            return prepare(model, clip, video_vae, audio_vae, cine_linx, segment_index, prompt_override)
         if shotplan.get("task_mode") == "v2va_face_swap":
             from .iamccs_h3_face_swap import prepare_face_swap
             return prepare_face_swap(model, clip, video_vae, audio_vae, cine_linx, segment_index, prompt_override)
+        if shotplan.get("task_mode") == "v2va_object_swap" and "iamccs_minimax_h3_v2v_config" in cine_linx.get("resources", {}):
+            from .iamccs_minimax_h3_v2v_backend import IAMCCS_MiniMaxH3V2VConditioningR22
+            prepared = IAMCCS_MiniMaxH3V2VConditioningR22().prepare(
+                model, clip, video_vae, audio_vae, cine_linx, segment_index, prompt_override)
+            return (prepared[0], prepared[1], prepared[2], prepared[3][:1], prepared[3][-1:],
+                    prepared[5], prepared[6], prepared[7], prepared[8], 0, prepared[12], None)
         chunk = _chunk(shotplan, segment_index)
         external_continuation = _external_continuation_active(shotplan, int(segment_index))
         authored_task = _effective_task(cine_linx, chunk)
@@ -1910,6 +1958,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
         width = int(shotplan.get("width", 960))
         height = int(shotplan.get("height", 544))
         adaptive_guide_window = bool(chunk.get("latent_tail_adaptive_window", False))
+        timeline_director_native = bool(chunk.get("timeline_director_native", False))
         extended_cfg = (
             shotplan.get("extended_av")
             if isinstance(shotplan.get("extended_av"), dict)
@@ -1968,6 +2017,11 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                     f"prefix={prefix} visible={visible_frames} runway={runway} "
                     f"grid_pad={grid_padding} raw={frames}."
                 )
+        elif timeline_director_native:
+            visible_frames = max(1, int(chunk.get("unique_frames", 0) or 0))
+            frames = max(5, int(chunk.get("frame_count", 0) or 0))
+            if frames % 17 != 5:
+                raise ValueError("TimelineDirector received a non-H3-grid sample")
         elif adaptive_guide_window or hd_hidden_context_window:
             # Planner owns the legal H3 technical window.  The visible editorial
             # suffix can be non-grid because an inherited latent tail occupies
@@ -2015,7 +2069,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                         "IAMCCS Adaptive Guide Window sample is shorter than context + visible suffix: "
                         f"sample={frames}f context={latent_tail_context_frames}f visible={visible_frames}f"
                     )
-            else:
+            elif not timeline_director_native:
                 frames = visible_frames + latent_tail_context_frames
                 while frames % 17 != 5:
                     frames += 1
@@ -2175,7 +2229,12 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             and str(shotplan.get("task_mode", "") or "").strip().lower() == "longvid_guides"
             and int(segment_index) > 0
         )
-        if positioned_bridge and planned_first is None and not torch.is_tensor(first_frame_override):
+        if positioned_bridge and (timeline_director_native or (planned_first is None and not torch.is_tensor(first_frame_override))):
+            # R46 native sampled-tail continuation must use the ACTUAL previous
+            # last decoded frame for the one RGB bridge, even if an authored
+            # image happens to start at this technical chunk boundary. Such a
+            # guide remains positioned AddGuide data, not a replacement for
+            # the predecessor's motion/bridge state.
             if torch.is_tensor(bridge_frame):
                 planned_first = bridge_frame[:1]
                 bridge_source = "socket"
@@ -2230,6 +2289,11 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             ref_video_audio = h3_resources.get("iamccs_minimax_h3_ref_video_audio")
         if not isinstance(ref_audio, dict):
             ref_audio = h3_resources.get("iamccs_minimax_h3_ref_audio")
+        if shotplan.get("task_mode") == "v2va_face_swap_lora":
+            from .iamccs_h3_character_swap_lora import reference_media
+            swap_images, ref_video, ref_video_audio = reference_media(cine_linx, shotplan, chunk, segment_index, frames)
+            external_images = [swap_images[0], *external_images[1:]]
+            shotplan = {**shotplan, "reference_video_role": "motion", "reference_roles": ["subject_identity", *_reference_roles(shotplan)[1:]]}
 
         if first is None and task in {"i2va", "fl2va"} and not isinstance(native_av_context, dict) and torch.is_tensor(ref_image_1):
             first = ref_image_1[:1]
@@ -2391,6 +2455,30 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 continuation_path, visible_continuation_frames, continuation_context, frames,
                 str(continuation_settings.get("handover_mode", "terminal") or "terminal"), visual_report, continuation_info,
             )
+        elif task == "t2va" and chunk.get("multishot_joint_window", False):
+            from comfy_extras.nodes_minimax_h3 import _empty_av_latent, _resize
+
+            semantic_images = []
+            for visual_slot in chunk.get("multishot_visual_slots", []):
+                image = _load_image(str(visual_slot.get("source_path", "")))
+                if not torch.is_tensor(image):
+                    raise ValueError(f"Multishot semantic image is missing: {visual_slot.get('source_path', '')}")
+                semantic_images.append(_resize(image[:1], width, height, "center"))
+                manifest.append({"label": f"<Picture {len(semantic_images)}>", "role": "timed_shot_composition"})
+
+            def build_multishot(active_clip):
+                av_latent, _ = _empty_av_latent(width, height, frames)
+                tokens = active_clip.tokenize(prompt, images=semantic_images)
+                conditioning = active_clip.encode_from_tokens_scheduled(tokens)
+                return conditioning, av_latent
+
+            result, text_encoder_report = _run_h3_conditioning_with_cpu_fallback(
+                clip, shotplan, build_multishot,
+            )
+            LOG.info(
+                "MiniMax H3 Multi-Shot semantic images | window=%d/%d | pictures=%d | source=authored_slot_intersections",
+                int(segment_index) + 1, len(shotplan["chunks"]), len(semantic_images),
+            )
         elif task == "t2va":
             result, text_encoder_report = _run_h3_conditioning_with_cpu_fallback(
                 clip,
@@ -2468,7 +2556,9 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             # performance slot is the fallback, even when an older CineInfo
             # node still says `cine_info_h3_only`.
             prompter_paths = shotplan.get("reference_image", {}).get("prompter_paths")
-            if isinstance(prompter_paths, list):
+            if shotboard_ref_mode == "v2va_face_swap_lora":
+                plan_paths = []
+            elif isinstance(prompter_paths, list):
                 plan_paths = prompter_paths
                 external_images = [None] * 4
                 roles = ["subject_identity"] * 4
@@ -2739,7 +2829,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
         # latent encoding, resizing and audio-crop semantics in one place.
         shotboard_task = str(shotplan.get("task_mode", "") or "").lower()
         guide_events = chunk.get("guides") if shotboard_task in {
-            "longvid_guides", "longvid_ref2vid_lipsync", "fl2va_extended_av"
+            "longvid_guides", "longvid_ref2vid_lipsync", "fl2va_extended_av", "longvid_multishot_hardcut"
         } else []
         applied_guides: list[str] = []
         if isinstance(guide_events, list):
@@ -3109,7 +3199,7 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
         turbo_model, turbo_report = _apply_turbo_lora(model, shotplan)
         fasth3_model, fasth3_report = _apply_fasth3_dense_lora(turbo_model, shotplan)
         pdd_model, pdd_report = _apply_pdd_lora(fasth3_model, shotplan)
-        lora_model, secondary_lora_report = _apply_secondary_lora(pdd_model, shotplan)
+        lora_model, secondary_lora_report = _apply_secondary_lora(pdd_model, shotplan, include_vfx=True)
         if turbo_enabled:
             # Apply the selected Turbo LoRA without silently replacing any
             # authored sampler, scheduler or AV shift.  Presets populate those
@@ -3146,6 +3236,7 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
             turbo_report,
         )
 
+        active_model = apply_veda(active_model, shotplan, _effective_task(cine_linx, chunk))
         noise = RandomNoise.execute(noise_seed=actual_seed)[0]
         guider = BasicGuider.execute(model=active_model, conditioning=positive)[0]
         sampler_report = str(sampler_name)
@@ -3555,7 +3646,7 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
             else:
                 if int(native_frames.shape[0]) < export_frames:
                     raise RuntimeError("IAMCCS latent-tail junction decoded too few frames.")
-                keep_frames = min(int(native_frames.shape[0]), export_frames + overlap_frames)
+                keep_frames = min(int(native_frames.shape[0]), export_frames + overlap_frames + (1 if timeline_director_native else 0))
                 native_frames = native_frames[:keep_frames, ...]
                 if isinstance(native_audio, dict) and torch.is_tensor(native_audio.get("waveform")):
                     native_audio = dict(native_audio)
@@ -3662,8 +3753,39 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
             from .iamccs_h3_face_swap import restore_face_swap, FACE_SWAP_LATENT
             native_frames, native_audio = restore_face_swap(native_frames, native_audio, latent)
             sampled = {key: value for key, value in sampled.items() if key != FACE_SWAP_LATENT}
+        if shotplan.get("task_mode") == "v2va_face_swap_lora":
+            from .iamccs_h3_character_swap_lora import restore_source_audio
+            native_frames, native_audio = restore_source_audio(native_frames, native_audio, cine_linx, shotplan, chunk, chunk_index)
+        if shotplan.get("task_mode") == "ref2va_vfx_edit":
+            from .iamccs_h3_vfx_edit import restore_audio
+            native_frames, native_audio = restore_audio(native_frames, native_audio, cine_linx, chunk)
         if not torch.is_tensor(native_frames) or native_frames.ndim != 4 or native_frames.shape[0] < 1:
             raise RuntimeError("MiniMax H3 video VAE returned no frames")
+        if str(shotplan.get("task_mode", "") or "").strip().lower() == "longvid_multishot_hardcut":
+            visible_frames = max(
+                1,
+                int(chunk.get("visible_frame_count", chunk.get("requested_frame_count", chunk.get("frame_count", 1))) or 1),
+            )
+            decoded_frames = int(native_frames.shape[0])
+            if decoded_frames < visible_frames:
+                raise RuntimeError(
+                    "Long Multi-Shot decoded fewer frames than its authored hard-cut interval "
+                    f"({decoded_frames}/{visible_frames})."
+                )
+            if decoded_frames > visible_frames:
+                native_frames = native_frames[:visible_frames, ...]
+                if isinstance(native_audio, dict) and torch.is_tensor(native_audio.get("waveform")):
+                    native_audio = dict(native_audio)
+                    sample_rate = max(1, int(native_audio.get("sample_rate", 32000) or 32000))
+                    target_samples = max(1, int(round(visible_frames * sample_rate / H3_FPS)))
+                    native_audio["waveform"] = native_audio["waveform"][..., :target_samples]
+                LOG.info(
+                    "MiniMax H3 Long Multi-Shot editorial crop | chunk=%d/%d | decoded=%df -> visible=%df",
+                    int(chunk_index) + 1,
+                    len(shotplan.get("chunks", [])),
+                    decoded_frames,
+                    visible_frames,
+                )
         if (
             str(shotplan.get("task_mode", "") or "").strip().lower() == "longvid_guides"
             and isinstance(chunk.get("positioned_guides_v2"), dict)
@@ -4397,9 +4519,8 @@ class IAMCCS_MiniMaxH3PostUpscaleControlV2:
         looper_horizontal_tiles = max(1, min(6, int(looper.get("horizontal_tiles", 1) or 1)))
         looper_vertical_tiles = max(1, min(6, int(looper.get("vertical_tiles", 1) or 1)))
         looper_spatial_overlap = max(1, min(8, int(looper.get("spatial_overlap", 1) or 1)))
-        # ComfyUI-LTXVideo's temporal looper rejects LTX audio-visual nested
-        # latents.  H3 upscale always uses the joint AV path, so the workflow
-        # deliberately uses SamplerCustomAdvanced instead.
+        # Keep the legacy video-only looper selector false in saved workflows.
+        # The queue adapter upgrades the standard AV branch to our tiled sampler.
         looper_available = False
         report = (
             f"H3 post-upscale control | selected={selected_mode} | "
@@ -4409,11 +4530,12 @@ class IAMCCS_MiniMaxH3PostUpscaleControlV2:
             f"duration={duration_seconds:.3f}s | seed={upscale_seed} | sage={'on' if sage_enabled else 'off'} | "
             f"detailer={'on' if ltx_detailer_enabled else 'off'}:{ltx_detailer_lora_name or 'none'}@{ltx_detailer_strength:.2f} | "
             f"seam_safe={'on' if ltx_seam_safe else 'off'} | rtx_4k={'on' if ltx_4k_enabled else 'off'}:{ltx_4k_quality} "
-            f"| looper=disabled_for_ltxav_standard_sampler "
+            f"| sampler=IAMCCS_LTX_tiled_AV "
             f"{looper_tile_size}/{looper_overlap}@{looper_overlap_strength:.2f} "
             f"({ltx_4k_resolution_report}) | "
             f"wan_denoise={wan_denoise:.2f} | lazy=yes"
         )
+        LOG.info(report)
         return (
             native_frames,
             prompt,

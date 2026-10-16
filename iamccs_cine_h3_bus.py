@@ -229,9 +229,10 @@ class IAMCCS_CineH3FunControlInput:
                 "preprocess_resolution": ("INT", {"default": 512, "min": 128, "max": 2048, "step": 64}),
             },
             "optional": {
-                "control_video": ("IMAGE",),
-                "mask": ("MASK",),
-                "source_video": ("IMAGE",),
+                "control_video": ("IMAGE", {"lazy": True}),
+                "mask": ("MASK", {"lazy": True}),
+                "source_video": ("IMAGE", {"lazy": True}),
+                "active_mode_only": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -243,6 +244,28 @@ class IAMCCS_CineH3FunControlInput:
         "Transport preprocessed H3 control frames, or preprocess source_video through the installed "
         "ControlNet Aux implementation. The appended preview output exposes the exact frames sent to H3."
     )
+
+    @staticmethod
+    def _enabled(cine_linx, active_mode_only=False):
+        if active_mode_only:
+            from .iamccs_minimax_h3_atomic_backend import _resolve_shotplan
+            if _resolve_shotplan(cine_linx).get("task_mode") != "v2va_controlnet":
+                return False
+        resources = _as_dict(cine_linx.get("resources"))
+        for candidate in (resources.get("iamccs_minimax_h3_settings"),
+                          _as_dict(cine_linx.get("outputs")).get("iamccs_minimax_h3_settings"),
+                          _as_dict(resources.get("cine_payload")).get("iamccs_minimax_h3_settings")):
+            candidate = _as_dict(candidate)
+            settings = _as_dict(candidate.get("settings")) or candidate
+            if "h3_controlnet_enabled" in settings:
+                value = settings["h3_controlnet_enabled"]
+                return value is True or str(value).strip().lower() in {"1", "true", "yes", "on"}
+        return True
+
+    def check_lazy_status(self, cine_linx, active_mode_only=False, **kwargs):
+        if not self._enabled(cine_linx, active_mode_only):
+            return []
+        return [name for name in ("control_video", "source_video", "mask") if name in kwargs and kwargs.get(name) is None]
 
     @staticmethod
     def _settings_kind(cine_linx):
@@ -335,9 +358,12 @@ class IAMCCS_CineH3FunControlInput:
         control_video=None,
         mask=None,
         source_video=None,
+        active_mode_only=False,
     ):
         if not isinstance(cine_linx, dict):
             raise ValueError("IAMCCS Cine H3 Fun Control Input requires a CineLinX input")
+        if not self._enabled(cine_linx, active_mode_only):
+            return cine_linx, "H3 Fun Control | OFF", None
         selected_preprocessor = str(preprocessor or "already_preprocessed").strip().lower()
         if selected_preprocessor == "from_iamccs_settings":
             selected_preprocessor = {

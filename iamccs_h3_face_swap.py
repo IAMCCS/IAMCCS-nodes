@@ -8,6 +8,7 @@ import folder_paths
 import torch
 
 FACE_SWAP_MODE = "v2va_face_swap"
+LORA_SWAP_MODE = "v2va_face_swap_lora"
 FACE_SWAP_RESOURCE = "iamccs_h3_face_swap_source"
 FACE_SWAP_LATENT = "iamccs_h3_face_swap_crop"
 
@@ -123,16 +124,52 @@ class IAMCCS_H3FaceSwapInput:
 
     def check_lazy_status(self, cine_linx, source_fps=24.0, **kwargs):
         from .iamccs_minimax_h3_atomic_backend import _resolve_shotplan
-        if _resolve_shotplan(cine_linx).get("task_mode") != FACE_SWAP_MODE:
+        mode = _resolve_shotplan(cine_linx).get("task_mode")
+        if mode not in {FACE_SWAP_MODE, LORA_SWAP_MODE}:
             return []
-        return [name for name in ("source_video", "reference_face") if kwargs.get(name) is None]
+        prompter_reference = (mode == LORA_SWAP_MODE
+                              and bool(cine_linx.get("resources", {}).get("iamccs_h3_swap_reference")))
+        prompter_video = (mode == LORA_SWAP_MODE and _resolve_shotplan(cine_linx).get("edit_video_source", "auto") != "backend"
+                          and bool(cine_linx.get("resources", {}).get("iamccs_h3_edit_video")))
+        media = ["reference_face"] if prompter_video else ["source_video", "reference_face", "source_audio"]
+        if mode == FACE_SWAP_MODE:
+            media.extend(["source_mask", "reference_face_2"])
+        return [name for name in media
+                if not (name == "reference_face" and prompter_reference)
+                if name in kwargs and kwargs[name] is None]
 
     def attach(self, cine_linx, source_fps, source_video=None, reference_face=None, source_audio=None, source_mask=None, reference_face_2=None):
         from .iamccs_minimax_h3_atomic_backend import _resolve_shotplan
         from .iamccs_supernodes_linx import build_stage_linx_payload
         plan = _resolve_shotplan(cine_linx)
-        if plan.get("task_mode") != FACE_SWAP_MODE:
+        if plan.get("task_mode") not in {FACE_SWAP_MODE, LORA_SWAP_MODE}:
             return (cine_linx,)
+        if plan.get("task_mode") == LORA_SWAP_MODE:
+            prompter_video = cine_linx.get("resources", {}).get("iamccs_h3_edit_video")
+            source_policy = plan.get("edit_video_source", "auto")
+            if source_policy == "prompter" and not prompter_video:
+                raise ValueError("Select a video in Prompter, or choose AUTO/BACKEND source.")
+            if prompter_video and source_policy != "backend":
+                from .iamccs_h3_edit_media import load_edit_video
+                loaded = load_edit_video(prompter_video, plan["width"], plan["height"], plan.get("effective_duration_seconds", 0))
+                source_video, source_audio, source_fps = loaded["video"], loaded["audio"], loaded["fps"]
+            prompter_reference = cine_linx.get("resources", {}).get("iamccs_h3_swap_reference")
+            if prompter_reference:
+                from .iamccs_h3_reference_image import _load_visual_path, _decode_visual
+                reference_face = _decode_visual(prompter_reference)
+                if reference_face is None:
+                    reference_face = _load_visual_path(prompter_reference)
+                if reference_face is None:
+                    raise ValueError("SwapChar reference is unavailable. Add the image again in Prompter, or remove it to use the backend reference.")
+            if not torch.is_tensor(source_video) or not len(source_video) or not torch.is_tensor(reference_face) or not len(reference_face):
+                raise ValueError("SUBJECT SWAP -LorA needs a source video and Picture 1.")
+            data = {"video": source_video, "fps": float(source_fps), "reference": reference_face, "audio": source_audio}
+            resources = {FACE_SWAP_RESOURCE: data}
+            if isinstance(source_audio, dict):
+                resources["iamccs_minimax_h3_custom_audio"] = source_audio
+            return (build_stage_linx_payload(cine_linx, stage_name="H3 Character Swap -LorA input",
+                stage_kind="minimax_h3_character_swap_lora", payload={"source_frames": len(source_video)},
+                report="Full-frame Ref2VA character swap · no segmentation", resources=resources),)
         validate_plan(plan)
         if not torch.is_tensor(source_video) or not torch.is_tensor(reference_face) or source_video.ndim != 4 or not len(source_video) or reference_face.ndim != 4 or not len(reference_face):
             raise ValueError("SAM3 Subject Swap requires a non-empty source video and one reference identity image.")
@@ -372,5 +409,30 @@ def restore_face_swap(images, audio, latent):
     return output[:count], original_audio
 
 
-NODE_CLASS_MAPPINGS = {"IAMCCS_H3FaceSwapInput": IAMCCS_H3FaceSwapInput}
+class IAMCCS_H3CharacterSwapModelR49:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"cine_linx": ("IAMCCS_SUPERNODE_LINX",)}, "optional": {
+            "base_model": ("MODEL", {"lazy": True}), "swap_model": ("MODEL", {"lazy": True})}}
+
+    RETURN_TYPES = ("MODEL",)
+    RETURN_NAMES = ("model",)
+    FUNCTION = "select"
+    CATEGORY = "IAMCCS/MiniMax H3/Face Swap"
+
+    @staticmethod
+    def _input(cine_linx):
+        from .iamccs_minimax_h3_atomic_backend import _resolve_shotplan
+        return "swap_model" if _resolve_shotplan(cine_linx).get("task_mode") == LORA_SWAP_MODE else "base_model"
+
+    def check_lazy_status(self, cine_linx, **kwargs):
+        name = self._input(cine_linx)
+        return [name] if kwargs.get(name) is None else []
+
+    def select(self, cine_linx, **kwargs):
+        return (kwargs[self._input(cine_linx)],)
+
+
+NODE_CLASS_MAPPINGS = {"IAMCCS_H3FaceSwapInput": IAMCCS_H3FaceSwapInput,
+    "IAMCCS_H3CharacterSwapModelR49": IAMCCS_H3CharacterSwapModelR49}
 NODE_DISPLAY_NAME_MAPPINGS = {"IAMCCS_H3FaceSwapInput": "SAM3 SUBJECT SWAP · tracked crop + H3 inpaint"}

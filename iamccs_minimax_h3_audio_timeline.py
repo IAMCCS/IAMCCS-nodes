@@ -210,7 +210,19 @@ def _slot_interval(shotplan: dict[str, Any], chunk: dict[str, Any]) -> tuple[flo
 def _chunk_interval(shotplan: dict[str, Any], chunk: dict[str, Any]) -> tuple[float, float]:
     fps = max(1.0, _number(shotplan.get("fps"), H3_FPS))
     start = max(0.0, _number(chunk.get("timeline_start_seconds"), 0.0))
-    duration = max(1.0 / fps, _number(chunk.get("duration_seconds"), _integer(chunk.get("frame_count"), 1) / fps))
+    if str(shotplan.get("task_mode", "")).lower() == "longvid_multishot_hardcut":
+        visible_frames = max(
+            1,
+            _integer(
+                chunk.get("visible_frame_count"),
+                _integer(chunk.get("requested_frame_count"), _integer(chunk.get("frame_count"), 1)),
+            ),
+        )
+        prefix = max(0, _integer(chunk.get("latent_tail_context_prefix_frames"), 0))
+        start = max(0.0, start - prefix / fps)
+        duration = (prefix + visible_frames) / fps
+    else:
+        duration = max(1.0 / fps, _number(chunk.get("duration_seconds"), _integer(chunk.get("frame_count"), 1) / fps))
     # A Motion Context continuation renders a pinned head and removes it
     # again after decode.  The locked AudioBoard slice must therefore begin
     # at that same pre-roll position.  Starting it at ``timeline_start``
@@ -377,6 +389,7 @@ def mix_audio_timeline(
                 "fl2va_extended_av",
                 "longvid_ref2vid_lipsync",
                 "longvid_motion_context",
+                "longvid_multishot_hardcut",
             }
             or any(str(chunk.get("frame_source", "")) == "longvid_global_timeline" for chunk in chunks)
         )
@@ -390,6 +403,15 @@ def mix_audio_timeline(
     # Without AudioBoard metadata, deterministic one-input-per-chunk remains a
     # useful minimal contract for two consecutive I2VA shots.
     fallback_mapping = False
+    if not segments and not native_audio_bypass and str(shotplan.get("task_mode", "")) == "longvid_multishot_hardcut":
+        fallback_mapping = True
+        segments = [{
+            "id": "fallback_multishot_master", "audio_input": 1,
+            "start_seconds": 0.0,
+            "duration_seconds": float(shotplan["effective_duration_seconds"]),
+            "gain": 1.0, "track": 0,
+        }]
+        contract["audioSegments"] = segments
     if not segments and not native_audio_bypass:
         fallback_mapping = True
         fps = max(1.0, _number(shotplan.get("fps"), H3_FPS))
@@ -445,6 +467,13 @@ def mix_audio_timeline(
             )
             segment_end = segment_start + segment_duration
             linked = _linked_to_slot(segment, slot_id)
+            linked_id = str(
+                segment.get("linkedVisualId")
+                or segment.get("linked_visual_id")
+                or segment.get("slot_id")
+                or segment.get("slotId")
+                or ""
+            )
             overlaps_slot = segment_end > slot_start and segment_start < slot_end
             if effective_mapping_policy == "slot_locked_i2v":
                 if not (linked or (not str(segment.get("linkedVisualId") or segment.get("linked_visual_id") or "") and overlaps_slot)):
@@ -461,11 +490,29 @@ def mix_audio_timeline(
                 clipped_at_slot = max(0.0, intersection_start - segment_start)
                 intersection_duration = intersection_end - intersection_start
             else:
+                # An explicitly magnet-linked dialogue clip belongs only to
+                # that camera slot. Unlinked long masters still flow through
+                # every hard-cut angle on the absolute editorial clock.
+                linked_slot = None
+                if str(shotplan.get("task_mode", "")) == "longvid_multishot_hardcut" and linked_id:
+                    linked_slot = next(
+                        (item for item in _list(shotplan.get("slots"))
+                         if isinstance(item, dict) and str(item.get("id", "")) == linked_id),
+                        None,
+                    )
+                    if linked_slot is None:
+                        raise ValueError(f"Multishot audio clip refers to missing Shotboard slot: {linked_id}")
                 chunk_end = generated_start + generated_duration
                 if segment_end <= generated_start or segment_start >= chunk_end:
                     continue
                 intersection_start = max(segment_start, generated_start)
                 intersection_end = min(segment_end, chunk_end)
+                if linked_slot is not None:
+                    linked_start = _number(linked_slot.get("start_seconds"), 0.0)
+                    linked_end = linked_start + _integer(linked_slot.get("requested_frame_count"), 1) / max(1.0, _number(shotplan.get("fps"), H3_FPS))
+                    intersection_start = max(intersection_start, linked_start)
+                    intersection_end = min(intersection_end, linked_end)
+                    linked = True
                 if intersection_end <= intersection_start:
                     continue
                 destination_seconds = max(0.0, intersection_start - generated_start)
@@ -547,16 +594,20 @@ def mix_audio_timeline(
         ),
     )
     extended_master = str(shotplan.get("task_mode", "")) == "fl2va_extended_av"
+    multishot_master = str(shotplan.get("task_mode", "")) == "longvid_multishot_hardcut"
     if extended_master:
         master_samples = max(1, int(round(float(shotplan["duration_seconds"]) * rate)))
+    elif multishot_master:
+        master_samples = max(1, int(round(float(shotplan["effective_duration_seconds"]) * rate)))
     master_waveform = torch.zeros((1, output_channels, master_samples), dtype=torch.float32)
     for index, chunk in enumerate(chunks):
         start, _ = _chunk_interval(shotplan, chunk)
         offset = max(0, int(round(start * rate)))
         waveform = chunk_audio[index]["waveform"]
-        if extended_master:
+        if extended_master or multishot_master:
             fps = max(1.0, _number(shotplan.get("fps"), H3_FPS))
-            head = int(round(_integer(chunk.get("extended_av_trim_head_frames"), 0) * rate / fps))
+            prefix_key = "latent_tail_context_prefix_frames" if multishot_master else "extended_av_trim_head_frames"
+            head = int(round(_integer(chunk.get(prefix_key), 0) * rate / fps))
             visible = int(round(_integer(chunk.get("visible_frame_count"), 0) * rate / fps))
             waveform = waveform[..., head:head + visible]
             offset = int(round(_number(chunk.get("timeline_start_seconds"), 0.0) * rate))

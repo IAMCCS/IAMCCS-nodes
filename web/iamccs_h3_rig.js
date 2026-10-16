@@ -7,6 +7,7 @@ export function rigMedia(settings, mode, connected) {
     const select=(type,input)=>pool.filter(n=>(!type||types(n)===type)&&n.inputs?.some(i=>i.name===input));
     let targets=[];
     if(mode==='v2va_controlnet')targets=[['IAMCCS_CineH3FunControlInput','source_video','VHS_LoadVideo','IMAGE']];
+    else if(mode==='v2va_face_swap_lora')targets=[['IAMCCS_H3FaceSwapInput','source_video','VHS_LoadVideo','IMAGE'],['IAMCCS_H3FaceSwapInput','reference_face','LoadImage','IMAGE']];
     else if(mode==='v2va_face_swap')targets=[['IAMCCS_H3FaceSwapInput','source_video','VHS_LoadVideo','IMAGE'],['IAMCCS_H3FaceSwapInput','reference_face','LoadImage','IMAGE'],['IAMCCS_H3FaceSwapInput','reference_face_2','LoadImage','IMAGE']];
     else if(mode==='ref2va'||mode==='ref2vid_lipsync')targets=[['IAMCCS_CineInfoH3','reference_image_1','LoadImage','IMAGE']];
     else if(mode==='v2va_object_swap')targets=[['IAMCCS_CineInfoH3','reference_video','VHS_LoadVideo','IMAGE']];

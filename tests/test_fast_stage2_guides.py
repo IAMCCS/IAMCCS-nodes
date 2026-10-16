@@ -83,21 +83,39 @@ class Stage2GuidesTest(unittest.TestCase):
         for mode in ("soft", "masked"):
             for full in (False, True):
                 calls = []
+                context_calls = []
+                guider_calls = []
                 def sample(**kwargs):
                     calls.append(kwargs)
                     latent = kwargs.get("latent", kwargs.get("latent_image"))
                     return latent, latent
+                class ContextWindows:
+                    @classmethod
+                    def execute(cls, **kwargs):
+                        context_calls.append(kwargs)
+                        return ("joint-model", "IAMCCS internal PSkf")
+                def guide(**kwargs):
+                    guider_calls.append(kwargs)
+                    return (object(),)
                 loop = types.SimpleNamespace(
                     per_row_mask_is_continuous=lambda: True,
-                    _split_mask=lambda x: x["noise_mask"].unbind(),
-                    MMH3LoopingSampler=types.SimpleNamespace(execute=sample))
-                windows = types.SimpleNamespace(_plan=lambda *a: (17, 2, None, None, [1, 2]))
+                    _split_mask=lambda x: x["noise_mask"].unbind())
+                windows = types.SimpleNamespace(
+                    _plan=lambda *args: (17, 2, 90, 27, [range(17), range(10, 27)]),
+                    MMH3ContextWindows=ContextWindows,
+                    ContextFuseMethods=types.SimpleNamespace(PYRAMID="pyramid"),
+                    ContextSchedules=types.SimpleNamespace(STATIC_STANDARD="standard_static"))
+                providers = {
+                    "common": common,
+                    "nodes_looping_sampler": loop,
+                    "nodes_windows": windows,
+                }
                 modules = {
                     "stage2_test.iamccs_h3_stage2_guides": helpers,
                     "stage2_test.iamccs_minimax_h3_pixel_refine_variant": types.SimpleNamespace(
-                        _provider=lambda name: {"common": common, "nodes_looping_sampler": loop, "nodes_windows": windows}[name]),
+                        _provider=lambda name: providers[name]),
                     "comfy_extras.nodes_custom_sampler": types.SimpleNamespace(
-                        BasicGuider=types.SimpleNamespace(execute=lambda **kw: (object(),)),
+                        BasicGuider=types.SimpleNamespace(execute=guide),
                         SamplerCustomAdvanced=types.SimpleNamespace(execute=sample)),
                 }
                 ns = {"__package__": "stage2_test", "torch": torch,
@@ -114,7 +132,19 @@ class Stage2GuidesTest(unittest.TestCase):
                 self.assertTrue(torch.equal(result["samples"].unbind()[1], audio))
                 self.assertTrue(torch.all(result["noise_mask"].unbind()[1] == 0))
                 if not full:
-                    self.assertEqual(calls[0]["cond_set"]["encoded_keyframes"], [self.guide])
+                    self.assertEqual(len(context_calls), 1)
+                    self.assertEqual(context_calls[0]["context_length"], 17)
+                    self.assertEqual(context_calls[0]["context_overlap"], 2)
+                    self.assertEqual(context_calls[0]["fuse_method"], "pyramid")
+                    self.assertEqual(context_calls[0]["context_schedule"], "standard_static")
+                    self.assertFalse(context_calls[0]["freenoise"])
+                    self.assertEqual(context_calls[0]["accumulator_device"], "cpu")
+                    self.assertEqual(guider_calls[-1]["model"], "joint-model")
+                    self.assertEqual(
+                        guider_calls[-1]["conditioning"][0][1]["minimax_keyframes"],
+                        [self.guide],
+                    )
+                    self.assertIn("latent_image", calls[0])
                 if mode == "masked":
                     self.assertTrue(torch.all(result["samples"].unbind()[0][:, :, 20] == 1))
 

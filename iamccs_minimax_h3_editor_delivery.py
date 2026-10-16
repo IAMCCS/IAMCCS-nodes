@@ -13,6 +13,9 @@ import torch
 
 from comfy_api.latest import InputImpl
 
+from .iamccs_shotboarder_exporter_pro import IAMCCS_ShotboarderAudVidExporterPRO
+from .cine_multigeneration import IAMCCS_ShotboardVideoEditorV1, IAMCCS_ShotboardVideoEditorRenderV1
+
 
 SUPERNODE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX"
 CATEGORY = "IAMCCS/MiniMax H3/Editor"
@@ -198,12 +201,110 @@ class IAMCCS_MiniMaxH3DeliveryPreviewStripR42:
         return {"ui": {"text": [report]}, "result": (preview, report)}
 
 
+
+class IAMCCS_ShotboardVideoEditorOptionalR49(IAMCCS_ShotboardVideoEditorV1):
+    OUTPUT_NODE = False
+
+
+class IAMCCS_ShotboardVideoEditorRenderOptionalR49(IAMCCS_ShotboardVideoEditorRenderV1):
+    OUTPUT_NODE = False
+
+
+class IAMCCS_ShotboarderAudVidExporterPROLazyR45(IAMCCS_ShotboarderAudVidExporterPRO):
+    """Non-terminal exporter used only behind the R45 optional Editor gate.
+
+    The original exporter remains an OUTPUT_NODE for every historical workflow.
+    This subclass is deliberately non-terminal so ComfyUI does not evaluate the
+    Editor branch unless IAMCCS_MiniMaxH3EditorOptionalFinalR45 requests it.
+    """
+
+    OUTPUT_NODE = False
+
+
+def _find_named_setting(value: Any, key: str):
+    """Find one named Settings-PRO value without changing legacy shotplan truth."""
+    if isinstance(value, dict):
+        if key in value:
+            return value.get(key)
+        for child_key in ("settings", "resources", "outputs", "payload", "cine_payload"):
+            child = value.get(child_key)
+            found = _find_named_setting(child, key)
+            if found is not None:
+                return found
+        for child in value.values():
+            if isinstance(child, dict):
+                found = _find_named_setting(child, key)
+                if found is not None:
+                    return found
+    return None
+
+
+class IAMCCS_MiniMaxH3EditorOptionalFinalR45:
+    """Final lazy gate: direct joined master by default, Editor only when enabled.
+
+    This gate lives *after* Universal delivery/master assembly. It never changes
+    chunk joins, LongVid seams, audio stitching or queue continuation. With the
+    Editor disabled, the exact normal final master remains the output.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {"cine_linx": (SUPERNODE_LINX_TYPE,)},
+            "optional": {
+                "direct_video_path": ("STRING", {"lazy": True}),
+                "editor_video_path": ("STRING", {"lazy": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "BOOLEAN", "STRING")
+    RETURN_NAMES = ("video_path", "editor_enabled", "report")
+    FUNCTION = "select"
+    OUTPUT_NODE = True
+    CATEGORY = CATEGORY
+
+    @classmethod
+    def IS_CHANGED(cls, *args, **kwargs):
+        return float("nan")
+
+    @staticmethod
+    def _enabled(cine_linx: Any) -> bool:
+        value = _find_named_setting(cine_linx, "h3_editor_enabled")
+        # Missing means legacy topology/settings; this new gate is only used by
+        # R45 workflows, where OFF is the explicit production default.
+        return bool(value) if value is not None else False
+
+    def check_lazy_status(self, cine_linx, direct_video_path=None, editor_video_path=None, **kwargs):
+        if _shotplan(cine_linx).get("task_mode") == "reference_image":
+            return []
+        name = "editor_video_path" if self._enabled(cine_linx) else "direct_video_path"
+        value = editor_video_path if name == "editor_video_path" else direct_video_path
+        return [name] if value is None else []
+
+    def select(self, cine_linx, direct_video_path=None, editor_video_path=None):
+        if _shotplan(cine_linx).get("task_mode") == "reference_image":
+            return {"ui": {}, "result": ("", False, "Video delivery idle · Image Generator selected")}
+        enabled = self._enabled(cine_linx)
+        path = str(editor_video_path if enabled else direct_video_path or "").strip()
+        route = "EDITOR" if enabled else "DIRECT JOINED MASTER"
+        report = (
+            f"R45 optional editor gate | route={route} | "
+            f"master={'ready' if path else 'waiting'} | {path or 'no final path yet'}"
+        )
+        return {"ui": {"text": [report]}, "result": (path, enabled, report)}
+
 NODE_CLASS_MAPPINGS = {
+    "IAMCCS_ShotboardVideoEditorOptionalR49": IAMCCS_ShotboardVideoEditorOptionalR49,
+    "IAMCCS_ShotboardVideoEditorRenderOptionalR49": IAMCCS_ShotboardVideoEditorRenderOptionalR49,
     "IAMCCS_MiniMaxH3EditorDeliveryMedia": IAMCCS_MiniMaxH3EditorDeliveryMedia,
     "IAMCCS_MiniMaxH3DeliveryPreviewStripR42": IAMCCS_MiniMaxH3DeliveryPreviewStripR42,
+    "IAMCCS_ShotboarderAudVidExporterPROLazyR45": IAMCCS_ShotboarderAudVidExporterPROLazyR45,
+    "IAMCCS_MiniMaxH3EditorOptionalFinalR45": IAMCCS_MiniMaxH3EditorOptionalFinalR45,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_MiniMaxH3EditorDeliveryMedia": "MiniMax H3 · Delivery Checkpoint → Editor Chunk",
     "IAMCCS_MiniMaxH3DeliveryPreviewStripR42": "R42 Delivery Preview · First / Middle / Last",
+    "IAMCCS_ShotboarderAudVidExporterPROLazyR45": "R45 Video Editor Exporter · Lazy",
+    "IAMCCS_MiniMaxH3EditorOptionalFinalR45": "R45 Final Master / Optional Editor Gate",
 }

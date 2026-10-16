@@ -18,7 +18,7 @@ function nodeType(node) {
 }
 
 function isEditor(node) {
-  return nodeType(node) === TYPE;
+  return [TYPE, "IAMCCS_ShotboardVideoEditorOptionalR49"].includes(nodeType(node));
 }
 
 function widget(node, name) {
@@ -2977,7 +2977,7 @@ function addManual(kind, button = null) {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ session_key: sessionKey, manifests: [manifest,
-          ...(app.graph?._nodes || []).filter(n => n !== node && String(n.comfyClass || n.type) === "IAMCCS_ShotboardVideoEditorV1")
+          ...(app.graph?._nodes || []).filter(n => n !== node && ["IAMCCS_ShotboardVideoEditorV1", "IAMCCS_ShotboardVideoEditorOptionalR49"].includes(String(n.comfyClass || n.type)))
             .map(n => manifestFromNode(n))] }),
       });
       const result = await response.json().catch(() => ({}));
@@ -3398,11 +3398,11 @@ function addManual(kind, button = null) {
     const storedId = node.properties?.iamccs_video_editor_render_node_id;
     if (storedId != null) {
       const found = graph.getNodeById?.(storedId) || (graph._nodes || []).find((item) => String(item?.id) === String(storedId));
-      if (found && nodeTypeMatches(found, RENDER_TYPE)) return found;
+      if (found && (nodeTypeMatches(found, RENDER_TYPE) || nodeTypeMatches(found, "IAMCCS_ShotboardVideoEditorRenderOptionalR49"))) return found;
     }
     const nodes = graph._nodes || [];
     return nodes.find((item) => {
-      if (!nodeTypeMatches(item, RENDER_TYPE)) return false;
+      if (!(nodeTypeMatches(item, RENDER_TYPE) || nodeTypeMatches(item, "IAMCCS_ShotboardVideoEditorRenderOptionalR49"))) return false;
       const inputIndex = findSlotIndex(item, "input", "editor_manifest_json");
       const linkId = item.inputs?.[inputIndex]?.link;
       const link = linkId != null ? graph.links?.[linkId] : null;
@@ -4642,7 +4642,7 @@ function addManual(kind, button = null) {
 app.registerExtension({
   name: "IAMCCS.ShotboardVideoEditorV1",
   beforeRegisterNodeDef(nodeType, nodeData) {
-    if (nodeData?.name !== TYPE) return;
+    if (![TYPE, "IAMCCS_ShotboardVideoEditorOptionalR49"].includes(nodeData?.name)) return;
     const onNodeCreated = nodeType.prototype.onNodeCreated;
     nodeType.prototype.onNodeCreated = function () {
       const ret = onNodeCreated?.apply(this, arguments);

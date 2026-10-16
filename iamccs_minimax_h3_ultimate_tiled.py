@@ -19,9 +19,12 @@ import folder_paths
 from .iamccs_minimax_h3_atomic_backend import _resolve_shotplan
 from .iamccs_minimax_h3_fast_latent_2pass import (
     IAMCCS_MiniMaxH3FastLatent2PassR41,
+    _concat_av,
     _provider_stream_save,
     _result_item,
+    _split_av,
     _target_conditioning,
+    _upscale_video_latent,
 )
 from .iamccs_minimax_h3_latent_upres_variant import (
     IAMCCS_MiniMaxH3LatentUpresSamplingR38,
@@ -179,6 +182,15 @@ class IAMCCS_MiniMaxH3UltimateTiledDelivery(IAMCCS_MiniMaxH3FastLatent2PassR41):
         try:
             mm.unload_all_models()
             mm.soft_empty_cache()
+            refine_latent = sampled_latent
+            if plan.get("task_mode") == "v2va_face_swap_lora":
+                # Upscale once while H3 is offloaded, before any tile sampling.
+                stage1_video, stage1_audio = _split_av(sampled_latent)
+                upscaled_video = _upscale_video_latent(stage1_video, plan, stage_w, stage_h)
+                refine_latent = _concat_av(upscaled_video, stage1_audio)
+                del stage1_video, stage1_audio, upscaled_video
+                latent_param = None
+                LOG.info("H3 SWAP REFINE | learned upscale complete before sampling | target=%dx%d | temporal policy=adaptive", stage_w, stage_h)
             target_model, conditioning, conditioning_report = _target_conditioning(
                 model, clip, video_vae, audio_vae, cine_linx, index,
                 stage_w, stage_h, stage1_conditioning,
@@ -192,7 +204,7 @@ class IAMCCS_MiniMaxH3UltimateTiledDelivery(IAMCCS_MiniMaxH3FastLatent2PassR41):
                 IAMCCS_MiniMaxH3LatentUpresSamplingR38().prepare(target_model, cine_linx, index)[:5]
             )
             refined = _result_item(_ultimate_class().execute(
-                latent=sampled_latent,
+                latent=refine_latent,
                 conditioning=conditioning,
                 model=active_model,
                 noise=noise,
@@ -204,6 +216,7 @@ class IAMCCS_MiniMaxH3UltimateTiledDelivery(IAMCCS_MiniMaxH3FastLatent2PassR41):
                 temporal_split_param=temporal_param,
                 spatial_split_param=spatial_param,
             ), 0)
+            del refine_latent
             mm.unload_all_models()
             mm.soft_empty_cache()
             intermediate = _provider_stream_save(

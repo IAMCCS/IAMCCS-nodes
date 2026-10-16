@@ -2,10 +2,14 @@
 
 import ast
 import logging
+import os
 import sys
 import types
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+
+import torch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,10 +17,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_fast_latent_calls_current_3d_api_and_releases_upscaler():
     source = ast.parse((ROOT / "iamccs_minimax_h3_fast_latent_2pass.py").read_text(encoding="utf-8"))
-    function = next(
+    functions = [
         node for node in source.body
-        if isinstance(node, ast.FunctionDef) and node.name == "_upscale_video_latent"
-    )
+        if isinstance(node, ast.FunctionDef)
+        and node.name in {"_adaptive_temporal_chunks", "_upscale_video_latent"}
+    ]
     calls = []
 
     class CurrentUpscaler:
@@ -26,6 +31,10 @@ def test_fast_latent_calls_current_3d_api_and_releases_upscaler():
             calls.append((mode, align, enable_temporal_chunking, force_unload, device, precision))
             return SimpleNamespace(result=({"samples": "upscaled"},))
 
+    @contextmanager
+    def passthrough_temporal_chunk(_klass, _chunk_size):
+        yield False
+
     namespace = {
         "_upres_settings": lambda _plan: {
             "model_name": "minimax_h3_latent_upscaler_3d_fp16.safetensors",
@@ -34,9 +43,11 @@ def test_fast_latent_calls_current_3d_api_and_releases_upscaler():
         "folder_paths": SimpleNamespace(get_full_path=lambda *_args: "installed"),
         "_load_upscaler_class": lambda: CurrentUpscaler,
         "_result_item": lambda value, index: value.result[index],
+        "_temporary_upscaler_temporal_chunk": passthrough_temporal_chunk,
         "LOG": logging.getLogger(__name__),
+        "torch": torch,
     }
-    exec(compile(ast.Module(body=[function], type_ignores=[]), "<fast-upscale>", "exec"), namespace)
+    exec(compile(ast.Module(body=functions, type_ignores=[]), "<fast-upscale>", "exec"), namespace)
     result = namespace["_upscale_video_latent"]({"samples": "native"}, {}, 1280, 768)
     assert result == {"samples": "upscaled"}
     assert calls == [(
@@ -48,7 +59,11 @@ def test_fast_latent_calls_current_3d_api_and_releases_upscaler():
 def test_universal_workflows_keep_fast_route_connected():
     import json
 
-    directory = Path(r"X:\1_UNIVERSAL_42_43")
+    fixture = os.environ.get("IAMCCS_TEST_UNIVERSAL_WORKFLOWS", "")
+    if not fixture:
+        import unittest
+        raise unittest.SkipTest("Set IAMCCS_TEST_UNIVERSAL_WORKFLOWS to test external workflows")
+    directory = Path(fixture)
     for name in (
         "A_IAMCCS_H3_MINIMAX_R42_UNIVERSAL_180926.json",
         "B_IAMCCS_H3_R43_KEYFRAME_JOINT_LATENT_NEW_UNIVERSAL_FIXED_MOTION_STATE.json",
@@ -176,3 +191,89 @@ def test_fast_latent_keeps_arbitrary_chunk_audio_video_parity():
         assert "audio spans" in str(exc)
     else:
         raise AssertionError("An audio/video timing mismatch must fail before Stage 2")
+
+
+def test_fast_latent_uses_each_native_segment_endpoints_for_stage2_fl2va():
+    source = ast.parse((ROOT / "iamccs_minimax_h3_fast_latent_2pass.py").read_text(encoding="utf-8"))
+    function = next(
+        node for node in source.body
+        if isinstance(node, ast.FunctionDef) and node.name == "_stage2_endpoint_images"
+    )
+    namespace = {"torch": torch}
+    exec(compile(ast.Module(body=[function], type_ignores=[]), "<fast-endpoints>", "exec"), namespace)
+    endpoints = namespace["_stage2_endpoint_images"]
+
+    segment = torch.arange(5).view(5, 1, 1, 1).float()
+    first, last = endpoints(segment)
+    assert first.item() == 0
+    assert last.item() == 4
+
+    override_first = torch.full((1, 1, 1, 1), 10.0)
+    override_last = torch.full((1, 1, 1, 1), 20.0)
+    first, last = endpoints(segment, override_first, override_last)
+    assert first.item() == 10
+    assert last.item() == 20
+
+
+def test_true_long_stage2_keeps_technical_runway_and_native_terminal_destination():
+    source = ast.parse((ROOT / "iamccs_minimax_h3_fast_latent_2pass.py").read_text(encoding="utf-8"))
+    names = {
+        "_conditioning_geometry",
+        "_prepare_true_long_stage2_plan",
+        "_remap_true_long_stage2_conditioning",
+    }
+    functions = [
+        node for node in source.body
+        if isinstance(node, ast.FunctionDef) and node.name in names
+    ]
+    namespace = {
+        "copy": __import__("copy"),
+        "H3_CONTINUOUS_INDEX": "h3_continuous_index",
+    }
+    exec(compile(ast.Module(body=functions, type_ignores=[]), "<fast-true-long>", "exec"), namespace)
+
+    stage1 = [[None, {
+        "minimax_frame_count": 175,
+        "minimax_keyframes": [{
+            "resolved_frame_index": 174,
+            "latent": "native-destination",
+        }],
+    }]]
+    plan = {
+        "task_mode": "longvid_keyframe_continuous",
+        "chunks": [{"index": 0}, {"index": 1, "frame_count": 124}],
+    }
+    technical, source_guides = namespace["_prepare_true_long_stage2_plan"](plan, 1, stage1)
+    assert technical == 175
+    assert plan["chunks"][1]["frame_count"] == 175
+    assert plan["chunks"][1]["requested_frame_count"] == 175
+
+    target = [[None, {
+        "minimax_frame_count": 175,
+        "minimax_keyframes": [
+            {"resolved_frame_index": 0, "latent": "target-opening"},
+            {"resolved_frame_index": 174, "latent": "target-destination"},
+        ],
+    }]]
+    remapped = namespace["_remap_true_long_stage2_conditioning"](
+        target, technical, source_guides,
+    )
+    guides = remapped[0][1]["minimax_keyframes"]
+    assert len(guides) == 1
+    assert guides[0]["latent"] == "target-destination"
+    assert guides[0]["resolved_frame_index"] == 174
+    assert "h3_continuous_index" not in guides[0]
+    assert remapped[0][1]["minimax_frame_count"] == 175
+
+
+def test_fast_latent_runtime_is_fully_iamccs_internal():
+    source = (ROOT / "iamccs_minimax_h3_fast_latent_2pass.py").read_text(encoding="utf-8")
+    assert 'from .vendor.minimax_h3_latent_upscaler_3d import MinimaxH3LatentUpscaler3D' in source
+    assert '_provider("nodes_windows")' in source
+    assert "provider=IAMCCS_INTERNAL" in source
+    assert 'NODE_CLASS_MAPPINGS.get("MinimaxH3LatentUpscaler3D")' not in source
+    assert 'NODE_CLASS_MAPPINGS.get("H3ContextWindows")' not in source
+    assert "provider=OBVPM" not in source
+    assert "comfyui-obvpm" not in source.lower()
+    assert (ROOT / "vendor" / "minimax_h3_latent_upscaler_3d.py").is_file()
+    assert (ROOT / "vendor" / "MINIMAX_H3_LATENT_UPSCALER_LICENSE.txt").is_file()

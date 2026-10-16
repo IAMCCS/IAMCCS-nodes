@@ -10,9 +10,9 @@ from __future__ import annotations
 import math
 
 try:
-    from .latent_math import FPS, video_latent_t, phase_aligned_extended_context_slice, phase_aware_context_slice, snap_landing_tail
+    from .latent_math import FPS, temporal_shape, video_latent_t, phase_aligned_extended_context_slice, phase_aware_context_slice, snap_landing_tail
 except ImportError:  # direct test import from package directory
-    from latent_math import FPS, video_latent_t, phase_aligned_extended_context_slice, phase_aware_context_slice, snap_landing_tail
+    from latent_math import FPS, temporal_shape, video_latent_t, phase_aligned_extended_context_slice, phase_aware_context_slice, snap_landing_tail
 
 
 BALANCED_FREEZE_PRESET = {
@@ -180,6 +180,69 @@ def apply_no_lock_fallback(handover: dict, *, freeze_hold: int, context_frames: 
         "legacy_landing_tail_frames": int(legacy_tail),
     })
     return out
+
+AUTHORED_BOUNDARY_RUNWAY_FRAMES = 34
+
+
+def authored_interval_timing(visible_frames, context_slice=None, previous_visible_end=None,
+                             boundary_runway_frames=AUTHORED_BOUNDARY_RUNWAY_FRAMES):
+    """Budget visible frames, inherited history and a hidden motion runway.
+
+    The authored endpoint is an editorial cut, not the physical end of the H3
+    sample. Two native 17-frame steps remain after it so the model can keep
+    moving toward its native terminal destination. That suffix is technical-
+    only and must never be delivered or inherited by the next take.
+    """
+    context = int(context_slice["actual_context_frames"]) if context_slice else 0
+    gap = 0
+    if context_slice and previous_visible_end is not None:
+        gap = max(0, int(previous_visible_end) + 1 - int(context_slice["source_end_frame"]))
+    head = context + gap
+    endpoint = head + int(visible_frames) - 1
+    runway = max(0, int(boundary_runway_frames or 0))
+    if runway % 17 != 0:
+        raise ValueError("H3 authored boundary runway must be a multiple of 17 frames")
+    required = endpoint + 1 + runway
+    technical, _, _ = temporal_shape(required)
+    return {
+        "authored_visible_frames": int(visible_frames),
+        "context_frames": context,
+        "replayed_frames": gap,
+        "head_trim_frames": head,
+        "endpoint_frame": endpoint,
+        "technical_frames": technical,
+        "boundary_runway_frames": runway,
+        "grid_padding_frames": technical - required,
+        "technical_padding_frames": technical - endpoint - 1,
+    }
+
+
+def authored_interval_prompt(prompt, timing, first_interval, has_reference=False, has_opening_image=False):
+    destination = (2 if first_interval or has_opening_image else 1) + int(has_reference)
+    edit_end = timing["endpoint_frame"] / FPS
+    destination_end = (timing["technical_frames"] - 1) / FPS
+    start = timing["head_trim_frames"] / FPS
+    opening = (
+        f"Picture {1 + int(has_reference)} defines the opening frame at 0.00 seconds. "
+        if first_interval else
+        f"The inherited moving video/audio prefix defines the opening through {start:.3f} seconds. "
+    )
+    if has_opening_image and not first_interval:
+        opening += (
+            f"Picture {1 + int(has_reference)} shows the already reached visual state at the end of that prefix. "
+            "Continue directly from this framing and motion; the programme's opening action has already happened. "
+        )
+    reference = "Picture 1 is an identity/style reference only. " if has_reference else ""
+    interval = (
+        reference + opening
+        + f"Picture {destination} is the terminal destination reached only at {destination_end:.3f} seconds. "
+        + f"The delivered editorial interval ends earlier, at {edit_end:.3f} seconds, while motion is still active and converging toward that destination. "
+        + "Develop the camera and subject motion progressively in one uninterrupted shot through the visible interval and hidden approach runway. "
+        + "Do not copy, snap or cut to the destination at the editorial boundary. "
+        + "No teleport, early arrival, deceleration or stationary hold."
+    )
+    return "Programme context (do not restart the whole programme in this interval):\n" + str(prompt) + "\n\nCurrent interval only:\n" + interval
+
 
 def normalize_output_mode(value: str) -> str:
     text = str(value).strip().lower().replace("_", " ")

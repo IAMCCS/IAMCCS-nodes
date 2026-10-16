@@ -26,6 +26,8 @@ from PIL import Image, ImageOps
 import folder_paths
 from .iamccs_h3_advisor import describe_asset, recipes, validate_settings
 from .iamccs_h3_face_swap import settings_schema as face_swap_schema, face_swap_settings, validate_plan as validate_face_swap_plan
+from .iamccs_h3_character_swap_lora import settings_schema as character_swap_schema, swap_plan
+from .iamccs_h3_vfx_edit import settings_schema as vfx_edit_schema
 
 from .iamccs_minimax_h3_shotboard_core import (
     H3_FPS,
@@ -46,6 +48,22 @@ LOG = logging.getLogger("IAMCCS.MiniMaxH3.Standalone")
 H3_DIMENSION_MULTIPLE = 32
 H3_MIN_DIMENSION = 256
 H3_MAX_DIMENSION = 5760
+
+H3_LINKED_STAGE_PAIRS = {
+    f"{lw}x{lh} -> {hw}x{hh}": (lw, lh, hw, hh)
+    for pair in [
+        (640, 384, 1280, 768), (768, 448, 1536, 896), (896, 512, 1792, 1024),
+        (1024, 576, 2048, 1152), (1280, 736, 2560, 1472), (736, 416, 1504, 832),
+        (864, 480, 1728, 960), (960, 544, 1920, 1088), (1280, 736, 1920, 1088),
+        (1024, 576, 1536, 864), (640, 384, 960, 576), (960, 576, 1280, 768),
+        (960, 576, 1600, 960), (960, 576, 1920, 1152), (1120, 672, 1920, 1152),
+        (1280, 768, 1920, 1152), (768, 384, 1536, 768), (1024, 512, 2048, 1024),
+        (768, 320, 1536, 640), (1152, 480, 1536, 640), (1152, 480, 1920, 800),
+        (1536, 640, 1920, 800), (1024, 768, 1536, 1152), (1152, 768, 1728, 1152),
+        (768, 768, 1536, 1536),
+    ]
+    for lw, lh, hw, hh in (pair, (pair[1], pair[0], pair[3], pair[2]))
+}
 
 
 @functools.lru_cache(maxsize=512)
@@ -473,7 +491,7 @@ def _h3_ui_group_for_field(name: str) -> str:
         return "memory"
     if name in _H3_UI_SAMPLING_FIELDS:
         return "sampling"
-    if name == "acceleration" or name.startswith(_H3_UI_SPEED_PREFIXES):
+    if name in {"acceleration", "h3_attention_backend"} or name.startswith(_H3_UI_SPEED_PREFIXES):
         return "speed"
     if (
         name.startswith("h3_continuation_")
@@ -786,6 +804,14 @@ def _apply_audioboard_to_minimax(
             "source": "shotboard",
             "reason": "native_h3_audio_selected",
             "discarded_stale_audioboard": True,
+        }
+    if isinstance(timeline.get("audioSegments"), list) and any(
+        key in timeline for key in ("truth_revision", "_iamccs_v3_truth_revision", "truth_updated_at")
+    ):
+        return json.dumps(timeline, ensure_ascii=False), {
+            "applied": False,
+            "source": "shotboard",
+            "reason": "visible_audio_is_queue_truth_use_explicit_publish",
         }
     if not isinstance(cine_linx, dict):
         return json.dumps(timeline, ensure_ascii=False), {"applied": False, "source": "none"}
@@ -3093,8 +3119,10 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "timeline_data": ("STRING", {"default": "", "multiline": True, "iamccs_contracts": ["iamccs.h3.evolving.v1"]}),
                 "duration_seconds": ("FLOAT", {"default": 10.0, "min": 0.01, "max": 36000.0, "step": 0.01}),
                 "task_mode": ([
-                    "auto_from_timeline", "t2va", "i2va", "fl2va", "ref2va", "reference_image",
-                    "v2va_controlnet", "v2va_object_swap", "v2va_face_swap", "longvid_guides", "keyframe_joint_native", "latent_go_ahead", "longvid_guided_lipsync",
+                    "auto_from_timeline", "t2va", "i2va", "fl2va", "ref2va", "ref2va_vfx_edit", "reference_image",
+                    "v2va_controlnet", "v2va_object_swap", "v2va_face_swap", "v2va_face_swap_lora",
+                    "longvid_multishot_hardcut", "longvid_keyframe_continuous", "pianosequenza_true_long",
+                    "longvid_guides", "keyframe_joint_native", "latent_go_ahead", "longvid_guided_lipsync",
                     "ref2vid_lipsync", "longvid_ref2vid_lipsync", "longvid_motion_context", "longvid_continuous_guided",
                     "longvid_masked_loop_guided", "guided_av_loop_experimental",
                     # Isolated R44 research path. Existing modes retain their
@@ -3447,10 +3475,8 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         longvid_pianosequenza_manual_stage1_steps = 4
         longvid_pianosequenza_manual_stage2_steps = 2
         longvid_pianosequenza_manual_stage3_steps = 1
-        # Append-only Settings PRO policy. LEGACY_AUTO preserves pre-patch
-        # workflows by inferring Adaptive Guide Windows from the historical
-        # longvid_latent_tail_experimental continuity selector.
         longvid_guide_window_policy = "legacy_auto"
+        longvid_continuous_engine = "pianosequenza_1_native_tail"
         # Phase B append-only Settings PRO controls.  They live in 2 · AUDIO
         # and affect only EXTEND delivery audio, never the video junction.
         extended_av_soft_audio_handover_ms = EXTEND_SOFT_AUDIO_DEFAULT_MS
@@ -3654,6 +3680,9 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             motion_context_window_frames = saved_settings.get(
                 "motion_context_window_frames", motion_context_window_frames
             )
+            longvid_continuous_engine = str(saved_settings.get(
+                "longvid_continuous_engine", longvid_continuous_engine
+            ) or "pianosequenza_1_native_tail").strip().lower()
             # IAMCCS_LONGVID_PIANOSEQUENZA_V2_UPSTREAM_PARITY
             longvid_terminal_endpoint_mode = str(
                 saved_settings.get("longvid_terminal_endpoint_mode", longvid_terminal_endpoint_mode)
@@ -3676,6 +3705,33 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 if not explicit_multistage_toggle:
                     longvid_pianosequenza_2stage_enabled = True
                 longvid_terminal_endpoint_mode = "pianosequenza_drift"
+        from .iamccs_minimax_h3_timeline_director_restore import resolve_continuous_engine
+        requested_longvid_mode = str(task_mode or "").lower()
+        true_long_requested = requested_longvid_mode in {
+            "longvid_keyframe_continuous", "pianosequenza_true_long",
+        }
+        if true_long_requested:
+            task_mode = "longvid_keyframe_continuous"
+        restored_engine = resolve_continuous_engine(longvid_continuous_engine) if str(task_mode or "").lower() == "longvid_keyframe_continuous" and not true_long_requested else None
+        native_restored_engine = restored_engine if restored_engine and restored_engine["backend_family"] == "native_tail" else None
+        extended_selected_engine = restored_engine if restored_engine and restored_engine["backend_family"] == "extended_av" else None
+        if native_restored_engine is not None:
+            # Native TimelineDirector owns incoming overlap. Honour the explicit
+            # 22/39/56-frame selector instead of hard-coding 22 for every take.
+            flf_continuity_mode = "longvid_latent_tail_experimental"
+            longvid_guide_window_policy = "standard_positioned"
+            longvid_terminal_endpoint_mode = native_restored_engine["terminal_endpoint_mode"]
+            longvid_pianosequenza_2stage_enabled = False
+            if bool(upscale_enabled) and str(upscale_mode or "off").strip().lower() not in {"", "off", "none"}:
+                raise ValueError("LONG KEYFRAME CONTINUOUS native TimelineDirector requires Native Delivery. Disable inline upscale; perform whole-sequence spatial/upscale only after the continuous native master is assembled.")
+            upscale_enabled = False
+            upscale_mode = "off"
+        if extended_selected_engine is not None:
+            # Real Extended AV backend: never route through the native Tail
+            # sampler. Exact masked pin and trimmed-head assembly are mandatory.
+            extended_av_pin_mode = "masked"
+            extended_av_mask_profile = "exact"
+            longvid_terminal_endpoint_mode = "latent_free_closure"
         requested_text_encoder_device = str(text_encoder_device or "gpu_auto").strip().lower()
         text_encoder_device = {
             "auto": "gpu_auto",
@@ -3701,8 +3757,12 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "longvid_continuous_guided", "long_continuous_guided",
         }
         masked_loop_requested = requested_task_key in {
+            "longvid_keyframe_continuous",
             "longvid_masked_loop_guided", "masked_loop_guided", "long_masked_loop_guided",
             "guided_av_loop_experimental", "longvid_guided_av_loop_experimental",
+        }
+        multishot_hardcut_requested = requested_task_key in {
+            "longvid_multishot_hardcut", "long_hardcut_video", "longvid_hardcut_video",
         }
         # Keep the positioned-guides controls in their own mode family.  The
         # Settings PRO node intentionally remembers every panel's values, so a
@@ -3721,6 +3781,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             or longvid_lipsync_requested
             or motion_context_requested
             or masked_loop_requested
+            or multishot_hardcut_requested
         )
         lipsync_requested = requested_task_key in {"ref2vid_lipsync", "lipsync_ref2vid"} or longvid_lipsync_requested
         requested_legacy_audio_mode = audio_mode
@@ -3777,13 +3838,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         adaptive_guide_windows_enabled = bool(
             longvid_guides_requested and adaptive_guide_windows_selected
         )
-        linked_stage_pairs = {
-            "640x384 -> 1280x768": (640, 384, 1280, 768),
-            "768x448 -> 1536x896": (768, 448, 1536, 896),
-            "896x512 -> 1792x1024": (896, 512, 1792, 1024),
-            "1024x576 -> 2048x1152": (1024, 576, 2048, 1152),
-            "1280x736 -> 2560x1472": (1280, 736, 2560, 1472),
-        }
+        linked_stage_pairs = H3_LINKED_STAGE_PAIRS
         linked_factor_text = str(upscale_link_factor or "640x384 -> 1280x768").strip()
         # v1.2/v1.3 exposed 2x/3x/4x for a short-lived delivery-link experiment.
         # Preserve those serialized values without allowing them to change the new stage contract.
@@ -3881,8 +3936,23 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             compiled_task_mode = "motion_context_auto_chain"
         else:
             compiled_task_mode = "ref2va" if task_mode == "reference_image" else task_mode
+        if native_restored_engine is not None:
+            compiled_task_mode = "longvid_guides"
+        elif extended_selected_engine is not None:
+            compiled_task_mode = "fl2va_extended_av"
         extended_av_root_task = "ref2va" if requested_task_key.startswith("ref2va") else "t2va"
-        compiled_motion_context_tail_frames = int(flf_continuity_tail_frames)
+        if extended_selected_engine is not None:
+            # For a board opened with Picture 1, Extended AV MUST begin with
+            # image-to-video, not silently fall back to a text-only root.
+            active_timeline = _timeline_dict(timeline_data)
+            visual_rows = active_timeline.get("rows", [])
+            has_opening_image = bool(active_timeline.get("image_paths") or any(
+                isinstance(row, dict) and str(row.get("type", "")).lower() == "image"
+                and (row.get("imageFile") or row.get("image_path") or row.get("path"))
+                for row in (visual_rows if isinstance(visual_rows, list) else [])
+            ))
+            extended_av_root_task = "i2va" if has_opening_image else "t2va"
+        compiled_motion_context_tail_frames = 0 if native_restored_engine is not None else int(flf_continuity_tail_frames)
         if legacy_auto_extend_requested and compiled_motion_context_tail_frames not in {22, 39, 56}:
             compiled_motion_context_tail_frames = 22
         compiled_motion_context_audio = bool(auto_extend_continue_audio) if legacy_auto_extend_requested else bool(flf_continuity_audio)
@@ -3991,7 +4061,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "shift_video": float(shift_video),
             "shift_audio": float(shift_audio),
         }
-        speed_preset_contract = _speed_preset_contract(
+        speed_preset_contract = None if requested_task_key == "v2va_face_swap_lora" else _speed_preset_contract(
             acceleration=str(acceleration),
             turbo_mode=str(effective_turbo_mode),
             turbo_lora_name=selected_turbo_lora,
@@ -4043,18 +4113,19 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             upscale_enabled=upscale_enabled,
             voice_reference_picture_index=voice_reference_picture_index,
             motion_context_tail_frames=compiled_motion_context_tail_frames,
+            timeline_director_native=bool(restored_engine),
             latent_tail_context_frames=(
                 int(flf_continuity_tail_frames)
                 if (
-                    str(task_mode or "").strip().lower() == "longvid_guides"
-                    and adaptive_guide_windows_enabled
+                    (str(task_mode or "").strip().lower() == "longvid_guides"
+                     and adaptive_guide_windows_enabled) or bool(native_restored_engine)
                 )
                 else 0
             ),
             motion_context_audio=bool(compiled_motion_context_audio),
             motion_context_window_frames=motion_context_window_frames,
             longvid_terminal_endpoint_mode=(
-                longvid_terminal_endpoint_mode if longvid_guides_requested else "hard_image"
+                longvid_terminal_endpoint_mode if (longvid_guides_requested or native_restored_engine or extended_selected_engine) else "hard_image"
             ),
             keyframe_joint_latent_new=bool(saved_settings.get("keyframe_joint_latent_new", True)),
             extended_av_profile=str(extended_av_profile or "safe_8_12gb"),
@@ -4101,6 +4172,32 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                     else "single_window_or_multishot"
                 ),
             }
+        if native_restored_engine is not None:
+            from .iamccs_minimax_h3_timeline_director_restore import (annotate_restored_plan, apply_evolving_native_conditioning)
+            annotate_restored_plan(plan, native_restored_engine, overlap_frames=int(flf_continuity_tail_frames))
+            if native_restored_engine["engine"] == "pianosequenza_evolving":
+                apply_evolving_native_conditioning(plan, _timeline_dict(timeline_data), global_prompt)
+        elif extended_selected_engine is not None:
+            if plan.get("task_mode") != "fl2va_extended_av" or not isinstance(plan.get("extended_av"), dict):
+                raise RuntimeError("Extended AV dropdown selected, but real masked Extended AV backend was not compiled")
+            plan["requested_task_mode"] = "longvid_keyframe_continuous"
+            plan["longvid_engine"] = "extended_av_continuous"
+            plan["mode_contract"]["selected_engine"] = "extended_av_continuous"
+            plan["mode_contract"]["public_mode"] = "longvid_keyframe_continuous"
+            plan["mode_contract"]["native_incoming_overlap"] = False
+            plan["mode_contract"]["extended_av_trimmed_prefix"] = True
+        if true_long_requested:
+            if not isinstance(plan.get("iamccs_continuous_av"), dict):
+                raise RuntimeError("True_long requires the native continuous AV plan")
+            plan["longvid_engine"] = "pianosequenza_true_long"
+            plan["requested_task_mode"] = requested_longvid_mode
+            plan["iamccs_continuous_av"]["segment_checkpoints"] = True
+            plan.setdefault("mode_contract", {}).update({
+                "public_name": "LONGVID · PIANOSEQUENZA TRUE LONG",
+                "public_mode": "longvid_keyframe_continuous",
+                "selected_engine": "pianosequenza_true_long",
+                "engine_selector_ignored": True,
+            })
         longvid_guides_active = bool(
             isinstance(plan, dict)
             and str(plan.get("task_mode", "") or "").strip().lower() == "longvid_guides"
@@ -4191,13 +4288,13 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         # keeps ordinary positioned-guide technical windows (typically 362f)
         # without a hidden 22f latent prefix. LEGACY_AUTO preserves old saves.
         latent_tail_requested = bool(
-            longvid_guides_active and adaptive_guide_windows_enabled
+            (longvid_guides_active and adaptive_guide_windows_enabled) or bool(native_restored_engine)
         )
         if latent_tail_requested:
             if str(audio_mode or "").strip().lower() != "h3_native_generated":
                 raise ValueError(
-                    "LONGVID LATENT TAIL A/B v1 is VIDEO-only. "
-                    "Set audio_mode=h3_native_generated for this first continuity test."
+                    "LONG KEYFRAME native sampled AV AudioCon currently requires H3 NATIVE AUDIO. "
+                    "Select h3_native_generated; custom waveform join is not an AudioCon substitute."
                 )
             if int(plan.get("total_segments", 0) or 0) < 2:
                 LOG.info(
@@ -4205,22 +4302,25 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                     "no handoff is required."
                 )
         latent_tail_enabled = bool(latent_tail_requested)
+        multishot_tail_enabled = bool(multishot_hardcut_requested and len(plan.get("chunks", [])) > 1)
+        latent_tail_enabled = latent_tail_enabled or multishot_tail_enabled
+        active_tail_frames = 22 if multishot_hardcut_requested else int(flf_continuity_tail_frames)
         plan["longvid_latent_tail"] = {
             "schema": "iamccs.minimax_h3.longvid_latent_tail.v2",
             "enabled": latent_tail_enabled,
-            "tail_frames": int(flf_continuity_tail_frames) if latent_tail_enabled else 0,
+            "tail_frames": active_tail_frames if latent_tail_enabled else 0,
             "video_only": False,
             "native_av_tail": True,
             "taper": "linear_0_to_1",
             "max_handoffs": max(0, int(plan.get("total_segments", 0) or 0) - 1),
             "preserve_rgb_bridge": True,
-            "source": "shotboard_optional_guide_windows_v2",
+            "source": "timeline_director_restore_r47" if native_restored_engine else "shotboard_optional_guide_windows_v2",
         }
         plan["longvid_latent_tail_junction"] = {
             "schema": "iamccs.minimax_h3.longvid_latent_tail_junction.v2",
             "enabled": latent_tail_enabled,
             "overlap_frames": 0,
-            "latent_context_frames": int(flf_continuity_tail_frames) if latent_tail_enabled else 0,
+            "latent_context_frames": active_tail_frames if latent_tail_enabled else 0,
             "strategy": "latent_context_exact_bridge_cut",
             "owner": "incoming_segment",
             "audio_overlap": False,
@@ -4249,11 +4349,30 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         plan["audioboard_injection"] = audioboard_injection
         plan["audio_mode"] = audio_mode
         longvid_active = str(plan.get("task_mode", "")).lower() in {
+            "longvid_multishot_hardcut", "longvid_keyframe_continuous",
             "longvid_guides", "longvid_ref2vid_lipsync", "longvid_motion_context", "longvid_continuous_guided",
             "longvid_masked_loop_guided", "guided_av_loop_experimental",
         }
-        longvid_lipsync_active = bool(longvid_active and longvid_guided_audio_drive)
-        if longvid_lipsync_active:
+        longvid_lipsync_active = bool(longvid_active and longvid_guided_audio_drive and longvid_lipsync_requested)
+        active_longvid_mode = str(plan.get("task_mode", "") or "").lower()
+        if active_longvid_mode == "longvid_multishot_hardcut":
+            timeline_audio_contract = (
+                "LONG MULTI-SHOT · FL2VA: multiple authored camera slots share one joint AV latent per native window. "
+                "Image guides and cut prompts follow Shotboard intervals. AudioBoard remains one locked global performance; "
+                "native generated audio continues through sampled AV tails between technical windows."
+            )
+        elif bool(native_restored_engine):
+            timeline_audio_contract = (
+                "LONG KEYFRAME native TimelineDirector: sampled video/audio latent tails carry motion and sound "
+                "between technical H3 chunks; native overlap belongs to the incoming segment, and AudioCon "
+                "hands off the exact editorial endpoint."
+            )
+        elif bool(extended_selected_engine):
+            timeline_audio_contract = (
+                "LONG KEYFRAME Extended AV: masked RAW video/audio latent pinning, trimmed technical prefix, "
+                "direct join and separate extended_av profile. This is not incoming-owned overlap."
+            )
+        elif longvid_lipsync_active:
             timeline_audio_contract = (
                 "LongVid Guided LipSync: timeline images remain positioned T2VA/AddGuide guides while AudioBoard is rebased per H3 chunk, "
                 "locked into the native H3 AV latent before sampling, and restored as the exact final soundtrack. No REF2VA reference block is materialized."
@@ -4263,7 +4382,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         elif str(plan.get("task_mode", "")).lower() == "longvid_continuous_guided":
             timeline_audio_contract = "Long Continuous Guided: native H3 AV state is carried into every FL2VA interval; each following Shotboard image is the destination keyframe, never a new hard-cut shot"
         elif str(plan.get("task_mode", "")).lower() in {
-            "longvid_masked_loop_guided", "guided_av_loop_experimental",
+            "longvid_keyframe_continuous", "longvid_masked_loop_guided", "guided_av_loop_experimental",
         }:
             timeline_audio_contract = (
                 "IAMCCS Continuous AV: every chronological Shotboard image is an FL2VA destination; "
@@ -4292,6 +4411,15 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "normalized_for_ref2vid_lipsync": False,
             "source": "shotboard",
         }
+        from .iamccs_h3_veda import veda_plan
+        plan["veda"] = veda_plan(saved_settings)
+        plan["attention_backend"] = str(saved_settings.get("h3_attention_backend", "from_acceleration"))
+        plan["character_swap_lora"] = swap_plan(saved_settings, str(task_mode))
+        plan["edit_video_source"] = str(saved_settings.get("h3_edit_video_source", "auto"))
+        plan["vfx_edit"] = {"enabled": task_mode == "ref2va_vfx_edit",
+                            "lora_name": saved_settings.get("h3_vfx_lora_name", "minimax_h3_vfx_edit_v1.0_r128.safetensors"),
+                            "strength": float(saved_settings.get("h3_vfx_lora_strength", 1)),
+                            "video_source": plan["edit_video_source"]}
         plan["performance_profile"] = str(performance_profile)
         plan["sampling"] = {
             "seed_policy": str(saved_settings.get("seed_policy", "fixed_per_generation")),
@@ -4535,6 +4663,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "fast_latent_stage2_guides": str(saved_settings.get("h3_fast_latent_stage2_guides", "soft")).lower(),
             "keep_models_resident": bool(saved_settings.get("h3_upres_keep_models_resident", False)),
             "steps": max(1, int(_finite_float(saved_settings.get("h3_upres_steps", 1), 1, 1, 20))),
+            "seed": int(saved_settings.get("h3_upres_seed", -1)),
             "denoise": float(_finite_float(saved_settings.get("h3_upres_denoise", 0.2), 0.2, 0.0, 1.0)),
             "sampler": str(saved_settings.get("h3_upres_sampler", "sa_solver") or "sa_solver"),
             "scheduler": str(saved_settings.get("h3_upres_scheduler", "simple") or "simple"),
@@ -4581,7 +4710,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "ltx_vae_decode_temporal_overlap": 4 if bool(ltx_seam_safe) else 1,
             "ltx_vae_decode_spatial_overlap": 4 if bool(ltx_seam_safe) else 1,
             "ltx_looper": {
-                "sampler": "LTXVLoopingSampler",
+                "sampler": "IAMCCS_MiniMaxH3LTXTiledSampler",
                 "temporal_tile_size": max(24, min(1000, int(ltx_looper_temporal_tile_size))),
                 "temporal_overlap": max(16, min(80, int(ltx_looper_temporal_overlap))),
                 "guiding_strength": max(0.0, min(1.0, float(ltx_looper_guiding_strength))),
@@ -4671,7 +4800,12 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         elif longvid_audio_normalized:
             warnings.append(f"LongVid uses positioned AudioBoard guides; incompatible {requested_legacy_audio_mode} was normalized to h3_native_generated")
         elif longvid_guided_audio_drive:
-            warnings.append("LongVid Guided Audio Drive: positioned images use AddGuide; the exact rebased AudioBoard chunk uses the v20 VAEEncodeAudio + zero-mask AV-latent lock and is not duplicated as an audio AddGuide")
+            if requested_task_key == "longvid_keyframe_continuous":
+                warnings.append("LONG KEYFRAME CONTINUOUS Custom Audio: phase-aligned FL2VA intervals use the exact AudioBoard master as a locked pre-sampler AV-audio authority; final soundtrack is restored from the pristine source.")
+            elif multishot_hardcut_requested:
+                warnings.append("LONG MULTI-SHOT Custom Audio: each independent shot receives its exact global AudioBoard slice as locked H3 performance timing; hard cuts do not reset the soundtrack master.")
+            else:
+                warnings.append("LongVid Guided Audio Drive: positioned images use AddGuide; the exact rebased AudioBoard chunk uses VAEEncodeAudio + zero-mask AV-latent lock and is not duplicated as an audio AddGuide")
         lipsync_contract = plan.get("lipsync") if isinstance(plan.get("lipsync"), dict) else {}
         if bool(lipsync_contract.get("enabled")) and not bool(lipsync_contract.get("dialogue_tags_present", False)):
             warnings.append(
@@ -5590,7 +5724,7 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
                     )
                 from .iamccs_minimax_h3_continuity import save_longvid_sampled_latent_tail
                 _endpoint_frames = None
-                if _hd_tail:
+                if _hd_tail or bool(_tail_plan.get("timeline_director_native", False)) or _tail_plan.get("task_mode") == "longvid_multishot_hardcut":
                     _chunks = _tail_plan.get("chunks") if isinstance(_tail_plan.get("chunks"), list) else []
                     _chunk = _chunks[int(current_segment)] if int(current_segment) < len(_chunks) else {}
                     if isinstance(_chunk, dict):
@@ -5601,6 +5735,8 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
                             _head = max(0, int(_chunk.get("pianosequenza_hd_context_prefix_frames", 0) or 0))
                         else:
                             _head = max(0, int(_chunk.get("trim_head_frames", 0) or 0))
+                        if bool(_tail_plan.get("timeline_director_native", False)) and int(current_segment) > 0:
+                            _head = max(0, int(_tail_cfg.get("tail_frames", 22) or 22))
                         _endpoint_frames = max(5, _head + _visible)
                         _sample_frames = max(5, int(_chunk.get("frame_count", _endpoint_frames) or _endpoint_frames))
                         _endpoint_frames = min(_sample_frames, _endpoint_frames)
@@ -6648,7 +6784,7 @@ class IAMCCS_ShotboardH3Settings:
             options = dict(source_options) if isinstance(source_options, dict) else {}
             # This node is a persisted configuration source, not a sampler;
             # never create a second auto-seed control widget beside `seed`.
-            options.pop("control_after_generate", None)
+            options["control_after_generate"] = False
             options["display_name"] = f"{group_name} · {name.replace('_', ' ')}"
             required[name] = (value_type, options)
 
@@ -6910,7 +7046,6 @@ class IAMCCS_ShotboardH3Settings:
             options = dict(source_options) if isinstance(source_options, dict) else {}
             options["display_name"], options["tooltip"] = fused_labels[name]
             required[name] = (value_type, options)
-        # IAMCCS_LONGVID_PIANOSEQUENZA_V2_UPSTREAM_PARITY
         required["longvid_terminal_endpoint_mode"] = (
             ["hard_image", "latent_free_closure", "pianosequenza_linear", "pianosequenza_drift", "pianosequenza_native", "pianosequenza_phase", "pianosequenza_frozen", "latent_free", "pianosequenza_2stage", "pianosequenza_hd"],
             {
@@ -7006,14 +7141,7 @@ class IAMCCS_ShotboardH3Settings:
             },
         )
         required["upscale_link_factor"] = (
-            [
-                "640x384 -> 1280x768",
-                "768x448 -> 1536x896",
-                "896x512 -> 1792x1024",
-                "1024x576 -> 2048x1152",
-                "1280x736 -> 2560x1472",
-                "2x", "3x", "4x",
-            ],
+            [*H3_LINKED_STAGE_PAIRS, "2x", "3x", "4x"],
             {
                 "default": "640x384 -> 1280x768",
                 "display_name": "NATIVE · multi-stage legal resolution pair",
@@ -7155,6 +7283,9 @@ class IAMCCS_ShotboardH3Settings:
             "h3_advisor_state": ("STRING", {"default": "{}", "multiline": False,
                 "tooltip": "Per-mode local advisor state. Proposals apply only after acceptance."}),
             "seed_policy": (["fixed_per_generation", "random_per_generation", "fixed_per_chunk", "random_per_chunk"], {"default": "fixed_per_generation", "tooltip": "Fixed/random per generation: one seed for all chunks. Fixed per chunk: base + index × stride. Random per chunk: independent seeds derived from the randomized queue seed. Random policies choose a new base when you press Queue in Settings Pro; API clients must supply their base seed."}),
+            "h3_editor_enabled": ("BOOLEAN", {"default": False,
+                "display_name": "OUTPUT · VIDEO EDITOR",
+                "tooltip": "OFF by default: all technical chunks are still joined into the normal final master and exported directly. ON requests the optional Shotboard Video Editor branch after master assembly."}),
             "keyframe_joint_latent_new": ("BOOLEAN", {"default": True, "tooltip": "Keyframe Joint only: experimental B1 MASKED+EXACT windows with positioned destination guides. No LatentGoAhead dependency. OFF preserves the legacy single-sample path."}),
             # R42 continuation fix fields are appended after every historical
             # required+optional widget so pre-patch workflow arrays keep their
@@ -7421,6 +7552,36 @@ class IAMCCS_ShotboardH3Settings:
                 "display_name": "FACE REFINE · FEATHER",
                 "tooltip": "Blend softness around the pasted region. Slight feathering helps avoid visible seams.",
             }),
+            # Append-only R46: the public Long Keyframe engine selector MUST stay
+            # behind every historical Settings PRO widget for saved workflow IDs.
+            "longvid_continuous_engine": (
+                ["pianosequenza_1_native_tail", "extended_av_continuous", "pianosequenza_evolving", "pianosequenza_2_drift", "pianosequenza_3_phase"],
+                {"default": "pianosequenza_1_native_tail",
+                 "display_name": "LONG KEYFRAME · CONTINUITY ENGINE",
+                 "tooltip": "Native TimelineDirector with selectable 22/39/56 incoming-owned overlap; Extended AV uses its own masked pin/trim backend and VRAM preset; Evolving uses timed Shotboard prompt beats on native AV tail; DRIFT/PHASE experimental terminal variants. Native Delivery is recommended for validation."},
+            ),
+            # Append-only image-engine profile. The value is consumed by the
+            # R42 prompt bridge and Sato node; video settings are untouched.
+            "h3_reference_image_vram_profile": ([
+                "under_8gb", "up_to_12gb_safe", "up_to_12gb_quality",
+                "up_to_24gb", "over_24gb_native_4k", "custom",
+            ], {
+                "default": "up_to_12gb_safe",
+                "display_name": "H3 IMAGE · NATIVE VRAM PROFILE",
+                "tooltip": "Native sampling cap before delivery resize: <8GB 0.55MP; 8-12GB safe 1.05MP; 12GB quality 1.50MP (test for OOM); up to 24GB 4MP; over 24GB 8.5MP (native 4K). CUSTOM uses the cap on SatoDive. Actual capacity also depends on model quantization and reference count.",
+            }),
+            "h3_veda_enabled": ("BOOLEAN", {"default": False, "display_name": "SPEED · VEDA ATTENTION", "tooltip": "Experimental on RTX 30: kernel self-test required. Applied after LoRAs and compatible memory patches; does not change sampling steps."}),
+            "h3_veda_predictor": (["auto", "minimax_h3_t2va_veda_8nfe_600step_preview_fp8.safetensors", "minimax_h3_r2va_veda_preview_fp8.safetensors"], {"default": "auto", "display_name": "SPEED · VEDA PREDICTOR"}),
+            "h3_veda_verbose": ("BOOLEAN", {"default": False, "display_name": "SPEED · VEDA TIMING LOG"}),
+            **character_swap_schema(),
+            "h3_upres_seed": ("INT", {"default": -1, "min": -1, "max": 0xffffffffffffffff,
+                "display_name": "H3 DETAIL · REFINE SEED",
+                "tooltip": "Fixed Stage-2 seed plus segment stride. -1 preserves the legacy seed/offset or SwapChar refine seed. H3 Detail preset selects 777."}),
+            **vfx_edit_schema(),
+            "h3_attention_backend": (["from_acceleration", "auto_3060", "h3_sage", "h3_exact", "sol_low_vram", "native"], {
+                "default": "from_acceleration", "display_name": "ATTENTION & MEMORY · BACKEND",
+                "tooltip": "Independent of sampling steps and Turbo LoRA. From acceleration preserves existing workflows. FastH3, SLA, Fused and Progressive manage their own attention. Sol and SLA/Fused cannot be combined with VEDA.",
+            }),
         })}
 
     RETURN_TYPES = (SUPERNODE_LINX_TYPE,)
@@ -7628,6 +7789,10 @@ from .iamccs_minimax_h3_universal_delivery import (
     NODE_CLASS_MAPPINGS as _UNIVERSAL_DELIVERY_NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as _UNIVERSAL_DELIVERY_NODE_DISPLAY_NAME_MAPPINGS,
 )
+from .iamccs_minimax_h3_ltx_tiled import (
+    NODE_CLASS_MAPPINGS as _LTX_TILED_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _LTX_TILED_NODE_DISPLAY_NAME_MAPPINGS,
+)
 from .iamccs_minimax_h3_exact import (
     NODE_CLASS_MAPPINGS as _H3_EXACT_NODE_CLASS_MAPPINGS,
     NODE_DISPLAY_NAME_MAPPINGS as _H3_EXACT_NODE_DISPLAY_NAME_MAPPINGS,
@@ -7669,6 +7834,9 @@ from .iamccs_minimax_h3_viggle_bridge import (
     NODE_DISPLAY_NAME_MAPPINGS as _VIGGLE_BRIDGE_NODE_DISPLAY_NAME_MAPPINGS,
 )
 
+from .iamccs_h3_vfx_edit import NODE_CLASS_MAPPINGS as _VFX_CLASSES, NODE_DISPLAY_NAME_MAPPINGS as _VFX_NAMES
+NODE_CLASS_MAPPINGS.update(_VFX_CLASSES)
+NODE_DISPLAY_NAME_MAPPINGS.update(_VFX_NAMES)
 NODE_CLASS_MAPPINGS.update(_ATOMIC_NODE_CLASS_MAPPINGS)
 from .iamccs_minimax_h3_latent_go_ahead import NODE_CLASS_MAPPINGS as _LGA_CLASSES, NODE_DISPLAY_NAME_MAPPINGS as _LGA_NAMES
 NODE_CLASS_MAPPINGS.update(_LGA_CLASSES)
@@ -7696,6 +7864,8 @@ NODE_CLASS_MAPPINGS.update(_FAST_LATENT_2PASS_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_FAST_LATENT_2PASS_NODE_DISPLAY_NAME_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(_UNIVERSAL_DELIVERY_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_UNIVERSAL_DELIVERY_NODE_DISPLAY_NAME_MAPPINGS)
+NODE_CLASS_MAPPINGS.update(_LTX_TILED_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_LTX_TILED_NODE_DISPLAY_NAME_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(_H3_EXACT_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_H3_EXACT_NODE_DISPLAY_NAME_MAPPINGS)
 NODE_CLASS_MAPPINGS.update(_R40_SEED_SCOUT_NODE_CLASS_MAPPINGS)
@@ -7723,3 +7893,10 @@ from .iamccs_minimax_h3_pixel_refine_variant import (
 )
 NODE_CLASS_MAPPINGS.update(_PIXEL_REFINE_NODE_CLASS_MAPPINGS)
 NODE_DISPLAY_NAME_MAPPINGS.update(_PIXEL_REFINE_NODE_DISPLAY_NAME_MAPPINGS)
+
+from .iamccs_h3_swap_video import (
+    NODE_CLASS_MAPPINGS as _SWAP_VIDEO_NODE_CLASS_MAPPINGS,
+    NODE_DISPLAY_NAME_MAPPINGS as _SWAP_VIDEO_NODE_DISPLAY_NAME_MAPPINGS,
+)
+NODE_CLASS_MAPPINGS.update(_SWAP_VIDEO_NODE_CLASS_MAPPINGS)
+NODE_DISPLAY_NAME_MAPPINGS.update(_SWAP_VIDEO_NODE_DISPLAY_NAME_MAPPINGS)

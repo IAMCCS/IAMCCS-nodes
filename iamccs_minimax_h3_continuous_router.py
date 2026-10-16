@@ -20,6 +20,7 @@ LOG = logging.getLogger("IAMCCS.MiniMaxH3.ContinuousRouter")
 CATEGORY = "IAMCCS/MiniMax H3/Continuity"
 
 _CONTINUOUS_AV_MODES = {
+    "longvid_keyframe_continuous",
     "longvid_masked_loop_guided",
     "masked_loop_guided",
     "long_masked_loop_guided",
@@ -77,6 +78,8 @@ class IAMCCS_MiniMaxH3ContinuousBackendLazyRouterR42:
         task_mode = str(plan.get("task_mode", "") or "").strip().lower()
         requested = str(plan.get("requested_task_mode", "") or "").strip().lower()
         modes = {task_mode, requested}
+        if requested == "longvid_keyframe_continuous" and str(plan.get("longvid_engine", "")).startswith("pianosequenza_"):
+            return "continuous"
         if "latent_go_ahead" in modes:
             return "latentgoahead"
         if modes & _GUIDED_AV_LOOP_MODES:
@@ -112,7 +115,7 @@ class IAMCCS_MiniMaxH3ContinuousBackendLazyRouterR42:
         branch = self._branch(cine_linx)
         label = {
             "latentgoahead": "LatentGoAhead · past-positioned native AV history",
-            "r42": "established R42 standard / Motion Context",
+            "r42": "R42 native / restored Pianosequenza TimelineDirector",
             "continuous": "FL2VA Continuous AV · phase-aligned latent handover",
             "guided": "Guided AV Loop · one-master experimental",
         }[branch]

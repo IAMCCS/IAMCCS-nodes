@@ -333,6 +333,19 @@ class MMH3ContextHandler(IndexListContextHandler):
                         result.window_idx, total_windows, timestep,
                         accum[mod_idx], counts[mod_idx], biases[mod_idx])
 
+            # A 20 GB H3 model on a 12 GB Windows card can silently spill through
+            # WDDM instead of raising OOM. Drop every reference to the completed
+            # window and return cached activation blocks before the next one.
+            # This does not alter tensors or sampling; it only prevents a later
+            # window from inheriting the previous window's VRAM high-water mark.
+            del results
+            try:
+                del result, mod_out, modality_window
+            except UnboundLocalError:
+                pass
+            import comfy.model_management
+            comfy.model_management.soft_empty_cache()
+
         try:
             result_out = []
             for ci in range(len(conds)):

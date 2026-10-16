@@ -961,6 +961,23 @@ class IAMCCS_MiniMaxH3BackendLazySwitchR37:
 
     @staticmethod
     def _names(cine_linx):
+        # In R43+ LONG KEYFRAME CONTINUOUS is intercepted by the outer
+        # ContinuousBackendLazyRouter before this legacy R37 switch is ever
+        # evaluated. If we are here with the new public mode, the loaded
+        # workflow still has the pre-R43 topology. Fail before spending a full
+        # H3 sample on chunk 1 and then crashing on chunk 2. Historical modes
+        # remain untouched.
+        try:
+            plan = _resolve_shotplan(cine_linx)
+            task_mode = str(plan.get("task_mode", "") or "").strip().lower()
+        except Exception:
+            task_mode = ""
+        if task_mode == "longvid_keyframe_continuous":
+            raise RuntimeError(
+                "LONG KEYFRAME CONTINUOUS requires the R43+ Continuous Backend Router topology. "
+                "This workflow is using the legacy R37 generation switch directly. Load/upgrade the Universal R43+ workflow; "
+                "existing legacy modes remain compatible."
+            )
         prefix = "variant" if _variant_active(cine_linx) else "legacy"
         return [f"{prefix}_{suffix}" for suffix in ("frames", "audio", "bridge", "latent", "fps", "report")]
 

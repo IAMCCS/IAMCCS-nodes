@@ -497,7 +497,7 @@ async function importVideo(node, root, file) {
 }
 
 function installFixedAddVideo(node) {
-  if (!node || nodeType(node) !== TYPE) return false;
+  if (!node || ![TYPE, "IAMCCS_ShotboardVideoEditorOptionalR49"].includes(nodeType(node))) return false;
   const widgetRoot = (node.widgets || [])
     .map((w) => w?.element || w?.inputEl || w?.domElement)
     .find((el) => el?.querySelector?.(".iamccs-sve"))?.querySelector?.(".iamccs-sve")
@@ -556,7 +556,7 @@ function schedulePatch(node) {
 app.registerExtension({
   name: "IAMCCS.ShotboardVideoEditorV1.ManualMediaFix",
   beforeRegisterNodeDef(nodeTypeDef, nodeData) {
-    if (nodeData?.name !== TYPE) return;
+    if (![TYPE, "IAMCCS_ShotboardVideoEditorOptionalR49"].includes(nodeData?.name)) return;
     const originalCreated = nodeTypeDef.prototype.onNodeCreated;
     nodeTypeDef.prototype.onNodeCreated = function () {
       try { repairSerializedManualPreview(this); } catch {}
@@ -566,7 +566,7 @@ app.registerExtension({
     };
   },
   loadedGraphNode(node) {
-    if (nodeType(node) !== TYPE) return;
+    if (![TYPE, "IAMCCS_ShotboardVideoEditorOptionalR49"].includes(nodeType(node))) return;
     try { repairSerializedManualPreview(node); } catch {}
     schedulePatch(node);
   },

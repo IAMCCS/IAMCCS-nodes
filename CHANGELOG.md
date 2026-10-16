@@ -1,3 +1,91 @@
+# 1.5.8 - H3 IAMCCS utilities (2026-10-16)
+
+- Add LoRA-based Character Swap and reference-image environment editing, plus a dedicated video VFX edit mode and Prompter media routing.
+- Make native single-pass delivery the SwapChar default; expose the optional H3 Detail second pass through synchronized Native and mode-engine controls.
+- Separate sampling recipes from attention/memory selection in Settings PRO; add compact Turbo groups and VEDA compatibility handling while preserving legacy widget order.
+- Update LongVid continuity engines, shared AV boundary handling, stage-two guide rebuilding, tiled LTX sampling, and the local licensed H3 latent upscaler.
+- Preserve Shotboard audio authority, dialogue stem timing, optional source audio and editor/export handoff.
+- Keep the package ID unchanged and align pyproject.toml and version.json at 1.5.8. The local version.json previously declared 1.5.7 while the repository declared 1.5.5.
+
+## R51 - 2026-10-09 - IAMCCS-internal PSkf Stage-2 upscale
+
+- Fast Latent 2-Pass no longer resolves OBVPM context-window nodes or the external MiniMax H3 3D upscaler through the global ComfyUI node registry.
+- The per-sigma PSkf window planner and pyramid fusion execute from the IAMCCS-local provider. The MIT 3D latent upscaler implementation and license are vendored under vendor/.
+- Model-folder registration now happens from the local module before checkpoint lookup, so the route boots after the external custom-node folders are removed.
+- Restored masked still-guide pinning and exact audio-mask preservation for both full and windowed Stage-2 sampling. The validated first pass is unchanged.
+- Added regression coverage for external-node independence, local imports, guide pins, audio lock and current upscaler call contract.
+
+## R49 — 2026-10-08 — True Long shared AV boundary
+
+- Public `longvid_keyframe_continuous` and the explicit True Long alias now enter the PSkf planner before legacy-engine resolution. Saved `longvid_continuous_engine` values are ignored for this mode; historical engines remain installed and available to their existing workflows.
+- Fixed the exclusive PSkf endpoint being consumed as inclusive (one hidden frame per continuation).
+- True Long intermediate delivery now ends at the exact inherited AV boundary, with a zero-replay invariant. Added short static-tail detection and an isolated Settings Pro panel.
+- Native True Long joins now use a 35 ms equal-gain audio boundary to suppress small generated-audio clicks. Authored Custom Audio remains untouched and is still muxed as the pristine master.
+- Final delivery trims a single strictly detected duplicate terminal frame as well as longer short holds; intermediate PSkf endpoints keep the stricter threshold and are unchanged.
+- Universal R49 already exposes the safe complete-film upscale route as `LTX 2.3 MASTER`: True Long is assembled first and its audio is preserved. The H3 Fast Latent 2-Pass branch remains per-segment and is not advertised as a True Long master route.
+- CPU boundary and real continuation-construction tests pass. GPU seam/guide validation remains required; internal model-generated cuts are not certified fixed. Legacy workflows remain available.
+
+## R48 — 2026-10-08 — Pianosequenza-True_long PSkf core
+
+- Integrated the explicit True_long task in Universal/Settings Pro, replacing the visible positioned-guided choice while retaining its legacy backend identifier. Continuous AV rendering now packs and saves PSkf checkpoints and uses True_long Extend between intervals. CPU routing smoke passes; GPU visual validation and PAN exposure remain pending.
+
+- Added the autonomous `Pianosequenza-True_long` core and versioned `PSkf` (Pianosequenza State Keyframe) checkpoints. PSkf persists the complete native H3 video+audio latent, delivery ranges, lineage and handover metadata in `.pskf.safetensors` files under ComfyUI output.
+- Added Pack, Save, Load and Extend nodes. Extend delegates to the validated IAMCCS phase-aligned native AV continuation primitive and does not import or call OBVPM.
+- Removed the optional MCtx adapter from default node registration. Its source remains only as an audit/A-B reference; product workflows no longer expose or require external OBVPM nodes.
+- Prepend and Bridge are intentionally not advertised as complete until their native AV masking and trim contracts pass GPU render validation.
+
+## R47 — 2026-10-08 — optional OBVPM MCtx route
+
+- Added one append-only `IAMCCS H3 LongVid · MCtx Route` adapter. It exposes user-facing Extend, Prepend and Bridge presets but delegates latent slicing, native guide/masked/both pins and trim ownership to the installed GPL-3.0 `comfyui-obvpm-timeline` nodes.
+- The adapter does not replace Pianosequenza 1/R46 and does not copy OBVPM tensor code. It fails closed when OBVPM is unavailable and keeps the experimental MCtx route isolated for A/B smoke tests.
+
+## R46 — 2026-10-08 — LONG KEYFRAME · native TimelineDirector restore
+
+- Public `longvid_keyframe_continuous` now routes through the historical sampled native VIDEO+AUDIO latent-tail/AudioCon engine instead of R45 pairwise FL2VA; technical windows keep incoming-owned 22f overlap and remove just a one-frame RGB bridge.
+- Three Pianosequenza engine options in Settings PRO → ENGINES → LONG KEYFRAME. PIANOSEQUENZA 1 default; 2 DRIFT / 3 PHASE experimental. Appended optional widget for saved-workflow position stability.
+- Editorial-endpoint tail checkpoints, LATENT FREE default, CPU regression tests for 30s/720f, video/audio mask transport and compatibility. Native Delivery required until full GPU validation.
+- See `docs/R46_LONGVID_NATIVE_TIMELINEDIRECTOR_RESTORE_IT.md`.
+
+# R45.2 candidate — authored interval budget and native masked AV history (2026-10-07)
+
+- LONG KEYFRAME CONTINUOUS adds history to the technical duration, positions the destination at the authored endpoint and strips only technical padding when no freeze is detected.
+- Carries raw AV history in the target using native per-stream masks. Quantization replay stays hidden; public video joins no longer replace frames with Safe Tail Bridge pixels.
+- Separates visible landing from latent cutoff, keeps the first detected landing frame, removes artificial editorial audio silence and adds checkpoint duration diagnostics.
+- Custom Audio covers the full technical interval. A shortened interval cannot silently produce a desynchronized custom-audio master.
+- Ordinary FLF, Extended AV and legacy continuation aliases keep their own contracts. See `docs/R45_2_CONTINUOUS_AUDIT_2026-10-07.md` for tests and the limits of visual validation; these corrections do not guarantee a continuous model-generated trajectory.
+
+# R45.1 — Long Keyframe motion-safe landings + live segment checkpoints (2026-10-07)
+
+- Fixed LONG KEYFRAME CONTINUOUS preserving H3 terminal still-frame locks as visible programme footage. The public mode now uses the freeze analyzer as a real motion-safe handover authority: intermediate visible tails are trimmed at the same phase-aligned cutoff used by the next latent continuation.
+- Continuation intervals no longer inherit the last frozen latent frames merely to preserve an authored guide. The next FL2VA interval still targets the next authored Shotboard image, but its AV history ends before the detected lock. Legacy serialized continuous aliases retain their historical behavior.
+- Final interval now removes only a detected terminal lock and keeps the last genuinely moving frame immediately before it; when no lock is detected the complete ending is preserved. This removes the final snap/hold on the last authored image.
+- Re-enabled the detector-approved Safe Tail Bridge (up to 2 frames) for the public continuous mode so phase-alignment quantization can retain the latest safe rendered approach without borrowing from the freeze safety margin.
+- Added live per-segment checkpoints for LONG KEYFRAME CONTINUOUS. Every cleaned interval is encoded before final assembly and published immediately to a video player on the FL2VA CONTINUOUS AV node, so a bad interval can be reviewed and the run interrupted before all later intervals finish.
+- Segment checkpoint videos show the exact delivery interval after reused-head and freeze-tail removal, not the raw technical H3 sample. Final master assembly remains mandatory and independent of the optional Video Editor.
+
+# R45.0 — Universal LongVid / Integrated Scout / Optional Editor (2026-10-07)
+
+- Unified the R43 Universal Scout/Editor topology with the R44.8.1 LongVid fixes: Standard/Motion Context, Long Multi-Shot Hard Cut, Long Keyframe Continuous, Guided AV Loop Experimental and Latent New now coexist in one Universal graph while legacy task IDs remain readable.
+- Added `longvid_keyframe_continuous` to the Scout history-preservation bypass: Scout can never replace a full-AV continuous handoff with a standalone candidate. Long Multi-Shot Hard Cut remains Scout-compatible because its authored shots are intentionally independent.
+- Settings PRO > ENGINES > SCOUT is now the operational Scout surface. It mirrors the cached R40 candidate bank, replays the existing candidate preview-frame batches as inline animated previews, shows candidate seeds, selects the winning take, and switches SCOUT / DELIVER phases without moving cache truth into the frontend.
+- Fixed the legacy R40 phase controller so Scout OFF means normal production; it no longer mutes production/editor nodes merely because the saved phase property says `scout`.
+- Added append-only `h3_editor_enabled` (default OFF). The new R45 final lazy gate runs after normal delivery/master assembly: OFF returns the direct joined master; ON requests the optional Video Editor branch. Chunk/master joining is never bypassed.
+- Added a non-terminal R45 exporter subclass used only behind the optional Editor gate. The historical exporter remains an OUTPUT_NODE, so old workflows retain their previous terminal behaviour.
+- New Universal workflow keeps the R40 Scout backend/cache nodes for compatibility but treats them as internal plumbing; the Settings PRO Scout panel is the intended user-facing control room.
+
+# R44.8 — LongVid cleanup / dedicated Engines / continuous custom-audio authority (2026-10-07)
+
+- Added public `LONG MULTI-SHOT · HARD CUT`: every authored Shotboard slot is an independent H3 shot with a real hard-cut boundary, while one Custom Audio master can remain the performance/lip-sync timing authority across the full edit.
+- Added public `LONG KEYFRAME CONTINUOUS`: N authored keyframes compile to N−1 FL2VA intervals using `phase_aligned_extended` direct full native AV latent handover; decoded video crossfade defaults to 0 so technical boundaries are not hidden by dissolves.
+- Preserved historical LongVid IDs as load-compatible aliases. Legacy `longvid_guides` remains readable but is hidden from the primary Mode Assistant for new work.
+- Added a defensive Pianosequenza endpoint fallback: historical workflows requesting a latent-tail endpoint without `iamccs_longvid_latent_tail_ab` no longer crash at the next/final chunk.
+- Settings PRO now exposes a dedicated Engine panel for each public Mode Assistant mode. Every mode card has an `ENGINE ▸` control that selects the mode and opens only its relevant engine variables; `DIRECT` remains visible as `DIRECT · LEGACY` for compatibility.
+- Added mode-specific Engine presets for Long Multi-Shot, Long Keyframe Continuous and Keyframe Joint Native/Latent-New experimental operation.
+- `h3_custom_audio_drive` is now supported by Long Keyframe Continuous: exact timeline slices are VAE-locked into every technical interval for performance/lip-sync authority, including the hidden phase-aligned continuation head, while the final mux restores one pristine global Custom Audio master.
+- Long Multi-Shot keeps the standard per-shot locked Custom Audio drive while final assembly preserves one continuous authored audio timeline across hard video cuts.
+- Added regression coverage for both new public LongVid contracts, legacy alias loading, custom-audio preservation and Settings PRO public-mode state.
+- Face Delivery now recognizes the whole-programme output of Long Keyframe Continuous: it tracks/refines the joined native frame master once instead of trying to decode the final technical interval latent as though it represented the complete programme. Ordinary I2V/FLF face delivery remains on the existing latent-based path.
+
 # R44.7 — Mixer realtime meters / smooth faders + Face preset stack + RTX UI polish (2026-10-06)
 
 - Video Editor audio slave now exposes realtime A1–A5 + master meter snapshots to IAMCCS AudioBoard Mixer.

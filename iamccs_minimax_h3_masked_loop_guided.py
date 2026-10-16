@@ -319,6 +319,8 @@ class IAMCCS_MiniMaxH3MaskedLoopGuidedSampler:
         from comfy_extras.nodes_minimax_h3 import MiniMaxH3SigmaShift
 
         shotplan = _resolve_shotplan(cine_linx)
+        if (shotplan.get("veda") or {}).get("enabled"):
+            raise ValueError("VeDA is not validated with Guided AV Loop masked attention. Disable VeDA for this experimental mode.")
         if str(shotplan.get("task_mode", "")).strip().lower() not in _GUIDED_AV_LOOP_MODES:
             raise ValueError(
                 "This isolated sampler only accepts GUIDED AV LOOP · EXPERIMENTAL; stable IAMCCS modes keep using their existing backends."

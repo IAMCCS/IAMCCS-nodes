@@ -142,12 +142,12 @@ class IAMCCS_R42ReferenceImagePromptBridge:
 
     RETURN_TYPES = (
         "STRING", "INT", "INT", "IMAGE", "BOOLEAN", "STRING", "FLOAT", "STRING",
-        "IMAGE", "IMAGE", "IMAGE",
+        "IMAGE", "IMAGE", "IMAGE", "STRING",
     )
     RETURN_NAMES = (
         "h3_prompt", "width", "height", "reference_image",
         "detail_enabled", "detail_model", "detail_strength", "branch_report",
-        "reference_image_2", "reference_image_3", "reference_image_4",
+        "reference_image_2", "reference_image_3", "reference_image_4", "vram_profile",
     )
     FUNCTION = "adapt"
     CATEGORY = "IAMCCS/MiniMax H3/Reference"
@@ -165,6 +165,7 @@ class IAMCCS_R42ReferenceImagePromptBridge:
 
     def adapt(self, prompt, project_json, cine_linx, direct_reference=None):
         settings = _settings_from_linx(cine_linx)
+        project = _project(project_json)
         task = str(settings.get("task_mode") or "").strip().lower()
         if task != "reference_image":
             raise ValueError(
@@ -176,6 +177,23 @@ class IAMCCS_R42ReferenceImagePromptBridge:
             raise ValueError("R42 H3 Image Generator: IAMCCS Prompter returned an empty final prompt.")
 
         preset = str(settings.get("h3_reference_image_preset") or "single_image")
+        project_preset = str(project.get("image_preset") or "single_image").strip().lower()
+        if project_preset == "reference_sheet":
+            project_preset = "character_sheet"
+        if project_preset not in {"single_image", "character_sheet"}:
+            project_preset = "single_image"
+        if project_preset != preset:
+            raise ValueError(
+                "R42 H3 Image Generator: conflicting image presets. "
+                f"Prompter={project_preset}, Settings PRO={preset}. "
+                "Choose the same preset in both controls, run AI again, then press Inject."
+            )
+        request = str(project.get("request") or "").strip()
+        if not request and preset != "character_sheet":
+            raise ValueError(
+                "R42 H3 Image Generator: the Prompter request is empty. "
+                "Enter what image to create, run AI, then press Inject; cached analysis alone is not render authority."
+            )
         if preset == "character_sheet":
             suffix = (
                 "One static character reference sheet on a single canvas: clearly separated, non-overlapping "
@@ -183,8 +201,10 @@ class IAMCCS_R42ReferenceImagePromptBridge:
             )
         else:
             suffix = (
-                "One static production reference image on a single canvas, with no temporal action, montage, "
-                "multi-shot sequence or motion language."
+                "Create exactly one full-frame static production image. Ignore any earlier request for a reference "
+                "sheet, contact sheet, split screen, grid, panels, multiple views or montage. Do not add borders or "
+                "separators. The result must be one continuous scene filling the entire canvas, with no temporal "
+                "action, multi-shot sequence or motion language."
             )
         if suffix.lower() not in text.lower():
             text = f"{text}\n\nOUTPUT CONTRACT:\n{suffix}"
@@ -223,7 +243,8 @@ class IAMCCS_R42ReferenceImagePromptBridge:
             f"detail={'off' if detail_model == 'None' else detail_model}"
         )
         padded = (references + [None, None, None, None])[:4]
-        return text, width, height, padded[0], detail_enabled, detail_model, detail_strength, report, padded[1], padded[2], padded[3]
+        profile = str(settings.get("h3_reference_image_vram_profile") or "up_to_12gb_safe")
+        return text, width, height, padded[0], detail_enabled, detail_model, detail_strength, report, padded[1], padded[2], padded[3], profile
 
 
 class IAMCCS_H3OptionalSameSizeDetail:

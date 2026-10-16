@@ -358,6 +358,37 @@ class IAMCCS_MiniMaxH3UniversalNativeWindowedR42(IAMCCS_MiniMaxH3PixelRefineR38B
         return super().finish(*args, **kwargs)
 
 
+class IAMCCS_MiniMaxH3UniversalDeliverySourceR49:
+    """Request mapped True Long segments only while that generation mode is active."""
+
+    FIELDS = {"latent": "LATENT", "frames": "IMAGE", "audio": "AUDIO",
+              "index": "INT", "total": "INT", "head_trim": "INT", "conditioning": "CONDITIONING"}
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"cine_linx": (SUPERNODE_LINX_TYPE,)}, "optional": {
+            f"{branch}_{name}": (kind, {"lazy": True, "forceInput": True})
+            for branch in ("selected", "continuous") for name, kind in cls.FIELDS.items()
+        }}
+
+    RETURN_TYPES = tuple(FIELDS.values())
+    RETURN_NAMES = tuple(FIELDS)
+    FUNCTION = "select"
+    CATEGORY = CATEGORY
+
+    @staticmethod
+    def _branch(cine_linx):
+        return "continuous" if _resolve_shotplan(cine_linx).get("task_mode") == "longvid_keyframe_continuous" else "selected"
+
+    def check_lazy_status(self, cine_linx, **kwargs):
+        branch = self._branch(cine_linx)
+        return [f"{branch}_{name}" for name in self.FIELDS if kwargs.get(f"{branch}_{name}") is None]
+
+    def select(self, cine_linx, **kwargs):
+        branch = self._branch(cine_linx)
+        return tuple(kwargs[f"{branch}_{name}"] for name in self.FIELDS)
+
+
 class IAMCCS_MiniMaxH3UniversalFastR42(IAMCCS_MiniMaxH3FastLatent2PassR41):
     """Shared lazy H3 delivery socket: R41 full-pass or Ultimate tiled."""
 
@@ -374,7 +405,15 @@ class IAMCCS_MiniMaxH3UniversalFastR42(IAMCCS_MiniMaxH3FastLatent2PassR41):
             return IAMCCS_MiniMaxH3UltimateTiledDelivery().finish(*args, **kwargs)
         if route != FAST_ROUTE:
             raise ValueError(f"R42 Fast branch was requested for incompatible route: {route}")
-        kwargs["queue_next_segment"] = True
+        plan = _resolve_shotplan(cine_linx)
+        # True Long renders all native PSkf intervals inside one execution and
+        # exposes them as mapped delivery items. They must all finish in this
+        # prompt; the historical per-prompt queue advance would enqueue the
+        # same programme again after every upscaled checkpoint.
+        kwargs["queue_next_segment"] = (
+            str(plan.get("task_mode", "") or "").strip().lower()
+            != "longvid_keyframe_continuous"
+        )
         return super().finish(*args, **kwargs)
 
 
@@ -876,6 +915,7 @@ class IAMCCS_MiniMaxH3UniversalEditorPolicyR42:
 
 
 NODE_CLASS_MAPPINGS = {
+    "IAMCCS_MiniMaxH3UniversalDeliverySourceR49": IAMCCS_MiniMaxH3UniversalDeliverySourceR49,
     "IAMCCS_MiniMaxH3ExactLTXDeliverySizeR42": IAMCCS_MiniMaxH3ExactLTXDeliverySizeR42,
     "IAMCCS_MiniMaxH3UniversalRouteControlR42": IAMCCS_MiniMaxH3UniversalRouteControlR42,
     "IAMCCS_MiniMaxH3UniversalNativeCheckpointR42": IAMCCS_MiniMaxH3UniversalNativeCheckpointR42,
