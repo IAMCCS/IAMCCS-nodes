@@ -115,7 +115,8 @@ class IAMCCS_H3FaceSwapInput:
             "source_fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0}),
         }, "optional": {"source_video": ("IMAGE", {"lazy": True}), "reference_face": ("IMAGE", {"lazy": True}),
                          "source_audio": ("AUDIO", {"lazy": True}), "source_mask": ("MASK", {"lazy": True}),
-                         "reference_face_2": ("IMAGE", {"lazy": True})}}
+                         "reference_face_2": ("IMAGE", {"lazy": True}),
+                         "environment_image": ("IMAGE", {"lazy": True})}}
 
     RETURN_TYPES = ("IAMCCS_SUPERNODE_LINX",)
     RETURN_NAMES = ("cine_linx",)
@@ -134,11 +135,13 @@ class IAMCCS_H3FaceSwapInput:
         media = ["reference_face"] if prompter_video else ["source_video", "reference_face", "source_audio"]
         if mode == FACE_SWAP_MODE:
             media.extend(["source_mask", "reference_face_2"])
+        elif not cine_linx.get("resources", {}).get("iamccs_h3_edit_environment"):
+            media.append("environment_image")
         return [name for name in media
                 if not (name == "reference_face" and prompter_reference)
                 if name in kwargs and kwargs[name] is None]
 
-    def attach(self, cine_linx, source_fps, source_video=None, reference_face=None, source_audio=None, source_mask=None, reference_face_2=None):
+    def attach(self, cine_linx, source_fps, source_video=None, reference_face=None, source_audio=None, source_mask=None, reference_face_2=None, environment_image=None):
         from .iamccs_minimax_h3_atomic_backend import _resolve_shotplan
         from .iamccs_supernodes_linx import build_stage_linx_payload
         plan = _resolve_shotplan(cine_linx)
@@ -163,7 +166,17 @@ class IAMCCS_H3FaceSwapInput:
                     raise ValueError("SwapChar reference is unavailable. Add the image again in Prompter, or remove it to use the backend reference.")
             if not torch.is_tensor(source_video) or not len(source_video) or not torch.is_tensor(reference_face) or not len(reference_face):
                 raise ValueError("SUBJECT SWAP -LorA needs a source video and Picture 1.")
-            data = {"video": source_video, "fps": float(source_fps), "reference": reference_face, "audio": source_audio}
+            prompter_environment = cine_linx.get("resources", {}).get("iamccs_h3_edit_environment")
+            if prompter_environment:
+                from .iamccs_h3_reference_image import _load_visual_path, _decode_visual
+                environment_image = _decode_visual(prompter_environment)
+                if environment_image is None:
+                    environment_image = _load_visual_path(prompter_environment)
+                if environment_image is None:
+                    raise ValueError("SwapChar environment is unavailable. Add Picture 2 again.")
+            if environment_image is not None and (not torch.is_tensor(environment_image) or environment_image.ndim != 4 or not len(environment_image)):
+                raise ValueError("SwapChar environment must be a non-empty image.")
+            data = {"video": source_video, "fps": float(source_fps), "reference": reference_face, "audio": source_audio, "environment": environment_image}
             resources = {FACE_SWAP_RESOURCE: data}
             if isinstance(source_audio, dict):
                 resources["iamccs_minimax_h3_custom_audio"] = source_audio

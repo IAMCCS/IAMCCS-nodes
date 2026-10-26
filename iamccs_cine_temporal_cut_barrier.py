@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Sequence, Tuple
 
 import torch
 import comfy.ldm.modules.attention
+from comfy.ldm.modules.attention import AttentionTensorContainer
 
 
 SUPERNODE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX"
@@ -147,6 +148,7 @@ def _slice_mask(mask: Any, q_start: int, q_end: int, k_start: int, k_end: int, g
 
 
 def _attention(q, k, v, module, mask, transformer_options):
+    q, k, v = AttentionTensorContainer(q), AttentionTensorContainer(k), AttentionTensorContainer(v)
     if mask is None:
         return comfy.ldm.modules.attention.optimized_attention(
             q,
@@ -155,6 +157,7 @@ def _attention(q, k, v, module, mask, transformer_options):
             module.heads,
             attn_precision=module.attn_precision,
             transformer_options=transformer_options,
+            preferred_attention=getattr(module, "comfy_attention", None),
         )
     return comfy.ldm.modules.attention.optimized_attention_masked(
         q,
@@ -164,6 +167,7 @@ def _attention(q, k, v, module, mask, transformer_options):
         mask,
         attn_precision=module.attn_precision,
         transformer_options=transformer_options,
+        preferred_attention=getattr(module, "comfy_attention", None),
     )
 
 
@@ -180,7 +184,11 @@ def _temporal_barrier_forward(
     transformer_options=None,
 ):
     transformer_options = transformer_options or {}
-    if context is not None:
+    native_mask = mask is not None and not torch.is_tensor(mask)
+    if native_mask and not plan["runtime"].get("warned_native_mask"):
+        print("[IAMCCS TemporalCutBarrier] native guide mask: using the model attention without the cut barrier")
+        plan["runtime"]["warned_native_mask"] = True
+    if context is not None or transformer_options.get("stg_skip_self_attn", False) or native_mask:
         return original_forward(
             x,
             context=context,

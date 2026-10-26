@@ -28,6 +28,7 @@ from .iamccs_h3_advisor import describe_asset, recipes, validate_settings
 from .iamccs_h3_face_swap import settings_schema as face_swap_schema, face_swap_settings, validate_plan as validate_face_swap_plan
 from .iamccs_h3_character_swap_lora import settings_schema as character_swap_schema, swap_plan
 from .iamccs_h3_vfx_edit import settings_schema as vfx_edit_schema
+from .iamccs_h3_omni import configure as configure_omni
 
 from .iamccs_minimax_h3_shotboard_core import (
     H3_FPS,
@@ -3915,6 +3916,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         }
         phase_b_auto_extend_requested = bool(
             not longvid_requested
+            and not (saved_settings.get("h3_omni_enabled", False) and requested_task_key == "ref2va")
             and requested_task_key in phase_b_extend_supported_tasks
             and same_authored_slot
             and float(duration_seconds) > AUTO_EXTEND_SLOT_THRESHOLD_SECONDS + 1e-6
@@ -4089,6 +4091,8 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 shift_video, shift_audio,
             )
         plan = build_shotplan(
+            defer_reference_windows=bool(saved_settings.get("h3_omni_enabled", False) and compiled_task_mode == "ref2va"),
+            multishot_boundary_mode=str(saved_settings.get("h3_multishot_boundary_mode", "joint")),
             timeline_data=timeline_data,
             global_prompt=global_prompt,
             duration_seconds=duration_seconds,
@@ -4302,7 +4306,11 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                     "no handoff is required."
                 )
         latent_tail_enabled = bool(latent_tail_requested)
-        multishot_tail_enabled = bool(multishot_hardcut_requested and len(plan.get("chunks", [])) > 1)
+        multishot_isolated = plan.get("multishot_boundary_mode") == "isolated_shots"
+        multishot_tail_enabled = bool(multishot_hardcut_requested and (
+            any(not c.get("isolated_shot_start", True) for c in plan.get("chunks", []))
+            if multishot_isolated else len(plan.get("chunks", [])) > 1
+        ))
         latent_tail_enabled = latent_tail_enabled or multishot_tail_enabled
         active_tail_frames = 22 if multishot_hardcut_requested else int(flf_continuity_tail_frames)
         plan["longvid_latent_tail"] = {
@@ -4355,7 +4363,13 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         }
         longvid_lipsync_active = bool(longvid_active and longvid_guided_audio_drive and longvid_lipsync_requested)
         active_longvid_mode = str(plan.get("task_mode", "") or "").lower()
-        if active_longvid_mode == "longvid_multishot_hardcut":
+        if active_longvid_mode == "longvid_multishot_hardcut" and multishot_isolated:
+            timeline_audio_contract = (
+                "LONG MULTI-SHOT · ISOLATED SHOTS: each camera is sampled and decoded separately, "
+                "with a discarded 17-frame tail handle and exact editorial cuts. Local shot prompts take priority. "
+                "Custom Audio retains the global performance clock; native audio is generated separately per shot."
+            )
+        elif active_longvid_mode == "longvid_multishot_hardcut":
             timeline_audio_contract = (
                 "LONG MULTI-SHOT · FL2VA: multiple authored camera slots share one joint AV latent per native window. "
                 "Image guides and cut prompts follow Shotboard intervals. AudioBoard remains one locked global performance; "
@@ -4788,6 +4802,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "route": "face_detailer_then_optional_upscale" if bool(face_detailer_enabled) else "native_then_optional_upscale",
             "source": "IAMCCS_ShotboardH3Settings" if _h3_settings_from_cine_linx(cine_linx) else "shotboard_defaults",
         }
+        configure_omni(plan, saved_settings)
         chunk_frames = [int(chunk.get("frame_count", 0) or 0) for chunk in plan.get("chunks", [])]
         max_chunk_frames = max(chunk_frames, default=0)
         native_load = (float(width) * float(height) * max(1, max_chunk_frames)) / (960.0 * 544.0 * 124.0)
@@ -5643,7 +5658,8 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
             context_images = soft_context["images_rgb8"]
             if context_images.ndim == 4 and int(context_images.shape[0]) > 0:
                 soft_context_path = _continuation_soft_context_path(
-                    output_folder, base_name, active_render_id, safe_stage_label,
+                    output_folder, base_name, active_render_id,
+                    f"{safe_stage_label}_seg_{current_segment + 1:04d}" if provenance_plan.get("fasth3_omni", {}).get("longvid") else safe_stage_label,
                 )
                 _require_new_output_path(soft_context_path)
                 _encode_images(
@@ -5667,6 +5683,22 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
                     "MiniMax H3 Continuation Soft AV context saved | %s | frames=%d",
                     soft_context_path, int(context_images.shape[0]),
                 )
+
+        omni_longvid = provenance_plan.get("fasth3_omni", {}).get("longvid", False)
+        if omni_longvid and current_segment > 0:
+            if soft_context_path is None:
+                raise RuntimeError("Omni LongVid is missing its decoded AV handover context.")
+            previous = output_folder / f"{base_name}_{active_render_id}_{safe_stage_label}_seg_{current_segment:04d}.mp4"
+            softened = output_folder / "_iamccs_omni_soft_av" / previous.name
+            _require_new_output_path(softened)
+            cfg = provenance_plan["fasth3_omni"]
+            _soften_outgoing_segment_with_context(
+                previous, soft_context_path, softened,
+                video_frames=int(cfg["soft_video_frames"]), video_curve="smoothstep",
+                audio_ms=0.0 if provenance_plan.get("audio_mode") == "h3_custom_audio_drive" else float(cfg["soft_audio_ms"]), fps=fps)
+            if provenance_plan.get("audio_mode") == "h3_custom_audio_drive":
+                shutil.copy2(previous.with_suffix(previous.suffix + ".locked_audio.npz"),
+                             softened.with_suffix(softened.suffix + ".locked_audio.npz"))
 
         bridge_source = bridge_images if torch.is_tensor(bridge_images) else images
         if checkpoint_extended_mode:
@@ -5724,7 +5756,7 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
                     )
                 from .iamccs_minimax_h3_continuity import save_longvid_sampled_latent_tail
                 _endpoint_frames = None
-                if _hd_tail or bool(_tail_plan.get("timeline_director_native", False)) or _tail_plan.get("task_mode") == "longvid_multishot_hardcut":
+                if _hd_tail or bool(_tail_plan.get("timeline_director_native", False)) or _tail_plan.get("task_mode") == "longvid_multishot_hardcut" or _tail_plan.get("fasth3_omni", {}).get("longvid"):
                     _chunks = _tail_plan.get("chunks") if isinstance(_tail_plan.get("chunks"), list) else []
                     _chunk = _chunks[int(current_segment)] if int(current_segment) < len(_chunks) else {}
                     if isinstance(_chunk, dict):
@@ -5830,7 +5862,7 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
                 plan_mode = str(_resolve_shotplan(cine_linx).get("task_mode", "") or "").strip().lower()
             except Exception:
                 plan_mode = ""
-        editor_longvid = plan_mode.startswith("longvid") or plan_mode == "fl2va_extended_av"
+        editor_longvid = plan_mode.startswith("longvid") or plan_mode == "fl2va_extended_av" or bool(omni_longvid)
         effective_merge_segments = bool(merge_segments)
         if str(editor_delivery_policy or "") == "per_slot_except_longvid":
             effective_merge_segments = bool(editor_longvid)
@@ -5855,7 +5887,16 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
             final_name = f"{base_name}_{active_render_id}_{safe_stage_label}_full.mp4"
             final_path = output_folder / final_name
             _require_new_output_path(final_path)
-            if same_time_handover:
+            if omni_longvid:
+                segment_paths = [output_folder / "_iamccs_omni_soft_av" / path.name for path in segment_paths[:-1]] + segment_paths[-1:]
+                if not all(path.is_file() for path in segment_paths):
+                    raise RuntimeError("Omni LongVid has an incomplete Soft AV segment chain.")
+                _concat_videos(segment_paths, final_path, audio_edge_fade_ms=0.0,
+                               audio_join_policy="locked_master" if provenance_plan.get("audio_mode") == "h3_custom_audio_drive" else "sample_exact_declick",
+                               extend_soft_av_ms=0.0, extend_boundary_polish_ms=0.0,
+                               extend_boundary_polish_strength=0.0)
+                audio_join_policy = "omni_hidden_context_soft_av"
+            elif same_time_handover:
                 _concat_videos_same_time_handover(segment_paths, final_path, decoded_overlap_frames, fps)
             elif same_time_direct:
                 _concat_videos_same_time_direct(segment_paths, final_path, decoded_overlap_frames, fps)
@@ -7582,6 +7623,13 @@ class IAMCCS_ShotboardH3Settings:
                 "default": "from_acceleration", "display_name": "ATTENTION & MEMORY · BACKEND",
                 "tooltip": "Independent of sampling steps and Turbo LoRA. From acceleration preserves existing workflows. FastH3, SLA, Fused and Progressive manage their own attention. Sol and SLA/Fused cannot be combined with VEDA.",
             }),
+            "h3_multishot_boundary_mode": (["joint", "isolated_shots"], {
+                "default": "joint", "display_name": "MULTI-SHOT · CAMERA CUTS",
+                "tooltip": "JOINT preserves native multi-shot sampling. ISOLATED SHOTS samples/decodes each camera separately and discards a 17-frame tail handle before exact cuts. Uses the local shot prompt when present. Custom Audio remains one master; native audio is independent per shot. More sampling executions.",
+            }),
+            "h3_omni_enabled": ("BOOLEAN", {"default": False,
+                "display_name": "REF2VA · FASTH3 OMNI 8 STEP",
+                "tooltip": "Full reference-conditioned checkpoint, not a LoRA. Select the Omni loader. Native PDD32, Euler/simple, 8 steps, shifts 12/3. Other modes keep their own model route."}),
         })}
 
     RETURN_TYPES = (SUPERNODE_LINX_TYPE,)

@@ -8,8 +8,6 @@ const block = src.slice(src.indexOf('function setAssistantMode('), src.indexOf('
 const calls = [];
 const values = { audio_mode: 'h3_custom_audio_drive', extended_av_profile: 'balanced_12_16gb' };
 const context = {
-  restoreNamedValues: () => {},
-  shotboardMode: () => values.task_mode || "i2va",
   linkedShotboard: () => null, setShotboardMode: (_, mode) => { values.task_mode = mode; },
   setShotboardAudio: (_, value) => { calls.push(value); values.audio_mode = value; },
   widget: (_, name) => ({value: values[name]}), setValue: (_, name, value) => { values[name] = value; },
@@ -17,7 +15,8 @@ const context = {
   document: {dispatchEvent: () => {}}, CustomEvent: class {},
 };
 vm.createContext(context);
-vm.runInContext(block, context);
+const modeReader = src.slice(src.indexOf('function shotboardMode('), src.indexOf('function setShotboardMode('));
+vm.runInContext(modeReader + block, context);
 for (const mode of ['t2va', 'i2va', 't2va_continuous', 'fl2va_extended_av', 'fl2va_stable', 'fl2va_continuous', 'keyframe_joint_native', 'longvid_multishot_hardcut', 'longvid_keyframe_continuous', 'longvid_guides']) {
   context.setAssistantMode({}, mode);
   assert.equal(values.audio_mode, 'h3_custom_audio_drive', `${mode} replaced custom audio`);
@@ -44,7 +43,8 @@ context.COMPATIBILITY_ONLY = new Set();
 context.app = {graph: {change() {}}};
 context.linkedShotboard = () => ({id: 2});
 context.shotboardMode = () => 'latent_go_ahead';
-vm.runInContext(autoCode, context);
+const restoreCode = src.slice(src.indexOf('function restoreNamedValues('), src.indexOf('function serializeNamedValues('));
+vm.runInContext(restoreCode + autoCode, context);
 const autoNode = {};
 context.importSettingsFromShotboard(autoNode);
 assert.equal(values.task_mode, 'auto_from_timeline');

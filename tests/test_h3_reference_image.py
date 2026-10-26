@@ -1,6 +1,5 @@
 import importlib.util
 import json
-import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -49,10 +48,7 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual(advisor.task_family('reference_image'), 'ref2va')
         self.assertEqual(advisor.task_family('i2va'), 'fl2va')
         import json
-        fixture = os.environ.get('IAMCCS_TEST_REFERENCE_IMAGE_API', '')
-        if not fixture:
-            self.skipTest('Set IAMCCS_TEST_REFERENCE_IMAGE_API to test an external workflow')
-        path = Path(fixture)
+        path = Path('X:/1_UNIVERSAL_42_43/R42_REFERENCE_IMAGE_GENERATOR_API.json')
         prompt = json.loads(path.read_text(encoding='utf-8'))['prompt']
         self.assertEqual(prompt['811']['inputs']['task_mode'], 'reference_image')
         self.assertEqual(prompt['9']['inputs']['model'], ['8',0])

@@ -14,6 +14,7 @@ import functools
 import hashlib
 from .iamccs_h3_seed_policy import chunk_seed
 from .iamccs_h3_veda import apply_veda
+from . import iamccs_h3_omni as omni
 import gc
 import json
 import logging
@@ -28,6 +29,7 @@ import torch.nn.functional as F
 from PIL import Image, ImageOps
 
 import comfy.utils
+from comfy.nested_tensor import NestedTensor
 import folder_paths
 from .iamccs_h3_advisor import describe_asset, validate_speed_asset
 
@@ -1693,26 +1695,23 @@ def _release_conditioning_models(shotplan: dict[str, Any], effective_task: str =
     generation node runs. Qwen3-VL (and any conditioning-time VAE residency)
     can therefore be unloaded before the H3 model is requested.
 
-    Local REF2VA + Fun ControlNet exception:
+    Fun ControlNet exception (both first/last and reference model families):
     ComfyUI's MiniMax H3 Fun ControlNet wrapper builds its control latent lazily
     on first diffusion forward and restores the model patchers that were active
     around that VAE encode. Unloading them here can leave a dead/None patcher
-    in the restore list. Preserve model residency only for that exact branch.
+    in the restore list. Preserve residency whenever this lazy control is active.
     """
     fun_controlnet = (
         shotplan.get("fun_controlnet")
         if isinstance(shotplan.get("fun_controlnet"), dict)
         else {}
     )
-    ref2va_fun_controlnet = (
-        bool(fun_controlnet.get("enabled", False))
-        and str(effective_task or "").strip().lower().startswith("ref2va")
-    )
+    preserve_fun_controlnet = bool(fun_controlnet.get("enabled", False))
 
     try:
         import comfy.model_management as mm
 
-        if ref2va_fun_controlnet:
+        if preserve_fun_controlnet:
             # Surgical local fix: do NOT invalidate model patchers needed later
             # by MiniMaxH3FunControlNetApply.prepare_control_latent().
             mm.soft_empty_cache()
@@ -1739,8 +1738,8 @@ def _release_conditioning_models(shotplan: dict[str, Any], effective_task: str =
             handle = ctypes.windll.kernel32.GetCurrentProcess()
             ctypes.windll.psapi.EmptyWorkingSet(handle)
             report = (
-                "REF2VA+FunControlNet model patchers preserved; CUDA cache cleared; Windows working set trimmed"
-                if ref2va_fun_controlnet
+                "FunControlNet model patchers preserved; CUDA cache cleared; Windows working set trimmed"
+                if preserve_fun_controlnet
                 else "conditioning models unloaded; CUDA cache cleared; Windows working set trimmed"
             )
             LOG.info("MiniMax H3 pre-sampler barrier: %s", report)
@@ -1748,8 +1747,8 @@ def _release_conditioning_models(shotplan: dict[str, Any], effective_task: str =
         except Exception as exc:
             LOG.warning("MiniMax H3 working-set trim warning: %s", exc)
     report = (
-        "REF2VA+FunControlNet model patchers preserved; CUDA cache cleared"
-        if ref2va_fun_controlnet
+        "FunControlNet model patchers preserved; CUDA cache cleared"
+        if preserve_fun_controlnet
         else "conditioning models unloaded; CUDA cache cleared"
     )
     LOG.info("MiniMax H3 pre-sampler barrier: %s", report)
@@ -1769,6 +1768,7 @@ class IAMCCS_MiniMaxH3AtomicModelRouter:
             "optional": {
                 "fl2va_model": ("MODEL", {"lazy": True}),
                 "ref2va_model": ("MODEL", {"lazy": True}),
+                "omni_model": ("MODEL", {"lazy": True}),
             },
         }
 
@@ -1780,6 +1780,8 @@ class IAMCCS_MiniMaxH3AtomicModelRouter:
     @staticmethod
     def _input_name(cine_linx, segment_index):
         shotplan = _resolve_shotplan(cine_linx)
+        if omni.enabled(shotplan):
+            return "omni_model"
         if _external_continuation_active(shotplan, int(segment_index)):
             return "fl2va_model"
         if _is_fused_turbo_preview(shotplan):
@@ -1790,6 +1792,8 @@ class IAMCCS_MiniMaxH3AtomicModelRouter:
 
     def check_lazy_status(self, cine_linx, segment_index, fl2va_model=None, ref2va_model=None, **kwargs):
         selected = self._input_name(cine_linx, segment_index)
+        if selected == "omni_model":
+            return ["omni_model"] if kwargs.get("omni_model") is None else []
         if selected == "fused_turbo_model":
             return []
         if selected == "ref2va_model" and ref2va_model is None:
@@ -1798,8 +1802,13 @@ class IAMCCS_MiniMaxH3AtomicModelRouter:
             return ["fl2va_model"]
         return []
 
-    def select(self, cine_linx, segment_index, fl2va_model=None, ref2va_model=None):
+    def select(self, cine_linx, segment_index, fl2va_model=None, ref2va_model=None, omni_model=None):
         shotplan = _resolve_shotplan(cine_linx)
+        if omni.enabled(shotplan):
+            if omni_model is None:
+                raise ValueError("Connect the FastH3 Omni diffusion loader to Atomic Model Router.omni_model.")
+            omni.validate_model(omni_model)
+            return omni_model, "ref2va", "FastH3 Omni | native PDD32 | 8 forwards | joint AV target"
         external_continuation = _external_continuation_active(shotplan, int(segment_index))
         if _is_fused_turbo_preview(shotplan) and not external_continuation:
             chunk = _chunk(shotplan, segment_index)
@@ -2049,7 +2058,10 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             latent_tail_requested,
             int(latent_tail_cfg.get("tail_frames", 22) or 22),
         )
-        latent_tail_active = bool(latent_tail_requested and int(segment_index) > 0)
+        latent_tail_active = bool(
+            latent_tail_requested and int(segment_index) > 0
+            and not chunk.get("isolated_shot_start", False)
+        )
         latent_tail_context_frames = 0
         if latent_tail_active:
             latent_tail_context_frames = max(
@@ -2292,8 +2304,9 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
         if shotplan.get("task_mode") == "v2va_face_swap_lora":
             from .iamccs_h3_character_swap_lora import reference_media
             swap_images, ref_video, ref_video_audio = reference_media(cine_linx, shotplan, chunk, segment_index, frames)
-            external_images = [swap_images[0], *external_images[1:]]
-            shotplan = {**shotplan, "reference_video_role": "motion", "reference_roles": ["subject_identity", *_reference_roles(shotplan)[1:]]}
+            external_images = swap_images
+            shotplan = {**shotplan, "reference_video_role": "motion", "reference_roles": [
+                "subject_identity", "composition" if torch.is_tensor(swap_images[1]) else "disabled", "disabled", "disabled"]}
 
         if first is None and task in {"i2va", "fl2va"} and not isinstance(native_av_context, dict) and torch.is_tensor(ref_image_1):
             first = ref_image_1[:1]
@@ -2556,12 +2569,16 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             # performance slot is the fallback, even when an older CineInfo
             # node still says `cine_info_h3_only`.
             prompter_paths = shotplan.get("reference_image", {}).get("prompter_paths")
+            if omni.enabled(shotplan):
+                omni_images = h3_resources.get("iamccs_h3_omni_image_files", [])
+                if omni_images:
+                    prompter_paths = [item["path"] for item in omni_images if isinstance(item, dict) and item.get("path")]
             if shotboard_ref_mode == "v2va_face_swap_lora":
                 plan_paths = []
             elif isinstance(prompter_paths, list):
                 plan_paths = prompter_paths
-                external_images = [None] * 4
-                roles = ["subject_identity"] * 4
+                external_images = [None] * (9 if omni.enabled(shotplan) else 4)
+                roles = ["subject_identity"] * len(external_images)
             elif slot_lipsync_mode:
                 plan_paths = []
                 slot_image = str(chunk.get("first_image", "") or "").strip()
@@ -2574,7 +2591,11 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             else:
                 plan_paths = [] if str(h3_info.get("reference_source", "")) == "cine_info_h3_only" else _unique_plan_image_paths(shotplan)
             refs: dict[str, torch.Tensor] = {}
-            for index in range(4):
+            omni_media = h3_resources.get("iamccs_h3_omni_media", {}) if omni.enabled(shotplan) else {}
+            if omni.enabled(shotplan) and len(external_images) == 4:
+                external_images += [omni_media.get(f"reference_image_{i}") for i in range(5, 10)]
+                roles += ["subject_identity"] * 5
+            for index in range(len(external_images)):
                 role = roles[index]
                 if role == "disabled":
                     continue
@@ -2652,11 +2673,12 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 active_audio = ref_video_audio
             if isinstance(active_audio, dict) and (
                 slot_lipsync_mode or audio_role != "off" or str(shotplan.get("audio_mode", "")) == "h3_ref2va_audio"
+                or (omni.enabled(shotplan) and h3_resources.get("iamccs_h3_omni_voice_bindings"))
             ):
                 # A timeline source was already trimmed to this performance
                 # slot above. CineInfoH3 reference audio remains a longer
                 # clip and is sliced on the planned global time as before.
-                sliced = active_audio if slot_lipsync_mode else _audio_slice(
+                sliced = active_audio if slot_lipsync_mode or omni.enabled(shotplan) else _audio_slice(
                     active_audio,
                     float(chunk.get("timeline_start_seconds", 0.0)),
                     float(chunk.get("duration_seconds", frames / H3_FPS)),
@@ -2669,6 +2691,8 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                     "role": "lipsync_timing_source" if slot_lipsync_mode else (audio_role if audio_role != "off" else "driven_audio"),
                 })
                 voice_picture_index = int(shotplan.get("voice_reference_picture_index", 0) or 0)
+                if omni.enabled(shotplan) and h3_resources.get("iamccs_h3_omni_voice_bindings"):
+                    voice_picture_index = 0
                 if voice_picture_index > 0:
                     voice_picture_label = f"<Picture {voice_picture_index}>"
                     if any(item["label"] == voice_picture_label for item in manifest):
@@ -2687,6 +2711,41 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 else:
                     voice_pairing_note = ""
 
+            if omni.enabled(shotplan):
+                ref_videos = dict(ref_videos or {})
+                ref_video_audios = dict(ref_video_audios or {})
+                ref_audios = dict(ref_audios or {})
+                for i in range(2, 4):
+                    video = omni_media.get(f"reference_video_{i}")
+                    if torch.is_tensor(video):
+                        ordinal = len(ref_videos) + 1
+                        video, resized = _resize_reference_image(video, reference_shotplan, f"ref_video_{ordinal}")
+                        ref_videos[f"ref_video_{ordinal}"] = video
+                        manifest.append({"label": f"<Video {ordinal}>", "role": "reference_video"})
+                        audio = omni_media.get(f"reference_video_audio_{i}")
+                        if isinstance(audio, dict):
+                            ref_video_audios[f"ref_video_audio_{ordinal}"] = audio
+                    audio = omni_media.get(f"reference_audio_{i}")
+                    if isinstance(audio, dict):
+                        ordinal = len(ref_audios) + len(ref_video_audios) + 1
+                        ref_audios[f"ref_audio_{i}"] = audio
+                        manifest.append({"label": f"<Audio {ordinal}>", "role": "voice_reference"})
+                ref_videos = ref_videos or None
+                ref_video_audios = ref_video_audios or None
+                for i, item in enumerate(h3_resources.get("iamccs_h3_omni_audio_files", []), 1):
+                    if isinstance(item, dict) and item.get("path"):
+                        audio = _load_timeline_audio(item["path"])
+                        if audio is None:
+                            raise ValueError(f"Omni voice file cannot be loaded: {item['path']}")
+                        ref_audios[f"ref_audio_{i}"] = audio
+                ref_audios = dict(sorted(ref_audios.items())) or None
+                manifest = omni.reference_manifest(refs, ref_videos, ref_video_audios, ref_audios)
+                labels = {entry["label"] for entry in manifest}
+                for binding in h3_resources.get("iamccs_h3_omni_voice_bindings", []):
+                    for kind, key in (("Picture", "picture"), ("Audio", "audio")):
+                        label = f"<{kind} {int(binding[key])}>"
+                        if label not in labels:
+                            raise ValueError(f"Omni voice binding needs {label}; connect that reference or disable the binding.")
             if not refs and not ref_videos and not ref_audios and not chunk.get("reference_still"):
                 raise ValueError("REF2VA requires at least one enabled image, video, or audio reference")
             prompt = _reference_header(manifest, prompt)
@@ -2779,6 +2838,17 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 tail_frames=latent_tail_context_frames,
             )
             motion_state["latent_tail_details"] = latent_tail_details
+            if omni.enabled(shotplan):
+                # Omni's distilled student needs the complete inherited video
+                # prefix pinned; keep LongVid's audio protect/release policy.
+                video_mask, audio_mask = latent["noise_mask"].unbind()
+                video_mask = video_mask.clone()
+                video_mask[:, :, :int(latent_tail_details["video_tokens"]), :, :] = 0.0
+                latent["noise_mask"] = NestedTensor((video_mask, audio_mask))
+                latent_tail_details.update(mask_end=0.0, video_mask_end=0.0, omni_video_pin="exact")
+                motion_state.update(omni_soft_av=True, run_and_gun_join="soft_av",
+                                    soft_video_frames=shotplan["fasth3_omni"]["soft_video_frames"],
+                                    soft_audio_ms=shotplan["fasth3_omni"]["soft_audio_ms"])
             LOG.info(
                 "MiniMax H3 Latent Tail A/B applied | chunk=%d/%d | tail=%df | "
                 "video_tokens=%d | taper=%.2f->%.2f | RGB bridge preserved=yes",
@@ -3493,7 +3563,7 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
             isinstance(sampled, dict)
             and isinstance(motion_state, dict)
             and bool(motion_state.get("active"))
-            and str(motion_state.get("method")) == "external_saved_av_continuation"
+            and (str(motion_state.get("method")) == "external_saved_av_continuation" or motion_state.get("omni_soft_av"))
             and str(motion_state.get("run_and_gun_join", "soft_av")) == "soft_av"
         ):
             # Preserve only the small, time-corresponding end of B's hidden AV
@@ -3761,7 +3831,8 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
             native_frames, native_audio = restore_audio(native_frames, native_audio, cine_linx, chunk)
         if not torch.is_tensor(native_frames) or native_frames.ndim != 4 or native_frames.shape[0] < 1:
             raise RuntimeError("MiniMax H3 video VAE returned no frames")
-        if str(shotplan.get("task_mode", "") or "").strip().lower() == "longvid_multishot_hardcut":
+        if (str(shotplan.get("task_mode", "") or "").strip().lower() == "longvid_multishot_hardcut"
+                or omni.enabled(shotplan)):
             visible_frames = max(
                 1,
                 int(chunk.get("visible_frame_count", chunk.get("requested_frame_count", chunk.get("frame_count", 1))) or 1),

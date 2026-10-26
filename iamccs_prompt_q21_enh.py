@@ -1,4 +1,4 @@
-"""IAMCCS native Qwen-Image 2.1 prompt enhancement / reference routing node.
+"""IAMCCS native Qwen-Image 2.1 prompt enhancement and reference routing node.
 
 V3.2: fast PE + queue rerun + multi-reference routing strategies.
 Copyright (c) 2026 IAMCCS. MIT License.
@@ -7,23 +7,52 @@ from __future__ import annotations
 
 import json
 import logging
-import math
 import re
 from pathlib import Path
-
-import comfy.utils
 
 LOG = logging.getLogger("iamccs.prompt_q21_enh")
 _VISION_TOKEN = "<|vision_start|><|image_pad|><|vision_end|>"
 _PROMPT_DIR = Path(__file__).resolve().parent / "prompts" / "qwen_image_2_1"
 _GENERATION_PROFILES = {
-    "official": {"t2i": 16256, "edit": 24000},
-    "balanced": {"t2i": 8192, "edit": 8192},
-    "fast": {"t2i": 4096, "edit": 4096},
+    # Practical output caps. The upstream 16k/24k context limits can turn a
+    # missing stop token into an hours-long local generation.
+    "official": {"t2i": 768, "edit": 512},
+    "balanced": {"t2i": 512, "edit": 384},
+    "fast": {"t2i": 256, "edit": 256},
 }
 _MAX_TOKEN_LIMIT = 32768
-_PE_IMAGE_MAX_PIXELS = 1024 * 1024
 _SYSTEM_PROMPT_CACHE = {}
+
+_SAFE_EDIT_SYSTEM = """
+You are a conservative image-edit instruction translator. The user wants an existing image changed, not
+redesigned. Read the image only to identify the explicitly named target. Translate the request into concise,
+literal English and clarify only the requested operation. Never add a new subject, object, background, style,
+camera, composition, lighting, pose, garment, accessory, or cleanup operation. Every unmentioned element must
+remain unchanged. For a local attribute edit, name the target, the new attribute, and one short preservation
+clause. Do not describe the whole image and do not turn an edit into a new scene.
+
+Return exactly one JSON object and nothing else:
+{"rewritten_prompt":"<concise English edit instruction>","wh_ratio":"","ratio_follow":"<image1>"}
+Use wh_ratio only when the user explicitly requests a new aspect ratio; then ratio_follow must be empty.
+""".strip()
+
+_TRANSLATE_EDIT_SYSTEM = """
+Translate the user's image-edit instruction into English without expanding, interpreting, improving, or
+changing its intent. Preserve the target, action, colour, count, position, negations, and image references
+exactly. Do not add any operation. Return exactly one JSON object and nothing else:
+{"rewritten_prompt":"<literal English translation>","wh_ratio":"","ratio_follow":"<image1>"}
+""".strip()
+
+_BACKGROUND_WORDS = ("background", "backdrop", "sfondo", "fondale", "sky", "cielo")
+_BACKGROUND_ACTIONS = (
+    "change", "replace", "remove", "alter", "transform", "regenerate", "modify", "swap",
+    "cambia", "cambiare", "sostituisci", "sostituire", "rimuovi", "rimuovere", "modifica", "modificare",
+)
+_PRESERVATION_WORDS = ("keep", "preserve", "unchanged", "retain", "mantieni", "conserva", "invariat")
+_GLOBAL_EDIT_WORDS = (
+    "outpaint", "uncrop", "extend the image", "extend image", "expand the image", "expand image",
+    "estendi l'immagine", "estendere l'immagine", "espandi l'immagine", "espandere l'immagine",
+)
 
 _POSE_TEXT_ONLY = """
 POSE EXTRACTION MODE — IMPORTANT:
@@ -74,21 +103,6 @@ def _load_system_prompt(task):
         raise RuntimeError(f"Qwen-Image 2.1 {task} system prompt is empty: {path}")
     _SYSTEM_PROMPT_CACHE[task] = prompt
     return prompt
-
-
-def _prepare_pe_image(image):
-    """Match the official prompt-enhancer training cap without touching generator inputs."""
-    shape = getattr(image, "shape", None)
-    if shape is None or len(shape) != 4:
-        return image
-    height, width = int(shape[1]), int(shape[2])
-    if height * width <= _PE_IMAGE_MAX_PIXELS:
-        return image
-    scale = math.sqrt(_PE_IMAGE_MAX_PIXELS / float(height * width))
-    target_width = max(32, math.floor(width * scale / 32) * 32)
-    target_height = max(32, math.floor(height * scale / 32) * 32)
-    samples = image.movedim(-1, 1)
-    return comfy.utils.common_upscale(samples, target_width, target_height, "lanczos", "disabled").movedim(1, -1)
 
 
 def _chat(system, user):
@@ -175,6 +189,45 @@ def _normalize_user_refs(text, slot_to_reference):
     return text
 
 
+def _mentions_any(text, words):
+    lowered = str(text).lower()
+    return any(word in lowered for word in words)
+
+
+def _introduces_background_edit(original, rewritten):
+    """Catch the most damaging PE drift without rejecting preservation clauses."""
+    if _mentions_any(original, _BACKGROUND_WORDS):
+        return False
+    lowered = str(rewritten).lower()
+    for word in _BACKGROUND_WORDS:
+        start = 0
+        while True:
+            index = lowered.find(word, start)
+            if index < 0:
+                break
+            window = lowered[max(0, index - 64):index + len(word) + 64]
+            if _mentions_any(window, _BACKGROUND_ACTIONS) and not _mentions_any(window, _PRESERVATION_WORDS):
+                return True
+            start = index + len(word)
+    return False
+
+
+def _guard_local_edit(original, rewritten):
+    """Prefer the user's own instruction when the rewrite invents a background operation."""
+    guarded = False
+    result = str(rewritten).strip()
+    if _introduces_background_edit(original, result):
+        LOG.warning("PromptQ21Enh: blocked an unrequested background edit introduced by the enhancer")
+        result = str(original).strip()
+        guarded = True
+    if not _mentions_any(original, _BACKGROUND_WORDS) and not _mentions_any(original, _GLOBAL_EDIT_WORDS):
+        result = result.rstrip(" .") + (
+            ". Keep the background, framing, camera, lighting, subject identity, pose, "
+            "and every other unmentioned element unchanged."
+        )
+    return result, guarded
+
+
 def _auto_mode(prompt, connected_slots):
     if len(connected_slots) < 2:
         return "general"
@@ -221,8 +274,13 @@ class IAMCCS_PromptQ21Enh:
                 "seed": ("INT", {"default": 42, "min": 0, "max": 0xFFFFFFFF, "control_after_generate": True}),
                 "generation_profile": (["official", "balanced", "fast"], {
                     "default": "official",
-                    "tooltip": "Official uses Qwen's 16256 T2I / 24000 Edit limits. Balanced uses 8192; Fast uses 4096."
+                    "tooltip": "Practical local caps: Official 768/512, Balanced 512/384, Fast 256 tokens (T2I/Edit)."
                 }),
+                "rewrite_policy": (["safe_edit", "translate_only", "official", "bypass"], {
+                    "default": "safe_edit",
+                    "tooltip": "For Edit, safe_edit is conservative; bypass sends the user's instruction unchanged."
+                }),
+                "thinking_mode": ("BOOLEAN", {"default": False}),
             },
         }
 
@@ -239,7 +297,8 @@ class IAMCCS_PromptQ21Enh:
 
     def enhance(self, clip, task, prompt, extra_instructions="", missing_image_policy="error", reference_mode="auto",
                 temperature=1.0, top_p=0.95, top_k=20, presence_penalty=-1.0,
-                max_new_tokens=0, rerun_each_queue=True, seed=42, generation_profile="official", **kwargs):
+                max_new_tokens=0, rerun_each_queue=True, seed=42, generation_profile="official",
+                rewrite_policy="safe_edit", thinking_mode=False, **kwargs):
         if not str(prompt).strip():
             return "", "", "", "", "", True, None, None, "empty prompt", None
         if task not in {"t2i", "edit"}:
@@ -276,13 +335,26 @@ class IAMCCS_PromptQ21Enh:
         images = []
         for slot in routed_slots:
             tensor = slot_tensors[slot]
-            images.extend(_prepare_pe_image(tensor[row:row+1]) for row in range(len(tensor)))
+            # Match the known-good Qwen 2.1 enhancer exactly: preserve the source
+            # pixels passed to the vision encoder instead of silently resampling.
+            images.extend(tensor[row:row+1] for row in range(len(tensor)))
+
+        policy = str(rewrite_policy or "safe_edit").strip().lower()
+        if policy not in {"safe_edit", "translate_only", "official", "bypass"}:
+            raise ValueError(f"Unknown IAMCCS PromptQ21Enh rewrite policy: {rewrite_policy}")
+        if not edit:
+            policy = "official"
 
         if edit:
             normalized_prompt = _normalize_user_refs(prompt, slot_to_reference)
             references = " ".join(f"<image{i}> {_VISION_TOKEN}" for i in range(1, len(images) + 1))
-            user = f"{references}\n{normalized_prompt}"
-            system = _load_system_prompt("edit")
+            user = f"{references} {normalized_prompt}"
+            if policy == "safe_edit":
+                system = _SAFE_EDIT_SYSTEM
+            elif policy == "translate_only":
+                system = _TRANSLATE_EDIT_SYSTEM
+            else:
+                system = _load_system_prompt("edit")
             if mode == "pose_text_only":
                 if len(routed_slots) < 2:
                     raise ValueError("pose_text_only requires at least image_1 and image_2")
@@ -298,37 +370,44 @@ class IAMCCS_PromptQ21Enh:
         if str(extra_instructions).strip():
             system += "\nAdditional constraints:\n" + str(extra_instructions).strip()
 
-        token_kwargs = {"skip_template": True, "min_length": 1, "thinking": True}
-        if edit:
-            token_kwargs["images"] = images
-        tokens = clip.tokenize(_chat(system, user), **token_kwargs)
-        try:
-            requested_tokens = int(max_new_tokens or 0)
-        except (TypeError, ValueError):
-            requested_tokens = 0
-        profile = str(generation_profile or "official").strip().lower()
-        if profile not in _GENERATION_PROFILES:
-            raise ValueError(f"Unknown IAMCCS PromptQ21Enh generation profile: {generation_profile}")
-        generation_limit = _GENERATION_PROFILES[profile][task] if requested_tokens <= 0 else min(max(requested_tokens, 64), _MAX_TOKEN_LIMIT)
-        if requested_tokens > _MAX_TOKEN_LIMIT:
-            LOG.warning("PromptQ21Enh: max_new_tokens=%s clamped to %s", requested_tokens, generation_limit)
-        generated = clip.generate(
-            tokens, do_sample=True, max_length=generation_limit,
-            temperature=float(temperature), top_k=int(top_k), top_p=float(top_p),
-            min_p=0.0, repetition_penalty=1.0,
-            presence_penalty=(0.0 if edit else 1.5) if float(presence_penalty) < 0 else float(presence_penalty),
-            seed=int(seed),
-        )
-        thinking, answer = _split_answer(clip.decode(generated))
-        positive, ratio, follow, parsed = _parse(answer, edit)
-        if not parsed:
-            LOG.warning("PromptQ21Enh: response was not valid prompt JSON; returning answer text")
+        guarded_background = False
+        if edit and policy == "bypass":
+            positive, ratio, follow, thinking, parsed = normalized_prompt, "", "<image1>", "", True
+        else:
+            token_kwargs = {"skip_template": True, "min_length": 1, "thinking": bool(thinking_mode)}
+            if edit:
+                token_kwargs["images"] = images
+            tokens = clip.tokenize(_chat(system, user), **token_kwargs)
+            try:
+                requested_tokens = int(max_new_tokens or 0)
+            except (TypeError, ValueError):
+                requested_tokens = 0
+            profile = str(generation_profile or "official").strip().lower()
+            if profile not in _GENERATION_PROFILES:
+                raise ValueError(f"Unknown IAMCCS PromptQ21Enh generation profile: {generation_profile}")
+            generation_limit = _GENERATION_PROFILES[profile][task] if requested_tokens <= 0 else min(max(requested_tokens, 64), _MAX_TOKEN_LIMIT)
+            if requested_tokens > _MAX_TOKEN_LIMIT:
+                LOG.warning("PromptQ21Enh: max_new_tokens=%s clamped to %s", requested_tokens, generation_limit)
+            generated = clip.generate(
+                tokens, do_sample=True, max_length=generation_limit,
+                temperature=float(temperature), top_k=int(top_k), top_p=float(top_p),
+                min_p=0.0, repetition_penalty=1.0,
+                presence_penalty=(0.0 if edit else 1.5) if float(presence_penalty) < 0 else float(presence_penalty),
+                seed=int(seed),
+            )
+            thinking, answer = _split_answer(clip.decode(generated))
+            positive, ratio, follow, parsed = _parse(answer, edit)
+            if not parsed:
+                LOG.warning("PromptQ21Enh: response was not valid prompt JSON; returning answer text")
+
+        if edit and policy in {"safe_edit", "translate_only", "bypass"}:
+            positive, guarded_background = _guard_local_edit(normalized_prompt, positive)
 
         # Route images for TextEncodeQwenImage21. Connect these outputs instead of the raw loaders.
         gen1 = slot_tensors.get(routed_slots[0]) if routed_slots else None
         gen2 = slot_tensors.get(routed_slots[1]) if len(routed_slots) > 1 else None
         gen3 = slot_tensors.get(routed_slots[2]) if len(routed_slots) > 2 else None
-        routing_info = "general"
+        routing_info = f"general; policy={policy}"
         if mode == "pose_text_only":
             # Critical: donor image is PE-only, not sent to the image generator.
             gen1 = slot_tensors.get(1)
@@ -343,6 +422,9 @@ class IAMCCS_PromptQ21Enh:
             routing_info = "CANVAS2: generator_image_1 = original image_2 canvas; generator_image_2 = original image_1 subject donor"
         elif mode == "pose_multiref":
             routing_info = "POSE_MULTIREF: both full photos are sent downstream; blending/duplication remains possible"
+
+        if guarded_background:
+            routing_info += "; enhancer background drift rejected: original instruction restored"
 
         return positive, "", ratio, follow, thinking, parsed, gen1, gen2, routing_info, gen3
 

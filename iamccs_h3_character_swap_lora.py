@@ -69,7 +69,8 @@ def reference_media(cine_linx, plan, chunk, segment_index, frames):
     video = _fit_frames(_select_frames(source["video"], indices, "character_swap_source"),
         int(plan["width"]), int(plan["height"]), config.get("source_fit", "canvas_pad"))
     audio = _slice_audio(source.get("audio"), start_seconds=start, requested_frames=requested, aligned_frames=frames)
-    return [source["reference"][:1], None, None, None], video, audio
+    environment = source.get("environment")
+    return [source["reference"][:1], environment[:1] if environment is not None else None, None, None], video, audio
 
 
 def restore_source_audio(images, audio, cine_linx, plan, chunk, segment_index):

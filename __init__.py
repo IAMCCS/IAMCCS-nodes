@@ -3132,3 +3132,32 @@ try:
     NODE_DISPLAY_NAME_MAPPINGS.update(_H3_PSKF_NAMES)
 except Exception as _h3_pskf_error:
     log.exception("[IAMCCS] H3 PSkf registration failed: %s", _h3_pskf_error)
+
+from .iamccs_drama3_gpu import (
+    NODE_CLASS_MAPPINGS as _DRAMA3_GPU_CLASSES,
+    NODE_DISPLAY_NAME_MAPPINGS as _DRAMA3_GPU_NAMES,
+)
+NODE_CLASS_MAPPINGS.update(_DRAMA3_GPU_CLASSES)
+NODE_DISPLAY_NAME_MAPPINGS.update(_DRAMA3_GPU_NAMES)
+
+# KittenTTS 2 runs in its own configured Python environment.
+try:
+    from .iamccs_kitten_tts2 import NODE_CLASS_MAPPINGS as _KITTEN_CLASSES, NODE_DISPLAY_NAME_MAPPINGS as _KITTEN_NAMES
+    NODE_CLASS_MAPPINGS.update(_KITTEN_CLASSES)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_KITTEN_NAMES)
+except Exception as _kitten_error:
+    log.exception("[IAMCCS] KittenTTS 2 registration failed: %s", _kitten_error)
+
+from .iamccs_moss_frame_designer import (
+    NODE_CLASS_MAPPINGS as _MOSS_FRAME_CLASSES,
+    NODE_DISPLAY_NAME_MAPPINGS as _MOSS_FRAME_NAMES,
+)
+NODE_CLASS_MAPPINGS.update(_MOSS_FRAME_CLASSES)
+NODE_DISPLAY_NAME_MAPPINGS.update(_MOSS_FRAME_NAMES)
+
+from .iamccs_moss_frame_output import (
+    NODE_CLASS_MAPPINGS as _MOSS_RESULT_CLASSES,
+    NODE_DISPLAY_NAME_MAPPINGS as _MOSS_RESULT_NAMES,
+)
+NODE_CLASS_MAPPINGS.update(_MOSS_RESULT_CLASSES)
+NODE_DISPLAY_NAME_MAPPINGS.update(_MOSS_RESULT_NAMES)

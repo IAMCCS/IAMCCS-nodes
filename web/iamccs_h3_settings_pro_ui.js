@@ -53,9 +53,9 @@ const GROUPS = [
   { id: "engine_i2va", label: "I2VA", title: "I2VA · Opening-image shot engine", modeEngine: true, fields: ["audio_mode", "reference_resize_policy", "reference_resize_megapixels", "reference_resize_filter", "ref_image_size"] },
   { id: "engine_flf", label: "FLF KEYFRAMES", title: "FLF · Authored keyframe-to-keyframe engine", modeEngine: true, fields: ["audio_mode", "flf_join_mode", "flf_overlap_frames", "flf_continuity_mode", "flf_continuity_tail_frames", "flf_continuity_audio"] },
   { id: "engine_flf_continuous", label: "FL2VA NATIVE AV", title: "FL2VA · Native AV keyframe-chain engine", modeEngine: true, fields: ["audio_mode", "flf_continuity_tail_frames", "flf_continuity_audio", "flf_join_mode", "flf_overlap_frames"] },
-  { id: "engine_ref2va", label: "REF2VA", title: "REF2VA · Identity / object / style reference engine", modeEngine: true, fields: ["audio_mode", "reference_role_1", "reference_role_2", "reference_role_3", "reference_role_4", "reference_video_role", "reference_audio_role", "reference_resize_policy", "reference_resize_megapixels", "reference_resize_filter", "ref_image_size"] },
+  { id: "engine_ref2va", label: "REF2VA", title: "REF2VA · Identity / object / style reference engine", modeEngine: true, fields: ["h3_omni_enabled", "audio_mode", "reference_role_1", "reference_role_2", "reference_role_3", "reference_role_4", "reference_video_role", "reference_audio_role", "reference_resize_policy", "reference_resize_megapixels", "reference_resize_filter", "ref_image_size"] },
   { id: "engine_ref2vid", label: "REF2VID AUDIO", title: "REF2VID · Locked audio performance engine", modeEngine: true, fields: ["audio_mode", "voice_reference_picture_index", "reference_role_1", "reference_role_2", "reference_role_3", "reference_role_4", "reference_video_role", "reference_audio_role", "reference_resize_policy", "reference_resize_megapixels", "reference_resize_filter", "ref_image_size"] },
-  { id: "engine_multishot", label: "LONG MULTI-SHOT", title: "Long Multi-Shot · Hard Cut engine", modeEngine: true, fields: ["audio_mode", "reference_resize_policy", "reference_resize_megapixels", "reference_resize_filter", "prompt_mapping"] },
+  { id: "engine_multishot", label: "LONG MULTI-SHOT", title: "Long Multi-Shot · Hard Cut engine", modeEngine: true, fields: ["h3_multishot_boundary_mode", "audio_mode", "reference_resize_policy", "reference_resize_megapixels", "reference_resize_filter", "prompt_mapping"] },
   { id: "engine_keyframe_continuous", label: "LONG KEYFRAME", title: "Long Keyframe · selectable native or Extended AV backend", modeEngine: true, fields: ["longvid_continuous_engine", "flf_continuity_tail_frames", "flf_continuity_audio", "extended_av_profile", "extended_av_custom_window_frames", "extended_av_custom_overlap_frames", "extended_av_pin_mode", "extended_av_mask_profile", "audio_mode", "reference_resize_policy", "reference_resize_megapixels", "reference_resize_filter", "ref_image_size"] },
   { id: "engine_true_long", label: "TRUE LONG", title: "Pianosequenza True Long · shared AV boundary", modeEngine: true, fields: ["flf_continuity_tail_frames", "flf_continuity_audio", "audio_mode", "ref_image_size"] },
   { id: "engine_keyframe_joint", label: "KEYFRAME JOINT", title: "Keyframe Joint · Native / latent-new engine", modeEngine: true, fields: ["audio_mode", "keyframe_joint_latent_new", "reference_resize_policy", "reference_resize_megapixels", "reference_resize_filter", "ref_image_size"] },
@@ -137,9 +137,10 @@ const MODE_CHOICES = [
   ["3 · FLF · KEYFRAME-TO-KEYFRAME", "fl2va_stable", "A→B, B→C with authored destination keyframes. This is not long-take extension."],
   ["4 · FL2VA · KEYFRAME CHAIN + NATIVE AV", "fl2va_continuous", "Carry a native AV context between authored FL2VA destination chunks; distinct from automatic long-take extension."],
   ["REF2VA · VFX EDIT", "ref2va_vfx_edit", "Edit a source video with the VFX LoRA and aligned AddGuide; native or shared second-pass delivery."],
+  ["FASTH3 OMNI · 8 STEP", "ref2va_omni", "Full Omni checkpoint: one joint AV target up to 362 frames. Longer timelines use experimental LongVid AV-tail windows with Soft AV handover. Ordered image, video and voice references; dedicated loader."],
   ["7 · REF2VA · REFERENCES", "ref2va", "Reference blocks for identity, object or style; no temporal carry."],
   ["8 · REF2VID · AUDIO PERFORMANCE", "ref2vid_lipsync", "Reference image plus one locked AudioBoard performance per hard-cut shot."],
-  ["10 · LONG MULTI-SHOT · FL2VA", "longvid_multishot_hardcut", "Timed camera slots share one joint FL2VA AV latent per native window. Cut prompts and image guides follow Shotboard durations; one continuous native or custom audio timeline spans all angles. Longer films continue through native AV tails."],
+  ["10 · LONG MULTI-SHOT · FL2VA", "longvid_multishot_hardcut", "Choose joint native multi-shot or isolated camera shots for exact editorial cuts. Isolated shots discard a generated tail handle and use each local shot prompt; Custom Audio keeps the full performance on one timeline."],
   ["11 · LONGVID · TRUE LONG PSkf", "longvid_keyframe_continuous", "One continuous authored timeline powered exclusively by Pianosequenza True Long with native video/audio PSkf checkpoints."],
   ["12 · KEYFRAME JOINT · NATIVE", "keyframe_joint_native", "Multiple positioned keyframes inside one native H3 sample window. Latent New remains an explicit experimental option inside this mode's Engine panel."],
   ["LATENTGOAHEAD · EXPERIMENTAL", "latent_go_ahead", "Continue with original AV latent history in past time. Compatible acceleration and H3 generated audio; masked audio excludes progressive sampling. Requires the LatentGoAhead branch; no pixel crossfade. Context controls are on that node."],
@@ -158,7 +159,7 @@ const MODE_ENGINE_GROUP = Object.freeze({
   reference_image: "engine_reference_image", t2va: "engine_t2va", i2va: "engine_i2va",
   fl2va_stable: "engine_flf", fl2va_continuous: "engine_flf_continuous",
   fl2va_extended_av: "extension", t2va_continuous: "extension",
-  ref2va_vfx_edit: "vfx_edit", ref2va: "engine_ref2va", ref2vid_lipsync: "engine_ref2vid",
+  ref2va_vfx_edit: "vfx_edit", ref2va_omni: "engine_ref2va", ref2va: "engine_ref2va", ref2vid_lipsync: "engine_ref2vid",
   longvid_multishot_hardcut: "engine_multishot", longvid_keyframe_continuous: "engine_true_long",
   pianosequenza_true_long: "engine_true_long",
   keyframe_joint_native: "engine_keyframe_joint", v2va_controlnet: "control",
@@ -846,6 +847,7 @@ function importSettingsFromShotboard(node) {
 }
 function assistantModeKey(node, mode = shotboardMode(node)) {
   if (node.properties?.iamccs_auto_from_shotboard_active) return "auto_from_shotboard";
+  if (String(mode) === "ref2va" && widget(node, "h3_omni_enabled")?.value) return "ref2va_omni";
   if (String(mode) !== "fl2va") return String(mode);
   const board = linkedShotboard(node);
   return String(widget(board || node, "flf_continuity_mode")?.value || "stable_keyframes") === "native_av_context"
@@ -909,7 +911,8 @@ function setAssistantMode(node, key) {
   }
   // Only the two legacy FL2VA assistant aliases map back to the historical
   // `fl2va` task. Extended AV is a real independent backend mode.
-  const actualMode = ["fl2va_stable", "fl2va_continuous"].includes(String(key)) ? "fl2va" : key;
+  setValue(node, "h3_omni_enabled", key === "ref2va_omni", false);
+  const actualMode = key === "ref2va_omni" ? "ref2va" : ["fl2va_stable", "fl2va_continuous"].includes(String(key)) ? "fl2va" : key;
   setShotboardMode(node, actualMode);
   if (node.properties.iamccs_r49_all_modes) {
     for (const target of connectedNodes(node)) {
@@ -917,6 +920,7 @@ function setAssistantMode(node, key) {
       if (Array.isArray(modes)) target.mode = modes.includes(actualMode) ? 0 : 2;
     }
   }
+  if (key === "ref2va_omni") applyRecipe(node, "omni");
   if (key === "v2va_controlnet") applyRecipe(node, "control");
   if (key === "v2va_face_swap") applyRecipe(node, "face");
   if (String(key) === "reference_image") {
@@ -1089,6 +1093,7 @@ function assistantTurboAssets(node, family) {
 function applyAssistantTurbo(node, name) {
   const asset = assistantTurboAssets(node, modeFamily(shotboardMode(node))).find(item => item.name === name);
   if (!asset) return false;
+  setValue(node, "h3_omni_enabled", false, false);
   const values = widget(node, "turbo_lora_name").options.iamccs_h3_recipes[asset.recipe].values;
   const set = (key, value) => setValue(node, key, value, false);
   rememberAttentionChoice(node);
@@ -1119,7 +1124,18 @@ function selectedAttention(node) {
 function attentionLabel(node) {
   return integratedAttention(node) || ATTENTION_PRESETS.find(([,id]) => id === selectedAttention(node))?.[0] || friendly(selectedAttention(node));
 }
+function omniActive(node) {
+  return Boolean(widget(node, "h3_omni_enabled")?.value) && shotboardMode(node) === "ref2va";
+}
+function omniLockedField(node, name) {
+  return omniActive(node) && (["steps", "sampler_name", "scheduler", "denoise", "shift_video", "shift_audio", "acceleration"].includes(name)
+    || /^(turbo_|pdd_|fused_turbo_|h3_veda_|h3_sla_)/.test(name));
+}
+function omniLockedRecipe(node, id) {
+  return omniActive(node) && (["native", "pdd", "fasth3", "sla", "fused", "attention:sol_low_vram", "attention:sage_sol"].includes(id) || String(id).startsWith("turbo:") || String(id).startsWith("veda"));
+}
 function vedaAvailable(node) {
+  if (omniActive(node)) return false;
   const mode = integratedAttention(node) ? String(widget(node,"acceleration")?.value) : selectedAttention(node);
   return !["sol_low_vram", "sage_sol", "sol_adaptive_safe", "sol_adaptive_balanced", "h3_sla", "matlowai_fused_turbo_manual_sigma"].includes(mode);
 }
@@ -1190,6 +1206,7 @@ function resetAcceleration(set) { set("turbo_mode", "off"); set("turbo_lora_name
 function selectedAcceleration(node) {
   const value = String(widget(node, "acceleration")?.value || "native");
   const turbo = String(widget(node, "turbo_mode")?.value || "off") !== "off";
+  if (widget(node, "h3_omni_enabled")?.value && shotboardMode(node) === "ref2va") return "omni";
   if (value === "h3_sla") return "sla";
   if (turbo && ["pdd_native_8step", "iamccs_progressive_pdd_2stage", "fasth3_dense_6step", "matlowai_fused_turbo_manual_sigma"].includes(value)) return "conflict";
   if (turbo) return "turbo";
@@ -1197,7 +1214,7 @@ function selectedAcceleration(node) {
 }
 function samplingRecipeLabel(node) {
   const selected = selectedAcceleration(node), steps = Number(widget(node,"steps")?.value || 0);
-  return ({native:"NATIVE",custom:"NATIVE / MANUAL",turbo:"TURBO",pdd:"PDD",fasth3:"FASTH3",sla:"SLA",fused:"FUSED",conflict:"CONFLICTING SPEED SETTINGS"}[selected] || selected) + ` · ${steps} STEPS`;
+  return ({omni:"FASTH3 OMNI",native:"NATIVE",custom:"NATIVE / MANUAL",turbo:"TURBO",pdd:"PDD",fasth3:"FASTH3",sla:"SLA",fused:"FUSED",conflict:"CONFLICTING SPEED SETTINGS"}[selected] || selected) + ` · ${steps} STEPS`;
 }
 function selectedMemory(node) {
   const value = String(widget(node, "performance_profile")?.value || "");
@@ -1257,7 +1274,13 @@ function deliveryModeAvailable(node, mode) {
 
 function applyRecipe(node, recipe) {
   const mode = shotboardMode(node), family = modeFamily(mode), set = (name, value) => setValue(node, name, value, false);
-  if (recipe === "native") {
+  if (["native", "pdd", "fasth3", "sla", "fused"].includes(recipe)) set("h3_omni_enabled", false);
+  if (recipe === "omni") {
+    resetAcceleration(set); set("h3_omni_enabled", true); set("acceleration", "h3_sage"); set("h3_attention_backend", "h3_sage");
+    set("steps", 8); set("sampler_name", "euler"); set("scheduler", "simple");
+    set("denoise", 1); set("shift_video", 12); set("shift_audio", 3);
+    set("h3_veda_enabled", false); set("secondary_lora_enabled", false);
+  } else if (recipe === "native") {
     rememberAttentionChoice(node);
     resetAcceleration(set); set("acceleration", "native"); set("steps", 20); set("sampler_name", "res_multistep");
     set("scheduler", "simple"); set("denoise", 1); set("shift_video", 12); set("shift_audio", 3);
@@ -1593,6 +1616,51 @@ function mount(node) {
   .h3p-recipe.active{border-color:#d0a45c;color:#f6d99d;background:#2b261d;box-shadow:inset 0 0 0 1px #6b5330}.h3p-recipe[disabled]::after{content:" · UNAVAILABLE";color:#e7a14e}.h3p-main[data-section="memory"] .h3p-recipes,.h3p-memory-recipes{padding:9px;border:1px solid #4d79a0;border-radius:9px;background:linear-gradient(135deg,#122838,#101c2a)}.h3p-main[data-section="memory"] .h3p-recipe,.h3p-memory-recipes .h3p-recipe{border-color:#4d83ad;color:#bfe4ff}.h3p-main[data-section="speed"] .h3p-recipes,.h3p-speed-recipes{padding:9px;border:1px solid #9a7140;border-radius:9px;background:linear-gradient(135deg,#302313,#201a14)}.h3p-main[data-section="speed"] .h3p-recipe,.h3p-speed-recipes .h3p-recipe{border-color:#b0844b;color:#ffe0a9}.h3p-delivery-recipes{padding:9px;border:1px solid #5b8a69;border-radius:9px;background:#12251a}.h3p-face-refine-presets-grid{width:100%;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;align-items:stretch}.h3p-face-refine-preset-group{min-width:0;display:flex;flex-direction:column;gap:7px;padding:10px;border:1px solid #4d79a0;border-radius:9px;background:linear-gradient(135deg,#122838,#101c2a)}.h3p-face-refine-preset-group .h3p-functional-title{margin:0;color:#e3bd78}.h3p-face-refine-preset-group .h3p-face-refine-group-note{min-height:32px;color:#8198a8;font-size:7px;line-height:1.35}.h3p-face-refine-preset-group .h3p-memory-recipes{padding:0;border:0;background:transparent;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin:0}.h3p-face-refine-preset-group .h3p-recipe{min-height:38px;padding:6px 7px;white-space:normal;line-height:1.2}.h3p-face-refine-preset-group .h3p-face-refine-help{min-height:44px;padding:7px 8px;border-left:2px solid #d0a45c;background:#0c1720;color:#9eb0bc;font-size:7px;line-height:1.4}.h3p-face-refine-preset-group .h3p-face-refine-help b{color:#f0d39e}.h3p-main[data-section="face_refine"]>.h3p-recipes{display:flex;align-items:stretch}.h3p-main[data-section="face_refine"]>.h3p-recipes>.h3p-recipe{min-height:42px}.h3p-face-refine-stack{width:100%;display:flex;align-items:center;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid #354b5f;background:#0d1821;color:#9fb0bc;font-size:7px;line-height:1.35}.h3p-face-refine-stack b{color:#f0d39e}.h3p-face-refine-reset{flex:0 0 auto;padding:7px 10px;border:1px solid #7d6850;background:#1d2020;color:#f0d39e;font:900 7px Consolas,monospace;cursor:pointer}.h3p-face-refine-reset:hover{border-color:#d0a45c;background:#2b261d}@media(max-width:1100px){.h3p-face-refine-presets-grid{grid-template-columns:1fr}.h3p-face-refine-preset-group .h3p-face-refine-group-note,.h3p-face-refine-preset-group .h3p-face-refine-help{min-height:0}}
   .h3p-assets{grid-column:1/-1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.h3p-library-title{grid-column:1/-1;margin-top:8px;padding:9px;border:1px solid #3d5062;border-radius:8px;background:#101a24;color:#e3bd78;font-size:8px;font-weight:900;letter-spacing:.09em}.h3p-library-title small{display:block;margin-top:4px;color:#8499a8;font-weight:500;letter-spacing:0}.h3p-asset{border:1px solid #43576a;border-radius:10px;background:#111d29;padding:8px;min-width:0}.h3p-asset img,.h3p-asset-placeholder{display:block;width:100%;height:145px;object-fit:contain;background:#080e15;border-radius:6px;color:#7e90a0;text-align:center;align-content:center}.h3p-cache-card .h3p-asset-placeholder{height:62px;color:#d7b879;font-weight:900;letter-spacing:.08em}.h3p-asset strong,.h3p-asset small{display:block;overflow-wrap:anywhere;margin:7px 0}.h3p-asset small{color:#8499a8}.h3p-asset-actions{display:flex;flex-wrap:wrap;gap:6px}.h3p-asset-actions button{padding:6px 9px;border:1px solid #a98754;border-radius:6px;background:#222b34;color:#f0d5a5;cursor:pointer}.h3p-asset-actions button.h3p-danger{border-color:#a85656;background:#34191d;color:#ffb5b5}.h3p-asset-actions button:disabled{opacity:.45;cursor:wait}.h3p-asset-status{grid-column:1/-1;color:#a5bac9}
   .h3p-open-editor{height:30px;padding:0 12px;border:1px solid #d0a45c;border-radius:7px;background:linear-gradient(135deg,#4a371d,#263543);color:#ffe2aa;font-size:8px;font-weight:900;letter-spacing:.06em;cursor:pointer;white-space:nowrap}.h3p-open-editor:hover{border-color:#f2ce88;background:linear-gradient(135deg,#6a4b21,#30485a);color:#fff3d5}.iamccs-h3pro:fullscreen,.iamccs-h3pro.h3p-monitor-open{width:100vw!important;height:100vh!important;max-width:none!important;max-height:none!important;padding:16px!important;border:0!important;border-radius:0!important}.iamccs-h3pro:fullscreen .h3p-layout,.iamccs-h3pro.h3p-monitor-open .h3p-layout{height:calc(100vh - 66px)!important;grid-template-columns:190px minmax(0,1fr) 330px}.iamccs-h3pro:fullscreen .h3p-head,.iamccs-h3pro.h3p-monitor-open .h3p-head{height:50px}.iamccs-h3pro:fullscreen .h3p-main,.iamccs-h3pro.h3p-monitor-open .h3p-main{padding:16px}.iamccs-h3pro:fullscreen .h3p-grid,.iamccs-h3pro.h3p-monitor-open .h3p-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.iamccs-h3pro:fullscreen .h3p-functional-grid,.iamccs-h3pro.h3p-monitor-open .h3p-functional-grid{grid-template-columns:repeat(3,minmax(0,1fr))}.h3p-monitor-host{position:fixed;inset:0;z-index:2147483640;background:#05080c;display:block;overflow:hidden}.h3p-monitor-host>.iamccs-h3pro{position:absolute;inset:0}.h3p-monitor-host .h3p-open-editor{border-color:#efbf6d;background:#6b4518}@media(max-width:1050px){.iamccs-h3pro:fullscreen .h3p-layout,.iamccs-h3pro.h3p-monitor-open .h3p-layout{grid-template-columns:145px minmax(0,1fr) 260px}.iamccs-h3pro:fullscreen .h3p-grid,.iamccs-h3pro.h3p-monitor-open .h3p-grid,.iamccs-h3pro:fullscreen .h3p-functional-grid,.iamccs-h3pro.h3p-monitor-open .h3p-functional-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
+  /* IAMCCS original Settings palette: presentation only. */
+  .iamccs-h3pro{background:linear-gradient(145deg,#192124,#101719 62%,#211A11);border-color:#A97C38;border-radius:3px;color:#F4F0E8;font-family:Arial,sans-serif;box-shadow:inset 0 1px 0 #ffffff12}
+  .iamccs-h3pro .h3p-head{border-bottom-color:#6D5630}
+  .iamccs-h3pro .h3p-title{font-family:Arial,sans-serif;color:#F5D18A;font-weight:800;letter-spacing:.04em}
+  .iamccs-h3pro .h3p-mark{border-radius:3px;background:#5D3C14;border-color:#D7A74F;color:#FFF0C5}
+  .iamccs-h3pro .h3p-sub{color:#AEBBBC}
+  .iamccs-h3pro .h3p-rail{background:linear-gradient(160deg,#192B2B,#11191B);border-color:#526469;border-radius:3px}
+  .iamccs-h3pro .h3p-main{background:linear-gradient(145deg,#172326,#11191B);border-color:#526469;border-radius:3px}
+  .iamccs-h3pro .h3p-truth{background:linear-gradient(145deg,#132522,#11191B);border-color:#4E8C70;border-radius:3px}
+  .iamccs-h3pro .h3p-tab{border-radius:3px;background:#202B2E;border-color:#587177;color:#D8E4E1;box-shadow:none}
+  .iamccs-h3pro .h3p-tab:hover{background:#2B3C3D;border-color:#AEBBBC;color:#F4F0E8}
+  .iamccs-h3pro .h3p-tab.active{background:linear-gradient(100deg,#5D3C14,#302A1D);border-color:#D7A74F;border-left-color:#F2C671;color:#FFF0C5;box-shadow:inset 2px 0 #F2C671}
+  .iamccs-h3pro .h3p-mode-folder{background:#241E30;border-color:#795B9C;color:#DBBEEE}
+  .iamccs-h3pro .h3p-mode-folder.open,.iamccs-h3pro .h3p-mode-folder.context-active{background:#352747;border-color:#B79ADB;color:#F3E8FF;box-shadow:inset 3px 0 #B79ADB}
+  .iamccs-h3pro .h3p-subtab{background:#201E29;border-color:#604B78;color:#C9BBD7}
+  .iamccs-h3pro .h3p-subtab.active{background:#45325F;border-color:#B79ADB;color:#F3E8FF;box-shadow:none}
+  .iamccs-h3pro .h3p-section-title,.iamccs-h3pro .h3p-truth h3{font-family:Arial,sans-serif;color:#F5D18A}
+  .iamccs-h3pro .h3p-section-note{color:#AEBBBC}
+  .iamccs-h3pro .h3p-functional{border-radius:3px;background:#152C38;border-color:#477C9C}
+  .iamccs-h3pro .h3p-functional-title{color:#EAC77F}
+  .iamccs-h3pro .h3p-field{border-radius:3px;background:#172326;border-color:#46595D}
+  .iamccs-h3pro .h3p-field label{color:#C5D3CF}
+  .iamccs-h3pro .h3p-field small{color:#9BAEAE}
+  .iamccs-h3pro .h3p-field input,.iamccs-h3pro .h3p-field select,.iamccs-h3pro .h3p-resolution{border-radius:2px;background:#0F1719;border-color:#64767A;color:#F1F4EE}
+  .iamccs-h3pro .h3p-field input:focus-visible,.iamccs-h3pro .h3p-field select:focus-visible{outline:2px solid #EAB86E;outline-offset:1px}
+  .iamccs-h3pro .h3p-field input[type=checkbox]{accent-color:#D7A74F}
+  .iamccs-h3pro .h3p-field.muted{background:#11191B;border-color:#46595D}
+  .iamccs-h3pro .h3p-recipe,.iamccs-h3pro .h3p-choice{border-radius:3px;background:#202B2E;border-color:#587177;color:#D8E4E1;box-shadow:none}
+  .iamccs-h3pro .h3p-recipe:not(:disabled):hover,.iamccs-h3pro .h3p-choice:not(:disabled):hover{background:#364137;border-color:#EAB86E;color:#FFF0C5;box-shadow:inset 0 1px #ffffff15}
+  .iamccs-h3pro .h3p-recipe.active,.iamccs-h3pro .h3p-choice.active{background:#5D3C14;border-color:#D7A74F;color:#FFF0C5;box-shadow:inset 0 1px #ffffff22}
+  .iamccs-h3pro .h3p-recipe:disabled{background:#172124;border-color:#46595D;color:#94A3A0;box-shadow:none}
+  .iamccs-h3pro .h3p-open-editor{border-radius:3px;border-color:#D7A74F;background:#5D3C14;color:#FFF0C5}
+  .iamccs-h3pro .h3p-open-editor:hover{background:#825A24;border-color:#F2C671;color:#FFF0C5}
+  .iamccs-h3pro .h3p-owner{background:#132522;border-radius:3px;color:#AFC1C1}
+  .iamccs-h3pro .h3p-owner strong{color:#EAC77F}
+  .iamccs-h3pro .h3p-truth-row{border-bottom-color:#354B43}
+  .iamccs-h3pro .h3p-truth-row span{color:#AFC1C1}
+  .iamccs-h3pro .h3p-truth-row b{color:#D6F6E4}
+  .iamccs-h3pro .h3p-memory-recipes,.iamccs-h3pro .h3p-guide-window-recipes,.iamccs-h3pro .h3p-attention-recipes{border-radius:3px;border-color:#477C9C;background:#152C38}
+  .iamccs-h3pro .h3p-speed-recipes,.iamccs-h3pro .h3p-turbo-recipes{border-radius:3px;border-color:#795B9C;background:#241E30}
+  .iamccs-h3pro .h3p-delivery-recipes,.iamccs-h3pro .h3p-face-refine-preset-group{border-radius:3px;border-color:#4E8C70;background:#17352D}
+  .iamccs-h3pro .h3p-face-refine-group-note,.iamccs-h3pro .h3p-face-refine-help{color:#AFC1C1}
+  .iamccs-h3pro .h3p-asset,.iamccs-h3pro .h3p-asset-actions button{border-radius:3px}
+  /* End original Settings palette. */
+
   </style>
   <div class="h3p-head"><span class="h3p-mark">IAMCCS PRO</span><div><div class="h3p-title">H3 Settings PRO</div><div class="h3p-sub">Render compiler · one queue truth · no editorial duplication</div></div><div class="h3p-mode"><span class="h3p-sub">SHOTBOARD MODE</span><b data-mode>NOT CONNECTED</b></div><button type="button" class="h3p-open-editor" data-open-editor>OPEN EDITOR</button></div>
   <div class="h3p-layout"><nav class="h3p-rail"></nav><main class="h3p-main"><div class="h3p-section-title"></div><div class="h3p-section-note"></div><div class="h3p-context"></div><div class="h3p-recipes"></div><div class="h3p-grid" data-grid></div></main><aside class="h3p-truth"><h3>Queue Truth</h3><div class="h3p-truth-list"></div><div class="h3p-health"></div></aside></div>`;
@@ -1801,6 +1869,13 @@ function mount(node) {
       control.disabled = true; box.classList.add("muted");
       box.title = name === "h3_attention_backend" ? `Managed by ${integratedAttention(node)}` : "VEDA is unavailable with Sol, SLA or Fused attention.";
     }
+    if (omniLockedField(node, name)) {
+      control.disabled = true; box.classList.add("muted");
+      box.title = "FastH3 Omni owns its 8-step recipe. Select another generation mode to use other speed adapters.";
+    }
+    if (name === "h3_attention_backend" && omniActive(node)) {
+      for (const option of control.options) option.disabled = ["sol_low_vram", "sage_sol"].includes(option.value);
+    }
     control.dataset.field = name; control.onchange = () => {
       const value = control.type === "checkbox" ? control.checked : control.type === "number" ? Number(control.value) : control.value;
       if (name === "duration_seconds") setShotboardDuration(node, value);
@@ -1987,6 +2062,7 @@ function mount(node) {
     app.graph?.change?.();
   }
   function addRecipe(parent, label, id, enabled = true, selected = false, handler = null) {
+    if (omniLockedRecipe(node, id)) enabled = false;
     const group = recipeGroup(parent);
     const button = document.createElement("button");
     const backendState = ["speed", "memory", "delivery", "turbo", "attention"].includes(group) || ["speed", "memory", "finish"].includes(active);
@@ -1995,6 +2071,7 @@ function mount(node) {
     button.className = `h3p-recipe${(selected || remembered) ? " active" : ""}`;
     button.textContent = id === "fused" ? "FUSED · 4 STEP · CHECKPOINT COMPATIBILITY" : label;
     button.disabled = !enabled;
+    if (omniLockedRecipe(node, id)) button.title = "Unavailable in FastH3 Omni. Select a standard H3 mode to use this recipe.";
     button.onclick = () => {
       if (!enabled) return;
       rememberRecipe(group, id);
@@ -2056,10 +2133,11 @@ function mount(node) {
     const selectedSpeed = selectedAcceleration(node);
     speed.classList.add("h3p-speed-recipes");
     addRecipe(speed, "NATIVE QUALITY", "native", true, selectedSpeed === "native"); addRecipe(speed, "PDD · 8 STEP", "pdd", accelerationAvailable(node,"pdd",mode), selectedSpeed === "pdd");
+    addRecipe(speed, "FASTH3 OMNI · 8 STEP", "omni", mode === "ref2va", selectedSpeed === "omni");
     addRecipe(speed, "FASTH3 · 6 STEP", "fasth3", accelerationAvailable(node,"fasth3",mode), selectedSpeed === "fasth3"); addRecipe(speed, "SLA · 4 STEP", "sla", accelerationAvailable(node,"sla",mode), selectedSpeed === "sla");
     addRecipe(speed, "FUSED FAST · T2VA ONLY", "fused", accelerationAvailable(node,"fused",mode), selectedSpeed === "fused"); grid.append(speed);
     const recipeInfo = document.createElement("p");
-    recipeInfo.textContent = `ACTIVE: ${samplingRecipeLabel(node)} · ${widget(node,"sampler_name")?.value} / ${widget(node,"scheduler")?.value}. Choose one sampling recipe: selecting another replaces its adapter and settings. Step counts are not added. VEDA, character/style LoRAs and output delivery are independent.`;
+    recipeInfo.textContent = `ACTIVE: ${samplingRecipeLabel(node)} · ${widget(node,"sampler_name")?.value} / ${widget(node,"scheduler")?.value}. Choose one sampling recipe: selecting another replaces its adapter and settings. Step counts are not added. Omni locks its trained recipe and disables VEDA. Other modes can use compatible adapters. Output delivery remains independent.`;
     recipeInfo.className = "h3p-sampling-summary"; grid.append(recipeInfo);
     ask("TURBO RECIPES · ALTERNATIVES IN THE SAME SAMPLING CHOICE");
     const turboGroups = document.createElement("div"); turboGroups.style.cssText = "grid-column:1/-1;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px";
@@ -2093,7 +2171,7 @@ function mount(node) {
     const vedaTitle = document.createElement("div"); vedaTitle.className = "h3p-functional-title"; vedaTitle.textContent = "VEDA · OPTIONAL SPARSE ATTENTION"; veda.append(vedaTitle);
     const vedaFields = document.createElement("div"); vedaFields.className = "h3p-functional-grid";
     for (const field of ["h3_veda_enabled", "h3_veda_predictor"]) { const control = makeControl(field); if (control) vedaFields.append(control); }
-    const vedaNote = document.createElement("p"); vedaNote.textContent = vedaAvailable(node) ? "Optional sparse attention; keeps the sampling step count. AUTO selects the matching T2VA/R2VA predictor. Requires Veda-on-ComfyUI and its predictor." : "Unavailable with Sol, SLA or Fused attention. Select Sage / Auto Low VRAM to use VEDA.";
+    const vedaNote = document.createElement("p"); vedaNote.textContent = omniActive(node) ? "Unavailable in the native FastH3 Omni profile. Select a standard H3 mode to use VEDA." : vedaAvailable(node) ? "Optional sparse attention; keeps the sampling step count. AUTO selects the matching T2VA/R2VA predictor. Requires Veda-on-ComfyUI and its predictor." : "Unavailable with Sol, SLA or Fused attention. Select Sage / Auto Low VRAM to use VEDA.";
     veda.append(vedaFields, vedaNote); grid.append(veda);
 
     ask("5 · CHOOSE A VRAM PRESET"); const memory = document.createElement("div"); memory.className = "h3p-recipes h3p-memory-recipes";
@@ -2439,7 +2517,7 @@ function mount(node) {
           return { available: swap.available || detailer.available, reason: "Connect the optional SAM3 Subject Swap or Face Detailer branch to activate these controls." };
         })() : null;
     q(".h3p-section-note").textContent = group.assistant ? "Answer in order; every accepted tag updates Queue Truth immediately."
-      : active === "engine_multishot" ? "Shotboard slots define timed camera angles inside one joint FL2VA AV sample. Longer timelines use technical windows with native AV context. AudioBoard drives the complete performance; H3 native audio is generated across the shots. Check generated cut accuracy in the preview."
+      : active === "engine_multishot" ? "JOINT retains the original native multi-shot sample. ISOLATED SHOTS keeps each camera in separate sampling/decoding windows and discards a 17-frame generated tail before exact cuts. Local shot prompts take priority; Custom Audio preserves the master timing. Native audio is independent per shot, and sampling requires more executions."
       : active === "engine_keyframe_continuous" ? "Five actual options: native TimelineDirector/AudioCon (22, 39 or 56 frames incoming-owned overlap), distinct Extended AV masked-pin/trim backend (39f SAFE preset), native Evolving with timed prompt beats, and experimental native DRIFT/PHASE. Native Delivery for first tests."
       : active === "engine_keyframe_joint" ? "Native is the stable default inside one H3 sample window. LATENT NEW is retained here only as an explicit experimental compatibility option."
       : active === "extension" ? (String(mode) === "fl2va_extended_av" ? "EXTENDED AV is active: MASKED + EXACT is locked for the production path. Chunk 1 uses Picture 1; every later take starts from a hidden RAW AV head copied from the previous delivered tail. The pinned head is trimmed before delivery, so the master is a direct butt join with no decoded crossfade." : "Choose EXTENDED AV · LONG I2V / LONG TAKE in MODE ASSISTANT to use the new RAW AV extension engine. Legacy Auto Extend remains below only for compatibility.")
@@ -2447,7 +2525,7 @@ function mount(node) {
       : group.contextual ? `Branch connected; controls compile for Shotboard mode ${mode}.`
       : active === "direction" ? "Legacy compatibility surface. New workflows should use the specific panel under ENGINES; saved Direct values remain serialized and loadable."
       : "Only controls relevant to this render layer are shown.";
-    q(".h3p-context").innerHTML = active === "extension" ? `<b>EXTENSION ≠ CONTINUATION.</b> EXTENDED AV uses an EXTEND-style MASKED EXTEND: previous delivered tail → RAW AV pin at child head → native H3 mask → pinned head trimmed → direct master join. SAVED TAKE · CONTINUATION is a separate resume workflow.` : active === "engine_keyframe_continuous" ? `<b>ENGINE CONTRACT:</b> Native TimelineDirector keeps incoming-owned AV overlap; Extended AV trims its masked pinned head; Evolving uses timed Shotboard prompt beats. These are different planner and runtime routes. Native Delivery recommended for initial validation.` : active === "engine_multishot" ? `<b>CUT CONTRACT:</b> each authored slot defines one camera view. Image guides and timed cut prompts share a joint FL2VA sample, with one continuous native or locked custom soundtrack.` : `<b>Current pipeline:</b> ${mode}. Media, prompts and FPS remain stored in Shotboard. Duration is Shotboard truth alone, or Settings PRO truth synchronized into Shotboard while PRO is master.`;
+    q(".h3p-context").innerHTML = active === "extension" ? `<b>EXTENSION ≠ CONTINUATION.</b> EXTENDED AV uses an EXTEND-style MASKED EXTEND: previous delivered tail → RAW AV pin at child head → native H3 mask → pinned head trimmed → direct master join. SAVED TAKE · CONTINUATION is a separate resume workflow.` : active === "engine_keyframe_continuous" ? `<b>ENGINE CONTRACT:</b> Native TimelineDirector keeps incoming-owned AV overlap; Extended AV trims its masked pinned head; Evolving uses timed Shotboard prompt beats. These are different planner and runtime routes. Native Delivery recommended for initial validation.` : active === "engine_multishot" ? `<b>CUT CONTRACT:</b> JOINT cuts are generated by the model. ISOLATED SHOTS cuts are placed exactly at slot boundaries, with no cross-camera latent handoff. Custom Audio preserves the original master waveform.` : `<b>Current pipeline:</b> ${mode}. Media, prompts and FPS remain stored in Shotboard. Duration is Shotboard truth alone, or Settings PRO truth synchronized into Shotboard while PRO is master.`;
     const recipes = q(".h3p-recipes"); recipes.replaceChildren();
     if (active === "scout") { renderIntegratedScout(mode); return; }
     if (group.assistant) { renderAssistant(mode); return; }
@@ -2463,15 +2541,23 @@ function mount(node) {
       recipes.append(profileBar);
     }
     if (active === "engine_multishot") {
-      addRecipe(recipes, "HARD CUT · CLEAN", "multishot_clean", true, false, () => {
+      const isolatedCuts = String(widget(node, "h3_multishot_boundary_mode")?.value || "joint") === "isolated_shots";
+      addRecipe(recipes, "ISOLATED SHOTS · CLEAN CUTS", "multishot_clean", true, isolatedCuts, () => {
+        setValue(node, "h3_multishot_boundary_mode", "isolated_shots", false);
         setValue(node, "flf_join_mode", "h3_keyframe_cut", false); setValue(node, "flf_overlap_frames", 0, false); refresh();
+      });
+      addRecipe(recipes, "JOINT · NATIVE MULTI-SHOT", "multishot_joint", true, !isolatedCuts, () => {
+        setValue(node, "h3_multishot_boundary_mode", "joint", false); refresh();
       });
       addRecipe(recipes, "CUSTOM AUDIO · PERFORMANCE / LIP-SYNC", "multishot_custom_audio", true, false, () => { setShotboardAudio(node, "h3_custom_audio_drive"); refresh(); });
       addRecipe(recipes, "H3 NATIVE AUDIO", "multishot_native_audio", true, false, () => { setShotboardAudio(node, "h3_native_generated"); refresh(); });
     }
+    if (active === "engine_ref2va") {
+      addRecipe(recipes, "FASTH3 OMNI · 8 STEP", "omni", true, Boolean(widget(node,"h3_omni_enabled")?.value), () => { setAssistantMode(node,"ref2va_omni"); refresh(); });
+    }
     if (["engine_ref2va", "engine_ref2vid"].includes(active)) {
       const note = document.createElement("p");
-      note.textContent = "Use the prepared PICTURE 1–4 loaders. These roles are read from Settings PRO at execution; disabled references are not loaded. For three people choose 3 SUBJECTS. A composition or style reference keeps its own selectable role below. Video requires an active video role.";
+      note.textContent = "Use PICTURE 1–4 loaders; FastH3 Omni also exposes Pictures 5–9, Videos 2–3 and Audio 2–3 on CineInfoH3. These roles are read from Settings PRO at execution; disabled references are not loaded. For three people choose 3 SUBJECTS. A composition or style reference keeps its own selectable role below. Video requires an active video role.";
       recipes.append(note);
       for (const count of [1, 2, 3, 4]) {
         addRecipe(recipes, `${count} SUBJECT${count === 1 ? "" : "S"}`, `ref_subjects_${count}`, true, false, () => {
@@ -2687,7 +2773,7 @@ function mount(node) {
       toggle.append(check, " Show advanced/manual speed controls"); recipes.append(toggle);
       if (!check.checked) {
         const selected = selectedAcceleration(node);
-        const fields = {native: [], pdd: ["pdd_lora_name"], fasth3: ["turbo_lora_name"], sla: ["turbo_lora_name", "h3_sla_sparsity"], fused: ["fused_turbo_model_name"]}[selected] || ["turbo_mode", "turbo_lora_name"];
+        const fields = {omni: ["h3_omni_enabled", "h3_clipproj_profile", "h3_clipproj_load_mode"], native: [], pdd: ["pdd_lora_name"], fasth3: ["turbo_lora_name"], sla: ["turbo_lora_name", "h3_sla_sparsity"], fused: ["fused_turbo_model_name"]}[selected] || ["turbo_mode", "turbo_lora_name"];
         names = names.filter(name => ["acceleration", "h3_attention_backend", "h3_veda_enabled", "h3_veda_predictor", "h3_veda_verbose", ...fields].includes(name));
       }
     }

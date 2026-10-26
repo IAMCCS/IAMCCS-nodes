@@ -1,5 +1,4 @@
 import ast
-import os
 from copy import copy, deepcopy
 import importlib.util
 import json
@@ -18,7 +17,7 @@ import torch
 
 
 ROOT = Path(__file__).parents[1]
-COMFY = Path(os.environ.get("COMFYUI_PATH", ROOT.parents[1]))
+COMFY = ROOT.parents[1]
 spec = importlib.util.spec_from_file_location("test_nested", COMFY / "comfy/nested_tensor.py")
 nested = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(nested)

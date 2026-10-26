@@ -19,6 +19,7 @@ import torch
 
 from .iamccs_supernodes_linx import SUPERNODE_LINX_TYPE, build_stage_linx_payload
 from .iamccs_minimax_h3_shotboard_core import build_shotplan, plan_json
+from .iamccs_h3_omni import configure as configure_omni
 
 
 CATEGORY = "IAMCCS/MiniMax H3"
@@ -254,6 +255,7 @@ def _recompile_routed_h3_plan(cine_linx: dict[str, Any]) -> tuple[dict[str, Any]
         or 10.0
     )
     rebuilt = build_shotplan(
+        defer_reference_windows=bool(source.get("fasth3_omni", {}).get("enabled")),
         timeline_data=timeline,
         global_prompt=global_prompt,
         duration_seconds=duration,
@@ -276,6 +278,9 @@ def _recompile_routed_h3_plan(cine_linx: dict[str, Any]) -> tuple[dict[str, Any]
         upscale_enabled=bool(source.get("upscale_enabled", False)),
     )
     _copy_runtime_contract(source, rebuilt)
+    if source.get("fasth3_omni", {}).get("enabled"):
+        configure_omni(rebuilt, {"h3_omni_enabled": True,
+                                "motion_context_window_frames": source.get("fasth3_omni", {}).get("window_frames", 362)})
     multi = timeline.get("multiGeneration") if isinstance(timeline.get("multiGeneration"), dict) else {}
     timeline_id = str(multi.get("activeTimelineId") or timeline.get("activeTimelineId") or "unknown")
     take_index = int(multi.get("activeTake") or timeline.get("activeTake") or 0)
@@ -331,6 +336,7 @@ def _clean_previous_h3_info(cine_linx: dict[str, Any]) -> dict[str, Any]:
         ):
             resources.pop(key, None)
     cleaned["resources"] = resources
+    resources.pop("iamccs_h3_omni_media", None)
     return cleaned
 
 
@@ -382,6 +388,10 @@ class IAMCCS_CineInfoH3:
                         ),
                     },
                 ),
+                **{f"reference_image_{i}": ("IMAGE", {"lazy": True}) for i in range(5, 10)},
+                **{f"reference_video_{i}": ("IMAGE", {"lazy": True}) for i in range(2, 4)},
+                **{f"reference_video_audio_{i}": ("AUDIO", {"lazy": True}) for i in range(2, 4)},
+                **{f"reference_audio_{i}": ("AUDIO", {"lazy": True}) for i in range(2, 4)},
             },
         }
 
@@ -411,6 +421,19 @@ class IAMCCS_CineInfoH3:
             if mode not in {"v2va_face_swap", "v2va_face_swap_lora"} and _normalise_audio_mode(plan.get("audio_mode")) == "h3_custom_audio_drive":
                 selected.append("custom_audio")
             media = selected
+        if _h3_plan(cine_linx).get("fasth3_omni", {}).get("enabled"):
+            media += [f"reference_image_{i}" for i in range(5, 10)]
+            media += [f"reference_{kind}_{i}" for kind in ("video", "video_audio", "audio") for i in range(2, 4)]
+            resources = cine_linx.get("resources", {})
+            if resources.get("iamccs_h3_omni_image_files"):
+                media = [name for name in media if not name.startswith("reference_image_")]
+            voices = resources.get("iamccs_h3_omni_audio_files", [])
+            if resources.get("iamccs_h3_omni_voice_bindings") and "reference_audio" not in media:
+                media.append("reference_audio")
+            for i, voice in enumerate(voices, 1):
+                if isinstance(voice, dict) and voice.get("path"):
+                    name = "reference_audio" if i == 1 else f"reference_audio_{i}"
+                    media = [item for item in media if item != name]
         return media
 
     def check_lazy_status(self, cine_linx, active_mode_only=False, **kwargs):
@@ -442,6 +465,7 @@ class IAMCCS_CineInfoH3:
         reference_audio=None,
         custom_audio=None,
         active_mode_only=False,
+        **omni_media,
     ):
         if not isinstance(cine_linx, dict):
             raise ValueError("IAMCCS Cine Info H3 requires a valid cine_linx input")
@@ -591,6 +615,11 @@ class IAMCCS_CineInfoH3:
             f"{RESOURCE_PREFIX}ref_audio": reference_audio,
             f"{RESOURCE_PREFIX}custom_audio": custom_audio,
         }
+        if shotplan.get("fasth3_omni", {}).get("enabled"):
+            resources["iamccs_h3_omni_media"] = {
+                name: value for name, value in omni_media.items()
+                if name in self.INPUT_TYPES()["optional"] and value is not None
+            }
         out_linx = build_stage_linx_payload(
             base,
             stage_name=STAGE_NAME,

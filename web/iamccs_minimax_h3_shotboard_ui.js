@@ -129,7 +129,7 @@ function canonicalH3TaskMode(value) {
     if (["longvid_motion_context", "longvid_motion_context_auto_chain", "motion_context_auto_chain"].includes(raw)) return "longvid_motion_context";
     if (["longvid_continuous_guided", "long_continuous_guided"].includes(raw)) return "longvid_continuous_guided";
     if (["longvid_multishot_hardcut", "long_hardcut_video", "longvid_hardcut_video"].includes(raw)) return "longvid_multishot_hardcut";
-    if (raw === "longvid_keyframe_continuous") return "longvid_keyframe_continuous";
+    if (["longvid_keyframe_continuous", "pianosequenza_true_long"].includes(raw)) return raw;
     if (["longvid_masked_loop_guided", "masked_loop_guided", "long_masked_loop_guided"].includes(raw)) return "longvid_masked_loop_guided";
     if (["guided_av_loop_experimental", "longvid_guided_av_loop_experimental"].includes(raw)) return "guided_av_loop_experimental";
     if (["longvid", "long_video_guides", "longvid_guides"].includes(raw)) return "longvid_guides";

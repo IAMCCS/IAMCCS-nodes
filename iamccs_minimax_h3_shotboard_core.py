@@ -10,6 +10,7 @@ Ref2VA audio, the fixed 24 fps clock, and the 17k+5 temporal grid.
 
 from __future__ import annotations
 
+import copy
 import json
 import math
 import re
@@ -240,6 +241,7 @@ def _normalise_slots(
     duration_seconds: float,
     fallback_duration: float,
     preserve_image_anchors: bool = False,
+    defer_window_limits: bool = False,
 ) -> list[dict[str, Any]]:
     raw_rows = _timeline_rows(timeline)
     image_paths = _timeline_image_paths(timeline)
@@ -283,14 +285,14 @@ def _normalise_slots(
             # Ignore the sliver rather than extending beyond the declared truth.
             if requested_frames < H3_MIN_FRAMES:
                 continue
-        if requested_frames > H3_MAX_TRAINED_FRAMES:
+        if requested_frames > H3_MAX_TRAINED_FRAMES and not defer_window_limits:
             raise ValueError(
                 f"Il box '{_text(_first_value(row, ('label', 'name'))) or index + 1}' richiede "
                 f"{requested_frames} frame: riduci il trimming sulla timeline a massimo "
                 f"{H3_MAX_TRAINED_FRAMES} frame. Il planner non divide automaticamente i box."
             )
         frame_count = align_h3_frames(requested_frames)
-        if frame_count > H3_MAX_TRAINED_FRAMES:
+        if frame_count > H3_MAX_TRAINED_FRAMES and not defer_window_limits:
             raise ValueError(
                 f"Il box {index + 1} diventa {frame_count} frame dopo l'allineamento H3 17k+5: "
                 f"riduci il trimming a massimo {H3_MAX_TRAINED_FRAMES} frame."
@@ -323,7 +325,7 @@ def _normalise_slots(
 
     total = max(0.01, _float(duration_seconds, fallback_duration))
     requested_frames = max(H3_MIN_FRAMES, int(round(total * H3_FPS)))
-    if requested_frames > H3_MAX_TRAINED_FRAMES:
+    if requested_frames > H3_MAX_TRAINED_FRAMES and not defer_window_limits:
         raise ValueError(
             f"La timeline senza box richiede {requested_frames} frame: il massimo H3 per un singolo "
             f"chunk è {H3_MAX_TRAINED_FRAMES}. Aggiungi box e regolane il trimming."
@@ -1952,6 +1954,96 @@ def _masked_loop_guided_plan(base: dict[str, Any], *, duration_seconds: float,
     return base
 
 
+def _isolated_multishot_plan(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Keep camera cuts outside diffusion/VAE windows; discard a generated tail handle."""
+    joint_args = {**arguments, "multishot_boundary_mode": "joint"}
+    plan = build_shotplan(**joint_args)
+    images = [event for event in plan["guide_track"]["events"] if event.get("kind") == "image"]
+    total = int(plan["total_unique_frames"])
+    chunks = []
+    _, global_sound, global_music = _multishot_prompt_sections(arguments["global_prompt"])
+    for shot_index, image in enumerate(images):
+        start = 0 if shot_index == 0 else int(image["global_frame"])
+        end = min(total, int(images[shot_index + 1]["global_frame"])) if shot_index + 1 < len(images) else total
+        if end <= start:
+            continue
+        visible = end - start
+        # A full 17-frame block remains beyond the editorial endpoint. It is
+        # sampled with this camera alone and never becomes part of the master.
+        padded = visible + 17
+        local_visual, local_sound, local_music = _multishot_prompt_sections(_text(image.get("prompt")))
+        visual = local_visual or _multishot_prompt_sections(arguments["global_prompt"])[0]
+        prompt = (
+            "integrated_multimodal_description: A single continuous take of the composition in <Picture 1>. "
+            "Maintain this camera view and the same visible performer through the entire take, including its ending. "
+            + ("Performance follows the supplied soundtrack. " if arguments["audio_mode"] == "h3_custom_audio_drive" else "")
+            + visual
+            + "\n\noverall_soundscape: " + (local_sound or global_sound or "Continuous scene ambience.")
+            + "\n\nnon_diegetic_music: " + (local_music or global_music or "N/A")
+        )
+        local_plan = build_shotplan(**{
+            **joint_args,
+            "timeline_data": {"fps": H3_FPS, "rows": [{
+                "id": image["id"], "type": "image", "start": 0, "length": padded,
+                "imageFile": image["source_path"], "prompt": prompt,
+            }]},
+            "global_prompt": "", "duration_seconds": padded / H3_FPS,
+        })
+        for local_index, local_chunk in enumerate(local_plan["chunks"]):
+            chunk = copy.deepcopy(local_chunk)
+            local_start = int(chunk["timeline_start_frame"])
+            delivered = min(int(chunk["unique_frames"]), visible - local_start)
+            if delivered <= 0:
+                break
+            chunk.update(
+                index=len(chunks), slot_index=shot_index, slot_id=image["id"],
+                slot_label=image.get("label", f"Shot {shot_index + 1}"),
+                timeline_start_frame=start + local_start,
+                timeline_start_seconds=(start + local_start) / H3_FPS,
+                unique_frames=delivered, visible_frame_count=delivered,
+                visible_duration_seconds=delivered / H3_FPS,
+                requested_frame_count=delivered,
+                isolated_shot_start=local_index == 0,
+                isolated_shot_index=shot_index,
+                isolated_tail_handle_frames=max(0, int(chunk["unique_frames"]) - delivered),
+                prompt=prompt, creative_prompt=prompt, local_prompt=visual,
+                join_mode="hard_cut" if local_index == 0 and chunks else chunk.get("join_mode", "none"),
+            )
+            # Local guide positions stay local; the backend adds its hidden
+            # context prefix. Rebase only the authored timeline coordinates.
+            for guide in chunk.get("guides", []) + chunk.get("multishot_visual_slots", []):
+                for key in ("global_frame", "end_frame", "intersection_start_frame", "intersection_end_frame"):
+                    if key in guide:
+                        guide[key] += start
+                for key in ("start_seconds", "end_seconds"):
+                    if key in guide:
+                        guide[key] += start / H3_FPS
+            for binding in chunk.get("prompt_guide_bindings", []):
+                for key in ("guide_global_frame", "guide_end_frame", "chunk_overlap_start_frame", "chunk_overlap_end_frame"):
+                    if key in binding:
+                        binding[key] += start
+            chunks.append(chunk)
+    plan.update(
+        chunks=chunks, total_segments=len(chunks),
+        backend_revision="iamccs-multishot-isolated-cuts-v1",
+        multishot_boundary_mode="isolated_shots",
+        continuation_mode="native_av_tail_within_shot_only",
+        chunk_policy="isolated_camera_shots_with_generated_tail_handle",
+        prompt_map=[{"chunk_index": c["index"], "prompt": c["prompt"],
+                     "duration_seconds": c["duration_seconds"]} for c in chunks],
+    )
+    plan["mode_contract"].update(
+        visual_cuts="exact_editorial_concat", shots_are_not_samples=False,
+        temporal_carry_between_shots=False, tail_handle_frames=17,
+        cut_accuracy="exact_authored_frame", decoded_frame_replacement=False,
+        audio_timeline_continuous=arguments["audio_mode"] == "h3_custom_audio_drive",
+        native_audio_contract="independent_per_shot", prompt_policy="local_shot_or_global_fallback",
+    )
+    plan["longvid_latent_tail"]["enabled"] = any(not c["isolated_shot_start"] for c in chunks)
+    plan["lipsync"]["contract"] = "isolated_cameras_locked_global_performance"
+    return plan
+
+
 def build_shotplan(
     *,
     timeline_data: Any,
@@ -2002,12 +2094,19 @@ def build_shotplan(
     extended_av_soft_audio_handover_ms: float = 15.0,
     extended_av_boundary_polish_ms: float = 3.0,
     extended_av_boundary_polish_strength: float = 1.0,
+    multishot_boundary_mode: str = "joint",
+    defer_reference_windows: bool = False,
 ) -> dict[str, Any]:
     """Translate a Shotboard timeline into executable MiniMax H3 chunks.
 
     ``generation_mode`` and ``chunk_seconds`` remain accepted only so boards
     saved by the first standalone prototype can still be opened.
     """
+    if task_mode in {"longvid_multishot_hardcut", "long_hardcut_video", "longvid_hardcut_video"}:
+        if multishot_boundary_mode == "isolated_shots":
+            return _isolated_multishot_plan(dict(locals()))
+        if multishot_boundary_mode != "joint":
+            raise ValueError(f"Unknown MultiShot boundary mode: {multishot_boundary_mode}")
     if task_mode == "keyframe_joint_native" and keyframe_joint_latent_new:
         arguments = dict(locals())
         arguments.update(task_mode="fl2va_extended_av", keyframe_joint_latent_new=False)
@@ -2751,6 +2850,7 @@ def build_shotplan(
         duration_seconds,
         fallback_duration,
         preserve_image_anchors=preserve_flf_anchors,
+        defer_window_limits=bool(defer_reference_windows and requested_task_mode == "ref2va"),
     )
     lipsync_requested = requested_task_mode in {"ref2vid_lipsync", "lipsync_ref2vid"}
     lipsync_audio_rows = _timeline_audio_rows(timeline) if lipsync_requested else []

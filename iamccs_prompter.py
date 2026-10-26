@@ -5,8 +5,7 @@
 The browser editor stores only user-authored project data. The deterministic
 path formats MiniMax prompt sections and carries an injection request through
 CineLinX. The optional assistant is implemented locally in this module and can
-call Ollama or a user-selected compatible provider without wrapping another
-custom-node package.
+use the workflow Qwen encoder through ClipProj or a user-selected API provider.
 """
 
 from __future__ import annotations
@@ -21,13 +20,15 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from .iamccs_h3_native_prompt import native_json_chat, native_models, run_ai_request
+
 
 SUPERNODE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX"
 CATEGORY = "IAMCCS/MiniMax H3/Prompting"
 PROJECT_SCHEMA = "iamccs.minimax_h3.prompter_project"
 PROJECT_VERSION = 7
 H3_ABSOLUTE_CHAR_LIMIT = 7000
-AI_IMAGE_LIMIT = 4
+AI_IMAGE_LIMIT = 9
 AI_IMAGE_MAX_BYTES = 16 * 1024 * 1024
 AUDIO_HANDOFF_AUTHORING_RULE = (
     "Never carry dialogue or a new vocalisation across two independently generated chunks. "
@@ -50,6 +51,9 @@ TASK_MODE_ALIASES = {
     "v2v_object_swap": "v2va_object_swap",
     "v2va": "v2va_object_swap",
     "object_swap": "v2va_object_swap",
+    "longvid_motion_context": "multi_shot_lipsync",
+    "longvid_lipsync": "multi_shot_lipsync",
+    "multishot_lipsync": "multi_shot_lipsync",
 }
 
 
@@ -131,7 +135,22 @@ MODE_SECTIONS: dict[str, tuple[tuple[str, str], ...]] = {
         ("audio_environment", "ENVIRONMENT SOUND"),
         ("audio_continuity_locks", "CONTINUITY SAFEGUARDS"),
     ),
+    "multi_shot_lipsync": (
+        ("multishot_audio_contract", "CONTINUOUS AUDIO CONTRACT"),
+        ("multishot_subject_map", "SUBJECT / SPEAKER MAP"),
+        ("multishot_global_direction", "GLOBAL FILM DIRECTION"),
+        ("multishot_shot_plan", "GUIDED SHOT CUTS"),
+        ("multishot_dialogue_map", "DIALOGUE MAP"),
+        ("multishot_lip_sync", "VISIBLE LIP SYNC"),
+        ("multishot_cut_policy", "EDITORIAL CUT POLICY"),
+        ("multishot_chunk_handoff", "TECHNICAL CHUNK HANDOFF"),
+        ("multishot_continuity_locks", "CONTINUITY SAFEGUARDS"),
+        ("multishot_environment", "PRODUCTION SOUND"),
+    ),
 }
+
+
+
 
 
 DEFAULT_SECTIONS = {
@@ -707,6 +726,12 @@ def _compose_prompt(project: dict[str, Any], task_mode: str, writing_mode: str, 
             # than silently changing the prompt grammar.
             for key, label in MODE_SECTIONS[mode]:
                 body = resolved.get(key, "").strip() or "N/A"
+                if mode == "ref2va" and project.get("omni_preset") and key == "detailed_description":
+                    for row in project.get("omni_voice_bindings", []):
+                        if isinstance(row, dict) and row.get("enabled", True):
+                            body += (f"\n[Shot {int(row['shot'])}] {row.get('character') or 'The character'} "
+                                     f"from <Picture {int(row['picture'])}> speaks with the voice identity of <Audio {int(row['audio'])}>. "
+                                     "Keep the authored dialogue and timing for this shot.")
                 if body != "N/A":
                     body = (_positive_h3_music(body) if key == "non_diegetic_music"
                             else _positive_h3_text_preserve_dialogue(body)) or "N/A"
@@ -745,6 +770,11 @@ def _compose_prompt(project: dict[str, Any], task_mode: str, writing_mode: str, 
                 alignment = _positive_h3_text(resolved.get("boundary_frames", ""))
                 sound = ""
                 music = resolved.get("non_diegetic_music", "").strip()
+            elif mode == "multi_shot_lipsync":
+                detail_keys = tuple(key for key, _label in MODE_SECTIONS[mode] if key != "multishot_environment")
+                alignment = ""
+                sound = resolved.get("multishot_environment", "").strip()
+                music = "N/A"
             else:  # audio_driven
                 detail_keys = (
                     "audio_drive_contract", "audio_subject_map", "audio_scene_intent",
@@ -884,6 +914,8 @@ def _assistant_instruction(
     visuals = _normalise_ai_images(images)
     mode_rules = {
         "v2va_face_swap_lora": SWAPCHAR_AI_RULE,
+        "ref2va_vfx_edit": "Write one concise English prompt beginning with vfx_edit:. State the requested visual effect, its location and motion, then preserve the unrelated performance, identity, camera and layout. The source is an aligned guide video; use ordinary prose without Picture, Subject or Video reference tags. Do not invent dialogue or audio changes.",
+        "multi_shot_lipsync": "The connected AudioBoard track owns exact words, timing, pauses and breaths across all guided shots. Keep stable <Subject N> and (SN) speaker labels. Treat each Shotboard image as a distinct [Shot N] opening guide and editorial cut. Preserve the supplied transcript verbatim, visible active-speaker mouth articulation, silent listener behavior, identity, geography and eyelines. Motion Context may bridge hidden technical chunks inside a shot; it must preserve every authored editorial cut. Do not interpolate between separate shot guides or invent dialogue.",
         "reference_image": (
             "Compose one static image using H3 full-reference six-section grammar. This is a still extracted from a short REF2VA window. "
             "Use stable <Subject N> identities for characters AND props. Cite only supplied <Picture N> sources, with their exact numbering, "
@@ -1369,6 +1401,11 @@ def rewrite_sections_with_ai(
                          and str(user_direction or "").strip() in {"", SWAPCHAR_REQUEST})
     if swapchar_template:
         content = json.dumps({"swap_prompt": SWAPCHAR_PROMPT})
+    elif provider == "qwen_native":
+        allowed_keys = [key for key, _label in MODE_SECTIONS.get(_normalise_task_mode(task_mode), MODE_SECTIONS["t2va"])]
+        response_keys = [key for key in allowed_keys if key in target_keys] if isinstance(target_keys, list) else [key for key in allowed_keys if str(sections.get(key, "")).strip()]
+        content = json.dumps(native_json_chat(model, system, user, visual_inputs, temperature,
+                            _string_object_schema(response_keys), "iamccs_h3_rewrite"), ensure_ascii=False)
     elif provider == "ollama":
         root = _ollama_native_base(base_url)
         def ollama_payload(system_text: str, user_text: str, *, compact: bool = False) -> dict[str, Any]:
@@ -1603,6 +1640,8 @@ def _multimodal_json_chat(provider: str, base_url: str, model: str, api_key: str
         "gemini": os.environ.get("GEMINI_API_KEY", ""),
         "anthropic": os.environ.get("ANTHROPIC_API_KEY", ""),
     }.get(provider, "")
+    if provider == "qwen_native":
+        return native_json_chat(model, system, user, visual_inputs, temperature, response_schema, schema_name)
     if provider == "ollama":
         edit_schema = schema_name in {"iamccs_swapchar_identity", "iamccs_edit_vision", "iamccs_edit_prompt"}
         result = _http_json(
@@ -1820,7 +1859,10 @@ def rewrite_nextframe_prompt_with_ai(
     )
     content = ""
 
-    if provider == "ollama":
+    if provider == "qwen_native":
+        content = json.dumps(native_json_chat(model, NEXTFRAME_ASSISTANT_SYSTEM_PROMPT, user,
+                            temperature=temperature, schema=_nextframe_prompt_schema(), schema_name="iamccs_nextframe_prompt"))
+    elif provider == "ollama":
         root = _ollama_native_base(base_url)
         result = _http_json(
             f"{root}/api/chat",
@@ -1939,7 +1981,10 @@ def invent_nextframe_ideas_with_ai(
         f"RANDOMIZATION NONCE: {str(nonce or '')}"
     )
     content = ""
-    if provider == "ollama":
+    if provider == "qwen_native":
+        content = json.dumps(native_json_chat(model, NEXTFRAME_IDEA_SYSTEM_PROMPT, user,
+                            visual_inputs, temperature, _nextframe_ideas_schema(count), "iamccs_nextframe_ideas"))
+    elif provider == "ollama":
         root = _ollama_native_base(base_url)
         result = _http_json(f"{root}/api/chat", {
             "model": model, "stream": False, "format": "json",
@@ -2138,6 +2183,9 @@ def _append_prompter_stage(
     resources["iamccs_h3_edit_video"] = dict(project["edit_video"]) if isinstance(project.get("edit_video"), dict) and project["edit_video"].get("path") else None
     resources["iamccs_h3_edit_variant"] = str(project.get("swapchar_variant", "identity"))
     resources["iamccs_h3_edit_environment"] = (dict(visuals[1]) if mode == "v2va_face_swap_lora" and project.get("swapchar_variant") == "environment" and len(visuals) > 1 else None)
+    resources["iamccs_h3_omni_image_files"] = visuals[:9] if project.get("omni_preset") and mode == "ref2va" else []
+    resources["iamccs_h3_omni_audio_files"] = project.get("omni_audio_files", [])[:3] if project.get("omni_preset") and mode == "ref2va" else []
+    resources["iamccs_h3_omni_voice_bindings"] = [dict(row) for row in project.get("omni_voice_bindings", []) if isinstance(row, dict) and row.get("enabled", True)] if project.get("omni_preset") and mode == "ref2va" else []
     out["resources"] = resources
 
     outputs = dict(out.get("outputs") or {})
@@ -2315,7 +2363,7 @@ class IAMCCS_Prompter:
                     },
                 ),
                 "task_mode": (
-                    ["t2va", "i2va", "fl2va", "ref2va", "v2va_object_swap", "v2va_face_swap_lora", "audio_driven", "reference_image", "ref2va_vfx_edit"],
+                    ["t2va", "i2va", "fl2va", "ref2va", "v2va_object_swap", "v2va_face_swap_lora", "audio_driven", "reference_image", "ref2va_vfx_edit", "multi_shot_lipsync"],
                     {"default": "t2va"},
                 ),
                 "injection_target": (
@@ -2612,6 +2660,10 @@ def _register_prompter_routes() -> None:
 
         routes = PromptServer.instance.routes
 
+        @routes.get("/iamccs/prompter/qwen/models")
+        async def iamccs_prompter_qwen_models(request):
+            return web.json_response({"ok": True, "models": [{"name": "__workflow__", "label": "Follow H3 Settings PRO (Qwen)"}] + [{"name": name} for name in native_models()]})
+
         @routes.get("/iamccs/prompter/lmstudio/models")
         async def iamccs_prompter_lmstudio_models(request):
             try:
@@ -2681,12 +2733,15 @@ def _register_prompter_routes() -> None:
                 sections = payload.get("sections") if isinstance(payload, dict) else None
                 if not isinstance(sections, dict):
                     raise ValueError("sections must be a JSON object")
+                if payload.get("character_swap_contract") and payload.get("task_mode") == "v2va_face_swap_lora":
+                    from .iamccs_h3_edit_prompt import character_swap_contract
+                    return web.json_response(character_swap_contract(payload))
                 if payload.get("edit_media") is not None and payload.get("task_mode") in {"v2va_face_swap_lora", "ref2va_vfx_edit"}:
                     from .iamccs_h3_edit_prompt import rewrite_edit
-                    rewritten, report = await asyncio.to_thread(rewrite_edit, payload, _multimodal_json_chat)
+                    rewritten, report = await asyncio.to_thread(run_ai_request, payload, rewrite_edit, payload, _multimodal_json_chat)
                     return web.json_response({"ok": True, "sections": rewritten, "report": report})
                 rewritten, report = await asyncio.to_thread(
-                    rewrite_sections_with_ai,
+                    run_ai_request, payload, rewrite_sections_with_ai,
                     str(payload.get("provider", "ollama")),
                     str(payload.get("base_url", "")),
                     str(payload.get("model", "")),
@@ -2716,7 +2771,7 @@ def _register_prompter_routes() -> None:
                 if not isinstance(payload, dict):
                     raise ValueError("Request body must be a JSON object")
                 prompt, report = await asyncio.to_thread(
-                    rewrite_nextframe_prompt_with_ai,
+                    run_ai_request, payload, rewrite_nextframe_prompt_with_ai,
                     str(payload.get("provider", "ollama")),
                     str(payload.get("base_url", "")),
                     str(payload.get("model", "")),
@@ -2740,7 +2795,7 @@ def _register_prompter_routes() -> None:
             try:
                 payload = await request.json()
                 plan, report = await asyncio.to_thread(
-                    build_visual_story_plan_with_ai,
+                    run_ai_request, payload, build_visual_story_plan_with_ai,
                     str(payload.get("provider", "ollama")), str(payload.get("base_url", "")),
                     str(payload.get("model", "")), str(payload.get("api_key", "")),
                     str(payload.get("relationship", "")), str(payload.get("task_mode", "i2va")),
@@ -2757,7 +2812,7 @@ def _register_prompter_routes() -> None:
             try:
                 payload = await request.json()
                 result, report = await asyncio.to_thread(
-                    rewrite_nextframe_h3_with_ai,
+                    run_ai_request, payload, rewrite_nextframe_h3_with_ai,
                     str(payload.get("provider", "ollama")), str(payload.get("base_url", "")),
                     str(payload.get("model", "")), str(payload.get("api_key", "")),
                     str(payload.get("qwen_prompt", "")), str(payload.get("requested_mode", "auto")),
@@ -2776,7 +2831,7 @@ def _register_prompter_routes() -> None:
                 if not isinstance(payload, dict):
                     raise ValueError("Request body must be a JSON object")
                 ideas, report = await asyncio.to_thread(
-                    invent_nextframe_ideas_with_ai,
+                    run_ai_request, payload, invent_nextframe_ideas_with_ai,
                     str(payload.get("provider", "ollama")), str(payload.get("base_url", "")),
                     str(payload.get("model", "")), str(payload.get("api_key", "")),
                     str(payload.get("logline", "")), str(payload.get("current_prompt", "")),

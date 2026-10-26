@@ -17,10 +17,9 @@ spec.loader.exec_module(decoder)
 
 class AudioDecodeTests(unittest.TestCase):
     def test_editor_loader_falls_back_for_reported_mp4(self):
-        fixture = os.environ.get("IAMCCS_TEST_AUDIO_VIDEO", "")
-        path = pathlib.Path(fixture)
-        if not fixture or not path.is_file():
-            self.skipTest("Set IAMCCS_TEST_AUDIO_VIDEO to a stereo MP4 regression fixture")
+        path = pathlib.Path(r"D:\ComfyUI\ComfyUI\output\IAMCCS\MiniMaxH3\R38B\IAMCCS_MiniMaxH3_R38B_FACE_0254\final_film.mp4")
+        if not path.exists():
+            self.skipTest("User MP4 regression fixture is not present on this machine")
         import torchaudio
         tree = ast.parse(pathlib.Path(__file__).with_name("__init__.py").read_text(encoding="utf-8-sig"))
         function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_load_audio_waveform_file")

@@ -4,6 +4,7 @@ import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
 import { beginAiBusy, createModeHelper } from "./iamccs_h3_authoring_helpers.js";
 import { H3_REFERENCE_DEMOS } from "./iamccs_h3_reference_demos.js";
+import { createPrompterWorkspace } from "./iamccs_h3_prompter_workspace.js";
 import { createPrompterInspector } from "./iamccs_h3_prompter_inspector.js";
 
 const NODE_TYPE = "IAMCCS_Prompter";
@@ -446,10 +447,13 @@ function safeProject(raw) {
         ai_direction: String(parsed.ai_direction || ""),
         ai_scope: String(parsed.ai_scope || "active_field"),
         ai_visual_roles: parsed.ai_visual_roles && typeof parsed.ai_visual_roles === "object" ? { ...parsed.ai_visual_roles } : {},
-        ai_visual_files: Array.isArray(parsed.ai_visual_files) ? parsed.ai_visual_files.slice(0, 4).map((item) => ({
+        ai_visual_files: Array.isArray(parsed.ai_visual_files) ? parsed.ai_visual_files.slice(0, 9).map((item) => ({
             name: String(item?.name || ""), path: String(item?.path || ""), mime_type: String(item?.mime_type || "image/png"),
             size: Number(item?.size || 0), last_modified: Number(item?.last_modified || 0),
         })).filter((item) => item.name && item.path) : [],
+        omni_preset: parsed.omni_preset === true,
+        omni_audio_files: Array.isArray(parsed.omni_audio_files) ? parsed.omni_audio_files.slice(0,3) : [],
+        omni_voice_bindings: Array.isArray(parsed.omni_voice_bindings) ? parsed.omni_voice_bindings.map(row => ({...row})) : [],
         swapchar_variant: parsed.task_mode === "ref2va_vfx_edit" ? "vfx" : (parsed.swapchar_variant === "environment" ? "environment" : "identity"),
         edit_video: parsed.edit_video && typeof parsed.edit_video === "object" ? {...parsed.edit_video} : null,
         edit_video_source: ["auto","prompter","backend"].includes(parsed.edit_video_source) ? parsed.edit_video_source : "auto",
@@ -828,6 +832,13 @@ function effectiveLocalPrompt(project) {
     return project?.final_local_prompt_override_enabled ? String(project.final_local_prompt_override || "") : generatedLocalPrompt(project);
 }
 
+function omniVoicePrompt(project) {
+    return (project.omni_voice_bindings || []).filter(row => row.enabled !== false).map(row =>
+        `\n[Shot ${row.shot}] ${row.character || "The character"} from <Picture ${row.picture}> speaks with the voice identity of <Audio ${row.audio}>. Keep the authored dialogue and timing for this shot.`).join("");
+}
+function omniRequestDirection(project) {
+    return "FASTH3 OMNI REF2VA: Write the six lowercase H3 sections. In detailed_description use chronological [Shot N] intervals with explicit framing, lens feeling, camera movement and performance, driven by the user's request. Preserve authored timings and exact dialogue. Bind real supplied references using <Picture N>, <Video N>, <Audio N> and stable <Subject N> labels. Use affirmative observable descriptions. Assign custom voices only to the enabled shot/character bindings below; a voice reference is timbre conditioning, not an exact soundtrack. For longer continuations keep physical action and ambience coherent at technical window boundaries.\n" + omniVoicePrompt(project);
+}
 function composePrompt(project) {
     const mode = canonicalMode(project.task_mode);
     const value = (key) => String(project.sections?.[key] || "").trim();
@@ -839,6 +850,7 @@ function composePrompt(project) {
     if (mode === "ref2va" || mode === "reference_image") {
         return MODE_META[mode].sections.map(([key, label]) => {
             let body = value(key) || "N/A";
+            if (project.omni_preset && key === "detailed_description") body += omniVoicePrompt(project);
             if (key === "summary" && body !== "N/A" && !/^\[[^\]\r\n]+\]/.test(body)) body = `[reference generation] ${body}`;
             return `${label}:\n${body}`;
         }).join("\n\n");
@@ -1019,6 +1031,7 @@ function mountPrompter(node) {
     }
 
     if (project.task_mode === "ref2va_vfx_edit") project.sections.vfx_prompt ||= VFX_EDIT_PROMPT;
+    let workspace = null;
     const root = el("div", "iamccs-pr-root");
     root.innerHTML = `
         <style>
@@ -1095,6 +1108,8 @@ function mountPrompter(node) {
         modeButtons.set(key, item);
         modeBar.appendChild(item);
     });
+    const omniButton = button("FASTH3 OMNI", "iamccs-pr-mode");
+    modeBar.appendChild(omniButton);
     const modeNote = el("div", "iamccs-pr-mode-note");
     modeBar.appendChild(modeNote);
 
@@ -1259,7 +1274,7 @@ function mountPrompter(node) {
     const aiDirectionLabel = el("label", "", "User direction (applies only when AI Rewrite is active)"); aiDirectionLabel.appendChild(aiDirection);
     aiPanel.append(aiScopeLabel, aiDirectionLabel);
     const aiProvider = el("select");
-    aiProvider.innerHTML = `<option value="ollama">Ollama / local</option><option value="openai_compatible">OpenAI-compatible</option><option value="gemini">Google Gemini</option><option value="anthropic">Anthropic</option>`;
+    aiProvider.innerHTML = `<option value="qwen_native">Qwen / native CLIP</option><option value="openai_compatible">OpenAI-compatible</option><option value="gemini">Google Gemini</option><option value="anthropic">Anthropic</option>`;
     aiProvider.add(new Option("LM Studio / local", "lm_studio"), 1);
     const aiBaseUrl = el("input");
     aiBaseUrl.placeholder = "Provider base URL";
@@ -1269,9 +1284,9 @@ function mountPrompter(node) {
     aiModelPicker.setAttribute("aria-label", "Installed local AI model");
     aiModelPicker.title = "All models reported by the selected local provider";
     const refreshModelsBtn = button("↻");
-    refreshModelsBtn.title = "Read the models installed in Ollama";
-    const connectOllamaBtn = button("CONNECT OLLAMA", "iamccs-pr-write");
-    connectOllamaBtn.title = "Verify the Ollama endpoint and load its installed model list.";
+    refreshModelsBtn.title = "Read installed Qwen text encoders";
+    const connectLocalBtn = button("READ QWEN MODELS", "iamccs-pr-write");
+    connectLocalBtn.title = "List installed native Qwen encoders without loading the model.";
     const aiApiKey = el("input");
     aiApiKey.type = "password";
     aiApiKey.autocomplete = "off";
@@ -1314,14 +1329,15 @@ function mountPrompter(node) {
     relationshipLabel.appendChild(visualRelationship);
     const buildVisualStoryBtn = button("✦ BUILD H3 GLOBAL + LOCAL PROMPTS");
     const rewriteBtn = button("✦ Improve selected section with AI");
-    const aiStatus = el("div", "iamccs-pr-ai-status", "Ollama is local. Choose the field to improve; cloud keys are never stored in the workflow.");
-    aiPanel.append(aiRow1, aiRow2, keyLabel, connectOllamaBtn, addAIImagesBtn, aiImageInput, aiImages, relationshipLabel, buildVisualStoryBtn, rewriteBtn, aiStatus);
+    const aiStatus = el("div", "iamccs-pr-ai-status", "Qwen uses the installed ComfyUI encoder. REQUEST prepares a draft; INJECT transfers it to Shotboard.");
+    aiPanel.append(aiRow1, aiRow2, keyLabel, connectLocalBtn, addAIImagesBtn, aiImageInput, aiImages, relationshipLabel, buildVisualStoryBtn, rewriteBtn, aiStatus);
     left.appendChild(aiPanel);
 
     const center = el("main", "iamccs-pr-center");
     let activePromptArea = null;
     let activePromptKey = null;
     const tagDeck = el("section", "iamccs-pr-tagdeck");
+    tagDeck.dataset.workspace = "tags";
     const tagHead = el("div", "iamccs-pr-taghead");
     tagHead.append(el("div", "iamccs-pr-tagtitle", "MINIMAX H3 PROMPT TAGS"));
     const tagHint = el("div", "iamccs-pr-taghint", "Click a field, then insert a tag");
@@ -1339,7 +1355,7 @@ function mountPrompter(node) {
     tagHead.appendChild(tagToggle);
     const tagRows = el("div", "iamccs-pr-tagrows");
     tagDeck.append(tagHead, tagRows);
-    setTagCollapsed(Boolean(node.properties.iamccs_prompter_tags_collapsed));
+    setTagCollapsed(node.properties.iamccs_prompter_tags_collapsed !== false);
 
     const openZoomEditor = (area) => {
         const overlay = el("div", "iamccs-pr-zoom-overlay");
@@ -1516,7 +1532,7 @@ function mountPrompter(node) {
         project.ai_visual_files = aiVisualFiles.map((item) => ({
             name: item.file.name, path: item.path, mime_type: item.file.type || "image/png",
             size: item.file.size || 0, last_modified: item.file.lastModified || 0,
-        })).filter((item) => item.path).slice(0, 4);
+        })).filter((item) => item.path).slice(0, 9);
         setWidget(node, "project_data", JSON.stringify(project));
         setWidget(node, "task_mode", project.task_mode);
         setWidget(node, "injection_target", project.injection_target);
@@ -1542,7 +1558,7 @@ function mountPrompter(node) {
     inspectorHost.replaceWith(inspector.root);
 
     const aiDefaults = {
-        ollama: { baseUrl: "http://127.0.0.1:11434", model: "" },
+        qwen_native: { baseUrl: "", model: "__workflow__" },
         lm_studio: { baseUrl: "http://localhost:1234/v1", model: "" },
         openai_compatible: { baseUrl: "https://api.openai.com/v1", model: "gpt-4.1-mini" },
         gemini: { baseUrl: "https://generativelanguage.googleapis.com/v1beta", model: "gemini-2.5-flash" },
@@ -1557,11 +1573,12 @@ function mountPrompter(node) {
     };
     const restoreAISettings = () => {
         const savedAI = {...sessionAISettings(), ...(node.properties.iamccs_prompter_ai || {})};
-        aiProvider.value = String(savedAI.provider || "ollama");
-        aiBaseUrl.value = String(savedAI.base_url || aiDefaults[aiProvider.value]?.baseUrl || "");
-        aiModel.value = String(savedAI.model || aiDefaults[aiProvider.value]?.model || "");
+        const migrateOllama = !savedAI.provider || savedAI.provider === "ollama";
+        aiProvider.value = migrateOllama ? "qwen_native" : String(savedAI.provider);
+        aiBaseUrl.value = migrateOllama ? "" : String(savedAI.base_url || aiDefaults[aiProvider.value]?.baseUrl || "");
+        aiModel.value = migrateOllama ? "__workflow__" : String(savedAI.model || aiDefaults[aiProvider.value]?.model || "");
         aiModelPicker.replaceChildren(new Option(aiModel.value || "Choose prompt writer model", aiModel.value));
-        const vision = String(savedAI.vision_model || "");
+        const vision = aiProvider.value === "qwen_native" ? "" : String(savedAI.vision_model || "");
         aiVisionList.replaceChildren(new Option("Use prompt writer for images", ""));
         if (vision) aiVisionList.appendChild(new Option(vision, vision));
         aiVisionModel.value = vision;
@@ -1579,19 +1596,21 @@ function mountPrompter(node) {
         try { globalThis.localStorage?.setItem(AI_PREFS_KEY, JSON.stringify(node.properties.iamccs_prompter_ai)); } catch {}
     };
     const renderAIProviderChrome = () => {
-        const isOllama = aiProvider.value === "ollama";
-        const isLocal = isOllama || aiProvider.value === "lm_studio";
-        keyLabel.hidden = isOllama;
-        connectOllamaBtn.hidden = !isLocal;
+        const isNative = aiProvider.value === "qwen_native";
+        const isLocal = isNative || aiProvider.value === "lm_studio";
+        keyLabel.hidden = isLocal;
+        urlLabel.hidden = isNative;
+        visionLabel.hidden = isNative;
+        connectLocalBtn.hidden = !isLocal;
         refreshModelsBtn.hidden = !isLocal;
-        connectOllamaBtn.textContent = isOllama ? "CONNECT OLLAMA" : "CONNECT LM STUDIO";
-        aiProviderChip.textContent = isLocal ? `${isOllama ? "OLLAMA" : "LM STUDIO"} · LOCAL` : "CLOUD / API";
+        connectLocalBtn.textContent = isNative ? "READ QWEN MODELS" : "CONNECT LM STUDIO";
+        refreshModelsBtn.title = isNative ? "List installed Qwen encoders" : "Read LM Studio models";
+        aiProviderChip.textContent = isLocal ? `${isNative ? "QWEN CLIP" : "LM STUDIO"} · LOCAL` : "CLOUD / API";
         aiProviderChip.classList.toggle("ok", isLocal);
-        aiBaseUrl.placeholder = isOllama ? "http://127.0.0.1:11434" : "Provider API base URL";
         aiModel.hidden = isLocal;
         aiModelPicker.hidden = !isLocal;
-        aiVisionModel.hidden = false;
     };
+    const fetchAI = (path, options) => api.fetchApi(path, {...options, timeoutMs: aiProvider.value === "qwen_native" ? 900000 : 300000});
     let aiVisualFiles = [];
     const restoreAIVisualFiles = () => {
         aiVisualFiles = (project.ai_visual_files || []).map((item) => ({
@@ -1625,8 +1644,8 @@ function mountPrompter(node) {
         return previousRemoved?.apply(this, arguments);
     };
     reuseImageBtn.onclick = async () => {
-        if (!generatedImages.value || aiVisualFiles.length >= 4) {
-            aiStatus.textContent = "Select a generated PNG and leave one free reference slot (maximum 4)."; return;
+        if (!generatedImages.value || aiVisualFiles.length >= (project.omni_preset ? 9 : 4)) {
+            aiStatus.textContent = "Select a generated PNG and leave one free reference slot (Omni: 9; other presets: 4)."; return;
         }
         reuseImageBtn.disabled = true;
         try {
@@ -1696,7 +1715,7 @@ function mountPrompter(node) {
                 })[value]; role.appendChild(option);
             });
             role.value = project.task_mode === "v2va_face_swap_lora" ? (index === 0 ? "identity" : "composition")
-                : String(roles[slot] || (project.task_mode === "reference_image" ? "reference" : index === 0 ? "opening" : index === 1 ? "closing" : "reference"));
+                : String(roles[slot] || ((project.omni_preset || project.task_mode === "reference_image") ? "reference" : index === 0 ? "opening" : index === 1 ? "closing" : "reference"));
             role.disabled = project.task_mode === "v2va_face_swap_lora";
             role.onchange = () => { visualRolesForTarget()[slot] = role.value; commit(); };
             meta.appendChild(role);
@@ -1715,7 +1734,7 @@ function mountPrompter(node) {
             card.append(thumb, meta, remove);
             aiImages.appendChild(card);
         });
-        if (aiVisualFiles.length < 4) {
+        if (aiVisualFiles.length < (project.omni_preset ? 9 : 4)) {
             const add = button("+", "iamccs-pr-ai-add");
             add.type = "button";
             add.title = "Add another reference image; existing images stay in their slots";
@@ -1723,8 +1742,8 @@ function mountPrompter(node) {
             add.onclick = () => aiImageInput.click();
             aiImages.appendChild(add);
         }
-        addAIImagesBtn.textContent = `ADD AI REFERENCE IMAGES · ${aiVisualFiles.length}/4`;
-        addAIImagesBtn.disabled = aiVisualFiles.length >= 4;
+        addAIImagesBtn.textContent = `ADD AI REFERENCE IMAGES · ${aiVisualFiles.length}/${project.omni_preset ? 9 : 4}`;
+        addAIImagesBtn.disabled = aiVisualFiles.length >= (project.omni_preset ? 9 : 4);
     };
     const buildAIImagePayload = async () => {
         const roles = visualRolesForTarget();
@@ -1732,23 +1751,23 @@ function mountPrompter(node) {
         return Promise.all(files.map(async (item, index) => ({
             slot: index + 1,
             name: item.file.name,
-            role: project.task_mode === "v2va_face_swap_lora" ? (index === 0 ? "identity" : "composition") : project.task_mode === "reference_image" ? "reference" : String(roles[String(index + 1)] || (index === 0 ? "opening" : index === 1 ? "closing" : "reference")),
+            role: project.task_mode === "v2va_face_swap_lora" ? (index === 0 ? "identity" : "composition") : project.task_mode === "reference_image" ? "reference" : String(roles[String(index + 1)] || (project.omni_preset ? "reference" : index === 0 ? "opening" : index === 1 ? "closing" : "reference")),
             mime_type: item.file.type || "image/png",
             data: await ensureImageData(item),
             path: item.path || "",
         }))).then((items) => items.filter((item) => item.role !== "ignore"));
     };
     let aiModelsRevision = 0;
-    const loadOllamaModels = async ({ quiet = false } = {}) => {
-        if (!["ollama", "lm_studio"].includes(aiProvider.value)) return [];
+    const loadAIModels = async ({ quiet = false } = {}) => {
+        if (!["qwen_native", "lm_studio"].includes(aiProvider.value)) return [];
         const revision = ++aiModelsRevision;
-        const providerName = aiProvider.value === "lm_studio" ? "LM Studio" : "Ollama";
+        const providerName = aiProvider.value === "lm_studio" ? "LM Studio" : "Qwen CLIP";
         refreshModelsBtn.disabled = true;
-        connectOllamaBtn.disabled = true;
-        connectOllamaBtn.textContent = "CONNECTING…";
+        connectLocalBtn.disabled = true;
+        connectLocalBtn.textContent = "CONNECTING…";
         if (!quiet) aiStatus.textContent = `Reading ${providerName} models…`;
         try {
-            const endpoint = aiProvider.value === "lm_studio" ? "lmstudio" : "ollama";
+            const endpoint = aiProvider.value === "lm_studio" ? "lmstudio" : "qwen";
             const response = await api.fetchApi(`/iamccs/prompter/${endpoint}/models?base_url=${encodeURIComponent(aiBaseUrl.value.trim() || aiDefaults[aiProvider.value].baseUrl)}`);
             const data = await response.json();
             if (revision !== aiModelsRevision) return [];
@@ -1756,8 +1775,8 @@ function mountPrompter(node) {
             const names = [...new Set((data.models || []).map((item) => String(item.name || "").trim()).filter(Boolean))];
             const previousModel = aiModel.value.trim();
             const previousVision = aiVisionModel.value;
-            aiModelPicker.replaceChildren(...names.map((name) => new Option(name, name)));
-            aiVisionList.replaceChildren(new Option("Choose vision model · blank uses writer", ""), ...names.map((name) => new Option(name, name)));
+            aiModelPicker.replaceChildren(...names.map((name) => new Option(name === "__workflow__" ? "Follow H3 Settings PRO (Qwen)" : name, name)));
+            aiVisionList.replaceChildren(new Option("Choose vision model · blank uses writer", ""), ...names.map((name) => new Option(name === "__workflow__" ? "Follow H3 Settings PRO (Qwen)" : name, name)));
             if (previousVision && !names.includes(previousVision))
                 aiVisionList.appendChild(new Option(`${previousVision} (saved; unavailable)`, previousVision));
             aiVisionList.value = previousVision;
@@ -1769,24 +1788,24 @@ function mountPrompter(node) {
             persistAI();
             aiStatus.className = "iamccs-pr-ai-status ok";
             aiStatus.textContent = names.length ? `${names.length} ${providerName} model(s) available. Selected: ${aiModel.value}.` : `${providerName} is reachable but exposes no models.`;
-            connectOllamaBtn.textContent = `${providerName.toUpperCase()} CONNECTED`;
-            connectOllamaBtn.style.borderColor = "#5F9C79";
-            connectOllamaBtn.style.background = "#17352D";
+            connectLocalBtn.textContent = `${providerName.toUpperCase()} CONNECTED`;
+            connectLocalBtn.style.borderColor = "#5F9C79";
+            connectLocalBtn.style.background = "#17352D";
             aiProviderChip.textContent = `${providerName.toUpperCase()} · READY`;
             return names;
         } catch (error) {
             if (revision !== aiModelsRevision) return [];
             aiStatus.className = "iamccs-pr-ai-status error";
             aiStatus.textContent = `${providerName} unavailable: ${error?.message || error}`;
-            connectOllamaBtn.textContent = `${providerName.toUpperCase()} ERROR · RETRY`;
-            connectOllamaBtn.style.borderColor = "#B76464";
-            connectOllamaBtn.style.background = "#3B2020";
+            connectLocalBtn.textContent = `${providerName.toUpperCase()} ERROR · RETRY`;
+            connectLocalBtn.style.borderColor = "#B76464";
+            connectLocalBtn.style.background = "#3B2020";
             aiProviderChip.textContent = `${providerName.toUpperCase()} · ERROR`;
             return [];
         } finally {
             if (revision === aiModelsRevision) {
                 refreshModelsBtn.disabled = false;
-                connectOllamaBtn.disabled = false;
+                connectLocalBtn.disabled = false;
             }
         }
     };
@@ -1794,7 +1813,7 @@ function mountPrompter(node) {
         aiModel.value = aiModelPicker.value;
         persistAI();
         aiStatus.className = "iamccs-pr-ai-status ok";
-        aiStatus.textContent = `${aiProvider.value === "lm_studio" ? "LM Studio" : "Ollama"} model selected: ${aiModel.value}.`;
+        aiStatus.textContent = `${aiProvider.value === "lm_studio" ? "LM Studio" : "Qwen CLIP"} model selected: ${aiModel.value}.`;
     };
     aiVisionList.onchange = () => {
         aiVisionModel.value = aiVisionList.value;
@@ -1810,18 +1829,18 @@ function mountPrompter(node) {
         aiApiKey.value = "";
         persistAI();
         renderAIProviderChrome();
-        if (["ollama", "lm_studio"].includes(aiProvider.value)) await loadOllamaModels();
+        if (["qwen_native", "lm_studio"].includes(aiProvider.value)) await loadAIModels();
     };
     [aiBaseUrl, aiModel, aiVisionModel, aiTemperature].forEach((control) => control.addEventListener("change", persistAI));
-    refreshModelsBtn.onclick = () => loadOllamaModels();
-    connectOllamaBtn.onclick = () => loadOllamaModels();
+    refreshModelsBtn.onclick = () => loadAIModels();
+    connectLocalBtn.onclick = () => loadAIModels();
     addAIImagesBtn.onclick = () => aiImageInput.click();
     aiImageInput.onchange = async () => {
         const selected = Array.from(aiImageInput.files || []).filter((file) => /^image\//.test(file.type));
         const existing = new Set(aiVisualFiles.map((item) => `${item.file.name}:${item.file.size}:${item.file.lastModified}`));
-        const files = selected.filter((file) => !existing.has(`${file.name}:${file.size}:${file.lastModified}`)).slice(0, Math.max(0, 4 - aiVisualFiles.length));
+        const files = selected.filter((file) => !existing.has(`${file.name}:${file.size}:${file.lastModified}`)).slice(0, Math.max(0, (project.omni_preset ? 9 : 4) - aiVisualFiles.length));
         aiStatus.className = "iamccs-pr-ai-status";
-        aiStatus.textContent = files.length ? "Uploading visual references to ComfyUI input…" : "No new image added (maximum 4 or duplicate selection).";
+        aiStatus.textContent = files.length ? "Uploading visual references to ComfyUI input…" : "No new image added (reference capacity reached or duplicate selection).";
         try {
             for (const file of files) aiVisualFiles.push({ file, dataUrl: await readFileDataUrl(file), path: await uploadVisualFile(file) });
             if (files.length) project.visual_story_plan = {};
@@ -1846,10 +1865,10 @@ function mountPrompter(node) {
         try {
             buildVisualStoryBtn.disabled = true; persistAI();
             aiStatus.className = "iamccs-pr-ai-status"; aiStatus.textContent = "Reading images and building H3 global/local motion prompts…";
-            const response = await api.fetchApi("/iamccs/prompter/visual-story", {
+            const response = await fetchAI("/iamccs/prompter/visual-story", {
                 method: "POST", headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({ provider: aiProvider.value, base_url: aiBaseUrl.value.trim(), model: aiModel.value.trim(),
-                    api_key: aiApiKey.value, relationship: visualRelationship.value.trim(), task_mode: project.task_mode,
+                    api_key: aiApiKey.value, native_clip: nativeClipConfig(), relationship: visualRelationship.value.trim(), task_mode: project.task_mode,
                     images: await buildAIImagePayload(), temperature: Number(aiTemperature.value || 0.3), timeout: 150 }),
             });
             const payload = await response.json();
@@ -1965,6 +1984,10 @@ function mountPrompter(node) {
         const walk=graph=>{if(!graph||seen.has(graph))return;seen.add(graph);for(const candidate of graph.nodes||graph._nodes||[]){found.push(candidate);walk(candidate.subgraph);}};
         walk(app.graph);return found;
     };
+    const nativeClipConfig = () => {
+        const settings = editGraphNodes().find(n => nodeType(n) === "IAMCCS_ShotboardH3SettingsPro");
+        return {profile: String(widget(settings, "h3_clipproj_profile")?.value || "4b_v3.1")};
+    };
     const editMediaConfig = () => {
         const graphNodes=editGraphNodes();
         const settings=graphNodes.find(n=>nodeType(n)==="IAMCCS_ShotboardH3SettingsPro");
@@ -2011,16 +2034,52 @@ function mountPrompter(node) {
         card.append(inspect,filmstrip,el("div","iamccs-pr-tip","REQUEST describes the desired edit. Vision reads sampled frames; the render receives the complete selected video. Choose the matching mode in Settings PRO before INJECT. VFX means visual effects; audio follows its separate output policy."));
         return card;
     };
+    const renderOmniBindings = () => {
+        const card = el("section", "iamccs-pr-section");
+        card.dataset.workspace = "voices";
+        card.appendChild(el("strong", "", "FASTH3 OMNI · SHOTS & VOICE REFERENCES"));
+        card.appendChild(el("div", "iamccs-pr-tip", "Write your scene and shot timings in REQUEST. Add up to 9 images here. Upload voice clips below, or connect CineInfoH3 Audio inputs as fallback; Audio numbering includes video soundtracks first. Select FASTH3 OMNI in Settings PRO. Voice references guide timbre; locked dialogue waveforms use Custom Audio instead."));
+        for (let i=0;i<3;i++) {
+            const line=el("div");line.style.cssText="display:flex;gap:6px;align-items:center;padding:4px";
+            const input=el("input");input.type="file";input.accept="audio/*,.wav,.flac,.mp3,.ogg";input.hidden=true;
+            const addVoice=button(`VOICE ${i+1} · ADD AUDIO`);addVoice.onclick=()=>input.click();
+            input.onchange=async()=>{try{const file=input.files?.[0];if(!file)return;const path=await uploadVisualFile(file);project.omni_audio_files ||= [];project.omni_audio_files[i]={path,name:file.name};commit();renderSections();}catch(error){aiStatus.textContent=error.message;}};
+            const stored=project.omni_audio_files?.[i];
+            const name=el("span","",stored?.name||"Backend reference fallback");
+            const clear=button("CLEAR");clear.onclick=()=>{project.omni_audio_files[i]=null;commit();renderSections();};
+            line.append(addVoice,input,name,clear);card.appendChild(line);
+        }
+        for (const row of project.omni_voice_bindings || []) {
+            const line = el("div"); line.style.cssText = "display:flex;gap:6px;flex-wrap:wrap;padding:6px";
+            const enabled = el("input"); enabled.type = "checkbox"; enabled.checked = row.enabled !== false;
+            enabled.onchange = () => {row.enabled=enabled.checked;commit();renderPreview();}; line.appendChild(fieldLabel("Use voice", enabled));
+            for (const [key, label, max] of [["shot","Shot",999],["picture","Picture",9],["audio","Audio",6]]) {
+                const input=el("input");input.type="number";input.min="1";input.max=String(max);input.value=row[key]||1;input.style.width="65px";
+                input.onchange=()=>{row[key]=Math.max(1,Math.min(max,Number(input.value)||1));commit();renderPreview();};line.appendChild(fieldLabel(label,input));
+            }
+            const subject=el("input");subject.value=row.character||"";subject.placeholder="Character name / label";
+            subject.onchange=()=>{row.character=subject.value.trim();commit();renderPreview();};line.appendChild(subject);
+            const remove=button("REMOVE");remove.onclick=()=>{project.omni_voice_bindings=project.omni_voice_bindings.filter(x=>x!==row);commit();renderSections();renderPreview();};line.appendChild(remove);card.appendChild(line);
+        }
+        const add=button("ADD SHOT / CHARACTER / VOICE BINDING");add.onclick=()=>{project.omni_voice_bindings ||= [];project.omni_voice_bindings.push({enabled:true,shot:1,picture:1,audio:1,character:""});commit();renderSections();};card.appendChild(add);
+        return card;
+    };
     const renderSections = () => {
         center.replaceChildren();
         activePromptArea = null;
         activePromptKey = null;
         center.appendChild(tagDeck);
         if (isEditMode(project.task_mode)) center.appendChild(renderEditMedia());
+        if (project.omni_preset && project.task_mode === "ref2va") center.appendChild(renderOmniBindings());
         const imageMode = project.task_mode === "reference_image";
         const swapChar = isEditMode(project.task_mode);
-        if (!imageMode && !swapChar) center.appendChild(createModeHelper(project.task_mode));
+        if (!imageMode && !swapChar) {
+            const helper = createModeHelper(project.task_mode);
+            helper.open = false;
+            center.appendChild(helper);
+        }
         const requestCard = el("section", "iamccs-pr-section");
+        requestCard.dataset.workspace = "direction";
         requestCard.style.cssText = "border:2px solid #a077cf;background:#271c3c;padding:12px";
         const requestHead = el("div", "iamccs-pr-section-head");
         requestHead.style.cssText="height:auto;min-height:38px;flex-wrap:wrap;padding:6px 10px";
@@ -2035,10 +2094,10 @@ function mountPrompter(node) {
             try {
                 requestStory.disabled = true; persistAI();
                 aiStatus.textContent = "Developing global direction and numbered local prompts…";
-                const response = await api.fetchApi("/iamccs/prompter/visual-story", {
+                const response = await fetchAI("/iamccs/prompter/visual-story", {
                     method: "POST", headers: {"Content-Type":"application/json"},
                     body: JSON.stringify({provider:aiProvider.value,base_url:aiBaseUrl.value.trim(),model:aiModel.value.trim(),
-                        api_key:aiApiKey.value,relationship:project.request,task_mode:project.task_mode,images:[],
+                        api_key:aiApiKey.value,native_clip:nativeClipConfig(),relationship:project.request,task_mode:project.task_mode,images:[],
                         temperature:Number(aiTemperature.value || 0.3),timeout:150}),
                 });
                 const data = await response.json();
@@ -2131,6 +2190,7 @@ function mountPrompter(node) {
         const meta = MODE_META[project.task_mode];
         meta.sections.forEach(([key, label, tip], index) => {
             const card = el("section", "iamccs-pr-section");
+            card.dataset.workspace = "structure";
             const head = el("div", "iamccs-pr-section-head");
             head.append(el("div", "iamccs-pr-num", String(index + 1)), el("div", "iamccs-pr-section-title", label));
             const state = el("div", "iamccs-pr-state");
@@ -2197,11 +2257,13 @@ function mountPrompter(node) {
         // GLOBAL document. This prevents LOCAL cards from splitting/reflowing
         // the global H3 section stack on narrower ComfyUI windows.
         if (!imageMode && !swapChar) center.appendChild(renderLocalPrompts());
-        modeButtons.forEach((item, key) => item.classList.toggle("active", key === project.task_mode));
+        modeButtons.forEach((item, key) => item.classList.toggle("active", key === project.task_mode && !project.omni_preset));
+        omniButton.classList.toggle("active", project.omni_preset && project.task_mode === "ref2va");
         modeNote.textContent = meta.subtitle;
         modeNote.title = meta.subtitle;
         decorateTextEditors();
         renderPreview();
+        workspace?.refresh();
     };
 
     const populateAIScope = () => {
@@ -2356,7 +2418,14 @@ function mountPrompter(node) {
         commit();
     };
 
-    const runAIRewrite = async ({ directTargetKeys = null, triggerButton = rewriteBtn, narrativeRequest = null } = {}) => {
+    const runAIRewrite = async (options) => {
+        try { return await performAIRewrite(options); }
+        catch (error) {
+            aiStatus.className = "iamccs-pr-ai-status error";
+            aiStatus.textContent = `Rewrite failed: ${error?.message || error}`;
+        }
+    };
+    const performAIRewrite = async ({ directTargetKeys = null, triggerButton = rewriteBtn, narrativeRequest = null } = {}) => {
         if (narrativeRequest === null && activePromptKey === "request") {
             narrativeRequest = activePromptArea?.value ?? project.request;
             project.request = narrativeRequest;
@@ -2430,7 +2499,9 @@ function mountPrompter(node) {
             node._iamccsPromptAiBusy = true;
             finishBusy = beginAiBusy(triggerButton);
             aiStatus.className = "iamccs-pr-ai-status";
-            aiStatus.textContent = `Sending ${targetKeys.join(", ")} to ${aiProvider.options[aiProvider.selectedIndex]?.text || aiProvider.value}.`;
+            aiStatus.textContent = aiProvider.value === "qwen_native"
+                ? "Qwen CLIP: loading the encoder, reading references and writing the H3 prompt. The first REQUEST includes model loading; keep this window open."
+                : `Sending ${targetKeys.join(", ")} to ${aiProvider.options[aiProvider.selectedIndex]?.text || aiProvider.value}.`;
             const imagePayload = await buildAIImagePayload();
             // A new image request is authoritative. Never feed previous generated
             // image fields back as rough text, otherwise local models tend to
@@ -2438,18 +2509,18 @@ function mountPrompter(node) {
             const rewriteInputSections = isImageRequest || isSwapCharRequest
                 ? Object.fromEntries(Object.keys(allSections).map((key) => [key, ""]))
                 : allSections;
-            const response = await api.fetchApi("/iamccs/prompter/rewrite", {
+            const response = await fetchAI("/iamccs/prompter/rewrite", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
                     provider: aiProvider.value,
                     base_url: aiBaseUrl.value.trim(),
                     model: aiModel.value.trim(),
-                    api_key: aiApiKey.value,
+                    api_key: aiApiKey.value, native_clip: nativeClipConfig(),
                     task_mode: project.task_mode,
                     sections: rewriteInputSections,
                     target_keys: targetKeys,
-                    user_direction: project.task_mode === "reference_image"
+                    user_direction: project.omni_preset && project.task_mode === "ref2va" ? `${omniRequestDirection(project)}\n${direction}` : project.task_mode === "reference_image"
                         ? `${project.image_preset === "reference_sheet" ? "REFERENCE SHEET: one combined canvas containing every requested character and prop." : "SINGLE STATIC IMAGE."}\n${direction}` : direction,
                     vision_model: aiVisionModel.value.trim(),
                     images: imagePayload,
@@ -2537,6 +2608,7 @@ function mountPrompter(node) {
     };
     const renderLocalPrompts = () => {
         const panel = el("section", "iamccs-pr-section");
+        panel.dataset.workspace = "shots";
         panel.style.cssText = "border:2px solid #468eb8;background:#142b3a;color:#e6f4ff;padding:12px";
         panel.append(el("div","iamccs-pr-section-title","LOCAL PROMPTS · one direction per Shotboard slot"));
         panel.append(el("div","iamccs-pr-tip","GLOBAL defines the world. LOCAL defines this shot: active speaker, silent listener, action and camera. These fields are injected together with the selected main target; images/audio stay in Shotboard."));
@@ -2605,7 +2677,7 @@ function mountPrompter(node) {
                 node._iamccsPromptAiBusy=true; const done=beginAiBusy(ai);
                 try {
                     persistAI();
-                    const response=await api.fetchApi("/iamccs/prompter/rewrite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:aiProvider.value,base_url:aiBaseUrl.value.trim(),model:aiModel.value.trim(),api_key:aiApiKey.value,task_mode:requestMode,sections:{[key]:rough},target_keys:[key],user_direction:`Rewrite only LOCAL slot ${row.slot}. Keep its active speaker and supplied dialogue unchanged; do not write a new global story. Global context: ${generatedGlobalPrompt(project).slice(0,3500)}`,images:await buildAIImagePayload(),temperature:Number(aiTemperature.value||0.35),timeout:180})});
+                    const response=await fetchAI("/iamccs/prompter/rewrite",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({provider:aiProvider.value,base_url:aiBaseUrl.value.trim(),model:aiModel.value.trim(),api_key:aiApiKey.value,native_clip:nativeClipConfig(),task_mode:requestMode,sections:{[key]:rough},target_keys:[key],user_direction:`Rewrite only LOCAL slot ${row.slot}. Keep its active speaker and supplied dialogue unchanged; do not write a new global story. Global context: ${generatedGlobalPrompt(project).slice(0,3500)}`,images:await buildAIImagePayload(),temperature:Number(aiTemperature.value||0.35),timeout:180})});
                     const result=await response.json(); if(!response.ok||!result.ok) throw new Error(result.error||`HTTP ${response.status}`);
                     if(project.task_mode!==requestMode || row.prompt!==rough) throw new Error("Your box changed while AI was working; your edit was kept.");
                     if(!result.sections?.[key]) throw new Error("No local prompt returned.");
@@ -2619,10 +2691,17 @@ function mountPrompter(node) {
     };
     rewriteBtn.onclick = () => runAIRewrite({ triggerButton: rewriteBtn });
 
+    omniButton.onclick = () => {
+        project.task_mode = "ref2va"; project.omni_preset = true;
+        project.injection_target = "global"; project.final_prompt_override_enabled = false;
+        commit(); renderControls(); renderSections(); renderPreview();
+    };
+
     modeButtons.forEach((item, key) => {
         item.onclick = () => {
             const previousMode = project.task_mode;
             if (previousMode !== key) snapshotProject(`mode change ${previousMode} → ${key}`);
+            project.omni_preset = false;
             project.task_mode = key;
             if (key === "v2va_face_swap_lora") {
                 project.request ||= SWAPCHAR_REQUEST;
@@ -2748,7 +2827,7 @@ function mountPrompter(node) {
                 if (typeof shotboard._iamccsMiniMaxSetI2VHardCutSlots !== "function")
                     throw Error("Reload ComfyUI to enable ordered I2VA image-slot injection.");
                 shotboard._iamccsMiniMaxSetI2VHardCutSlots({paths:compactI2VPaths});
-            } else if (!swapChar && uniqueVisualPaths.length) {
+            } else if (!swapChar && !project.omni_preset && uniqueVisualPaths.length) {
                 setWidget(shotboard, "image_paths", JSON.stringify(uniqueVisualPaths));
             }
             if (imageOnly) {
@@ -2916,9 +2995,12 @@ function mountPrompter(node) {
         commit();
     };
 
+    workspace = createPrompterWorkspace({ root, layout, left, center, right, modeBar, audioPanel, aiPanel,
+        references: [addAIImagesBtn, aiImageInput, aiImages, generatedImages, reuseImageBtn], injectBtn, injectStatus });
+
     const domWidget = node.addDOMWidget("IAMCCS Prompter", "iamccs_prompter", root, { serialize: false });
-    const PROMPTER_NODE_SIZE = [980, 790];
-    domWidget.computeSize = () => [960, 720];
+    const PROMPTER_NODE_SIZE = [1120, 790];
+    domWidget.computeSize = () => [1100, 720];
     node.setSize(PROMPTER_NODE_SIZE.slice());
     node.resizable = false;
 
@@ -2932,7 +3014,7 @@ function mountPrompter(node) {
         ++aiModelsRevision;
         restoreAISettings();
         renderAIProviderChrome();
-        if (["ollama", "lm_studio"].includes(aiProvider.value)) loadOllamaModels({quiet:true});
+        if (["qwen_native", "lm_studio"].includes(aiProvider.value)) loadAIModels({quiet:true});
         renderControls();
         renderSections();
         // Saved workflows may retain an old oversized node rectangle. Keep the
@@ -2980,7 +3062,7 @@ function mountPrompter(node) {
     renderSections();
     renderAIProviderChrome();
     commit();
-    if (["ollama", "lm_studio"].includes(aiProvider.value)) setTimeout(() => loadOllamaModels({ quiet: true }), 0);
+    if (["qwen_native", "lm_studio"].includes(aiProvider.value)) setTimeout(() => loadAIModels({ quiet: true }), 0);
 }
 
 app.registerExtension({

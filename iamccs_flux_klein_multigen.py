@@ -195,15 +195,17 @@ def _resize_image_exact(image, width, height, upscale_method="lanczos"):
     ).movedim(1, -1)
 
 
-def _sigmas_for_denoise(steps, width, height, denoise):
+def _sigmas_for_denoise(steps, width, height, denoise, model=None, scheduler="flux2"):
     """Match Comfy's denoise scheduling: fewer final sigmas from a longer schedule."""
     steps = max(1, int(steps))
     denoise = float(denoise)
-    if denoise >= 0.999:
-        return _node_Flux2Scheduler(steps, width, height)
     if denoise <= 0.0:
         return None
-
+    if scheduler != "flux2":
+        from comfy_extras.nodes_custom_sampler import BasicScheduler
+        return _unpack(BasicScheduler.execute(model, scheduler, steps, denoise))
+    if denoise >= 0.999:
+        return _node_Flux2Scheduler(steps, width, height)
     total_steps = max(steps, int(steps / denoise))
     sigmas = _node_Flux2Scheduler(total_steps, width, height)
     return sigmas[-(steps + 1):]
@@ -257,6 +259,7 @@ class IAMCCS_FluxKleinMultiGen:
                 "debug_enabled":            ("BOOLEAN", {"default": False}),
                 "debug_prefix":             ("STRING",  {"default": "flux_klein_debug"}),
                 "defer_cpu_transfer":       ("BOOLEAN", {"default": False}),
+                "scheduler": (["flux2", "simple", "sgm_uniform"], {"default": "flux2", "tooltip": "Keep flux2 for existing workflows. Use simple for FLUX 3 with the matching model and text encoder."}),
             },
         }
 
@@ -284,6 +287,7 @@ class IAMCCS_FluxKleinMultiGen:
         debug_enabled=False,
         debug_prefix="flux_klein_debug",
         defer_cpu_transfer=False,
+        scheduler="flux2",
     ):
         sep = separator.replace("\\n", "\n")
         prompts = [p.strip() for p in (multi_prompt or "").split(sep) if p.strip()]
@@ -347,7 +351,7 @@ class IAMCCS_FluxKleinMultiGen:
         #          steps + output_width + output_height -> Flux2Scheduler -> sigmas
         #          output_width + output_height -> EmptyFlux2LatentImage -> latent_image
         sampler_obj = _node_KSamplerSelect(sampler_name)
-        sigmas      = _node_Flux2Scheduler(steps, output_width, output_height)
+        sigmas      = _sigmas_for_denoise(steps, output_width, output_height, 1.0, model, scheduler)
         latent_img  = _node_EmptyFlux2LatentImage(output_width, output_height)
 
         # ── GENERATION LOOP ────────────────────────────────────────────────────
@@ -500,6 +504,7 @@ class IAMCCS_FluxKleinRefine:
                 "debug_enabled":            ("BOOLEAN", {"default": False}),
                 "debug_prefix":             ("STRING",  {"default": "flux_klein_refine_debug"}),
                 "defer_cpu_transfer":       ("BOOLEAN", {"default": False}),
+                "scheduler": (["flux2", "simple", "sgm_uniform"], {"default": "flux2", "tooltip": "Keep flux2 for existing workflows. Use simple for FLUX 3 with the matching model and text encoder."}),
             },
         }
 
@@ -528,6 +533,7 @@ class IAMCCS_FluxKleinRefine:
         debug_enabled=False,
         debug_prefix="flux_klein_refine_debug",
         defer_cpu_transfer=False,
+        scheduler="flux2",
     ):
         sep = separator.replace("\\n", "\n")
         prompts = [p.strip() for p in (multi_prompt or "").split(sep) if p.strip()]
@@ -612,11 +618,11 @@ class IAMCCS_FluxKleinRefine:
             )
 
             if use_img2img:
-                sigmas = _sigmas_for_denoise(steps, width, height, denoise)
+                sigmas = _sigmas_for_denoise(steps, width, height, denoise, model, scheduler)
                 latent_img = reference_latent
                 mode_used = "img2img_refine"
             else:
-                sigmas = _node_Flux2Scheduler(steps, width, height)
+                sigmas = _sigmas_for_denoise(steps, width, height, 1.0, model, scheduler)
                 latent_img = empty_latent
                 mode_used = "kontext_reference_edit"
 

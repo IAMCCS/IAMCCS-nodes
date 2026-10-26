@@ -1,5 +1,4 @@
 import ast
-import os
 from collections.abc import Mapping
 from copy import deepcopy
 import importlib.util
@@ -22,7 +21,7 @@ spec.loader.exec_module(swap)
 
 # Exercise the actual installed VHS lazy-audio implementation without importing
 # its unrelated model and UI modules or loading video frames onto the GPU.
-vhs_path = Path(os.environ.get("COMFYUI_PATH", ROOT.parents[1])) / "custom_nodes/comfyui-videohelpersuite/videohelpersuite/utils.py"
+vhs_path = ROOT.parent / "comfyui-videohelpersuite/videohelpersuite/utils.py"
 tree = ast.parse(vhs_path.read_text(encoding="utf-8"))
 audio_nodes = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in {"get_audio", "LazyAudioMap"}]
 scope = dict(Mapping=Mapping, subprocess=subprocess, torch=torch, re=re,

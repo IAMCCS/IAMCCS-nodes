@@ -2,7 +2,6 @@
 
 import ast
 import logging
-import os
 import sys
 import types
 from contextlib import contextmanager
@@ -59,11 +58,7 @@ def test_fast_latent_calls_current_3d_api_and_releases_upscaler():
 def test_universal_workflows_keep_fast_route_connected():
     import json
 
-    fixture = os.environ.get("IAMCCS_TEST_UNIVERSAL_WORKFLOWS", "")
-    if not fixture:
-        import unittest
-        raise unittest.SkipTest("Set IAMCCS_TEST_UNIVERSAL_WORKFLOWS to test external workflows")
-    directory = Path(fixture)
+    directory = Path(r"X:\1_UNIVERSAL_42_43")
     for name in (
         "A_IAMCCS_H3_MINIMAX_R42_UNIVERSAL_180926.json",
         "B_IAMCCS_H3_R43_KEYFRAME_JOINT_LATENT_NEW_UNIVERSAL_FIXED_MOTION_STATE.json",

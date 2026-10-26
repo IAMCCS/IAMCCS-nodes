@@ -1,7 +1,6 @@
 import importlib.util
 from pathlib import Path
 import unittest
-from unittest import mock
 
 
 PATH = Path(__file__).parents[1] / "iamccs_prompt_q21_enh.py"
@@ -47,11 +46,11 @@ class PromptQ21EnhTests(unittest.TestCase):
         clip = FakeClip('<think>compose</think>{"rewritten_prompt":"A detailed frame","wh_ratio":"16:9"}')
         output = MODULE.IAMCCS_PromptQ21Enh().enhance(clip, "t2i", "a village", seed=7)
         self.assertEqual(output[:6], ("A detailed frame", "", "16:9", "", "compose", True))
-        self.assertEqual(output[6:], (None, None, "general", None))
+        self.assertEqual(output[6:], (None, None, "general; policy=official", None))
         self.assertEqual(clip.generate_call[1]["presence_penalty"], 1.5)
         self.assertEqual(clip.generate_call[1]["seed"], 7)
-        self.assertEqual(clip.generate_call[1]["max_length"], 16256)
-        self.assertTrue(clip.token_call[1]["thinking"])
+        self.assertEqual(clip.generate_call[1]["max_length"], 768)
+        self.assertFalse(clip.token_call[1]["thinking"])
         self.assertNotIn("images", clip.token_call[1])
         self.assertIn("Return one strictly valid JSON object", clip.token_call[0])
 
@@ -64,43 +63,66 @@ class PromptQ21EnhTests(unittest.TestCase):
         self.assertEqual(output[:6], ("Replace the sky", "", "4:3", "", "", True))
         self.assertIs(output[6], image)
         self.assertIsNone(output[7])
-        self.assertEqual(output[8], "general")
+        self.assertEqual(output[8], "general; policy=safe_edit")
         self.assertIsNone(output[9])
         self.assertEqual(len(clip.token_call[1]["images"]), 1)
         self.assertIn("<image1>", clip.token_call[0])
         self.assertEqual(clip.generate_call[1]["presence_penalty"], 0.0)
         self.assertEqual(clip.generate_call[1]["top_k"], 31)
-        self.assertEqual(clip.generate_call[1]["max_length"], 24000)
-        self.assertIn("Image Reference Rules", clip.token_call[0])
+        self.assertEqual(clip.generate_call[1]["max_length"], 512)
+        self.assertIn("conservative image-edit instruction translator", clip.token_call[0])
 
-    def test_prompt_enhancer_caps_large_image_without_changing_generator_image(self):
+    def test_prompt_enhancer_keeps_reference_pixels_like_working_node(self):
         class LargeImage(FakeImage):
             shape = (1, 2048, 2048, 3)
 
         clip = FakeClip('{"rewritten_prompt":"Edit the frame"}')
         source = LargeImage()
-        pe_image = FakeImage()
-        with mock.patch.object(MODULE.comfy.utils, "common_upscale", return_value=pe_image) as upscale:
-            output = MODULE.IAMCCS_PromptQ21Enh().enhance(
-                clip, "edit", "edit the frame", image_1=source
-            )
+        output = MODULE.IAMCCS_PromptQ21Enh().enhance(
+            clip, "edit", "edit the frame", image_1=source
+        )
         self.assertIs(output[6], source)
-        self.assertIs(clip.token_call[1]["images"][0], pe_image)
-        target_width, target_height = upscale.call_args.args[1:3]
-        self.assertLessEqual(target_width * target_height, 1024 * 1024)
-        self.assertEqual(target_width % 32, 0)
-        self.assertEqual(target_height % 32, 0)
+        self.assertIs(clip.token_call[1]["images"][0], source)
 
     def test_profiles_and_explicit_token_limit(self):
         clip = FakeClip('{"rewritten_prompt":"Keep it concise"}')
         MODULE.IAMCCS_PromptQ21Enh().enhance(
             clip, "t2i", "idea", generation_profile="fast"
         )
-        self.assertEqual(clip.generate_call[1]["max_length"], 4096)
+        self.assertEqual(clip.generate_call[1]["max_length"], 256)
         MODULE.IAMCCS_PromptQ21Enh().enhance(
             clip, "t2i", "idea", max_new_tokens=50000
         )
         self.assertEqual(clip.generate_call[1]["max_length"], 32768)
+
+    def test_official_policy_matches_reference_prompt(self):
+        clip = FakeClip('{"rewritten_prompt":"Change the jacket to red"}')
+        MODULE.IAMCCS_PromptQ21Enh().enhance(
+            clip, "edit", "change the jacket to red", image_1=FakeImage(),
+            rewrite_policy="official", thinking_mode=True,
+        )
+        self.assertIn("Image Reference Rules", clip.token_call[0])
+        self.assertTrue(clip.token_call[1]["thinking"])
+
+    def test_safe_policy_rejects_invented_background_edit(self):
+        clip = FakeClip('{"rewritten_prompt":"Replace the background with a blue studio"}')
+        output = MODULE.IAMCCS_PromptQ21Enh().enhance(
+            clip, "edit", "Cambia il colore della giacca in rosso", image_1=FakeImage()
+        )
+        self.assertTrue(output[0].startswith("Cambia il colore della giacca in rosso"))
+        self.assertIn("Keep the background", output[0])
+        self.assertIn("background drift rejected", output[8])
+
+    def test_bypass_never_calls_prompt_model(self):
+        clip = FakeClip("must not be used")
+        output = MODULE.IAMCCS_PromptQ21Enh().enhance(
+            clip, "edit", "Change only the jacket to red", image_1=FakeImage(),
+            rewrite_policy="bypass",
+        )
+        self.assertIsNone(clip.token_call)
+        self.assertIsNone(clip.generate_call)
+        self.assertTrue(output[0].startswith("Change only the jacket to red"))
+        self.assertEqual(output[3], "<image1>")
 
     def test_missing_image_is_explicit(self):
         clip = FakeClip("")

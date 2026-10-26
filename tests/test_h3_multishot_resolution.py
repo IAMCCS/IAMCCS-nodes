@@ -1,5 +1,4 @@
 import ast
-import os
 import importlib.util
 import math
 import sys
@@ -73,7 +72,7 @@ class MultishotResolutionTests(unittest.TestCase):
                          'Static camera. Compare the composition with [Shot 2].')
 
     def test_h3_rope_guide_times_do_not_depend_on_spatial_resolution(self):
-        model_path = Path(os.environ.get('COMFYUI_PATH', ROOT.parents[1])) / 'comfy/ldm/minimax/model.py'
+        model_path = ROOT.parents[1] / 'comfy/ldm/minimax/model.py'
         tree = ast.parse(model_path.read_text(encoding='utf-8'))
         names = {'_axis_from_sqrt_area', '_frame_grid', '_video_t_spans', '_video_t_grid',
                  '_ref_t_span', '_audio_grid', '_video_grid', 'PackedLayout'}

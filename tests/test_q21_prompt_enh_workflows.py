@@ -11,6 +11,7 @@ WORKFLOWS = {
     "outpaint": WORKFLOW_DIR / "03_q21_prompt_enh_outpaint_smoke.json",
     "two_image_edit": WORKFLOW_DIR / "04_q21_prompt_enh_two_image_edit_smoke.json",
 }
+UNIFIED = WORKFLOW_DIR / "05_q21_unified_t2i_edit_controlnet_safe.json"
 
 
 class PromptQ21WorkflowTests(unittest.TestCase):
@@ -61,7 +62,7 @@ class PromptQ21WorkflowTests(unittest.TestCase):
                 enhancer = self.only_node(workflow, "IAMCCS_PromptQ21Enh")
                 encoder = self.only_node(workflow, "TextEncodeQwenImage21")
                 self.assertEqual(len(enhancer["outputs"]), 10)
-                self.assertEqual(enhancer["widgets_values"][-1], "official")
+                self.assertEqual(enhancer["widgets_values"][-2:], ["safe_edit", False])
                 prompt_source, prompt_output = self.source_for_input(workflow, encoder, "prompt")
                 negative_source, negative_output = self.source_for_input(workflow, encoder, "negative_prompt")
                 self.assertEqual(prompt_source["id"], enhancer["id"])
@@ -100,6 +101,29 @@ class PromptQ21WorkflowTests(unittest.TestCase):
         self.assertEqual(first_source["id"], two_enhancer["id"])
         self.assertEqual(second_source["id"], two_enhancer["id"])
         self.assertEqual((first_output, second_output), ("generator_image_1", "generator_image_2"))
+
+    def test_unified_workflow_uses_known_good_refiners_and_native_controlnet(self):
+        with UNIFIED.open("r", encoding="utf-8") as handle:
+            workflow = json.load(handle)
+        types = self.node_types(workflow)
+        self.assertIn("QwenImage21_T2IPromptRewrite", types)
+        self.assertIn("QwenImage21_EditPromptRewrite", types)
+        self.assertIn("ModelPatchLoader", types)
+        self.assertIn("QwenImageDiffsynthControlnet", types)
+        self.assertIn("AIO_Preprocessor", types)
+        self.assertNotIn("IAMCCS_PromptQ21Enh", types)
+        booleans = {node.get("title"): node["widgets_values"][0] for node in workflow["nodes"] if node["type"] == "PrimitiveBoolean"}
+        self.assertTrue(booleans["EDIT MODE"])
+        self.assertFalse(booleans["AI REFINE (default OFF)"])
+        self.assertFalse(booleans["ENABLE FUN CONTROLNET"])
+        patch_loader = self.only_node(workflow, "ModelPatchLoader")
+        self.assertEqual(patch_loader["widgets_values"][0], "Qwen-Image-2.1-Fun-Controlnet-Union.safetensors")
+        refiners = {node["type"]: node for node in workflow["nodes"] if node["type"].startswith("QwenImage21_")}
+        self.assertIn(768, refiners["QwenImage21_T2IPromptRewrite"]["widgets_values"])
+        self.assertIn(512, refiners["QwenImage21_EditPromptRewrite"]["widgets_values"])
+        pe_loaders = [node for node in workflow["nodes"] if node["type"] == "CLIPLoader" and "working package" in node.get("title", "")]
+        self.assertEqual(len(pe_loaders), 2)
+        self.assertTrue(all(node["widgets_values"][1] == "qwen_image" for node in pe_loaders))
 
 
 if __name__ == "__main__":

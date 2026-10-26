@@ -13,6 +13,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import re
 import shutil
 import time
 from pathlib import Path
@@ -128,7 +129,7 @@ def _final_visible_handover(handover: dict[str, Any] | None, total_frames: int) 
 
 def _checkpoint_run_dir(unique_id: Any) -> tuple[Path, str]:
     stamp = int(time.time() * 1000)
-    node = str(unique_id or "continuous").replace("/", "_").replace("\\", "_")
+    node = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", str(unique_id or "continuous"))
     run = f"continuous_{node}_{stamp}"
     root = Path(folder_paths.get_output_directory()) / "IAMCCS" / "MiniMaxH3" / "ContinuousAV" / run
     root.mkdir(parents=True, exist_ok=True)
