@@ -26,6 +26,15 @@ CATEGORY = "IAMCCS/MiniMax H3/Face Detailer"
 _EXTERNAL_FACE_NODE_PATH = Path(__file__).resolve().parents[1] / "ComfyUI-H3-FaceRefine" / "nodes.py"
 
 
+def _face_nodes_available(*node_names: str) -> bool:
+    """Probe optional registration without importing the external backend."""
+    if _EXTERNAL_FACE_NODE_PATH.is_file():
+        return True
+    registered = getattr(sys.modules.get("nodes"), "NODE_CLASS_MAPPINGS", {})
+    external = getattr(sys.modules.get("iamccs_external_h3_face_refine"), "NODE_CLASS_MAPPINGS", {})
+    return all(name in registered or name in external for name in node_names)
+
+
 def _face_node_class(node_name: str):
     """Resolve the installed FaceRefine node without duplicating its algorithms."""
     try:
@@ -224,3 +233,10 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "IAMCCS_MiniMaxH3FaceTransformInfo": "IAMCCS H3 Face Transform Info",
     "IAMCCS_MiniMaxH3FaceDetailerRouter": "IAMCCS H3 Optional Face Detailer Router",
 }
+
+# ComfyUI queries every registered INPUT_TYPES on startup/frontend reload.
+# Missing optional backends must not turn that discovery into repeated errors.
+for _name, _class in list(NODE_CLASS_MAPPINGS.items()):
+    if issubclass(_class, _FaceRefineAlias) and not _face_nodes_available(_class.EXTERNAL_NODE):
+        del NODE_CLASS_MAPPINGS[_name]
+        del NODE_DISPLAY_NAME_MAPPINGS[_name]

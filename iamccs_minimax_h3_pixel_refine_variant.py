@@ -722,7 +722,10 @@ from .iamccs_minimax_h3_face_delivery_variant import (
     IAMCCS_MiniMaxH3FaceDeliveryR38B,
     IAMCCS_MiniMaxH3WideCharacterDetailer12GB,
 )
-NODE_CLASS_MAPPINGS["IAMCCS_MiniMaxH3FaceDeliveryR38B"] = IAMCCS_MiniMaxH3FaceDeliveryR38B
-NODE_DISPLAY_NAME_MAPPINGS["IAMCCS_MiniMaxH3FaceDeliveryR38B"] = "MiniMax H3 · Optional FaceRefine · Before Upscale"
-NODE_CLASS_MAPPINGS["IAMCCS_MiniMaxH3WideCharacterDetailer12GB"] = IAMCCS_MiniMaxH3WideCharacterDetailer12GB
-NODE_DISPLAY_NAME_MAPPINGS["IAMCCS_MiniMaxH3WideCharacterDetailer12GB"] = "IAMCCS WIDE CHARACTER DETAILER · 12 GB"
+from .iamccs_minimax_h3_face_detailer import _face_nodes_available
+
+if _face_nodes_available("H3FaceTrackCrop", "H3FaceStitch"):
+    NODE_CLASS_MAPPINGS["IAMCCS_MiniMaxH3FaceDeliveryR38B"] = IAMCCS_MiniMaxH3FaceDeliveryR38B
+    NODE_DISPLAY_NAME_MAPPINGS["IAMCCS_MiniMaxH3FaceDeliveryR38B"] = "MiniMax H3 · Optional FaceRefine · Before Upscale"
+    NODE_CLASS_MAPPINGS["IAMCCS_MiniMaxH3WideCharacterDetailer12GB"] = IAMCCS_MiniMaxH3WideCharacterDetailer12GB
+    NODE_DISPLAY_NAME_MAPPINGS["IAMCCS_MiniMaxH3WideCharacterDetailer12GB"] = "IAMCCS WIDE CHARACTER DETAILER · 12 GB"
