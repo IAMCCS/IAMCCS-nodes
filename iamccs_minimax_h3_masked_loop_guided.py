@@ -358,7 +358,7 @@ class IAMCCS_MiniMaxH3MaskedLoopGuidedSampler:
         turbo_model, turbo_report = _apply_turbo_lora(model, shotplan)
         fasth3_model, fasth3_report = _apply_fasth3_dense_lora(turbo_model, shotplan)
         pdd_model, pdd_report = _apply_pdd_lora(fasth3_model, shotplan)
-        lora_model, secondary_report = _apply_secondary_lora(pdd_model, shotplan)
+        lora_model, secondary_report = _apply_secondary_lora(pdd_model, shotplan, chunk_index=chunk_index)
         turbo = _turbo_settings(shotplan)
         turbo_name = str(turbo.get("lora_name", "") or "").strip()
         turbo_enabled = bool(

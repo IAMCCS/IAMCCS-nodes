@@ -893,12 +893,42 @@ def _normalise_ai_images(value: Any) -> list[dict[str, str]]:
     return images
 
 
+def _authored_h3_dialogue_lines(text: str) -> list[str]:
+    """Protect exact utterances for referenced characters and standalone voices."""
+    return list(dict.fromkeys(re.findall(
+        r"(?:<Subject\s+\d+>\s*)?\(S\d+(?:\s*,\s*S\d+)*\)[^<>\r\n]{0,160}<d>\[[^\]]+\][\s\S]*?</d>(?:\s*<(?:scenetrans|cutoff)>)*",
+        str(text or ""), flags=re.IGNORECASE,
+    )))
+
+
+def _official_h3_tag_rules(task_mode: str) -> str:
+    """Shared by Global, selected-field rewrite, and compact local fallback."""
+    if task_mode in {"v2va_face_swap_lora", "ref2va_vfx_edit"}:
+        return "Use this mode's native aligned-edit grammar; do not append full-reference labels to its specialized edit prompt."
+    return (
+        "Official H3 tag authoring contract applies even when the rough request has no tags. "
+        "Format every supplied spoken or sung line as (S1) says <d>[Language] exact words</d>, "
+        "assigning stable (S1), (S2) and later speaker IDs by first actual vocal event, independently of subject numbering. "
+        "Keep voice, delivery and acting descriptions outside <d>; preserve the exact words and original language inside it. "
+        "Never invent dialogue. Use <scenetrans> only for speech genuinely continuing across an authored cut, "
+        "and <cutoff> only for speech intentionally interrupted by the clip ending; they are not generic transition decoration. "
+        "For full-reference modes, define reusable people, objects or environments with stable <Subject N> labels. "
+        "Bind their provenance to actual <Picture N> or <Video N> assets and use <Subject N> (Sx) for a referenced speaker. "
+        "A Subject is content, a Picture is an image/frame, a Video is a source or temporal reference, and an Audio is an active audio reference or reuse source. "
+        "Do not equate Subject and speaker numbers. Reference labels are category-specific and must resolve to available inputs or explicit existing context. "
+        "Do not populate unused slots, invent four subjects, or create Audio labels merely because a video contains sound. "
+        "Base T2VA/I2VA/FL2VA/L2VA keep their three-section grammar and applicable image alignment; "
+        "full-reference modes keep their six sections. Global describes output scope, not a plain-prose exemption from these rules."
+    )
+
+
 def _assistant_instruction(
     task_mode: str,
     sections: dict[str, str],
     user_direction: str = "",
     target_keys: Any = None,
     images: Any = None,
+    request_text: str | None = None,
 ) -> tuple[str, str]:
     mode = _normalise_task_mode(task_mode or "t2va")
     if mode not in MODE_SECTIONS:
@@ -962,6 +992,27 @@ def _assistant_instruction(
         "When images are attached, analyze only the contribution named by each image role. An opening image governs the first frame; a closing image governs the last frame; identity, composition and style images govern only those named attributes. "
         "Never mention unavailable media or claim to have seen a detail that is not visible."
     )
+    if request_text is not None:
+        system = (
+            "You compile a filmmaker's brief into MiniMax H3 prompt fields. Return one JSON object with plain-string values, "
+            f"using exactly these selected keys: {selected}. "
+            "Write all generated descriptions in English, even when the brief is in another language. "
+            "Preserve supplied dialogue verbatim in its original language and retain exact reference tags and authored times. "
+            "Develop the brief into concrete, filmable staging: chronological visible movement, physical interactions, performance, "
+            "camera and location sound belong in their respective fields. Add only the minimal physical detail needed to stage the requested action. "
+            "Do not merely copy or translate the brief into one field or repeat it across multiple fields. "
+            "Do not invent characters, dialogue, extra actions, cuts, wardrobe, locations or a different story. "
+            "A scene field establishes the setting and subjects; shot_list describes the visible action in order; acting describes body mechanics; "
+            "camera describes the requested framing and movement; lighting describes the stated visual treatment; sound fields describe audible events. "
+            "For a single continuous action use one concise action passage, without an extra [Shot 1] heading. "
+            "Never emit timing placeholders such as MM:SS, HH:MM or 'end time', and never invent a timestamp. "
+            "Leave dialogue empty when none was supplied. Do not add music unless requested. "
+            "The user brief is the content authority. Existing context supplies only the unselected fields; previous drafts of selected fields are not instructions. "
+            f"Mode rule: {mode_rules} "
+            "Images provide visual evidence only for their assigned roles; do not claim unavailable references. "
+            "Return field contents only, without headings, markdown, commentary or reasoning."
+        )
+    system += "\n" + _official_h3_tag_rules(mode)
     if len(system) > 24000:
         raise RuntimeError("MiniMax assistant system prompt exceeds the 7000-token safety envelope")
     user = json.dumps({
@@ -974,6 +1025,15 @@ def _assistant_instruction(
             for item in visuals
         ],
     }, ensure_ascii=False, indent=2)
+    if request_text is not None:
+        user = json.dumps({
+            "task_mode": mode,
+            "selected_sections": selected,
+            "request": str(request_text).strip(),
+            "direction": str(user_direction or "").strip(),
+            "existing_context": {key: value for key, value in filled.items() if key not in selected},
+            "visual_context": [{"slot": item["slot"], "role": item["role"], "name": item["name"]} for item in visuals],
+        }, ensure_ascii=False)
     return system, user
 
 
@@ -1263,7 +1323,7 @@ def _compact_assistant_instruction(task_mode: str, sections: dict[str, str], use
         "Return one JSON object only, without markdown. Every value must be one plain string. "
         f"Use only these keys: {selected}. Omit a key when the user supplied no relevant content. "
         "Preserve requested identity, action, camera direction, timestamps, language and quoted dialogue. "
-        f"{special}"
+        f"{special} " + _official_h3_tag_rules(mode)
     )
     user = json.dumps({
         "task_mode": mode,
@@ -1316,6 +1376,7 @@ def rewrite_sections_with_ai(
     target_keys: Any = None,
     images: Any = None,
     vision_model: str = "",
+    request_text: str | None = None,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     provider = str(provider or "ollama").strip().lower()
     if provider == "lm_studio":
@@ -1343,7 +1404,7 @@ def rewrite_sections_with_ai(
                 visual_inputs[0].update(data=base64.b64encode(buffer.getvalue()).decode("ascii"), mime_type="image/jpeg")
         except (OSError, ValueError):
             pass
-    system, user = _assistant_instruction(task_mode, sections, user_direction, target_keys, visual_inputs)
+    system, user = _assistant_instruction(task_mode, sections, user_direction, target_keys, visual_inputs, request_text)
     vision_observations = {}
     selected_vision_model = str(vision_model or "").strip()
     if _normalise_task_mode(task_mode) == "v2va_face_swap_lora" and visual_inputs and not selected_vision_model:
@@ -1537,6 +1598,10 @@ def rewrite_sections_with_ai(
     filtered = {key: value for key, value in rewritten.items() if key in requested and value}
     if not filtered:
         raise RuntimeError("The AI did not return any valid filled MiniMax section")
+    if request_text and len(requested) > 1:
+        brief = re.sub(r"\W+", " ", request_text).strip().casefold()
+        if all(re.sub(r"\W+", " ", value).strip().casefold() == brief for value in filtered.values()):
+            raise RuntimeError("The AI echoed REQUEST instead of writing H3 fields. Your existing prompt was kept; retry with another writer model.")
     mode_name = _normalise_task_mode(task_mode)
     if mode_name == "v2va_face_swap_lora":
         text = str(filtered.get("swap_prompt") or "").strip()
@@ -1589,16 +1654,17 @@ def rewrite_sections_with_ai(
             filtered["shot_list"] = canonical_timeline
     # An AI rewrite may paraphrase a Whisper transcript even when told not to.
     # Restore the exact H3 dialogue line supplied by the user after parsing.
-    authored = "\n".join([str(user_direction or ""), *(str(value or "") for value in sections.values())])
-    dialogue_lines = list(dict.fromkeys(re.findall(
-        r"<Subject\s+\d+>\s*\(S\d+\):\s*<d>\[[^\]]+\][\s\S]*?</d>",
-        authored,
-        flags=re.IGNORECASE,
-    )))
+    authored = "\n".join([str(request_text or ""), str(user_direction or ""), *(str(value or "") for value in sections.values())])
+    dialogue_lines = _authored_h3_dialogue_lines(authored)
+    if mode_name == "fl2va" and requested.isdisjoint({"action", "shot_list", "dialogue"}):
+        # Global keyframe fields remain stable authority; utterances belong to locals.
+        dialogue_lines = []
     if dialogue_lines:
         target = "audio_dialogue_map" if "audio_dialogue_map" in requested else next(
             (key for key in target_keys if key in requested), next(iter(requested))
         ) if isinstance(target_keys, list) else next(iter(requested))
+        if target in {"dialogue", "audio_dialogue_map", "multishot_dialogue_map"}:
+            filtered[target] = "\n".join(dialogue_lines)
         for line in dialogue_lines:
             if line not in "\n".join(filtered.values()):
                 filtered[target] = "\n".join(part for part in (filtered.get(target, ""), line) if part)
@@ -1720,7 +1786,7 @@ def build_visual_story_plan_with_ai(provider: str, base_url: str, model: str, ap
         raise ValueError("Describe the relationship between the images")
     visual_map = "\n".join(f"Picture {item['slot']}: {item['name']} · role={item['role']}" for item in visuals)
     payload = _multimodal_json_chat(provider, base_url, model, api_key,
-        VISUAL_STORY_SYSTEM_PROMPT + ("" if visuals else
+        VISUAL_STORY_SYSTEM_PROMPT + "\n" + _official_h3_tag_rules(_normalise_task_mode(task_mode)) + ("" if visuals else
             "\nNo images supplied. Do not invent Picture references. Create one local shot per explicitly numbered prompt in the brief. Preserve those slot numbers and their individual instructions; do not collapse them into the global prompt. If no slots are numbered, choose a short consecutive shot sequence. Global defines shared identity, location and atmosphere; local prompts carry the chronological development."),
         f"CURRENT IAMCCS MODE: {task_mode}\nVISUAL MAP:\n{visual_map}\n\nRELATIONSHIP / STORY INTENT:\n{relation}",
         visuals, temperature, timeout,
@@ -1766,11 +1832,10 @@ def build_visual_story_plan_with_ai(provider: str, base_url: str, model: str, ap
         ) if part)
     # REQUEST → GLOBAL + LOCALS has a separate AI endpoint. Keep verbatim
     # Whisper dialogue here too, even when the model paraphrases its output.
-    for line in dict.fromkeys(re.findall(
-        r"<Subject\s+\d+>\s*\(S\d+\):\s*<d>\[[^\]]+\][\s\S]*?</d>",
-        relation, flags=re.IGNORECASE,
-    )):
+    for line in _authored_h3_dialogue_lines(relation):
         if line not in global_prompt and not any(line in shot["local_prompt"] for shot in shots):
+            if _normalise_task_mode(task_mode) == "fl2va":
+                raise RuntimeError("The H3 plan lost an authored dialogue line from its locals. The brief was preserved; retry the local plan.")
             global_prompt = "\n\n".join(part for part in (global_prompt, line) if part)
     return {"global_prompt": global_prompt,
             "global_direction": global_direction,
@@ -2754,6 +2819,7 @@ def _register_prompter_routes() -> None:
                     payload.get("target_keys"),
                     payload.get("images"),
                     str(payload.get("vision_model", "")),
+                    payload.get("request_text"),
                 )
                 return web.json_response({"ok": True, "sections": rewritten, "report": report})
             except Exception as exc:

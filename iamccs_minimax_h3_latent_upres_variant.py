@@ -214,7 +214,7 @@ class IAMCCS_MiniMaxH3LatentUpresSamplingR38:
         shift_video = float(sampling.get("shift_video", 12.0))
         shift_audio = float(sampling.get("shift_audio", 3.0))
         turbo_model, turbo_report = _apply_turbo_lora(model, plan)
-        lora_model, secondary_lora_report = _apply_secondary_lora(turbo_model, plan)
+        lora_model, secondary_lora_report = _apply_secondary_lora(turbo_model, plan, chunk_index=segment_index)
         shifted = MiniMaxH3SigmaShift.execute(model=lora_model, shift_video=shift_video, shift_audio=shift_audio)[0]
         if str(plan.get("acceleration", "native")).lower() == "comfy_kitchen":
             from comfy_extras.nodes_model_advanced import ModelAttentionBackend

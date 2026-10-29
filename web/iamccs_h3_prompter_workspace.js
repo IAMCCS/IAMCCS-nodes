@@ -103,8 +103,6 @@ export function createPrompterWorkspace({ root, layout, left, center, right, mod
         buttons.set(key, button);
     }
     function refresh() {
-        const request = center.querySelector('[data-workspace="direction"]');
-        if (request && center.firstElementChild !== request) center.prepend(request);
         const hasShots = Boolean(center.querySelector('[data-workspace="shots"]'));
         buttons.get("shots").disabled = !hasShots;
         if (selected === "shots" && !hasShots) selected = "direction";
@@ -122,5 +120,5 @@ export function createPrompterWorkspace({ root, layout, left, center, right, mod
         }
     }
     refresh();
-    return { refresh };
+    return { refresh, showReview() { selected = "review"; refresh(); } };
 }

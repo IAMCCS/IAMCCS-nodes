@@ -29,6 +29,8 @@ from .iamccs_h3_face_swap import settings_schema as face_swap_schema, face_swap_
 from .iamccs_h3_character_swap_lora import settings_schema as character_swap_schema, swap_plan
 from .iamccs_h3_vfx_edit import settings_schema as vfx_edit_schema
 from .iamccs_h3_omni import configure as configure_omni
+from .iamccs_h3_continuity_guard import settings_schema as continuity_guard_schema, configuration as continuity_guard_configuration
+from .iamccs_minimax_h3_open_refine import settings_schema as open_h3_refine_schema, configuration as open_h3_refine_configuration
 
 from .iamccs_minimax_h3_shotboard_core import (
     H3_FPS,
@@ -3485,6 +3487,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         extended_av_boundary_polish_strength = EXTEND_BOUNDARY_POLISH_DEFAULT_STRENGTH
         # Append-only Settings/PRO controls. They are intentionally NOT planner widgets,
         # so historical Shotboard widget positions remain byte-for-byte compatible.
+        secondary_lora_continuation_only = False
         upscale_link_to_native = False
         upscale_link_factor = "640x384 -> 1280x768"
         import hashlib
@@ -3647,6 +3650,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             secondary_lora_enabled = saved_settings.get("secondary_lora_enabled", secondary_lora_enabled)
             secondary_lora_name = saved_settings.get("secondary_lora_name", secondary_lora_name)
             secondary_lora_strength = saved_settings.get("secondary_lora_strength", secondary_lora_strength)
+            secondary_lora_continuation_only = bool(saved_settings.get("secondary_lora_continuation_only", False))
             pdd_lora_name = saved_settings.get("pdd_lora_name", pdd_lora_name)
             pdd_strength = saved_settings.get("pdd_strength", pdd_strength)
             h3_controlnet_enabled = saved_settings.get("h3_controlnet_enabled", h3_controlnet_enabled)
@@ -4545,6 +4549,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "duplicate_of_turbo": bool(secondary_lora_duplicate),
             "lora_name": selected_secondary_lora,
             "strength": float(secondary_strength),
+            "continuation_only": bool(secondary_lora_continuation_only),
             "loader": "ComfyUI LoraLoaderModelOnly",
             "source": "shotboard",
         }
@@ -4765,6 +4770,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "soft_video_curve": str(saved_settings.get("h3_continuation_soft_video_curve", "smoothstep") or "smoothstep"),
             "soft_audio_ms": max(0.0, min(100.0, _finite_float(saved_settings.get("h3_continuation_soft_audio_ms", 15.0), 15.0, 0.0, 100.0))),
         }
+        plan["continuity_guard"] = continuity_guard_configuration(saved_settings)
         plan["refmod_settings"] = {
             "schema": "iamccs.minimax_h3.refmod.v1",
             "enabled": bool(saved_settings.get("h3_refmod_enabled", False)),
@@ -4802,6 +4808,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
             "route": "face_detailer_then_optional_upscale" if bool(face_detailer_enabled) else "native_then_optional_upscale",
             "source": "IAMCCS_ShotboardH3Settings" if _h3_settings_from_cine_linx(cine_linx) else "shotboard_defaults",
         }
+        plan["open_h3_refine"] = open_h3_refine_configuration(saved_settings)
         configure_omni(plan, saved_settings)
         chunk_frames = [int(chunk.get("frame_count", 0) or 0) for chunk in plan.get("chunks", [])]
         max_chunk_frames = max(chunk_frames, default=0)
@@ -5571,6 +5578,10 @@ class IAMCCS_MiniMaxH3NativeCheckpointSave:
             )
 
         trim_count = max(0, int(trim_head_frames or 0))
+        guard_report = sampled_latent.get("_iamccs_continuity_guard") if isinstance(sampled_latent, dict) else None
+        if isinstance(guard_report, dict):
+            from .iamccs_h3_continuity_guard import bind_checkpoint
+            bind_checkpoint(folder_paths.get_output_directory(), guard_report, active_render_id)
         join_contract = _checkpoint_join_contract(cine_linx, current_segment, trim_count)
         motion_context_pretrimmed = bool(join_contract["context_pretrimmed"])
         overlap_stitch = join_contract["mode"] == "decoded_overlap"
@@ -7630,6 +7641,12 @@ class IAMCCS_ShotboardH3Settings:
             "h3_omni_enabled": ("BOOLEAN", {"default": False,
                 "display_name": "REF2VA · FASTH3 OMNI 8 STEP",
                 "tooltip": "Full reference-conditioned checkpoint, not a LoRA. Select the Omni loader. Native PDD32, Euler/simple, 8 steps, shifts 12/3. Other modes keep their own model route."}),
+            **continuity_guard_schema(),
+            "secondary_lora_continuation_only": ("BOOLEAN", {
+                "default": False, "display_name": "Second LoRA: from segment 2",
+                "tooltip": "Apply the second LoRA only from segment 2 onward. A saved-AV checkpoint resume already counts as continuation. OFF preserves all-segment behavior. This controls temporal segments, not upscale passes.",
+            }),
+            **open_h3_refine_schema(),
         })}
 
     RETURN_TYPES = (SUPERNODE_LINX_TYPE,)

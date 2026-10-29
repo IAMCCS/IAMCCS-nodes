@@ -1426,7 +1426,15 @@ def _secondary_lora_settings(shotplan: dict[str, Any]) -> dict[str, Any]:
     return settings if isinstance(settings, dict) else {"enabled": False}
 
 
-def _apply_secondary_lora(model, shotplan: dict[str, Any], include_vfx=False):
+def _secondary_lora_applies_to_segment(shotplan: dict[str, Any], chunk_index: int = 0) -> bool:
+    """Scope the optional slot to temporal segments, including external resumes."""
+    settings = _secondary_lora_settings(shotplan)
+    return (not bool(settings.get("continuation_only", False))
+            or int(chunk_index) > 0
+            or _external_continuation_active(shotplan, int(chunk_index)))
+
+
+def _apply_secondary_lora(model, shotplan: dict[str, Any], include_vfx=False, chunk_index=0):
     """Apply an independent model-only H3 LoRA without changing sampling.
 
     The second slot is deliberately separate from Turbo. It never selects a
@@ -1447,6 +1455,8 @@ def _apply_secondary_lora(model, shotplan: dict[str, Any], include_vfx=False):
             return model, f"off (optional H3 LoRA unavailable: {missing})"
         return model, "off"
 
+    if not _secondary_lora_applies_to_segment(shotplan, chunk_index):
+        return model, "off (segment 1; second LoRA starts at segment 2)"
     lora_name = str(settings.get("lora_name", "") or "").strip()
     strength = float(settings.get("strength", 0.0) or 0.0)
     if not lora_name or abs(strength) <= 1e-8:
@@ -1474,7 +1484,8 @@ def _apply_secondary_lora(model, shotplan: dict[str, Any], include_vfx=False):
             f"Could not apply secondary MiniMax H3 LoRA '{lora_name}'. "
             "Verify that it is compatible with the selected FL2VA/REF2VA base model."
         ) from exc
-    return patched, f"native model-only H3 LoRA {lora_name}@{strength:.2f}"
+    scope = "continuation-only" if settings.get("continuation_only", False) else "all-segments"
+    return patched, f"native model-only H3 LoRA {lora_name}@{strength:.2f} ({scope}, segment {int(chunk_index) + 1})"
 
 
 def _turbo_sampler(shotplan: dict[str, Any]):
@@ -3070,6 +3081,11 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             prefix_frames=control_prefix_frames,
         )
         positive, refmod_report = _apply_h3_refmod(positive, shotplan)
+        guard_config = shotplan.get("continuity_guard", {})
+        if guard_config.get("mode", "off") == "monitor" and shotboard_task == "fl2va_extended_av":
+            from .iamccs_h3_continuity_guard import conditioning_identity
+            guard_id = conditioning_identity(render_id, segment_index)
+            motion_state["continuity_guard_render_id"] = guard_id
         if legacy_actual_output_bridge:
             motion_report += "; legacy_actual_output_bridge_ignored"
         if motion_state["active"] and motion_state.get("strategy") == "reference_motion_carry":
@@ -3269,7 +3285,7 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
         turbo_model, turbo_report = _apply_turbo_lora(model, shotplan)
         fasth3_model, fasth3_report = _apply_fasth3_dense_lora(turbo_model, shotplan)
         pdd_model, pdd_report = _apply_pdd_lora(fasth3_model, shotplan)
-        lora_model, secondary_lora_report = _apply_secondary_lora(pdd_model, shotplan, include_vfx=True)
+        lora_model, secondary_lora_report = _apply_secondary_lora(pdd_model, shotplan, include_vfx=True, chunk_index=chunk_index)
         if turbo_enabled:
             # Apply the selected Turbo LoRA without silently replacing any
             # authored sampler, scheduler or AV shift.  Presets populate those
@@ -3558,6 +3574,16 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
             cleanup_report = _clean_vram_before_decode()
 
         native_frames = comfy_nodes.VAEDecode().decode(vae=video_vae, samples=sampled)[0]
+        guard_report = {"status": "off"}
+        guard_config = shotplan.get("continuity_guard", {})
+        if guard_config.get("mode", "off") == "monitor" and shotplan.get("task_mode") == "fl2va_extended_av":
+            from .iamccs_h3_continuity_guard import process as process_guard, storage as guard_storage
+            guard_directory = guard_storage(folder_paths.get_output_directory(), motion_state["continuity_guard_render_id"])
+            sampled, native_frames, guard_report = process_guard(
+                guard_config, sampled, native_frames, directory=guard_directory, index=int(chunk_index),
+                head_frames=int(motion_state.get("trim_frames", 0)),
+                visible_frames=int(motion_state["export_frames"]))
+            LOG.info("IAMCCS Continuity Guard | chunk=%d | %s | report=%s", int(chunk_index)+1, guard_report["status"], guard_directory)
         native_audio = VAEDecodeAudio.execute(vae=audio_vae, samples=sampled)[0]
         if (
             isinstance(sampled, dict)
@@ -3977,6 +4003,7 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
             f"lipsync_lock={lipsync_lock_report} | "
             f"pre_sample_cleanup={conditioning_cleanup} | "
             f"terminal_closure={terminal_closure_report} | "
+            f"continuity_guard={guard_report['status']} | "
             f"pre_decode_cleanup={cleanup_report} | native_last_frame=captured | "
             f"resolution={resolution_contract} | "
             f"pianosequenza={pianosequenza_report} | "

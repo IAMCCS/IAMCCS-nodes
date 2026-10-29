@@ -2115,6 +2115,7 @@ function mountPrompter(node) {
                     prompt:[shot.local_prompt,shot.h3_transition_prompt].filter(Boolean).join("\n")}));
                 project.injection_target = "global";
                 aiApiKey.value = ""; commit(); renderSections(); renderPreview();
+                workspace?.showReview();
                 aiStatus.className = "iamccs-pr-ai-status ok";
                 aiStatus.textContent = `Global + ${project.local_prompts.length} local prompts ready. Review, then INJECT → SHOTBOARD.`;
             } catch (error) { aiStatus.className = "iamccs-pr-ai-status error"; aiStatus.textContent = error.message; }
@@ -2503,11 +2504,9 @@ function mountPrompter(node) {
                 ? "Qwen CLIP: loading the encoder, reading references and writing the H3 prompt. The first REQUEST includes model loading; keep this window open."
                 : `Sending ${targetKeys.join(", ")} to ${aiProvider.options[aiProvider.selectedIndex]?.text || aiProvider.value}.`;
             const imagePayload = await buildAIImagePayload();
-            // A new image request is authoritative. Never feed previous generated
-            // image fields back as rough text, otherwise local models tend to
-            // concatenate the old prompt with the new refinement.
-            const rewriteInputSections = isImageRequest || isSwapCharRequest
-                ? Object.fromEntries(Object.keys(allSections).map((key) => [key, ""]))
+            // REQUEST replaces selected drafts; unselected fields remain context.
+            const rewriteInputSections = narrativeRequest !== null
+                ? Object.fromEntries(Object.entries(allSections).map(([key, value]) => [key, targetKeys.includes(key) ? "" : value]))
                 : allSections;
             const response = await fetchAI("/iamccs/prompter/rewrite", {
                 method: "POST",
@@ -2520,6 +2519,7 @@ function mountPrompter(node) {
                     task_mode: project.task_mode,
                     sections: rewriteInputSections,
                     target_keys: targetKeys,
+                    request_text: narrativeRequest,
                     user_direction: project.omni_preset && project.task_mode === "ref2va" ? `${omniRequestDirection(project)}\n${direction}` : project.task_mode === "reference_image"
                         ? `${project.image_preset === "reference_sheet" ? "REFERENCE SHEET: one combined canvas containing every requested character and prop." : "SINGLE STATIC IMAGE."}\n${direction}` : direction,
                     vision_model: aiVisionModel.value.trim(),
@@ -2589,6 +2589,7 @@ function mountPrompter(node) {
             renderSections();
             renderPreview();
             commit();
+            if (narrativeRequest !== null) workspace?.showReview();
             aiStatus.className = "iamccs-pr-ai-status ok";
             const visualCount = Number(data.report?.visual_references?.length || 0);
             aiStatus.textContent = isExtendedEvolvingRequest

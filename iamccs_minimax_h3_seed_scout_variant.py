@@ -20,6 +20,7 @@ from typing import Any
 
 import folder_paths
 import torch
+from comfy_execution.graph import ExecutionBlocker
 
 from .iamccs_minimax_h3_atomic_backend import (
     H3_FPS,
@@ -78,14 +79,14 @@ def _apply_sparse(model, enabled: bool, budget: float, denser_edges: bool):
         ) from exc
 
 
-def _active_sampling_model(model, plan: dict[str, Any]):
+def _active_sampling_model(model, plan: dict[str, Any], chunk_index=0):
     from comfy_extras.nodes_minimax_h3 import MiniMaxH3SigmaShift
 
     sampling = plan.get("sampling") if isinstance(plan.get("sampling"), dict) else {}
     shift_video = float(sampling.get("shift_video", 12.0))
     shift_audio = float(sampling.get("shift_audio", 3.0))
     turbo_model, turbo_report = _apply_turbo_lora(model, plan)
-    lora_model, secondary_report = _apply_secondary_lora(turbo_model, plan)
+    lora_model, secondary_report = _apply_secondary_lora(turbo_model, plan, chunk_index=chunk_index)
     turbo = _turbo_settings(plan)
     turbo_name = str(turbo.get("lora_name", "") or "").strip()
     compatible, _ = _h3_lora_compatibility(turbo_name)
@@ -123,11 +124,11 @@ class IAMCCS_MiniMaxH3SeedCandidateR40:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("MODEL",),
-                "positive": ("CONDITIONING",),
-                "latent": ("LATENT",),
+                "model": ("MODEL", {"lazy": True}),
+                "positive": ("CONDITIONING", {"lazy": True}),
+                "latent": ("LATENT", {"lazy": True}),
                 "cine_linx": (SUPERNODE_LINX_TYPE,),
-                "chunk_index": ("INT", {"forceInput": True}),
+                "chunk_index": ("INT", {"forceInput": True, "lazy": True}),
                 "candidate_index": ("INT", {"default": 0, "min": 0, "max": 3, "step": 1}),
             }
         }
@@ -137,7 +138,22 @@ class IAMCCS_MiniMaxH3SeedCandidateR40:
     FUNCTION = "sample"
     CATEGORY = CATEGORY
 
-    def sample(self, model, positive, latent, cine_linx, chunk_index, candidate_index):
+    @staticmethod
+    def _active(cine_linx, candidate_index):
+        prefix, _ = IAMCCS_MiniMaxH3ScoutDeliveryLazyRouterR43._selection(cine_linx)
+        settings = _scout_settings(_resolve_shotplan(cine_linx))
+        count = max(1, min(4, int(settings.get("candidate_count", 1) or 1)))
+        return prefix == "scout" and 0 <= int(candidate_index) < count
+
+    def check_lazy_status(self, cine_linx, candidate_index, **kwargs):
+        if not self._active(cine_linx, candidate_index):
+            return []
+        return [name for name in ("model", "positive", "latent", "chunk_index") if kwargs.get(name) is None]
+
+    def sample(self, model=None, positive=None, latent=None, cine_linx=None, chunk_index=0, candidate_index=0):
+        if not self._active(cine_linx, candidate_index):
+            blocker = ExecutionBlocker(None)
+            return blocker, blocker, 0, False, f"R40 candidate {int(candidate_index) + 1} bypassed"
         from comfy_extras.nodes_custom_sampler import (
             BasicGuider,
             BasicScheduler,
@@ -148,26 +164,17 @@ class IAMCCS_MiniMaxH3SeedCandidateR40:
 
         plan = _resolve_shotplan(cine_linx)
         scout = _scout_settings(plan)
-        enabled = bool(scout.get("enabled", False))
-        count = max(1, min(4, int(scout.get("candidate_count", 1) or 1))) if enabled else 1
+        count = max(1, min(4, int(scout.get("candidate_count", 1) or 1)))
         index = max(0, min(3, int(candidate_index)))
         sampling = plan.get("sampling") if isinstance(plan.get("sampling"), dict) else {}
         base_seed = int(sampling.get("seed", 0) or 0)
         chunk_stride = int(sampling.get("seed_stride", 1) or 1)
         scout_stride = max(1, int(scout.get("seed_stride", 1_000_003) or 1_000_003))
         actual_seed = (base_seed + int(chunk_index) * chunk_stride + index * scout_stride) & 0xFFFFFFFFFFFFFFFF
-        if index >= count:
-            inactive_sampled = copy.copy(latent)
-            inactive_x0 = copy.copy(latent)
-            inactive_sampled["iamccs_r40_candidate_active"] = False
-            inactive_x0["iamccs_r40_candidate_active"] = False
-            report = f"R40 candidate {index + 1} inactive | configured candidates={count}"
-            return inactive_sampled, inactive_x0, actual_seed, False, report
-
         _audit_lipsync_audio_lock(plan, latent, int(chunk_index))
         cleanup_report = _release_conditioning_models(plan)
         active_model, turbo_enabled, turbo_report, secondary_report, acceleration_report, sparse_report = (
-            _active_sampling_model(model, plan)
+            _active_sampling_model(model, plan, chunk_index=chunk_index)
         )
         noise = RandomNoise.execute(noise_seed=actual_seed)[0]
         guider = BasicGuider.execute(model=active_model, conditioning=positive)[0]
@@ -319,8 +326,8 @@ class IAMCCS_MiniMaxH3SeedPreviewR40:
         return {
             "required": {
                 "latent": ("LATENT",),
-                "video_vae": ("VAE",),
-                "trim_frames": ("INT", {"forceInput": True}),
+                "video_vae": ("VAE", {"lazy": True}),
+                "trim_frames": ("INT", {"forceInput": True, "lazy": True}),
                 "max_preview_frames": ("INT", {"default": 49, "min": 1, "max": 209, "step": 1}),
                 "max_preview_width": ("INT", {"default": 512, "min": 128, "max": 1024, "step": 64}),
             }
@@ -331,9 +338,14 @@ class IAMCCS_MiniMaxH3SeedPreviewR40:
     FUNCTION = "decode"
     CATEGORY = CATEGORY
 
-    def decode(self, latent, video_vae, trim_frames, max_preview_frames, max_preview_width):
+    def check_lazy_status(self, latent, **kwargs):
         if not bool(latent.get("iamccs_r40_candidate_active", False)):
-            return torch.zeros((1, 144, 256, 3), dtype=torch.float32), "R40 candidate inactive"
+            return []
+        return [name for name in ("video_vae", "trim_frames") if kwargs.get(name) is None]
+
+    def decode(self, latent, video_vae=None, trim_frames=0, max_preview_frames=49, max_preview_width=512):
+        if not bool(latent.get("iamccs_r40_candidate_active", False)):
+            return ExecutionBlocker(None), "R40 candidate inactive"
         import nodes as comfy_nodes
 
         frames = comfy_nodes.VAEDecode().decode(vae=video_vae, samples=latent)[0]
@@ -563,7 +575,7 @@ class IAMCCS_MiniMaxH3LatentUpresSamplingR40:
         sampling = plan.get("sampling") if isinstance(plan.get("sampling"), dict) else {}
         seed = (int(shot_lab.get("stage2_seed", 0)) + int(segment_index) * int(shot_lab.get("stage2_seed_stride", 1))) & 0xFFFFFFFFFFFFFFFF
         base, turbo_report = _apply_turbo_lora(model, plan)
-        base, lora2_report = _apply_secondary_lora(base, plan)
+        base, lora2_report = _apply_secondary_lora(base, plan, chunk_index=segment_index)
         base, stage2_lora_report = _stage2_lora(base, shot_lab)
         shifted = MiniMaxH3SigmaShift.execute(
             model=base,

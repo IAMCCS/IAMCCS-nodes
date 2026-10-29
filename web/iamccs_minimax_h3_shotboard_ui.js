@@ -12773,6 +12773,7 @@ function renderShotboardV3(node) {
     addWidgetBoolSetting("Enable second H3 LoRA", "secondary_lora_enabled");
     addSelectSetting("Second LoRA file", "secondary_lora_name", Array.isArray(secondaryLoraValues) && secondaryLoraValues.length ? secondaryLoraValues : [""]);
     addSetting("Second LoRA strength", "secondary_lora_strength", "0.05", "-2");
+    addWidgetBoolSetting("Second LoRA: from segment 2", "secondary_lora_continuation_only");
     const pddLoraValues = getWidget(node, "pdd_lora_name")?.options?.values;
     addSelectSetting("PDD acceleration LoRA", "pdd_lora_name", Array.isArray(pddLoraValues) && pddLoraValues.length ? pddLoraValues : [""]);
     addSetting("PDD strength / trained 1.0", "pdd_strength", "0.05", "0");
@@ -20902,7 +20903,7 @@ const H3_SETTINGS_UI_GROUPS = [
             "fused_turbo_model_name", "fused_turbo_sigma_preset",
             "h3_exact_profile", "h3_clipproj_profile", "h3_clipproj_load_mode",
             "h3_exact_chunk_rows", "h3_exact_precision_mode", "h3_exact_qkv_streaming", "h3_exact_attention_memory",
-            "secondary_lora_enabled", "secondary_lora_name", "secondary_lora_strength",
+            "secondary_lora_enabled", "secondary_lora_name", "secondary_lora_strength", "secondary_lora_continuation_only",
             "seed", "seed_stride", "sampler_name", "scheduler", "denoise", "shift_video", "shift_audio",
             "ref_image_size", "sol_conditioning", "spectrum_profile", "vram_clean_before_decode", "rife_mode",
         ],
@@ -20981,7 +20982,7 @@ const H3_SETTINGS_FULL_UI_GROUPS = [
         note: "Primary/secondary H3 LoRA and execution acceleration. Every visible box remains editable truth.",
         names: [
             "turbo_mode", "turbo_lora_name", "turbo_strength", "turbo_sampler_mode",
-            "secondary_lora_enabled", "secondary_lora_name", "secondary_lora_strength",
+            "secondary_lora_enabled", "secondary_lora_name", "secondary_lora_strength", "secondary_lora_continuation_only",
             "acceleration", "ref_image_size", "sol_conditioning", "spectrum_profile", "vram_clean_before_decode", "rife_mode",
             "fused_turbo_model_name", "fused_turbo_sigma_preset",
         ],
@@ -21087,7 +21088,7 @@ const H3_SETTINGS_PRO_UI_GROUPS = [
     {
         id: "speed", label: "4 · H3 SPEED", title: "STAGE A · NATIVE H3 ACCELERATION",
         note: "Speeds up only the native H3 sample. It does not select an upscale or add a delivery stage. PDD and LightX2V Turbo are separate routes.",
-        names: ["acceleration", "pdd_lora_name", "pdd_strength", "turbo_mode", "turbo_lora_name", "turbo_strength", "turbo_sampler_mode", "fused_turbo_model_name", "fused_turbo_sigma_preset", "secondary_lora_enabled", "secondary_lora_name", "secondary_lora_strength", "ref_image_size", "sol_conditioning", "spectrum_profile", "vram_clean_before_decode", "rife_mode", "h3_exact_profile", "h3_clipproj_profile", "h3_clipproj_load_mode", "h3_exact_chunk_rows", "h3_exact_precision_mode", "h3_exact_qkv_streaming", "h3_exact_attention_memory"],
+        names: ["acceleration", "pdd_lora_name", "pdd_strength", "turbo_mode", "turbo_lora_name", "turbo_strength", "turbo_sampler_mode", "fused_turbo_model_name", "fused_turbo_sigma_preset", "secondary_lora_enabled", "secondary_lora_name", "secondary_lora_strength", "secondary_lora_continuation_only", "ref_image_size", "sol_conditioning", "spectrum_profile", "vram_clean_before_decode", "rife_mode", "h3_exact_profile", "h3_clipproj_profile", "h3_clipproj_load_mode", "h3_exact_chunk_rows", "h3_exact_precision_mode", "h3_exact_qkv_streaming", "h3_exact_attention_memory"],
     },
     {
         id: "direction", label: "5 · DIRECT", title: "MODE-SPECIFIC CONTRACT",
@@ -21118,7 +21119,7 @@ const H3_SETTINGS_TAB_GROUPS = [...H3_SETTINGS_PRO_UI_GROUPS, ...H3_SETTINGS_FUL
 const H3_SETTINGS_ADVANCED_FIELDS = new Set([
     "reference_resize_megapixels", "reference_resize_filter", "h3_exact_profile", "h3_clipproj_load_mode",
     "h3_exact_chunk_rows", "h3_exact_precision_mode", "h3_exact_qkv_streaming", "h3_exact_attention_memory",
-    "turbo_sampler_mode", "secondary_lora_enabled", "secondary_lora_name", "secondary_lora_strength",
+    "turbo_sampler_mode", "secondary_lora_enabled", "secondary_lora_name", "secondary_lora_strength", "secondary_lora_continuation_only",
     "seed_stride", "sampler_name", "scheduler", "denoise", "shift_video", "shift_audio", "ref_image_size",
     "sol_conditioning", "spectrum_profile", "vram_clean_before_decode", "rife_mode",
     "upscale_prompt", "upscale_sage", "upscale_seed_offset", "wan_upscale_denoise", "ltx_seam_safe",
@@ -21206,6 +21207,7 @@ function h3SettingsUiLabel(name) {
         turbo_strength: "Turbo strength", turbo_sampler_mode: "Turbo sampler", reference_resize_policy: "Fit policy",
         secondary_lora_enabled: "Enable creative / projection H3 LoRA", secondary_lora_name: "Creative / projection H3 LoRA",
         secondary_lora_strength: "Creative / projection strength",
+        secondary_lora_continuation_only: "Second LoRA: from segment 2",
         pdd_lora_name: "PDD acceleration LoRA", pdd_strength: "PDD strength",
         h3_controlnet_enabled: "Enable H3 Fun ControlNet", h3_controlnet_name: "Fun ControlNet model",
         h3_controlnet_kind: "Control kind / preprocessor", h3_controlnet_strength: "Control strength",

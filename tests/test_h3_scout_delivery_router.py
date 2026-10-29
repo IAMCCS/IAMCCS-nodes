@@ -37,5 +37,49 @@ class ScoutDeliveryRouterTests(unittest.TestCase):
         self.assertEqual((prefix, reason), ("original", "Scout disabled"))
 
 
+class ScoutBypassTests(unittest.TestCase):
+    def plan(self, enabled=False, count=4, mode="t2va"):
+        return {"task_mode":mode,"seed_scout_settings":{"enabled":enabled,"candidate_count":count}}
+
+    def test_disabled_preview_does_not_request_any_candidate_dependencies(self):
+        candidate=MODULE.IAMCCS_MiniMaxH3SeedCandidateR40()
+        with patch.object(MODULE,"_resolve_shotplan",return_value=self.plan()), patch.object(MODULE,"_release_conditioning_models",side_effect=AssertionError("Unexpected model cleanup")), patch.object(MODULE,"_active_sampling_model",side_effect=AssertionError("Unexpected sampling")):
+            for index in range(4):
+                self.assertEqual(candidate.check_lazy_status({},index),[])
+                result=candidate.sample(cine_linx={},candidate_index=index)
+                self.assertIsInstance(result[0],MODULE.ExecutionBlocker)
+                self.assertIsInstance(result[1],MODULE.ExecutionBlocker)
+                self.assertFalse(result[3])
+
+    def test_enabled_candidate_requests_its_heavy_inputs(self):
+        candidate=MODULE.IAMCCS_MiniMaxH3SeedCandidateR40()
+        with patch.object(MODULE,"_resolve_shotplan",return_value=self.plan(True,2)):
+            self.assertEqual(candidate.check_lazy_status({},0),["model","positive","latent","chunk_index"])
+            self.assertEqual(candidate.check_lazy_status({},1,model=object(),chunk_index=0),["positive","latent"])
+            self.assertEqual(candidate.check_lazy_status({},2),[])
+            self.assertIsInstance(candidate.sample(cine_linx={},candidate_index=3)[0],MODULE.ExecutionBlocker)
+
+    def test_temporal_route_bypasses_even_when_scout_requested(self):
+        candidate=MODULE.IAMCCS_MiniMaxH3SeedCandidateR40()
+        with patch.object(MODULE,"_resolve_shotplan",return_value=self.plan(True,4,"latent_go_ahead")):
+            self.assertEqual(candidate.check_lazy_status({},0),[])
+            self.assertFalse(candidate.sample(cine_linx={})[3])
+
+    def test_inactive_preview_never_requests_vae_or_allocates_an_image(self):
+        preview=MODULE.IAMCCS_MiniMaxH3SeedPreviewR40()
+        latent={"iamccs_r40_candidate_active":False}
+        self.assertEqual(preview.check_lazy_status(latent),[])
+        self.assertIsInstance(preview.decode(latent)[0],MODULE.ExecutionBlocker)
+        self.assertEqual(preview.check_lazy_status({"iamccs_r40_candidate_active":True}),["video_vae","trim_frames"])
+
+    def test_existing_socket_names_are_preserved_and_heavy_inputs_are_lazy(self):
+        candidate=MODULE.IAMCCS_MiniMaxH3SeedCandidateR40.INPUT_TYPES()["required"]
+        for name in ("model","positive","latent","chunk_index"):
+            self.assertTrue(candidate[name][1]["lazy"])
+        preview=MODULE.IAMCCS_MiniMaxH3SeedPreviewR40.INPUT_TYPES()["required"]
+        self.assertTrue(preview["video_vae"][1]["lazy"])
+        self.assertTrue(preview["trim_frames"][1]["lazy"])
+
+
 if __name__ == "__main__":
     unittest.main()
