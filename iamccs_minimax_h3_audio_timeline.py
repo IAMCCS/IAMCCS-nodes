@@ -98,8 +98,8 @@ def _candidate_audio_timelines(cine_linx: Any) -> list[dict[str, Any]]:
     payload = _payload(cine_linx)
     tracks = _dict(resources.get("cine_audio_tracks"))
     candidates: list[Any] = [
-        {"audioSegments": tracks.get("shotboard_segments"), "trackSettings": tracks.get("shotboard_track_settings")},
-        {"audioSegments": tracks.get("segments"), "trackSettings": tracks.get("track_settings")},
+        {"audioSegments": tracks.get("shotboard_segments"), "trackSettings": tracks.get("shotboard_track_settings"), "masterAudioGain": tracks.get("masterAudioGain", payload.get("masterAudioGain", 1.0))},
+        {"audioSegments": tracks.get("segments"), "trackSettings": tracks.get("track_settings"), "masterAudioGain": tracks.get("masterAudioGain", payload.get("masterAudioGain", 1.0))},
         resources.get("cine_audio_timeline_json"),
         resources.get("cine_audio_bus_timeline_json"),
         resources.get("cine_board_timeline_data"),
@@ -293,15 +293,15 @@ def _apply_gain_pan(waveform: torch.Tensor, gain: float, pan: float, channels: i
     return waveform
 
 
-def _fade(waveform: torch.Tensor, fade_in: int, fade_out: int) -> torch.Tensor:
+def _fade(waveform: torch.Tensor, fade_in: int, fade_out: int, *, offset: int = 0, total_length: int | None = None) -> torch.Tensor:
     length = int(waveform.shape[-1])
+    total_length = length if total_length is None else int(total_length)
     result = waveform.clone()
+    positions = torch.arange(offset, offset + length, dtype=result.dtype, device=result.device)
     if fade_in > 0 and length > 0:
-        count = min(length, int(fade_in))
-        result[..., :count] *= torch.linspace(0.0, 1.0, count, dtype=result.dtype)
+        result *= (positions / max(1, int(fade_in) - 1)).clamp(0, 1)
     if fade_out > 0 and length > 0:
-        count = min(length, int(fade_out))
-        result[..., -count:] *= torch.linspace(1.0, 0.0, count, dtype=result.dtype)
+        result *= ((total_length - 1 - positions) / max(1, int(fade_out) - 1)).clamp(0, 1)
     return result
 
 
@@ -539,7 +539,8 @@ def mix_audio_timeline(
             fps = max(1.0, _number(shotplan.get("fps"), H3_FPS))
             fade_in = int(round(max(0, _integer(segment.get("fadeInFrames"), 0)) / fps * rate))
             fade_out = int(round(max(0, _integer(segment.get("fadeOutFrames"), 0)) / fps * rate))
-            piece = _fade(piece, fade_in, fade_out)
+            clip_samples = min(int(round(segment_duration * rate)), max(0, int(source_waveform.shape[-1]) - int(round(source_trim * rate))))
+            piece = _fade(piece, fade_in, fade_out, offset=int(round(clipped_at_slot * rate)), total_length=clip_samples)
             mixed[..., destination:destination + take] += piece
             used += 1
             assignments.append({

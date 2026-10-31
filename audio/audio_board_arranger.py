@@ -316,6 +316,8 @@ class IAMCCS_AudioBoardArranger:
         out: List[Dict[str, Any]] = []
         for seg in segments:
             item = copy.deepcopy(seg)
+            item["sourceClipMute"] = bool(item.get("sourceClipMute", item.get("mute", False) and not item.get("trackMute", False)))
+            item["mute"] = item["sourceClipMute"]
             track = max(0, _safe_int(item.get("track", 0), 0))
             track_state = settings[track] if track < len(settings) else {}
             track_volume = max(0.0, min(2.0, _safe_float(track_state.get("volume", 1.0), 1.0)))

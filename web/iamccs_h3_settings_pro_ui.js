@@ -67,7 +67,7 @@ const GROUPS = [
   { id: "audio", label: "2 · AUDIO", title: "Audio authority and EXTEND seam polish", fields: ["audio_mode", "reference_audio_role", "voice_reference_picture_index", "extended_av_soft_audio_handover_ms", "extended_av_boundary_polish_ms", "extended_av_boundary_polish_strength"] },
   { id: "memory", label: "3 · MEMORY", title: "VRAM preset", fields: ["performance_profile", "motion_context_window_frames", "text_encoder_device", "h3_exact_profile", "h3_exact_chunk_rows", "h3_exact_precision_mode", "h3_exact_qkv_streaming", "h3_exact_attention_memory", "h3_clipproj_profile", "h3_clipproj_load_mode", "vram_clean_before_decode"] },
   { id: "sampling", label: "4 · SAMPLE", title: "Native H3 sampling", fields: ["seed", "seed_policy", "seed_stride", "steps", "sampler_name", "scheduler", "denoise", "shift_video", "shift_audio"] },
-{ id: "speed", label: "5 · SPEED", title: "Acceleration recipe", fields: ["h3_attention_backend", "h3_veda_enabled", "h3_veda_predictor", "h3_veda_verbose", "acceleration", "turbo_mode", "turbo_lora_name", "turbo_strength", "turbo_sampler_mode", "fused_turbo_model_name", "fused_turbo_sigma_preset", "pdd_lora_name", "pdd_strength", "secondary_lora_enabled", "secondary_lora_name", "secondary_lora_strength", "secondary_lora_continuation_only", "ref_image_size", "sol_conditioning", "spectrum_profile", "h3_sla_sparsity", "h3_sla_dense_last_steps"] },
+{ id: "speed", label: "5 · SPEED", title: "Acceleration recipe", fields: ["h3_attention_backend", "h3_veda_enabled", "h3_veda_predictor", "h3_veda_verbose", "acceleration", "turbo_mode", "turbo_lora_name", "turbo_strength", "turbo_sampler_mode", "fused_turbo_model_name", "fused_turbo_sigma_preset", "pdd_lora_name", "pdd_strength", "secondary_lora_enabled", "secondary_lora_name", "secondary_lora_strength", "secondary_lora_continuation_only", "pika_flex_fl2va_lora", "pika_flex_ref2va_lora", "ref_image_size", "sol_conditioning", "spectrum_profile", "h3_sla_sparsity", "h3_sla_dense_last_steps"] },
   { id: "direction", label: "6 · DIRECT · LEGACY", title: "Legacy Direct compatibility", fields: ["reference_role_1", "reference_role_2", "reference_role_3", "reference_role_4", "reference_video_role", "v2v_guide_mode", "v2v_source_range_policy", "v2v_source_offset_seconds", "v2v_source_fit", "v2v_source_end_policy", "v2v_audio_pairing", "flf_join_mode", "flf_overlap_frames", "flf_continuity_mode", "flf_continuity_tail_frames", "flf_continuity_audio", "longvid_guide_window_policy", "keyframe_joint_latent_new", "longvid_terminal_endpoint_mode", "longvid_pianosequenza_2stage_enabled"] }, // IAMCCS_LONGVID_ENDPOINT_STRATEGIES_V1
   { id: "control", label: "CONTROLNET", title: "H3 Fun ControlNet", contextual: "control", modeEngine: true, fields: ["h3_controlnet_enabled", "h3_controlnet_name", "h3_controlnet_kind", "h3_controlnet_preprocess_resolution", "h3_controlnet_strength", "h3_controlnet_start_percent", "h3_controlnet_end_percent", "h3_controlnet_frame_scope", "h3_controlnet_end_policy", "h3_controlnet_use_video_audio", "h3_controlnet_dwpose_torch_gpu"] },
   { id: "vfx_edit", label: "VFX EDIT", title: "REF2VA · VFX EDIT · aligned video guide", modeEngine: true, fields: ["h3_vfx_lora_name", "h3_vfx_lora_strength", "h3_edit_video_source", "upscale_enabled", "upscale_mode", "upscale_width", "upscale_height"] },
@@ -1255,6 +1255,7 @@ function selectedAcceleration(node) {
   const value = String(widget(node, "acceleration")?.value || "native");
   const turbo = String(widget(node, "turbo_mode")?.value || "off") !== "off";
   if (widget(node, "h3_omni_enabled")?.value && shotboardMode(node) === "ref2va") return "omni";
+  if (value === "pika_h3_flex_6step") return turbo ? "conflict" : "pika";
   if (value === "h3_sla") return "sla";
   if (turbo && ["pdd_native_8step", "iamccs_progressive_pdd_2stage", "fasth3_dense_6step", "matlowai_fused_turbo_manual_sigma"].includes(value)) return "conflict";
   if (turbo) return "turbo";
@@ -1262,7 +1263,7 @@ function selectedAcceleration(node) {
 }
 function samplingRecipeLabel(node) {
   const selected = selectedAcceleration(node), steps = Number(widget(node,"steps")?.value || 0);
-  return ({omni:"FASTH3 OMNI",native:"NATIVE",custom:"NATIVE / MANUAL",turbo:"TURBO",pdd:"PDD",fasth3:"FASTH3",sla:"SLA",fused:"FUSED",conflict:"CONFLICTING SPEED SETTINGS"}[selected] || selected) + ` · ${steps} STEPS`;
+  return ({pika:"PIKA FLEX",omni:"FASTH3 OMNI",native:"NATIVE",custom:"NATIVE / MANUAL",turbo:"TURBO",pdd:"PDD",fasth3:"FASTH3",sla:"SLA",fused:"FUSED",conflict:"CONFLICTING SPEED SETTINGS"}[selected] || selected) + ` · ${steps} STEPS`;
 }
 function selectedMemory(node) {
   const value = String(widget(node, "performance_profile")?.value || "");
@@ -1324,12 +1325,22 @@ function deliveryModeAvailable(node, mode) {
 function applyRecipe(node, recipe) {
   const mode = shotboardMode(node), family = modeFamily(mode), set = (name, value) => setValue(node, name, value, false);
   if (["native-delivery", "ultimate-tiled", "upres", "h3-pixel", "pixel-safe", "ltx-master", "ltx-per-shot", "rtx-final"].includes(recipe)) set("h3_open_refine_enabled", false);
-  if (["native", "pdd", "fasth3", "sla", "fused"].includes(recipe)) set("h3_omni_enabled", false);
+  if (["native", "pdd", "fasth3", "pika", "sla", "fused"].includes(recipe)) set("h3_omni_enabled", false);
   if (recipe === "open-h3-refine") {
     if (!branchGate(node, "h3_open_refine_enabled").available) return false;
     set("upscale_enabled", false); set("upscale_mode", "off");
     set("h3_open_refine_enabled", true); set("rife_mode", "off");
     set("h3_open_refine_sigma_preset", "gentle_3step");
+  } else if (recipe === "pika") {
+    if (!accelerationAvailable(node, "pika", mode)) return false;
+    resetAcceleration(set); set("h3_omni_enabled", false); set("acceleration", "pika_h3_flex_6step");
+    set("steps", 6); set("sampler_name", "lcm"); set("scheduler", "simple");
+    set("denoise", 1); set("shift_video", 12); set("shift_audio", 3);
+    set("h3_attention_backend", "from_acceleration"); set("h3_veda_enabled", false);
+    for (const family of ["fl2va", "ref2va"]) {
+      const key = `pika_flex_${family}_lora`;
+      if (!String(widget(node,key)?.value || "")) set(key, firstChoice(node,key,name => name.includes("pika") && name.includes(family)));
+    }
   } else if (recipe === "omni") {
     resetAcceleration(set); set("h3_omni_enabled", true); set("acceleration", "h3_sage"); set("h3_attention_backend", "h3_sage");
     set("steps", 8); set("sampler_name", "euler"); set("scheduler", "simple");
@@ -1538,6 +1549,7 @@ function applyAccelerationChoice(node, value) {
     native: "native",
     pdd_native_8step: "pdd",
     fasth3_dense_6step: "fasth3",
+    pika_h3_flex_6step: "pika",
     h3_sla: "sla",
     matlowai_fused_turbo_manual_sigma: "fused",
   };
@@ -1584,6 +1596,11 @@ function applyMemoryProfileChoice(node, value) {
 }
 
 function accelerationAvailable(node, recipe, mode = shotboardMode(node)) {
+  if (recipe === "pika") {
+    if (!["t2va", "i2va", "fl2va", "ref2va", "v2va_face_swap_lora", "ref2va_vfx_edit", "ref2vid_lipsync", "auto_from_timeline"].includes(String(mode))) return false;
+    const key = `pika_flex_${modeFamily(mode) === "ref2" ? "ref2va" : "fl2va"}_lora`;
+    return Boolean(String(widget(node,key)?.value || "") || firstChoice(node,key,name => name.includes("pika")));
+  }
   const family = modeFamily(mode);
   if (recipe === "pdd") return Boolean(firstChoice(node, "pdd_lora_name", (name) => isPddLoRA(name, family)));
   if (recipe === "fasth3") return Boolean(fastH3Asset(node, mode));
@@ -1946,6 +1963,9 @@ function mount(node) {
     if (name === "h3_attention_backend" && omniActive(node)) {
       for (const option of control.options) option.disabled = ["sol_low_vram", "sage_sol"].includes(option.value);
     }
+    if (selectedAcceleration(node) === "pika" && ["steps", "sampler_name", "scheduler", "denoise", "shift_video", "shift_audio", "turbo_mode", "turbo_lora_name", "turbo_strength", "pdd_lora_name", "pdd_strength", "h3_omni_enabled"].includes(name)) {
+      control.disabled = true; box.classList.add("muted"); box.title = "Pika Flex owns the LCM six-NFE schedule; select another sampling recipe to change speed adapters.";
+    }
     control.dataset.field = name; control.onchange = () => {
       const value = control.type === "checkbox" ? control.checked : control.type === "number" ? Number(control.value) : control.value;
       if (name === "duration_seconds") setShotboardDuration(node, value);
@@ -2208,6 +2228,7 @@ function mount(node) {
     speed.classList.add("h3p-speed-recipes");
     addRecipe(speed, "NATIVE QUALITY", "native", true, selectedSpeed === "native"); addRecipe(speed, "PDD · 8 STEP", "pdd", accelerationAvailable(node,"pdd",mode), selectedSpeed === "pdd");
     addRecipe(speed, "FASTH3 OMNI · 8 STEP", "omni", mode === "ref2va", selectedSpeed === "omni");
+    addRecipe(speed, "PIKA FLEX · 6 STEP", "pika", accelerationAvailable(node,"pika",mode), selectedSpeed === "pika");
     addRecipe(speed, "FASTH3 · 6 STEP", "fasth3", accelerationAvailable(node,"fasth3",mode), selectedSpeed === "fasth3"); addRecipe(speed, "SLA · 4 STEP", "sla", accelerationAvailable(node,"sla",mode), selectedSpeed === "sla");
     addRecipe(speed, "FUSED FAST · T2VA ONLY", "fused", accelerationAvailable(node,"fused",mode), selectedSpeed === "fused"); grid.append(speed);
     const recipeInfo = document.createElement("p");
@@ -2743,7 +2764,7 @@ function mount(node) {
       stack.append(stackText, reset);
       recipes.append(presetGrid, stack);
     }
-    const recipeSet = active === "memory" ? [["≤ 8–12 GB · 124F / 2048 ROWS", "vram8"], ["12–16 GB · 209F / 4096 ROWS", "vram12"], ["16–24 GB · 294F / 8192 ROWS", "vram16"], ["24 GB+ · 362F / 16384 ROWS", "vram24"]] : active === "speed" ? [["NATIVE QUALITY · 20 STEP", "native"], ["PDD · 8 STEP", "pdd"], ["FASTH3 · 6 STEP", "fasth3"], ["SLA · 4 STEP", "sla"], ["FUSED FAST · T2VA ONLY", "fused"]] : active === "control" ? [["ENABLE + SELECT INSTALLED MODEL", "control"]] : active === "face" ? [["SAM3 SUBJECT SWAP · SAFE DEFAULTS", "face"]] : active === "face_refine" ? [["FACE REFINE · TOGGLE", "face-refine"]] : active === "finish" ? [["OPEN-H3 REFINEMENT · 3 STEP", "open-h3-refine"], ["NATIVE DELIVERY", "native-delivery"], ["H3 DETAIL · 1-STEP REFINE", "ultimate-tiled"], ["PIXEL SAFE · LOW VRAM", "pixel-safe"], ["H3 2-PASS UPRES", "upres"], ["H3 PIXEL REFINE", "h3-pixel"], ["LTX 2.3 MASTER", "ltx-master"], ["LTX 2.3 PER-SHOT", "ltx-per-shot"], ["RTX FINAL", "rtx-final"]] : [];
+    const recipeSet = active === "memory" ? [["≤ 8–12 GB · 124F / 2048 ROWS", "vram8"], ["12–16 GB · 209F / 4096 ROWS", "vram12"], ["16–24 GB · 294F / 8192 ROWS", "vram16"], ["24 GB+ · 362F / 16384 ROWS", "vram24"]] : active === "speed" ? [["NATIVE QUALITY · 20 STEP", "native"], ["PIKA FLEX · 6 STEP", "pika"], ["PDD · 8 STEP", "pdd"], ["FASTH3 · 6 STEP", "fasth3"], ["SLA · 4 STEP", "sla"], ["FUSED FAST · T2VA ONLY", "fused"]] : active === "control" ? [["ENABLE + SELECT INSTALLED MODEL", "control"]] : active === "face" ? [["SAM3 SUBJECT SWAP · SAFE DEFAULTS", "face"]] : active === "face_refine" ? [["FACE REFINE · TOGGLE", "face-refine"]] : active === "finish" ? [["OPEN-H3 REFINEMENT · 3 STEP", "open-h3-refine"], ["NATIVE DELIVERY", "native-delivery"], ["H3 DETAIL · 1-STEP REFINE", "ultimate-tiled"], ["PIXEL SAFE · LOW VRAM", "pixel-safe"], ["H3 2-PASS UPRES", "upres"], ["H3 PIXEL REFINE", "h3-pixel"], ["LTX 2.3 MASTER", "ltx-master"], ["LTX 2.3 PER-SHOT", "ltx-per-shot"], ["RTX FINAL", "rtx-final"]] : [];
     recipeSet.forEach(([label, id]) => {
       const deliveryRecipe = ["open-h3-refine", "native-delivery", "ultimate-tiled", "pixel-safe", "upres", "h3-pixel", "ltx-master", "ltx-per-shot", "rtx-final", "face-refine"].includes(id);
       const deliveryAvailable = id === "open-h3-refine" ? branchGate(node, "h3_open_refine_enabled").available : id === "upres"
@@ -2850,7 +2871,7 @@ function mount(node) {
       toggle.append(check, " Show advanced/manual speed controls"); recipes.append(toggle);
       if (!check.checked) {
         const selected = selectedAcceleration(node);
-        const fields = {omni: ["h3_omni_enabled", "h3_clipproj_profile", "h3_clipproj_load_mode"], native: [], pdd: ["pdd_lora_name"], fasth3: ["turbo_lora_name"], sla: ["turbo_lora_name", "h3_sla_sparsity"], fused: ["fused_turbo_model_name"]}[selected] || ["turbo_mode", "turbo_lora_name"];
+        const fields = {omni: ["h3_omni_enabled", "h3_clipproj_profile", "h3_clipproj_load_mode"], native: [], pika: ["pika_flex_fl2va_lora", "pika_flex_ref2va_lora"], pdd: ["pdd_lora_name"], fasth3: ["turbo_lora_name"], sla: ["turbo_lora_name", "h3_sla_sparsity"], fused: ["fused_turbo_model_name"]}[selected] || ["turbo_mode", "turbo_lora_name"];
         names = names.filter(name => ["acceleration", "h3_attention_backend", "h3_veda_enabled", "h3_veda_predictor", "h3_veda_verbose", ...fields, "secondary_lora_enabled", "secondary_lora_name", "secondary_lora_strength", "secondary_lora_continuation_only"].includes(name));
       }
     }

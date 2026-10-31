@@ -4,6 +4,8 @@ import copy
 import json
 from typing import Any, Dict, List
 
+from .audio_board_arranger import IAMCCS_AudioBoardArranger
+
 
 SUPERNODE_LINX_TYPE = "IAMCCS_SUPERNODE_LINX"
 
@@ -226,7 +228,7 @@ class IAMCCS_AudioBoardMixer:
                 "masterAudioGain",
                 audio_tracks.get("masterAudioGain", mixer.get("masterAudioGain", 1.0)),
             )
-        master_gain = max(0.01, min(2.0, _safe_float(upstream_master_gain, 1.0)))
+        master_gain = max(0.0, min(2.0, _safe_float(upstream_master_gain, 1.0)))
 
         manifest = {
             "schema": "iamccs.audio_board_mixer.manifest",
@@ -242,6 +244,26 @@ class IAMCCS_AudioBoardMixer:
         }
 
         if sync_policy != "read_only_monitor":
+            # Rebuild from immutable clip controls, not the already baked fader values.
+            for segment in source_segments:
+                if "sourceClipMute" not in segment:
+                    segment["sourceClipMute"] = bool(segment.get("mute", False) and not segment.get("trackMute", False))
+            source_segments = IAMCCS_AudioBoardArranger._segments_with_track_mix(source_segments, track_settings, track_count)
+            manifest["segments"] = source_segments
+            for key in ("segments", "all_segments", "shotboard_segments"):
+                audio_tracks[key] = copy.deepcopy(source_segments)
+            audio_tracks["shotboard_track_settings"] = copy.deepcopy(track_settings)
+            audio_tracks["masterAudioGain"] = master_gain
+            # Every downstream consumer sees the same effective timeline.
+            timeline = {"audioSegments": source_segments, "trackSettings": track_settings,
+                        "audioTrackCount": track_count, "masterAudioGain": master_gain, "masterBus": master_bus}
+            for key in ("cine_audio_timeline_json", "cine_audio_bus_timeline_json", "cine_board_timeline_data"):
+                existing = resources.get(key)
+                if existing is not None:
+                    updated = {**_safe_json_loads(existing, {}), **timeline}
+                    resources[key] = json.dumps(updated, ensure_ascii=False) if isinstance(existing, str) else updated
+            outputs["audio_timeline_json"] = json.dumps(timeline, ensure_ascii=False)
+            payload["audioSegments"] = copy.deepcopy(source_segments)
             audio_tracks["trackSettings"] = track_settings
             audio_tracks["track_settings"] = copy.deepcopy(track_settings)
             audio_tracks["all_track_settings"] = copy.deepcopy(track_settings)

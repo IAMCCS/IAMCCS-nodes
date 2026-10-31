@@ -10,6 +10,9 @@ acceleration and delivery routing agree for each chunk.
 
 from __future__ import annotations
 
+from .iamccs_h3_pika_flex import active as pika_active, apply_adapter as apply_pika_adapter, SIGMAS as PIKA_SIGMAS, IAMCCS_MiniMaxH3PikaFlexLazyRouter
+from .iamccs_h3_multitracks import IAMCCS_H3MultitrackAudioRouter
+
 import functools
 import hashlib
 from .iamccs_h3_seed_policy import chunk_seed
@@ -1521,6 +1524,8 @@ def _accelerate(model, shotplan: dict[str, Any]):
         # Kijai's loader already applies the released model's Sage policy.
         # Do not stack IAMCCS attention patches, cache approximations or LoRAs.
         return model, "Fused Fast H3 | Kijai Sage auto (isolated; no LoRA/cache stacking)"
+    if mode == "pika_h3_flex_6step":
+        return _apply_h3_sage_or_exact_low_vram(model, "Pika Flex six-NFE / exact memory policy")
     if mode == "fasth3_dense_6step":
         # The converter's measured 8 GB reference path explicitly uses Sage
         # attention plus chunked feed-forward. FastH3 reduces denoising steps,
@@ -2580,7 +2585,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             # performance slot is the fallback, even when an older CineInfo
             # node still says `cine_info_h3_only`.
             prompter_paths = shotplan.get("reference_image", {}).get("prompter_paths")
-            if omni.enabled(shotplan):
+            if (omni.enabled(shotplan) or pika_active(shotplan)):
                 omni_images = h3_resources.get("iamccs_h3_omni_image_files", [])
                 if omni_images:
                     prompter_paths = [item["path"] for item in omni_images if isinstance(item, dict) and item.get("path")]
@@ -2588,7 +2593,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 plan_paths = []
             elif isinstance(prompter_paths, list):
                 plan_paths = prompter_paths
-                external_images = [None] * (9 if omni.enabled(shotplan) else 4)
+                external_images = [None] * (9 if (omni.enabled(shotplan) or pika_active(shotplan)) else 4)
                 roles = ["subject_identity"] * len(external_images)
             elif slot_lipsync_mode:
                 plan_paths = []
@@ -2602,8 +2607,8 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
             else:
                 plan_paths = [] if str(h3_info.get("reference_source", "")) == "cine_info_h3_only" else _unique_plan_image_paths(shotplan)
             refs: dict[str, torch.Tensor] = {}
-            omni_media = h3_resources.get("iamccs_h3_omni_media", {}) if omni.enabled(shotplan) else {}
-            if omni.enabled(shotplan) and len(external_images) == 4:
+            omni_media = h3_resources.get("iamccs_h3_omni_media", {}) if (omni.enabled(shotplan) or pika_active(shotplan)) else {}
+            if (omni.enabled(shotplan) or pika_active(shotplan)) and len(external_images) == 4:
                 external_images += [omni_media.get(f"reference_image_{i}") for i in range(5, 10)]
                 roles += ["subject_identity"] * 5
             for index in range(len(external_images)):
@@ -2684,12 +2689,12 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 active_audio = ref_video_audio
             if isinstance(active_audio, dict) and (
                 slot_lipsync_mode or audio_role != "off" or str(shotplan.get("audio_mode", "")) == "h3_ref2va_audio"
-                or (omni.enabled(shotplan) and h3_resources.get("iamccs_h3_omni_voice_bindings"))
+                or ((omni.enabled(shotplan) or pika_active(shotplan)) and h3_resources.get("iamccs_h3_omni_voice_bindings"))
             ):
                 # A timeline source was already trimmed to this performance
                 # slot above. CineInfoH3 reference audio remains a longer
                 # clip and is sliced on the planned global time as before.
-                sliced = active_audio if slot_lipsync_mode or omni.enabled(shotplan) else _audio_slice(
+                sliced = active_audio if slot_lipsync_mode or (omni.enabled(shotplan) or pika_active(shotplan)) else _audio_slice(
                     active_audio,
                     float(chunk.get("timeline_start_seconds", 0.0)),
                     float(chunk.get("duration_seconds", frames / H3_FPS)),
@@ -2702,7 +2707,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                     "role": "lipsync_timing_source" if slot_lipsync_mode else (audio_role if audio_role != "off" else "driven_audio"),
                 })
                 voice_picture_index = int(shotplan.get("voice_reference_picture_index", 0) or 0)
-                if omni.enabled(shotplan) and h3_resources.get("iamccs_h3_omni_voice_bindings"):
+                if (omni.enabled(shotplan) or pika_active(shotplan)) and h3_resources.get("iamccs_h3_omni_voice_bindings"):
                     voice_picture_index = 0
                 if voice_picture_index > 0:
                     voice_picture_label = f"<Picture {voice_picture_index}>"
@@ -2722,7 +2727,7 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                 else:
                     voice_pairing_note = ""
 
-            if omni.enabled(shotplan):
+            if (omni.enabled(shotplan) or pika_active(shotplan)):
                 ref_videos = dict(ref_videos or {})
                 ref_video_audios = dict(ref_video_audios or {})
                 ref_audios = dict(ref_audios or {})
@@ -2757,6 +2762,12 @@ class IAMCCS_MiniMaxH3AtomicConditioningBackend:
                         label = f"<{kind} {int(binding[key])}>"
                         if label not in labels:
                             raise ValueError(f"Omni voice binding needs {label}; connect that reference or disable the binding.")
+            multitracks = h3_resources.get("iamccs_h3_multitracks", {})
+            if multitracks.get("family") == "ref2va":
+                ref_audios = {f"ref_audio_{i}": audio for i, audio in enumerate(multitracks["tracks"], 1)}
+                ref_video_audios = None
+                manifest = omni.reference_manifest(refs, ref_videos, ref_video_audios, ref_audios)
+
             if not refs and not ref_videos and not ref_audios and not chunk.get("reference_still"):
                 raise ValueError("REF2VA requires at least one enabled image, video, or audio reference")
             prompt = _reference_header(manifest, prompt)
@@ -3211,6 +3222,8 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
         shift_video,
         shift_audio,
         motion_state=None,
+        pika_sampler=None,
+        pika_sigmas=None,
     ):
         import nodes as comfy_nodes
         from comfy_extras.nodes_audio import VAEDecodeAudio
@@ -3282,6 +3295,7 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
                 if not speed_path:
                     raise ValueError(f"H3 {role}: missing adapter '{speed_name}'.")
                 validate_speed_asset(describe_asset(speed_name, speed_path), _effective_task(cine_linx, chunk), role)
+        model, pika_report = apply_pika_adapter(model, shotplan, _effective_task(cine_linx, chunk))
         turbo_model, turbo_report = _apply_turbo_lora(model, shotplan)
         fasth3_model, fasth3_report = _apply_fasth3_dense_lora(turbo_model, shotplan)
         pdd_model, pdd_report = _apply_pdd_lora(fasth3_model, shotplan)
@@ -3326,7 +3340,11 @@ class IAMCCS_MiniMaxH3GenerationBackendV2:
         noise = RandomNoise.execute(noise_seed=actual_seed)[0]
         guider = BasicGuider.execute(model=active_model, conditioning=positive)[0]
         sampler_report = str(sampler_name)
-        if fused_turbo_active and not fused_convrot:
+        if pika_active(shotplan):
+            sampler = pika_sampler if pika_sampler is not None else KSamplerSelect.execute(sampler_name="lcm")[0]
+            sigmas = pika_sigmas if pika_sigmas is not None else ManualSigmas.execute(sigmas=PIKA_SIGMAS)[0]
+            sampler_report = pika_report
+        elif fused_turbo_active and not fused_convrot:
             sigma_map = {
                 "4_step": "0.9999166, 0.9728326, 0.9230769, 0.8, 0.0",
                 "6_step": "0.9999166, 0.9868421, 0.9638554, 0.9230769, 0.8695652, 0.8, 0.0",
@@ -4849,7 +4867,20 @@ class IAMCCS_MiniMaxH3DeliveryRouterV2:
         return delivery, native_audio, bridge_last_frame, int(delivery_fps), upscale_report, report
 
 
+
+class IAMCCS_MiniMaxH3PikaFlexGeneration(IAMCCS_MiniMaxH3GenerationBackendV2):
+    @classmethod
+    def INPUT_TYPES(cls):
+        schema = super().INPUT_TYPES()
+        schema["required"]["pika_sampler"] = ("SAMPLER",)
+        schema["required"]["pika_sigmas"] = ("SIGMAS",)
+        return schema
+
+
 NODE_CLASS_MAPPINGS = {
+    "IAMCCS_H3MultitrackAudioRouter": IAMCCS_H3MultitrackAudioRouter,
+    "IAMCCS_MiniMaxH3PikaFlexGeneration": IAMCCS_MiniMaxH3PikaFlexGeneration,
+    "IAMCCS_MiniMaxH3PikaFlexLazyRouter": IAMCCS_MiniMaxH3PikaFlexLazyRouter,
     "IAMCCS_MiniMaxH3AtomicModelRouter": IAMCCS_MiniMaxH3AtomicModelRouter,
     "IAMCCS_MiniMaxH3AtomicConditioningBackend": IAMCCS_MiniMaxH3AtomicConditioningBackend,
     "IAMCCS_MiniMaxH3DirectorFLFParityModelRouter": IAMCCS_MiniMaxH3DirectorFLFParityModelRouter,

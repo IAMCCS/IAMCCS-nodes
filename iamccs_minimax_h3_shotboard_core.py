@@ -2173,7 +2173,7 @@ def build_shotplan(
     if acceleration not in {
         "auto_3060", "low_vram_auto", "native", "h3_sage", "h3_sla", "sage", "sage_sol", "sol_low_vram",
         "adaptive_safe", "sol_adaptive_safe", "sol_adaptive_balanced", "spectrum", "sage_spectrum",
-        "comfy_kitchen", "h3_exact", "pdd_native_8step", "fasth3_dense_6step", "matlowai_fused_turbo_manual_sigma",
+        "comfy_kitchen", "h3_exact", "pdd_native_8step", "fasth3_dense_6step", "pika_h3_flex_6step", "matlowai_fused_turbo_manual_sigma",
         "iamccs_progressive_2stage", "iamccs_progressive_3stage", "iamccs_progressive_pdd_2stage",
     }:
         raise ValueError(f"accelerazione H3 non valida: {acceleration}")

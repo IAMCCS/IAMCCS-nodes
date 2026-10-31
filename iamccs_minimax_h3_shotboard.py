@@ -29,6 +29,7 @@ from .iamccs_h3_face_swap import settings_schema as face_swap_schema, face_swap_
 from .iamccs_h3_character_swap_lora import settings_schema as character_swap_schema, swap_plan
 from .iamccs_h3_vfx_edit import settings_schema as vfx_edit_schema
 from .iamccs_h3_omni import configure as configure_omni
+from .iamccs_h3_pika_flex import configure as configure_pika, schema as pika_schema, PROFILE as PIKA_PROFILE, VALUES as PIKA_VALUES
 from .iamccs_h3_continuity_guard import settings_schema as continuity_guard_schema, configuration as continuity_guard_configuration
 from .iamccs_minimax_h3_open_refine import settings_schema as open_h3_refine_schema, configuration as open_h3_refine_configuration
 
@@ -131,6 +132,8 @@ def _speed_preset_contract(
     book = recipes()
     mode = str(acceleration or "native").strip().lower()
     recipe_id = None
+    if mode == PIKA_PROFILE:
+        return {"id": PIKA_PROFILE, "values": dict(PIKA_VALUES)}
     if mode in {"pdd_native_8step", "iamccs_progressive_pdd_2stage"}:
         recipe_id = "pdd_8"
     elif mode == "fasth3_dense_6step":
@@ -3164,7 +3167,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 "acceleration": ([
                     "low_vram_auto", "native", "h3_sage", "h3_sla", "sol_low_vram", "sol_adaptive_safe",
                     "sol_adaptive_balanced", "adaptive_safe", "spectrum", "sage_spectrum",
-                    "auto_3060", "sage", "sage_sol", "comfy_kitchen", "h3_exact", "pdd_native_8step", "fasth3_dense_6step", "matlowai_fused_turbo_manual_sigma",
+                    "auto_3060", "sage", "sage_sol", "comfy_kitchen", "h3_exact", "pdd_native_8step", "fasth3_dense_6step", "pika_h3_flex_6step", "matlowai_fused_turbo_manual_sigma",
                     "iamccs_progressive_2stage", "iamccs_progressive_3stage", "iamccs_progressive_pdd_2stage",
                 ], {"default": default_acceleration}),
                 "ref_image_size": (["match", "max"], {"default": "match"}),
@@ -4810,6 +4813,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         }
         plan["open_h3_refine"] = open_h3_refine_configuration(saved_settings)
         configure_omni(plan, saved_settings)
+        configure_pika(plan, saved_settings)
         chunk_frames = [int(chunk.get("frame_count", 0) or 0) for chunk in plan.get("chunks", [])]
         max_chunk_frames = max(chunk_frames, default=0)
         native_load = (float(width) * float(height) * max(1, max_chunk_frames)) / (960.0 * 544.0 * 124.0)
@@ -7647,6 +7651,7 @@ class IAMCCS_ShotboardH3Settings:
                 "tooltip": "Apply the second LoRA only from segment 2 onward. A saved-AV checkpoint resume already counts as continuation. OFF preserves all-segment behavior. This controls temporal segments, not upscale passes.",
             }),
             **open_h3_refine_schema(),
+            **pika_schema(folder_paths.get_filename_list("loras")),
         })}
 
     RETURN_TYPES = (SUPERNODE_LINX_TYPE,)

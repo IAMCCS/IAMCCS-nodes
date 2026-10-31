@@ -10,6 +10,8 @@ use the workflow Qwen encoder through ClipProj or a user-selected API provider.
 
 from __future__ import annotations
 
+from .iamccs_h3_multitracks import prompt_context as multitracks_prompt_context
+
 import copy
 import asyncio
 import json
@@ -735,14 +737,14 @@ def _compose_prompt(project: dict[str, Any], task_mode: str, writing_mode: str, 
                 if body != "N/A":
                     body = (_positive_h3_music(body) if key == "non_diegetic_music"
                             else _positive_h3_text_preserve_dialogue(body)) or "N/A"
-                if key == "summary" and body != "N/A" and not body.lower().startswith("[reference"):
+                if key == "summary" and body != "N/A" and not re.match(r"^\[(?:reference generation|keyframe completion|video editing|video continuation|audio reuse|audio reference)(?:\s*\+[^\]]*)?\]", body, flags=re.I):
                     body = f"[reference generation] {body}"
                 blocks.append(f"{label}:\n{body}")
         elif mode == "v2va_object_swap":
             detail = _positive_h3_text_preserve_dialogue(join_fields(("v2va_interval_edits", "v2va_exclusions"))) or "N/A"
             summary = _positive_h3_text(resolved.get("v2va_source_video_authority", "").strip()) or "N/A"
-            if summary != "N/A" and not summary.lower().startswith("[reference"):
-                summary = f"[reference generation + video reference] {summary}"
+            if summary != "N/A" and not re.match(r"^\[(?:reference generation|keyframe completion|video editing|video continuation|audio reuse|audio reference)(?:\s*\+[^\]]*)?\]", summary, flags=re.I):
+                summary = f"[video editing + reference generation] {summary}"
             blocks = [
                 f"subject_definitions:\n{_positive_h3_text(resolved.get('v2va_subject_definitions', '').strip()) or 'N/A'}",
                 f"summary:\n{summary}",
@@ -905,7 +907,15 @@ def _official_h3_tag_rules(task_mode: str) -> str:
     """Shared by Global, selected-field rewrite, and compact local fallback."""
     if task_mode in {"v2va_face_swap_lora", "ref2va_vfx_edit"}:
         return "Use this mode's native aligned-edit grammar; do not append full-reference labels to its specialized edit prompt."
-    return (
+    mode = _normalise_task_mode(task_mode)
+    family_rule = {
+        "t2va": "T2VA begins directly with the three body fields and no image alignment instruction.",
+        "i2va": "I2VA places its opening-picture alignment instruction first, followed by a blank line and the three body fields.",
+        "fl2va": "FL2VA starts with first/last-picture alignment at zero and the supplied effective final duration, written to two decimals. Preserve the IAMCCS global/local split; timed action belongs in local fields and is reassembled for each generated segment.",
+        "ref2va": "REF2VA has six ordered fields: subject_definitions, summary, retention_analysis, detailed_description, overall_soundscape, non_diegetic_music. Summary task types must reflect actual inputs. Audio retention markers are fully_copy, partially_copy, reference or weak_reference; visual markers are fully_preserved, partially_preserved, attribute_transfer or weak_reference.",
+        "audio_driven": "The custom audio owns the exact performance; use the integrated three-field body and do not invent reference Audio labels for a locked FL2VA guide.",
+    }.get(mode, "Use the specialized IAMCCS mode contract; do not silently switch checkpoint family.")
+    return (family_rule + " " +
         "Official H3 tag authoring contract applies even when the rough request has no tags. "
         "Format every supplied spoken or sung line as (S1) says <d>[Language] exact words</d>, "
         "assigning stable (S1), (S2) and later speaker IDs by first actual vocal event, independently of subject numbering. "
@@ -1377,7 +1387,11 @@ def rewrite_sections_with_ai(
     images: Any = None,
     vision_model: str = "",
     request_text: str | None = None,
+    multitracks: Any = None,
 ) -> tuple[dict[str, str], dict[str, Any]]:
+    multi_context = multitracks_prompt_context(multitracks, task_mode)
+    if multi_context:
+        user_direction = str(user_direction or "") + "\n\n" + multi_context
     provider = str(provider or "ollama").strip().lower()
     if provider == "lm_studio":
         base_url = str(base_url or "http://localhost:1234/v1").rstrip("/")
@@ -2251,6 +2265,11 @@ def _append_prompter_stage(
     resources["iamccs_h3_omni_image_files"] = visuals[:9] if project.get("omni_preset") and mode == "ref2va" else []
     resources["iamccs_h3_omni_audio_files"] = project.get("omni_audio_files", [])[:3] if project.get("omni_preset") and mode == "ref2va" else []
     resources["iamccs_h3_omni_voice_bindings"] = [dict(row) for row in project.get("omni_voice_bindings", []) if isinstance(row, dict) and row.get("enabled", True)] if project.get("omni_preset") and mode == "ref2va" else []
+    if project.get("multitracks_preset"):
+        multitracks_prompt_context({"enabled": True, "lipsync": project.get("multitracks_lipsync"), "transcript": project.get("multitracks_transcript", ""), "tracks": project.get("multitracks_tracks", [])}, mode)
+        resources["iamccs_h3_multitracks_prompt"] = {"enabled": True, "task_mode": mode,
+            "lipsync": bool(project.get("multitracks_lipsync")),
+            "transcript": str(project.get("multitracks_transcript", "") or ""), "tracks": project.get("multitracks_tracks", [])}
     out["resources"] = resources
 
     outputs = dict(out.get("outputs") or {})
@@ -2820,6 +2839,7 @@ def _register_prompter_routes() -> None:
                     payload.get("images"),
                     str(payload.get("vision_model", "")),
                     payload.get("request_text"),
+                    payload.get("multitracks"),
                 )
                 return web.json_response({"ok": True, "sections": rewritten, "report": report})
             except Exception as exc:

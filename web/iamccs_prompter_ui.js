@@ -1110,6 +1110,8 @@ function mountPrompter(node) {
     });
     const omniButton = button("FASTH3 OMNI", "iamccs-pr-mode");
     modeBar.appendChild(omniButton);
+    const multitracksButton = button("MULTITRACKS", "iamccs-pr-mode");
+    modeBar.appendChild(multitracksButton);
     const modeNote = el("div", "iamccs-pr-mode-note");
     modeBar.appendChild(modeNote);
 
@@ -2071,6 +2073,24 @@ function mountPrompter(node) {
         center.appendChild(tagDeck);
         if (isEditMode(project.task_mode)) center.appendChild(renderEditMedia());
         if (project.omni_preset && project.task_mode === "ref2va") center.appendChild(renderOmniBindings());
+        if (project.multitracks_preset) {
+            const panel = el("section", "iamccs-pr-section"); panel.dataset.workspace = "direction";
+            panel.appendChild(el("strong", "", "MULTITRACKS · AUDIOBOARD TRACK 1 / 2 / 3"));
+            const quick = el("div", "iamccs-pr-row");
+            for (const [mode,label] of [["t2va","FL2VA · TEXT ONLY"],["fl2va","FL2VA · FIRST / LAST"],["ref2va","REF2VA · PICTURES + 3 AUDIO REFS"]]) {
+                const b = button(label,"iamccs-pr-small"); b.classList.toggle("active",project.task_mode === mode);
+                b.onclick = () => { project.task_mode = mode; project.omni_preset = false; project.final_prompt_override_enabled = false; commit(); renderControls(); renderSections(); renderPreview(); };
+                quick.appendChild(b);
+            }
+            panel.appendChild(quick);
+            panel.appendChild(el("p","", "Describe each track in REQUEST: who follows Track 1 footsteps, who follows Track 2 rhythm, and which track supplies the score. Picture numbers refer only to attached images. FL2VA uses one locked master; Ref2VA maps Tracks 1/2/3 to Audio 1/2/3. Match the generation mode in Settings PRO; these quick choices select prompting grammar."));
+            const lip = el("input"); lip.type="checkbox"; lip.checked=Boolean(project.multitracks_lipsync);
+            const label = el("label",""," Voice track needs lip sync "); label.prepend(lip); panel.appendChild(label);
+            const transcript=el("textarea"); transcript.value=project.multitracks_transcript || ""; transcript.placeholder="Exact spoken words and language. Identify the speaking character and voice track in REQUEST."; transcript.style.minHeight="70px";
+            lip.onchange=()=>{project.multitracks_lipsync=lip.checked;commit();};
+            transcript.oninput=()=>{project.multitracks_transcript=transcript.value;commit();};
+            panel.appendChild(transcript); center.appendChild(panel);
+        }
         const imageMode = project.task_mode === "reference_image";
         const swapChar = isEditMode(project.task_mode);
         if (!imageMode && !swapChar) {
@@ -2260,6 +2280,7 @@ function mountPrompter(node) {
         if (!imageMode && !swapChar) center.appendChild(renderLocalPrompts());
         modeButtons.forEach((item, key) => item.classList.toggle("active", key === project.task_mode && !project.omni_preset));
         omniButton.classList.toggle("active", project.omni_preset && project.task_mode === "ref2va");
+        multitracksButton.classList.toggle("active", Boolean(project.multitracks_preset));
         modeNote.textContent = meta.subtitle;
         modeNote.title = meta.subtitle;
         decorateTextEditors();
@@ -2520,6 +2541,7 @@ function mountPrompter(node) {
                     sections: rewriteInputSections,
                     target_keys: targetKeys,
                     request_text: narrativeRequest,
+                    multitracks: {enabled:Boolean(project.multitracks_preset), lipsync:Boolean(project.multitracks_lipsync), transcript:project.multitracks_transcript || ""},
                     user_direction: project.omni_preset && project.task_mode === "ref2va" ? `${omniRequestDirection(project)}\n${direction}` : project.task_mode === "reference_image"
                         ? `${project.image_preset === "reference_sheet" ? "REFERENCE SHEET: one combined canvas containing every requested character and prop." : "SINGLE STATIC IMAGE."}\n${direction}` : direction,
                     vision_model: aiVisionModel.value.trim(),
@@ -2692,7 +2714,14 @@ function mountPrompter(node) {
     };
     rewriteBtn.onclick = () => runAIRewrite({ triggerButton: rewriteBtn });
 
+    multitracksButton.onclick = () => {
+        project.multitracks_preset = true; project.omni_preset = false;
+        if (!["t2va","fl2va","ref2va"].includes(project.task_mode)) project.task_mode="t2va";
+        project.injection_target="global"; project.final_prompt_override_enabled=false;
+        commit(); renderControls(); renderSections(); renderPreview();
+    };
     omniButton.onclick = () => {
+        project.multitracks_preset = false;
         project.task_mode = "ref2va"; project.omni_preset = true;
         project.injection_target = "global"; project.final_prompt_override_enabled = false;
         commit(); renderControls(); renderSections(); renderPreview();
@@ -2700,6 +2729,7 @@ function mountPrompter(node) {
 
     modeButtons.forEach((item, key) => {
         item.onclick = () => {
+            project.multitracks_preset = false;
             const previousMode = project.task_mode;
             if (previousMode !== key) snapshotProject(`mode change ${previousMode} → ${key}`);
             project.omni_preset = false;
