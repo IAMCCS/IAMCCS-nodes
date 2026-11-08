@@ -25,7 +25,11 @@ def named_family(text):
     return families[0] if len(families) == 1 else ""
 
 
-@functools.lru_cache(maxsize=128)
+# Keep repeated schema refreshes warm even for large LoRA libraries.
+H3_HEADER_CACHE_MAXSIZE = 8192
+
+
+@functools.lru_cache(maxsize=H3_HEADER_CACHE_MAXSIZE)
 def inspect_header(path_text, mtime_ns, size):
     del mtime_ns
     with open(path_text, "rb") as handle:
@@ -41,6 +45,36 @@ def inspect_header(path_text, mtime_ns, size):
     return {"metadata": metadata, "native": native, "lora": bool(lora),
             "pdd": all(any(f"final_layer.{kind}_out" in key and ("reshape_weight" in key or "set_weight" in key) for key in keys) for kind in ("video", "audio")),
             "header_sha256": hashlib.sha256(raw).hexdigest(), "bytes": size}
+
+
+@functools.lru_cache(maxsize=H3_HEADER_CACHE_MAXSIZE)
+def classify_fasth3_dense_file(path_text: str, mtime_ns: int, size: int) -> tuple[bool, str]:
+    """Fail closed unless this is a native fused-QKV FastH3 converter output."""
+    del mtime_ns, size
+    try:
+        from safetensors import safe_open
+
+        with safe_open(path_text, framework="pt", device="cpu") as handle:
+            keys = [str(key).lower() for key in handle.keys()]
+            metadata = {str(key).lower(): str(value) for key, value in (handle.metadata() or {}).items()}
+    except Exception as exc:
+        return False, f"unreadable safetensors header ({type(exc).__name__}: {exc})"
+
+    if metadata.get("converted_by", "").strip().lower() != "lora_convert_h3":
+        return False, "not a FastH3 adapter converted for native ComfyUI (converter metadata missing)"
+    adaln_mode = metadata.get("adaln_mode", "").strip().lower()
+    if adaln_mode != "drop":
+        return False, f"AdaLN mode '{adaln_mode or 'unknown'}' is not production-safe; reconvert with --adaln drop"
+    native_lora = any(
+        key.startswith("diffusion_model.blocks.") and (".lora_a." in key or ".lora_b." in key)
+        for key in keys
+    )
+    fused_qkv = any(".attn.qkv_proj.lora_a." in key for key in keys) and any(
+        ".attn.qkv_proj.lora_b." in key for key in keys
+    )
+    if not native_lora or not fused_qkv:
+        return False, "converted metadata exists, but native fused-QKV H3 LoRA tensors are incomplete"
+    return True, "FastH3 Dense native ComfyUI adapter"
 
 
 def describe_asset(name, path):

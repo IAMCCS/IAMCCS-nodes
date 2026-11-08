@@ -2865,6 +2865,12 @@ def setup_api_routes() -> None:
             except Exception as e:
                 return web.json_response({"error": str(e)}, status=500)
 
+        @routes.get("/api/iamccs/h3/lora-catalog")
+        async def iamccs_h3_lora_catalog_endpoint(request):
+            from .iamccs_h3_lora_catalog import lora_catalog
+
+            return web.json_response(await lora_catalog(), headers={"Cache-Control": "no-store"})
+
         @routes.post("/api/iamccs/h3/advice")
         async def iamccs_h3_advice_endpoint(request):
             import asyncio

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import copy
-import functools
 import gc
 import json
 import logging
@@ -25,6 +24,7 @@ from PIL import Image, ImageOps
 
 import folder_paths
 from .iamccs_h3_advisor import describe_asset, recipes, validate_settings
+from .iamccs_h3_lora_catalog import is_native_pdd_candidate
 from .iamccs_h3_face_swap import settings_schema as face_swap_schema, face_swap_settings, validate_plan as validate_face_swap_plan
 from .iamccs_h3_character_swap_lora import settings_schema as character_swap_schema, swap_plan
 from .iamccs_h3_vfx_edit import settings_schema as vfx_edit_schema
@@ -69,50 +69,6 @@ H3_LINKED_STAGE_PAIRS = {
     for lw, lh, hw, hh in (pair, (pair[1], pair[0], pair[3], pair[2]))
 }
 
-
-@functools.lru_cache(maxsize=512)
-def _classify_fasth3_dense_lora_header(path_text: str, mtime_ns: int) -> tuple[bool, str]:
-    """Identify converted FastH3 Dense adapters without relying on filenames."""
-    del mtime_ns  # retained in the cache key so replacing a file invalidates the result
-    try:
-        from safetensors import safe_open
-
-        with safe_open(path_text, framework="pt", device="cpu") as handle:
-            keys = [str(key).lower() for key in handle.keys()]
-            metadata = {str(key).lower(): str(value) for key, value in (handle.metadata() or {}).items()}
-    except Exception as exc:
-        return False, f"unreadable safetensors header ({type(exc).__name__}: {exc})"
-
-    converted_by = metadata.get("converted_by", "").strip().lower()
-    adaln_mode = metadata.get("adaln_mode", "").strip().lower()
-    native_lora = any(
-        key.startswith("diffusion_model.blocks.") and (".lora_a." in key or ".lora_b." in key)
-        for key in keys
-    )
-    fused_qkv = any(".attn.qkv_proj.lora_a." in key for key in keys) and any(
-        ".attn.qkv_proj.lora_b." in key for key in keys
-    )
-    if converted_by != "lora_convert_h3":
-        return False, "missing FastH3 converter metadata"
-    if not native_lora or not fused_qkv:
-        return False, "FastH3 metadata found, but native fused-QKV H3 LoRA tensors are incomplete"
-    if adaln_mode != "drop":
-        return False, f"unsupported FastH3 AdaLN conversion mode '{adaln_mode or 'unknown'}'; use --adaln drop"
-    return True, "FastH3 Dense native ComfyUI adapter"
-
-
-def _discover_fasth3_dense_loras(names: list[str]) -> list[str]:
-    """Return compatible converted adapters from ComfyUI's complete LoRA registry."""
-    found: list[str] = []
-    for name in names:
-        try:
-            path = folder_paths.get_full_path("loras", name)
-            mtime_ns = Path(path).stat().st_mtime_ns if path else 0
-        except (OSError, TypeError, ValueError):
-            continue
-        if path and _classify_fasth3_dense_lora_header(str(path), int(mtime_ns))[0]:
-            found.append(name)
-    return sorted(found, key=str.lower)
 
 def _speed_preset_contract(
     *,
@@ -3031,36 +2987,11 @@ class IAMCCS_MiniMaxH3ShotPlanner:
 
         samplers = list(comfy.samplers.SAMPLER_NAMES)
         schedulers = list(comfy.samplers.SCHEDULER_NAMES)
-        # Discover every installed H3 LoRA by its filename or relative folder.
-        # Community releases do not consistently include "minimax" or
-        # "turbo" in the basename, so those tokens must not be a second,
-        # hardcoded allow-list.
-        all_installed_loras = list(folder_paths.get_filename_list("loras"))
-        installed_fasth3_loras = _discover_fasth3_dense_loras(all_installed_loras)
-        installed_turbo_loras = sorted(
-            (
-                name for name in all_installed_loras
-                if "h3" in name.lower() or name in installed_fasth3_loras
-            ),
-            key=str.lower,
-        )
-        h3_lora_assets = [
-            describe_asset(name, folder_paths.get_full_path("loras", name))
-            for name in installed_turbo_loras
-        ]
+        # Keep combo validation independent of compatibility discovery. Saved
+        # workflows may select a converted adapter with an arbitrary filename.
+        all_installed_loras = folder_paths.get_filename_list("loras")
         installed_pdd_loras = sorted(
-            (
-                name for name in installed_turbo_loras
-                if (
-                    ("pdd" in name.lower() and "acc" in name.lower())
-                    or ("h3" in name.lower() and "acc" in name.lower() and "8step" in name.lower())
-                )
-                # Native ComfyUI PDD head-bank files are the converted
-                # *_comfy safetensors.  Legacy companion-loader files may use
-                # the same Acc-8Step name but have an incompatible tensor
-                # layout, so do not advertise them in the native dropdown.
-                and "comfy" in name.lower()
-            ),
+            (name for name in all_installed_loras if is_native_pdd_candidate(name)),
             key=str.lower,
         )
         # The LTX finishing slot intentionally exposes the complete ComfyUI
@@ -3082,7 +3013,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
         preferred_ltx_detailer_lora = crisp_ltx_loras[0] if crisp_ltx_loras else ""
         # Only expose files that really exist. The web migration converts old
         # saved missing filenames to the empty/Base-H3 choice before validation.
-        turbo_loras = list(dict.fromkeys(("", *installed_turbo_loras)))
+        turbo_loras = list(dict.fromkeys(("", *all_installed_loras)))
         pdd_loras = list(dict.fromkeys(("", *installed_pdd_loras)))
         # Default to a real installed native PDD file when one exists.  The
         # value is discovered from ComfyUI's LoRA registry at startup, never a
@@ -3214,8 +3145,7 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 # Turbo is kept inside the typed shotplan so the selected LoRA,
                 # effective sampler and audio policy cannot drift apart.
                 "turbo_mode": (["off", "early_8_10", "ckpt500_6_8"], {"default": "off"}),
-                "turbo_lora_name": (turbo_loras, {"default": "", "iamccs_fasth3_values": installed_fasth3_loras,
-                    "iamccs_h3_assets": h3_lora_assets}),
+                "turbo_lora_name": (turbo_loras, {"default": ""}),
                 "turbo_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 4.0, "step": 0.05}),
                 "turbo_sampler_mode": (["audio_fixed", "res_multistep_stock"], {"default": "audio_fixed"}),
                 # Preserve source pixels by default. The native H3 conditioner
@@ -3292,11 +3222,11 @@ class IAMCCS_MiniMaxH3ShotPlanner:
                 # changes the authored H3 sampling controls. These fields are
                 # appended to preserve older Shotboard widget arrays.
                 "secondary_lora_enabled": ("BOOLEAN", {"default": False}),
-                "secondary_lora_name": (turbo_loras, {"default": "", "iamccs_h3_assets": h3_lora_assets}),
+                "secondary_lora_name": (turbo_loras, {"default": ""}),
                 "secondary_lora_strength": ("FLOAT", {"default": 0.0, "min": -2.0, "max": 2.0, "step": 0.05}),
                 # Append-only native PDD controls. Converted PDD files use the
                 # stock ComfyUI LoRA registry but never share the Turbo route.
-                "pdd_lora_name": (pdd_loras, {"default": default_pdd_lora, "iamccs_h3_assets": h3_lora_assets}),
+                "pdd_lora_name": (pdd_loras, {"default": default_pdd_lora}),
                 "pdd_strength": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 2.0, "step": 0.05}),
                 # Append-only native Fun ControlNet controls. Media is injected
                 # through IAMCCS Cine H3 Fun Control Input; these visible boxes
@@ -7297,18 +7227,10 @@ class IAMCCS_ShotboardH3Settings:
         })
         # User preference for new configurations. Existing workflow widget values
         # remain authoritative; no migration rewrites a saved sampling recipe.
-        from .iamccs_h3_advisor import preferred_sla_defaults, recipes
+        from .iamccs_h3_advisor import recipes
         import nodes as comfy_nodes
         required["turbo_lora_name"][1]["iamccs_h3_recipes"] = recipes()
         required["turbo_lora_name"][1]["iamccs_sla_available"] = "H3SLAAttention" in comfy_nodes.NODE_CLASS_MAPPINGS
-        sla_defaults = preferred_sla_defaults(
-            required["turbo_lora_name"][1].get("iamccs_h3_assets", []),
-            required["task_mode"][1].get("default", "auto_from_timeline"),
-            comfy_nodes.NODE_CLASS_MAPPINGS if torch.cuda.is_available() else {},
-        )
-        for name, value in sla_defaults.items():
-            if name in required:
-                required[name][1]["default"] = value
         extended_av_optional = {}
         for name in _H3_EXTENDED_AV_SETTINGS_NODE_FIELDS:
             source_spec = copy.deepcopy(planner_inputs[name])

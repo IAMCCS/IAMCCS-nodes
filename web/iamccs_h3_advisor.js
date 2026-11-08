@@ -3,6 +3,48 @@ const SAVED = "iamccs_minimax_h3_saved_settings_v1";
 const widget = (node, name) => node?.widgets?.find(w => w.name === name);
 const clone = value => JSON.parse(JSON.stringify(value));
 
+const catalogFields = ["turbo_lora_name", "secondary_lora_name", "pdd_lora_name"];
+let catalogRequest = null;
+let catalog = null;
+let catalogFetchedAt = 0;
+
+export function fetchH3LoraCatalog(api, { force = false } = {}) {
+    if (catalogRequest) return catalogRequest;
+    if (!force && catalog && Date.now() - catalogFetchedAt < 5000) return Promise.resolve(catalog);
+    catalogRequest = api.fetchApi("/api/iamccs/h3/lora-catalog").then(async response => {
+        if (!response.ok) throw new Error(`H3 LoRA catalog HTTP ${response.status}`);
+        catalog = await response.json();
+        catalogFetchedAt = Date.now();
+        return catalog;
+    }).finally(() => { catalogRequest = null; });
+    return catalogRequest;
+}
+
+export function applyH3LoraCatalog(node, data) {
+    for (const name of catalogFields) {
+        const item = widget(node, name);
+        if (!item) continue;
+        const selected = typeof item.value === "string" ? item.value : "";
+        const available = name === "pdd_lora_name" ? data.pdd : data.choices;
+        item.options ||= {};
+        item.options.values = [...new Set(["", ...available, selected])];
+        item.options.iamccs_h3_assets = data.assets;
+        if (name === "turbo_lora_name") item.options.iamccs_fasth3_values = data.fasth3;
+    }
+}
+
+export function captureH3LoraDefaults(node) {
+    return new Map((node.widgets || []).map(item => [item.name, item.value]));
+}
+
+export function applyNewH3LoraDefaults(node, data, initial) {
+    if (!initial || node._iamccsH3LoraConfigured || node._iamccsH3LoraDefaultsApplied) return;
+    const defaults = Object.entries(data.sla_defaults || {});
+    if (!defaults.length || defaults.some(([name]) => !initial.has(name) || widget(node, name)?.value !== initial.get(name))) return;
+    node._iamccsH3LoraDefaultsApplied = true;
+    for (const [name, value] of defaults) widget(node, name).value = value;
+}
+
 export function h3TaskFamily(task) {
     if (["v2va_controlnet", "controlnet_v2v", "h3_fun_controlnet"].includes(String(task))) return "fl2va";
     return String(task).startsWith("ref2v") || ["v2va_object_swap", "v2va_face_swap"].includes(task) ? "ref2va" : "fl2va";

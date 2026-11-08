@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { app } from "/scripts/app.js";
 import { api } from "/scripts/api.js";
+import { fetchH3LoraCatalog, applyH3LoraCatalog, captureH3LoraDefaults, applyNewH3LoraDefaults } from "./iamccs_h3_advisor.js";
 import { mountAheadRoom } from './iamccs_ahead_control_room.js';
 import { rigMedia } from './iamccs_h3_rig.js';
 import { createSwapDuration, installSwapDurationQueueGuard } from './iamccs_h3_swap_duration.js';
@@ -445,7 +446,8 @@ function restoreNamedValues(node, info, nodeData) {
     if (!item) continue;
     const kind = spec?.[0], options = spec?.[1] || {};
     let value = Object.prototype.hasOwnProperty.call(named, name) ? named[name] : options.default;
-    if (Array.isArray(kind) && !kind.includes(value)) value = options.default ?? kind[0];
+    const savedLora = ["turbo_lora_name", "secondary_lora_name", "pdd_lora_name"].includes(name) && typeof value === "string";
+    if (Array.isArray(kind) && !kind.includes(value) && !savedLora) value = options.default ?? kind[0];
     if ((kind === "INT" || kind === "FLOAT") && (value === "" || value == null || !Number.isFinite(Number(value)) ||
       (options.min !== undefined && Number(value) < Number(options.min)) ||
       (options.max !== undefined && Number(value) > Number(options.max)))) value = options.default ?? 0;
@@ -469,6 +471,16 @@ function installAssetOptions(node, nodeData) {
     // own controls. Restore the server list as well as the selected value.
     item.options.values = spec[0].slice();
     for (const key of ["iamccs_h3_assets", "iamccs_h3_recipes", "iamccs_sla_available"]) if (key in declared) item.options[key] = declared[key];
+  }
+}
+async function refreshProLoraCatalog(node, options = {}) {
+  try {
+    const catalog = await fetchH3LoraCatalog(api, options);
+    applyH3LoraCatalog(node, catalog);
+    applyNewH3LoraDefaults(node, catalog, options.initial);
+    node._iamccsSettingsProRefresh?.();
+  } catch (error) {
+    console.warn("[IAMCCS H3 Settings Pro] Could not refresh the H3 LoRA catalog", error);
   }
 }
 function serializeNamedValues(node, info, nodeData) {
@@ -1104,12 +1116,13 @@ function selectedH3AssetCompatibility(node, mode) {
   return issues;
 }
 function firstChoice(node, name, predicate) { return choices(widget(node, name)).map(String).find((value) => value && predicate(value.toLowerCase())) || ""; }
-function isFastH3LoRA(name) { const value = String(name).toLowerCase(); return (value.includes("fasth3") || value.includes("fast_h3") || value.includes("fast-h3")) && !value.includes("fused") && !value.includes("adapter_model"); }
 function fastH3Asset(node, mode = shotboardMode(node)) {
   return choices(widget(node, "turbo_lora_name")).map(String).find(name => {
     const asset = h3AssetDescriptor(node, "turbo_lora_name", name);
-    return isFastH3LoRA(name) && asset?.role === "fasth3" && !asset.error && !asset.conflict
-      && inferredH3AssetFamily(name, asset) === modeFamily(mode);
+    const verified = widget(node, "turbo_lora_name")?.options?.iamccs_fasth3_values;
+    const family = inferredH3AssetFamily(name, asset);
+    return (verified ? verified.includes(name) : asset?.role === "fasth3" && asset.native && !asset.error && !asset.conflict)
+      && (!family || family === modeFamily(mode));
   }) || "";
 }
 function turboModeGroup(mode) {
@@ -1617,29 +1630,8 @@ function normalizeSeedPolicy(node) {
   if(item && (item.value == null || String(item.value).trim() === '')) item.value='fixed_per_generation';
 }
 
-function normalizeInstalledSpeedAsset(node) {
-  const acceleration = String(widget(node, "acceleration")?.value || "native");
-  const family = modeFamily(shotboardMode(node));
-  if (acceleration === "fasth3_dense_6step") {
-    const current = String(widget(node, "turbo_lora_name")?.value || "");
-    if (!isFastH3LoRA(current)) {
-      const compatible = fastH3Asset(node);
-      if (compatible) { setValue(node, "turbo_lora_name", compatible, false); setValue(node, "steps", 6, false); }
-    }
-  }
-  if (acceleration === "pdd_native_8step") {
-    const current = String(widget(node, "pdd_lora_name")?.value || "");
-    if (!isPddLoRA(current, family)) {
-      const compatible = firstChoice(node, "pdd_lora_name", (name) => isPddLoRA(name, family));
-      if (compatible) setValue(node, "pdd_lora_name", compatible, false);
-    }
-  }
-  normalizeSpeedPresetContract(node);
-}
-
 function mount(node) {
   normalizeSeedPolicy(node);
-  normalizeInstalledSpeedAsset(node);
   normalizeSpeedPresetContract(node);
   normalizePianosequenzaStageControls(node);
   installPianosequenzaStageQueueGuards(node);
@@ -2980,30 +2972,40 @@ function mount(node) {
 
 app.registerExtension({
   name: "IAMCCS.H3SettingsPro.UI",
+  refreshComboInNodes() {
+    for (const node of app.graph?._nodes || []) {
+      if ((node.comfyClass || node.type) === NODE_TYPE) void refreshProLoraCatalog(node, { force: true });
+    }
+  },
   async beforeRegisterNodeDef(nodeType, nodeData) {
     if (String(nodeData?.name || nodeData?.class_type || "") !== NODE_TYPE) return;
     // ComfyUI implicitly adds a seed-control widget when the flag is absent.
     // PRO already persists its compatibility slot and owns seed_policy.
     const seedOptions = nodeData.input?.required?.seed?.[1];
     if (seedOptions) seedOptions.control_after_generate = false;
-    const created = nodeType.prototype.onNodeCreated; nodeType.prototype.onNodeCreated = function () { const result = created?.apply(this, arguments); installAssetOptions(this, nodeData); window.setTimeout(() => { mount(this); }, 0); return result; };
+    const created = nodeType.prototype.onNodeCreated;
+    nodeType.prototype.onNodeCreated = function () {
+      const result = created?.apply(this, arguments);
+      installAssetOptions(this, nodeData);
+      window.setTimeout(() => { mount(this); refreshProLoraCatalog(this, { initial: captureH3LoraDefaults(this) }); }, 0);
+      return result;
+    };
     const configured = nodeType.prototype.onConfigure; nodeType.prototype.onConfigure = function (info) {
       const result = configured?.apply(this, arguments);
       installAssetOptions(this, nodeData);
+      this._iamccsH3LoraConfigured = true;
       restoreNamedValues(this, info, nodeData);
       normalizeSeedPolicy(this);
-      normalizeInstalledSpeedAsset(this);
       normalizeSpeedPresetContract(this);
       normalize2StageResolutionLink(this);
       normalizePianosequenzaStageControls(this);
       installPianosequenzaStageQueueGuards(this);
-      window.setTimeout(() => { mount(this); this._iamccsSettingsProRefresh?.(); }, 0);
+      window.setTimeout(() => { mount(this); refreshProLoraCatalog(this); }, 0);
       return result;
     };
     const serialized = nodeType.prototype.onSerialize; nodeType.prototype.onSerialize = function (info) {
       const result = serialized?.apply(this, arguments);
       normalizeSeedPolicy(this);
-      normalizeInstalledSpeedAsset(this);
       normalizeSpeedPresetContract(this);
       normalize2StageResolutionLink(this);
       normalizePianosequenzaStageControls(this);
