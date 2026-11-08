@@ -25,7 +25,11 @@ def named_family(text):
     return families[0] if len(families) == 1 else ""
 
 
-@functools.lru_cache(maxsize=128)
+# Keep repeated schema refreshes warm even for large LoRA libraries.
+H3_HEADER_CACHE_MAXSIZE = 8192
+
+
+@functools.lru_cache(maxsize=H3_HEADER_CACHE_MAXSIZE)
 def inspect_header(path_text, mtime_ns, size):
     del mtime_ns
     with open(path_text, "rb") as handle:

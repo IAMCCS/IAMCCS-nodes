@@ -24,7 +24,7 @@ import torch
 from PIL import Image, ImageOps
 
 import folder_paths
-from .iamccs_h3_advisor import describe_asset, recipes, validate_settings
+from .iamccs_h3_advisor import H3_HEADER_CACHE_MAXSIZE, describe_asset, recipes, validate_settings
 from .iamccs_h3_face_swap import settings_schema as face_swap_schema, face_swap_settings, validate_plan as validate_face_swap_plan
 from .iamccs_h3_character_swap_lora import settings_schema as character_swap_schema, swap_plan
 from .iamccs_h3_vfx_edit import settings_schema as vfx_edit_schema
@@ -70,10 +70,10 @@ H3_LINKED_STAGE_PAIRS = {
 }
 
 
-@functools.lru_cache(maxsize=512)
-def _classify_fasth3_dense_lora_header(path_text: str, mtime_ns: int) -> tuple[bool, str]:
+@functools.lru_cache(maxsize=H3_HEADER_CACHE_MAXSIZE)
+def _classify_fasth3_dense_lora_header(path_text: str, mtime_ns: int, size: int) -> tuple[bool, str]:
     """Identify converted FastH3 Dense adapters without relying on filenames."""
-    del mtime_ns  # retained in the cache key so replacing a file invalidates the result
+    del mtime_ns, size  # retained in the cache key to detect file changes
     try:
         from safetensors import safe_open
 
@@ -107,10 +107,12 @@ def _discover_fasth3_dense_loras(names: list[str]) -> list[str]:
     for name in names:
         try:
             path = folder_paths.get_full_path("loras", name)
-            mtime_ns = Path(path).stat().st_mtime_ns if path else 0
+            if not path:
+                continue
+            stat = Path(path).stat()
         except (OSError, TypeError, ValueError):
             continue
-        if path and _classify_fasth3_dense_lora_header(str(path), int(mtime_ns))[0]:
+        if _classify_fasth3_dense_lora_header(str(path), stat.st_mtime_ns, stat.st_size)[0]:
             found.append(name)
     return sorted(found, key=str.lower)
 
