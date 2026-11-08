@@ -3,7 +3,7 @@
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
-import { createH3AdvisorPanel, selectH3SpeedAsset, h3TaskFamily } from "./iamccs_h3_advisor.js";
+import { createH3AdvisorPanel, selectH3SpeedAsset, h3TaskFamily, fetchH3LoraCatalog, applyH3LoraCatalog, captureH3LoraDefaults, applyNewH3LoraDefaults } from "./iamccs_h3_advisor.js";
 import { createH3SLAPanel, slaValues } from "./iamccs_h3_speed_panel.js";
 import { H3_DELIVERY_PAIRS, deliveryPairValues, h3ModeBaselines } from "./iamccs_h3_delivery_presets.js";
 import { createH3MotionContextPanel, createH3WindowPanel } from "./iamccs_h3_window_presets.js";
@@ -526,51 +526,6 @@ function getWidget(node, name) {
     return node?.widgets?.find((widget) => widget?.name === name || widget?.label === name) || null;
 }
 
-let h3LoraRegistryRequest = null;
-let h3LoraRegistryAt = 0;
-let h3MetadataVerifiedFastLoras = [];
-
-async function fetchInstalledH3Loras({ force = false } = {}) {
-    const now = Date.now();
-    if (!force && h3LoraRegistryRequest && now - h3LoraRegistryAt < 5000) return h3LoraRegistryRequest;
-    h3LoraRegistryAt = now;
-    h3LoraRegistryRequest = (async () => {
-        const response = await api.fetchApi("/object_info/LoraLoaderModelOnly");
-        if (!response?.ok) throw new Error(`LoRA registry HTTP ${response?.status || "error"}`);
-        const data = await response.json();
-        const values = data?.LoraLoaderModelOnly?.input?.required?.lora_name?.[0];
-        try {
-            // The generic LoRA endpoint has filenames only. IAMCCS' own schema
-            // adds the safetensors-header classification performed by Python,
-            // which is authoritative even when the adapter was renamed.
-            const settingsResponse = await api.fetchApi("/object_info/IAMCCS_ShotboardH3Settings");
-            if (settingsResponse?.ok) {
-                const settingsData = await settingsResponse.json();
-                const schema = settingsData?.IAMCCS_ShotboardH3Settings?.input;
-                if (schema) h3SettingsNodeSpecs = {...schema.required, ...schema.optional};
-                const fast = settingsData?.IAMCCS_ShotboardH3Settings?.input?.required?.turbo_lora_name?.[1]?.iamccs_fasth3_values;
-                h3MetadataVerifiedFastLoras = Array.isArray(fast)
-                    ? fast.map(value => String(value || "")).filter(Boolean)
-                    : [];
-            }
-        } catch (error) {
-            console.warn("[IAMCCS MiniMax H3] Could not read metadata-verified FastH3 choices", error);
-        }
-        const h3 = (Array.isArray(values) ? values : [])
-            .map(value => String(value || ""))
-            .filter(value => value.toLowerCase().includes("h3"))
-            .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: "base" }));
-        return ["", ...new Set([...h3, ...h3MetadataVerifiedFastLoras])];
-    })();
-    try {
-        return await h3LoraRegistryRequest;
-    } catch (error) {
-        h3LoraRegistryRequest = null;
-        console.warn("[IAMCCS MiniMax H3] Could not refresh the live H3 LoRA registry", error);
-        return [];
-    }
-}
-
 function replaceSelectChoices(select, choices, value) {
     if (!(select instanceof HTMLSelectElement)) return;
     select.replaceChildren(...choices.map(choice => {
@@ -582,64 +537,24 @@ function replaceSelectChoices(select, choices, value) {
     select.value = choices.includes(String(value || "")) ? String(value || "") : "";
 }
 
-async function refreshNodeH3LoraChoices(node, { force = false } = {}) {
-    const choices = await fetchInstalledH3Loras({ force });
-    if (choices.length < 1) return false;
-    let changed = false;
-    for (const name of ["turbo_lora_name", "secondary_lora_name", "pdd_lora_name", "fused_turbo_model_name"]) {
-        const widget = getWidget(node, name);
-        if (!widget) continue;
-        // Python inspects safetensors metadata and publishes compatible
-        // converted FastH3 adapters here. Preserve that authoritative list
-        // even when a user renamed the file without the token "h3"; the live
-        // generic LoRA registry endpoint exposes filenames but not metadata.
-        const previousFast = name === "turbo_lora_name" && Array.isArray(widget.options?.iamccs_fasth3_values)
-            ? widget.options.iamccs_fasth3_values.map(value => String(value || "")).filter(Boolean) : [];
-        const metadataVerifiedFast = name === "turbo_lora_name"
-            ? [...new Set([...previousFast, ...h3MetadataVerifiedFastLoras])]
-            : [];
-        const serverSpec = h3SettingsNodeSpecs[name];
-        const effectiveChoices = Array.isArray(serverSpec?.[0]) ? serverSpec[0].slice() : ["", ...new Set([...choices.filter(Boolean), ...metadataVerifiedFast])];
-        const previous = Array.isArray(widget.options?.values) ? widget.options.values.map(String) : [];
-        widget.options = {...(widget.options || {}), ...(serverSpec?.[1] || {})};
-        widget.options.values = effectiveChoices.slice();
-        if (name === "turbo_lora_name") widget.options.iamccs_fasth3_values = metadataVerifiedFast.slice();
-        // Preserve a missing selection so users can identify and replace it explicitly.
-        changed ||= previous.length !== effectiveChoices.length || previous.some((value, index) => value !== effectiveChoices[index]);
-        changed ||= previousFast.length !== metadataVerifiedFast.length || previousFast.some((value, index) => value !== metadataVerifiedFast[index]);
-        if (
-            name === "turbo_lora_name"
-            && String(getWidget(node, "acceleration")?.value || "") === "fasth3_dense_6step"
-            && metadataVerifiedFast.length
-            && !metadataVerifiedFast.includes(String(widget.value || ""))
-        ) {
-            widget.value = metadataVerifiedFast[0];
-            changed = true;
-            emitH3SettingsChanged(node, "turbo_lora_name", widget.value);
+async function refreshNodeH3LoraChoices(node, options = {}) {
+    try {
+        const catalog = await fetchH3LoraCatalog(api, options);
+        applyH3LoraCatalog(node, catalog);
+        applyNewH3LoraDefaults(node, catalog, options.initial);
+        for (const name of ["turbo_lora_name", "secondary_lora_name", "pdd_lora_name"]) {
+            const widget = getWidget(node, name);
+            const spec = h3SettingsNodeSpecs[name];
+            if (spec) h3SettingsNodeSpecs[name] = [spec[0], {...spec[1], iamccs_h3_assets: catalog.assets}];
+            if (widget) replaceSelectChoices(node?._iamccsH3SettingsControls?.get?.(name), widget.options.values, widget.value);
         }
-        replaceSelectChoices(node?._iamccsH3SettingsControls?.get?.(name), effectiveChoices, widget.value);
-    }
-    const pddWidget = getWidget(node, "pdd_lora_name");
-    if (pddWidget) {
-        const pddChoices = choices.filter((value) => {
-            if (!value) return true;
-            const lower = value.toLowerCase();
-            return (lower.includes("pdd") && lower.includes("acc"))
-                || (lower.includes("h3") && lower.includes("acc") && lower.includes("8step"));
-        });
-        const previous = Array.isArray(pddWidget.options?.values) ? pddWidget.options.values.map(String) : [];
-        pddWidget.options = pddWidget.options || {};
-        pddWidget.options.values = pddChoices.slice();
-        if (!pddChoices.includes(String(pddWidget.value || ""))) pddWidget.value = "";
-        changed ||= previous.length !== pddChoices.length || previous.some((value, index) => value !== pddChoices[index]);
-        replaceSelectChoices(node?._iamccsH3SettingsControls?.get?.("pdd_lora_name"), pddChoices, pddWidget.value);
-    }
-    if (changed) {
         node?._iamccsRefreshH3SettingsUi?.();
         node?.setDirtyCanvas?.(true, true);
-        app.graph?.setDirtyCanvas?.(true, true);
+        return true;
+    } catch (error) {
+        console.warn("[IAMCCS MiniMax H3] Could not refresh the H3 LoRA catalog", error);
+        return false;
     }
-    return changed;
 }
 
 function hideWidget(widget) {
@@ -21954,7 +21869,7 @@ function renderShotboardH3Settings(node) {
         const widget = getWidget(node, "turbo_lora_name");
         const local = Array.isArray(widget?.options?.iamccs_fasth3_values)
             ? widget.options.iamccs_fasth3_values.map(value => String(value || "")).filter(Boolean) : [];
-        const compatible = [...new Set([...local, ...h3MetadataVerifiedFastLoras])];
+        const compatible = local;
         const current = String(widget?.value || "");
         return compatible.includes(current) ? current : (compatible[0] || "");
     };
@@ -23756,6 +23671,15 @@ app.registerExtension({
     },
     async beforeRegisterNodeDef(nodeType, nodeData) {
         const name = String(nodeData?.name || nodeData?.class_type || "");
+        if (name === "IAMCCS_LongVid-v1" && !nodeType.prototype._iamccsLongVidCatalogWrapped) {
+            nodeType.prototype._iamccsLongVidCatalogWrapped = true;
+            const onConfigure = nodeType.prototype.onConfigure;
+            nodeType.prototype.onConfigure = function (...args) {
+                const result = onConfigure?.apply(this, args);
+                refreshNodeH3LoraChoices(this);
+                return result;
+            };
+        }
         if (name === "IAMCCS_ShotboardH3Settings") h3SettingsNodeSpecs = {...nodeData.input?.required, ...nodeData.input?.optional};
         if (name === "IAMCCS_ShotboardH3Settings") {
             if (nodeType.prototype._iamccsH3SettingsUiWrapped) return;
@@ -23763,8 +23687,9 @@ app.registerExtension({
             const onConfigure = nodeType.prototype.onConfigure;
             nodeType.prototype.onConfigure = function (...args) {
                 const result = onConfigure?.apply(this, args);
+                this._iamccsH3LoraConfigured = true;
                 restoreH3SettingsWidgetState(this, args[0], nodeData);
-                refreshNodeH3LoraChoices(this, { force: true });
+                refreshNodeH3LoraChoices(this);
                 window.setTimeout(() => {
                     if (typeof this._iamccsRefreshH3SettingsUi === "function") {
                         this._iamccsRefreshH3SettingsUi();
@@ -23797,7 +23722,7 @@ app.registerExtension({
             const result = onConfigure?.apply(this, args);
             repairMiniMaxH3WidgetState(this, args[0]);
             restoreMiniMaxH3NamedSettings(this, args[0]);
-            refreshNodeH3LoraChoices(this, { force: true });
+            refreshNodeH3LoraChoices(this);
             enforceMiniMaxSingleCineLinxOutput(this);
             window.setTimeout(() => {
                 repairMiniMaxH3WidgetState(this, args[0]);
@@ -23831,10 +23756,23 @@ app.registerExtension({
             return result;
         };
     },
+    refreshComboInNodes(definitions) {
+        const settings = definitions?.IAMCCS_ShotboardH3Settings?.input;
+        if (settings) h3SettingsNodeSpecs = {...settings.required, ...settings.optional};
+        for (const node of app.graph?._nodes || []) {
+            if (["IAMCCS_MiniMaxH3ShotPlanner", "IAMCCS_ShotboardH3Settings", "IAMCCS_LongVid-v1"].includes(nodeClassName(node))) {
+                void refreshNodeH3LoraChoices(node, { force: true });
+            }
+        }
+    },
     async nodeCreated(node) {
+        if (nodeClassName(node) === "IAMCCS_LongVid-v1") {
+            refreshNodeH3LoraChoices(node);
+            return;
+        }
         if (nodeClassName(node) === "IAMCCS_ShotboardH3Settings") {
             scheduleRender(node);
-            refreshNodeH3LoraChoices(node, { force: true });
+            refreshNodeH3LoraChoices(node, { initial: captureH3LoraDefaults(node) });
             return;
         }
         if (nodeClassName(node) !== "IAMCCS_MiniMaxH3ShotPlanner") return;
@@ -23843,7 +23781,7 @@ app.registerExtension({
         enforceMiniMaxSingleCineLinxOutput(node);
         window.setTimeout(() => enforceMiniMaxSingleCineLinxOutput(node), 120);
         scheduleRender(node);
-        refreshNodeH3LoraChoices(node, { force: true });
+        refreshNodeH3LoraChoices(node);
     },
 });
 

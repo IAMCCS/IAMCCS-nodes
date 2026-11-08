@@ -1201,36 +1201,6 @@ def _apply_pdd_lora(model, shotplan: dict[str, Any]):
     return patched, f"native PDD {lora_name}@{strength:.2f} (8/euler/simple, shifts 12/3)"
 
 
-@functools.lru_cache(maxsize=64)
-def _classify_fasth3_dense_file(path_text: str, mtime_ns: int) -> tuple[bool, str]:
-    """Fail closed unless this is a native fused-QKV FastH3 converter output."""
-    del mtime_ns
-    try:
-        from safetensors import safe_open
-
-        with safe_open(path_text, framework="pt", device="cpu") as handle:
-            keys = [str(key).lower() for key in handle.keys()]
-            metadata = {str(key).lower(): str(value) for key, value in (handle.metadata() or {}).items()}
-    except Exception as exc:
-        return False, f"unreadable safetensors header ({type(exc).__name__}: {exc})"
-
-    if metadata.get("converted_by", "").strip().lower() != "lora_convert_h3":
-        return False, "not a FastH3 adapter converted for native ComfyUI (converter metadata missing)"
-    adaln_mode = metadata.get("adaln_mode", "").strip().lower()
-    if adaln_mode != "drop":
-        return False, f"AdaLN mode '{adaln_mode or 'unknown'}' is not production-safe; reconvert with --adaln drop"
-    native_lora = any(
-        key.startswith("diffusion_model.blocks.") and (".lora_a." in key or ".lora_b." in key)
-        for key in keys
-    )
-    fused_qkv = any(".attn.qkv_proj.lora_a." in key for key in keys) and any(
-        ".attn.qkv_proj.lora_b." in key for key in keys
-    )
-    if not native_lora or not fused_qkv:
-        return False, "converted metadata exists, but native fused-QKV H3 LoRA tensors are incomplete"
-    return True, "FastH3 Dense native ComfyUI adapter"
-
-
 def _apply_fasth3_dense_lora(model, shotplan: dict[str, Any]):
     settings = _fasth3_settings(shotplan)
     if not bool(settings.get("requested", False)):
@@ -1247,11 +1217,10 @@ def _apply_fasth3_dense_lora(model, shotplan: dict[str, Any]):
         lora_path = None
     if not lora_path:
         raise ValueError(f"FastH3 Dense LoRA not found in ComfyUI's models/loras paths: {lora_name}")
-    try:
-        mtime_ns = Path(lora_path).stat().st_mtime_ns
-    except OSError:
-        mtime_ns = 0
-    compatible, detail = _classify_fasth3_dense_file(str(lora_path), int(mtime_ns))
+    from .iamccs_h3_advisor import classify_fasth3_dense_file
+
+    stat = Path(lora_path).stat()
+    compatible, detail = classify_fasth3_dense_file(str(lora_path), stat.st_mtime_ns, stat.st_size)
     if not compatible:
         raise ValueError(f"Invalid FastH3 Dense selection '{lora_name}': {detail}")
 
